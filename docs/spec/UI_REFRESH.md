@@ -1,198 +1,475 @@
-# UI Refresh — Design-Kontrakt
+# UI design tokens
 
-Quelle: Claude-Design-Projekt `OS UI Refresh.dc.html`
-(`claude.ai/design/p/25474c47-a7b7-49b7-ad97-85b582df39a1`).
+The colours, sizes and states that `shade` draws and that apps reference
+through the `nopeek_widgets` SDK. Apps name tokens and scale steps; the
+compositor resolves them. The token table lives in
+`kernel/src/shade/widgets/palette.rs`, the SDK mirror in
+`tools/wasm/sdk/widgets/src/abi.rs` and `style.rs`.
 
-Dieses Dokument ist die Übersetzung des Mockups in unser Vokabular. Das
-Mockup ist CSS; hier steht, welches Token / welcher Modifier das im
-`nopeek_widgets`-ABI ist. Apps lesen dieses File, nicht das HTML.
+All lengths are logical px. The compositor multiplies every length, radius,
+border width and font size by the UI scale (`shade.scale`, 1.0 to 3.0 in
+1/120 steps; unset: 2.0 on screens wider than 2560 px, else 1.0). A
+non-zero length never rounds to zero.
 
 ---
 
-## 1. Farbrampen
+## 1. Colour ramps
 
-Das Design hat eine neutral-kühle Graustufenrampe (statt der alten
-blau-violetten) plus eine dritte Textstufe. Reihenfolge dunkel → hell:
+### Theme
 
-| Design    | Token             | Dark      | Light     | Rolle                              |
-|-----------|-------------------|-----------|-----------|------------------------------------|
-| `page`    | `Page`            | `#131517` | `#ffffff` | Inhaltsfläche: Editor, Seite, Term |
-| `surface` | `Surface`         | `#17191b` | `#faf9f7` | Fensterkörper                      |
-| `chrome`  | `SurfaceElevated` | `#1c1f21` | `#f0f0ec` | Titel-/Menüband, Tabstrip, Panels  |
-| `surface-2`| `SurfaceMuted`   | `#1e2124` | `#f1f0ec` | Eingesenkt: Sidebar, Feld, Tab-Bg  |
-| `surface-3`| `SurfaceHover`   | `#262a2e` | `#e4e3de` | Hover-Füllung, Chips, Kbd-Badge    |
-| `line`    | `Border`          | `#2c3034` | `#dedcd6` | 1px-Trennlinien + Rahmen           |
-| `fg`      | `OnSurface`       | `#e6e8ea` | `#1b1d1f` | Primärtext                         |
-| `fg-2`    | `OnSurfaceMuted`  | `#a2a8ae` | `#5c6166` | Sekundärtext, Menülabels           |
-| `fg-3`    | `OnSurfaceFaint`  | `#6f767c` | `#8a9096` | Sektionsköpfe, Meta, disabled      |
-| `ok`      | `Success`         | `#8fbf9f` | `#4d8a63` | Lock-Icon, Erfolg                  |
+| `theme` | Palette |
+|---|---|
+| `dark` | dark |
+| `light` | light |
+| `auto` (setup default) | light if the wallpaper's darkest palette colour has luma > 128, else dark; dark without a wallpaper |
 
-`chrome` und `chrome-2` des Mockups liegen 3 Stufen auseinander — das ist
-unter der Wahrnehmungsschwelle. Beide sind `SurfaceElevated`.
+Luma is `(299 R + 587 G + 114 B) / 1000` throughout.
 
-## 1a. Code-Rampe (Syntax)
+Panels (strut panels such as `deck`, their popups) and the `loop` terminal
+are glass and always use the **dark** palette, whatever `theme` says.
+Every other window uses the active theme.
 
-Die Rampe oben beschreibt **Chrome**. Quelltext braucht eine zweite,
-unabhängige — ein Editor zeigt beides gleichzeitig, und solange
-Schlüsselwörter auf `Accent` lagen, hing die Syntaxfarbe am Wallpaper und
-eine ganze Sprache kam mit drei Farben aus.
+### Surface, text and status tokens
 
-Neun Tokens, angehängt ab 17 (ABI: nur anhängen, Werte eingefroren):
+Token values are fixed per theme. The wire id is the token's `u8` value
+and is frozen; tokens are only appended.
 
-| Token          | Wert | Rolle                                              |
-|----------------|------|----------------------------------------------------|
-| `CodeKeyword`  | 17   | Deklaration/Storage: `fn` `let` `def` `class` `int` |
-| `CodeControl`  | 18   | Fluss + Import: `if` `for` `return` `import`        |
-| `CodeString`   | 19   | String- und Zeichenliterale, Anführungszeichen mit  |
-| `CodeComment`  | 20   | Kommentare                                          |
-| `CodeNumber`   | 21   | Zahlliterale                                        |
-| `CodeFunction` | 22   | Funktionsnamen, Deklaration und Aufruf              |
-| `CodeType`     | 23   | Typ-/Klassennamen, Markup-Tagnamen                  |
-| `CodeVariable` | 24   | Attributnamen, JSON-Schlüssel, Dekoratoren          |
-| `CodeConstant` | 25   | `true` `None` `null`, Entities, ALLCAPS-Namen       |
+| Id | Token | Dark | Light | Role |
+|---|---|---|---|---|
+| 12 | `Page` | `#131517` | `#FFFFFF` | Content canvas: editor body, page, terminal |
+| 0 | `Surface` | `#17191B` | `#FAF9F7` | Window body; clear colour of an opaque scene |
+| 1 | `SurfaceElevated` | `#1C1F21` | `#F0F0EC` | Menu bar, tab strip, menus, cards |
+| 2 | `SurfaceMuted` | `#1E2124` | `#F1F0EC` | Sunken: sidebar, field, inactive-tab hover |
+| 13 | `SurfaceHover` | `#262A2E` | `#E4E3DE` | Hover fill, chips |
+| 8 | `Border` | `#2C3034` | `#DEDCD6` | 1 px separators and outlines, `Divider` |
+| 3 | `OnSurface` | `#E6E8EA` | `#1B1D1F` | Primary text, default glyph colour, caret |
+| 4 | `OnSurfaceMuted` | `#A2A8AE` | `#4E5358` | Secondary text, `TextStyle::Muted`, scrollbars |
+| 14 | `OnSurfaceFaint` | `#6F767C` | `#6E747A` | Section heads, meta, placeholders, line numbers |
+| 9 | `Success` | `#8FBF9F` | `#4D8A63` | Success, TLS lock |
+| 10 | `Warning` | `#E0B877` | `#B07A28` | Warning |
+| 11 | `Danger` | `#E07B7B` | `#C04C4C` | Destructive actions, failures |
 
-Aufgelöst wird **nicht** über den Akzent, sondern über ein benanntes
-Schema: `set code.scheme <name>`. Die Werte stammen 1:1 aus VSCodiums
-eingebauten Themes, aufgelöst wie TextMate auflöst (spezifischster Scope
-gewinnt):
+Every token resolves to an opaque colour. The rasterizer ignores a
+token's alpha byte; translucency comes only from a panel's fill opacity
+(section 4).
 
-`auto` (Vorgabe, folgt dem Theme) · `dark-plus` · `light-plus` ·
-`monokai` · `solarized-dark` · `solarized-light` · `abyss` ·
-`kimbie-dark` · `quiet-light`
+An app that paints its own pixels reads a resolved token with
+`npk_theme_token(id)` (needs the `RENDER` right; 0 for an unknown id). It
+answers from the active theme, not from the glass palette.
 
-**Ein Schema liefert nur diese neun Farben.** Leinwand bleibt `Page`,
-Fließtext bleibt `OnSurface`. Das eigene Hintergrundbild eines Schemas
-mitzunehmen würde gegen die Glasflächen arbeiten — und ein dunkles Schema
-unter hellem Theme malte dann dunkel auf weiß. Präferenz und Leinwand
-sind zwei Dinge; dieser Schalter bewegt nur die Präferenz. Ein explizit
-gesetzter Widerspruch wird ausgeführt, aber `set` sagt es an.
+## 1a. Code ramp
 
-Ohne Deckung durch eine Span rendert ein Byte in `OnSurface` — das ist
-der Normalfall und der Grund, warum die Rampe klein bleiben kann.
+A second ramp for source text, independent of the accent. A
+`TextArea` span or an `Input` span names one of these; bytes without a
+span render in `OnSurface` on `Page`.
 
-## 2. Akzent
+| Id | Token | Role |
+|---|---|---|
+| 17 | `CodeKeyword` | Declaration and storage keywords |
+| 18 | `CodeControl` | Control flow and imports |
+| 19 | `CodeString` | String and character literals |
+| 20 | `CodeComment` | Comments |
+| 21 | `CodeNumber` | Numeric literals |
+| 22 | `CodeFunction` | Function names |
+| 23 | `CodeType` | Type and class names, markup tag names |
+| 24 | `CodeVariable` | Attribute names, JSON keys, decorators |
+| 25 | `CodeConstant` | Language constants, escapes |
 
-Vier Presets aus dem Design, plus `auto` (Wallpaper-Extraktion, wie
-bisher). Wählbar über `set accent <name>`:
+The values come from the scheme named by `code.scheme`. `auto` (default)
+takes `dark-plus` under the dark theme and `light-plus` under the light
+theme. A scheme sets only these nine colours; canvas and plain text stay
+theme tokens.
 
-| Preset  | Accent    | Ink (Text auf Accent, dark) |
-|---------|-----------|------------------------------|
-| `rose`  | `#e39bab` | `#1c1315`                    |
-| `sage`  | `#8fbf9f` | `#111a14`                    |
-| `blue`  | `#9fb8e0` | `#111620`                    |
-| `amber` | `#e0b877` | `#1d1710`                    |
+| Scheme | Canvas | Keyword | Control | String | Comment | Number | Function | Type | Variable | Constant |
+|---|---|---|---|---|---|---|---|---|---|---|
+| `dark-plus` | dark | `#569CD6` | `#C586C0` | `#CE9178` | `#6A9955` | `#B5CEA8` | `#DCDCAA` | `#4EC9B0` | `#9CDCFE` | `#569CD6` |
+| `light-plus` | light | `#0000FF` | `#AF00DB` | `#A31515` | `#008000` | `#098658` | `#795E26` | `#267F99` | `#001080` | `#0000FF` |
+| `monokai` | dark | `#66D9EF` | `#F92672` | `#E6DB74` | `#88846F` | `#AE81FF` | `#A6E22E` | `#A6E22E` | `#F8F8F2` | `#AE81FF` |
+| `solarized-dark` | dark | `#93A1A1` | `#859900` | `#2AA198` | `#586E75` | `#D33682` | `#268BD2` | `#CB4B16` | `#93A1A1` | `#B58900` |
+| `solarized-light` | light | `#586E75` | `#859900` | `#2AA198` | `#93A1A1` | `#D33682` | `#268BD2` | `#CB4B16` | `#93A1A1` | `#B58900` |
+| `abyss` | dark | `#9966B8` | `#225588` | `#22AA44` | `#384887` | `#F280D0` | `#DDBB88` | `#FFEEBB` | `#6688CC` | `#F280D0` |
+| `kimbie-dark` | dark | `#98676A` | `#98676A` | `#889B4A` | `#A57A4C` | `#F79A32` | `#8AB1B0` | `#F06431` | `#DC3958` | `#F79A32` |
+| `quiet-light` | light | `#7A3E9D` | `#4B69C6` | `#448C27` | `#AAAAAA` | `#9C5D27` | `#AA3731` | `#7A3E9D` | `#7A3E9D` | `#9C5D27` |
 
-Im Light-Mode ist Ink immer `#ffffff`.
+`set code.scheme` rejects an unknown name and lists the known ones. A
+scheme whose canvas differs from the active theme is applied, and `set`
+prints a note.
 
-Abgeleitete Tokens — alle **vorgemischt undurchsichtig** über `Surface`,
-weil der Rasterizer die Alpha-Bytes der Tokens ignoriert (die Deckkraft
-kommt aus `bg_alpha`):
+## 2. Accent
 
-| Design         | Token         | Mischung             | Rolle                          |
-|----------------|---------------|----------------------|--------------------------------|
-| `accent-soft`  | `AccentMuted` | 15 % Accent          | Selektionsfüllung, Active-Bg   |
-| `accent-ring`  | `AccentRing`  | 22 % Accent          | 3px-Fokusring                  |
-| `accent-line`  | `AccentLine`  | 45 % Accent          | Rahmen des fokussierten Tiles  |
-| `accent-ink`   | `OnAccent`    | —                    | Text auf Accent-Füllung        |
+### Choice
 
-## 3. Widget-Zustände (verbindlich)
+`accent` takes a preset, a `#RRGGBB` literal, or `auto`.
 
-Aus der `WIDGET-ZUSTÄNDE`-Sektion des Mockups. Das ist der Teil, den jede
-App gleich umsetzen muss.
+| `accent` | Raw accent |
+|---|---|
+| `rose` | `#E39BAB` |
+| `sage` | `#8FBF9F` |
+| `blue` | `#9FB8E0` |
+| `amber` | `#E0B877` |
+| `#RRGGBB` | that colour |
+| `auto` or unset, wallpaper set | wallpaper palette colour 1, each channel raised by `100 - luma` when its luma is below 100 |
+| `auto` or unset, no wallpaper | `#E39BAB` |
 
-### `toolbar_button` — 30×30, Radius 7
+Preset names match case-insensitively.
 
-| Zustand  | Umsetzung                                        |
-|----------|--------------------------------------------------|
-| rest     | kein Hintergrund, Icon `OnSurface`               |
-| hover    | `Background(SurfaceHover)`                       |
-| active   | `Background(AccentMuted)` + `Tint(Accent)`       |
-| focus    | `Ring { token: Accent, width: 2 }`               |
-| disabled | `Tint(OnSurfaceFaint)` + `Opacity(115)`          |
+### Contrast adjustment
 
-### `text_field` — Höhe 30, Radius 8
+The raw accent is adjusted against the theme's `Surface` before use:
 
-| Zustand | Umsetzung                                                        |
-|---------|------------------------------------------------------------------|
-| rest    | `Background(Surface)` + `Border { Border, 1, 8 }`                 |
-| focus   | `Border { Accent, 1, 8 }` + `Ring { token: AccentRing, width: 3 }`|
+- Dark: kept if its luma differs from `Surface` by at least 80, else every
+  channel is raised by `0x60`.
+- Light: darkened in steps of `0x10` per channel (at most 16 steps) until
+  its luma is 95 or lower, so it reads as text.
 
-### `list_row` — Höhe 34
+### Accent tokens
 
-Selektion ist **Tint + 2px-Kante links**, kein voller Balken und kein
-umlaufender Rahmen.
+| Id | Token | Value |
+|---|---|---|
+| 6 | `Accent` | adjusted accent |
+| 7 | `AccentMuted` | `Accent` mixed over `Surface` at 38/255 (15 %) |
+| 15 | `AccentRing` | `Accent` mixed over `Surface` at 56/255 (22 %) |
+| 16 | `AccentLine` | `Accent` mixed over `Surface` at 115/255 (45 %) |
+| 5 | `OnAccent` | Light: `#FFFFFF`. Dark: `#101010` mixed with `Accent` at 24/255 if `Accent` luma > 128, else `#FFFFFF` |
 
-| Zustand  | Umsetzung                                                       |
-|----------|-----------------------------------------------------------------|
-| rest     | transparent, 2px transparente Kante links (hält das Layout)     |
-| hover    | `Background(SurfaceHover)`                                      |
-| selected | `Background(AccentMuted)` + 2px-Kante `Accent` + `Tint(Accent)` auf dem Icon + Text `Strong` |
+Resolved values for the presets:
 
-### `tab` — Höhe 30, Radius `8 8 0 0`, feste Breite, Ellipsis
+| Theme | Preset | `Accent` | `AccentMuted` | `AccentRing` | `AccentLine` | `OnAccent` |
+|---|---|---|---|---|---|---|
+| dark | `rose` | `#E39BAB` | `#352C30` | `#43353A` | `#73535B` | `#231D1E` |
+| dark | `sage` | `#8FBF9F` | `#28312E` | `#313D37` | `#4D6356` | `#1B201D` |
+| dark | `blue` | `#9FB8E0` | `#2B3038` | `#343B46` | `#546073` | `#1D1F23` |
+| dark | `amber` | `#E0B877` | `#343028` | `#433B2F` | `#716044` | `#231F19` |
+| light | `rose` | `#833B4B` | `#E8DCDD` | `#DFCFD1` | `#C4A3A9` | `#FFFFFF` |
+| light | `sage` | `#3F6F4F` | `#DEE4DD` | `#D0DAD2` | `#A5BAAB` | `#FFFFFF` |
+| light | `blue` | `#3F5880` | `#DEE1E5` | `#D0D5DC` | `#A5B0C1` | `#FFFFFF` |
+| light | `amber` | `#805817` | `#E7E1D5` | `#DFD5C5` | `#C2B091` | `#FFFFFF` |
 
-- Der **aktive Tab trägt die Farbe des Inhalts darunter** — im Editor
-  `Page`, im Browser `Surface`. Der Tabstrip selbst ist `SurfaceElevated`.
-- hover: `Background(SurfaceMuted)`
-- inaktiv: transparent, Text `OnSurfaceMuted`
-- Das `×` erscheint nur auf aktivem/gehovertem Tab. Sonst zeigt der Slot
-  bei ungespeicherten Änderungen einen 8px-Punkt in `Accent`.
+## 3. Widget states
 
-### `dock` — Reveal
+### How states apply
 
-**Nicht nachbauen:** im Mockup schiebt sich hinter dem Dock ein
-rechteckiger Balken nach oben in die Kacheln. Das ist ein Renderfehler
-des Entwurfs, kein Gestaltungsmittel. Das Dock ist ein freistehender
-Tray mit Abstand zum unteren Rand; darüber liegt nichts.
+A widget's effective modifier list is built in this order, later entries
+winning for single-valued modifiers (`Background`, `Border`, `Rounded`,
+`Ring`, `Tint`):
 
+1. base modifiers
+2. `WhenDensity(d, ..)` matching the window's density
+3. `Disabled(..)`
+4. `Hover(..)` while the pointer is over the widget or a descendant
+5. `Focus(..)` while the widget or a descendant has focus
+6. `Active(..)` while the widget or a descendant is pressed
 
-4px-Hot-Zone · 180 ms rein, 400 ms raus · Slide+Fade 160 ms · die Kacheln
-reflowen mit. Drei Zustände: `0 aus` (nichts) · `1 hint` (34×4-Streifen
-`OnSurfaceFaint` am unteren Rand) · `2 offen` (Tray).
+`Disabled` is present-or-absent on the widget. While present, `Hover`,
+`Focus` and `Active` are skipped, clicks on the widget and its subtree are
+swallowed, and the subtree is left out of Tab order.
 
-Icon-Zellen 34×34, Radius 9. Laufindikator unter der Zelle:
-laufend+fokussiert = 12×2 `Accent` + Zelle `Background(SurfaceHover)`;
-laufend = 3×2 `OnSurfaceFaint`; nicht laufend = nichts.
+| Modifier | Rendering |
+|---|---|
+| `Background(t)` | filled rect, rounded by the corner radius |
+| `Border { t, w, r }` | stroke of `w` inside the rect |
+| `Rounded(r)` | corner radius; wins over a `Border` radius |
+| `Ring { t, w }` | stroke of `w` outside the rect, outer radius = radius + `w`; no layout space |
+| `Tint(t)` | colour of text and icons; inherited by the subtree |
+| `Opacity(o)` | blends the painted rect towards `Surface` by `255 - o` |
+| `Scale(q)` | icon scale, Q8.8 (256 = 1.0), inherited by icons below |
+| `Shadow`, `Blur`, `Effect`, `Transition` | accepted, not rendered |
 
-## 3a. Fokus und Texteingabe (verbindlich, systemweit)
+Radii are clamped to half the shorter side, so `Radius::Pill` (255) gives
+a pill.
 
-Vorher war das pro Widget-Art verschieden — der Browser fühlte sich
-richtig an, der Dateimanager sperrte die Tastatur im Suchfeld ein. Eine
-Regel für alle:
+### Density
 
-| Ereignis | Verhalten |
-|----------|-----------|
-| Fenster erscheint | Fokus liegt **nirgends**, außer ein Textfeld trägt `Modifier::Autofocus`. Das ist der Launcher- und Dialogfall, nicht der Normalfall. |
-| Klick **in** ein `Input`/`TextArea` | Fokus wandert dorthin. |
-| Klick **irgendwo sonst** im Fenster | Fokus wird freigegeben — auch auf Knöpfe, Listenzeilen und leere Fläche. Es gibt immer einen Weg heraus. |
-| Fokus verlässt ein Feld | Der getippte Puffer wird **geparkt**, nicht verworfen. |
-| Fokus kehrt in dasselbe Feld zurück | Der geparkte Puffer lebt weiter. |
+| `Density` | Logical window width |
+|---|---|
+| `Compact` | < 600 |
+| `Regular` | 600 to 1199 |
+| `Spacious` | >= 1200 |
 
-Der letzte Punkt ist keine Bequemlichkeit, sondern Notwendigkeit: der
-Editorpuffer des Compositors läuft dem Baum der App **konstruktionsbedingt
-eine Runde voraus**. Wer ihn beim Fokusverlust wegwirft, verliert alles,
-was seit dem letzten Commit der App getippt wurde — das Feld wirkte
-geleert und füllte sich erst bei Enter wieder.
+### Scales (SDK `style.rs`)
 
-**Folge, bewusst in Kauf genommen:** ein Klick ins Menüband nimmt auch
-dem Editor in spell den Cursor. Das ist der Preis für eine Regel ohne
-Ausnahmen; die Alternative wäre eine Sonderbehandlung für Menüs, und
-genau solche Sonderfälle haben den Zustand vorher unvorhersehbar gemacht.
+| Step | `Radius` | `Spacing` | `Padding` |
+|---|---|---|---|
+| `None` | 0 | 0 | 0 |
+| `Xxs` | | 2 | 2 |
+| `Xs` | | 4 | 4 |
+| `Sm` | 4 | 8 | 8 |
+| `Md` | 8 | 12 | 12 |
+| `Lg` | 12 | 16 | 16 |
+| `Xl` | 16 | 24 | 24 |
+| `Xxl` | | 32 | |
+| `Pill` | 255 | | |
 
-## 4. Fenster-Chrome (Compositor)
+### Text styles
 
-- Kachel-Gap **6 px**, Radius **10 px**.
-- Fokussiertes Fenster: 1px `AccentLine`. Unfokussiert: 1px `Border`.
-- Panel (Bar): Höhe 36, Radius 8, 6px Rand ringsum, 1px `Border`.
-- Dock-Tray: Radius 12.
+| `TextStyle` | Size | Default colour |
+|---|---|---|
+| `Title` | 22 | `OnSurface` |
+| `Heading` | 15 | `OnSurface` |
+| `Body` | 13 | `OnSurface` |
+| `Muted` | 13 | `OnSurfaceMuted` |
+| `Caption` | 10 | `OnSurface` |
+| `Mono` | 13 (monospace face) | `OnSurface` |
 
-## 5. Fensteraufbau der Apps
+`Modifier::FontSize` overrides the size, clamped to 6..64. Each style
+declares a weight, but every style renders at the font's default weight.
+Text wider than its box is ellipsized.
 
-Von oben nach unten, alle drei Apps teilen das Raster:
+### `toolbar_button`
 
-1. **Menüband** — 36 px, `SurfaceElevated`. App-Icon (`Accent` wenn
-   fokussiert, sonst `OnSurfaceFaint`), dann die Menülabels in
-   `OnSurfaceMuted`, rechts das Plattform-`×`.
-2. **Tabstrip** — 36 px, `SurfaceElevated`, Tabs unten bündig (nur beak
-   und spell).
-3. **Toolbar** — 44 px, `Surface`, unten 1px `Border`.
-4. **Inhalt** — `Page`.
+Built by `prefab::icon_button`; beak and iris build the same cell by hand.
+
+| Property | Value |
+|---|---|
+| Cell | 28 x 28, icon centred |
+| Radius | 7 |
+| Rest | no fill, icon `OnSurface` |
+| Hover | `Background(SurfaceHover)` |
+| Active | `Background(AccentMuted)`, `Tint(Accent)` |
+| Focus | `Ring { AccentRing, 2 }` (prefab only) |
+
+### `text_field`
+
+The field row in loft and beak: a `Row` holding a 16 px leading icon and an
+`Input`.
+
+| Property | Value |
+|---|---|
+| Height | 30 (`MinHeight`) |
+| Padding | x 8, y 0 |
+| Rest | `Background(SurfaceMuted)`, `Border { Border, 1, 8 }` |
+| Focus | `Border { Accent, 1, 8 }`, `Ring { AccentRing, 3 }` |
+
+`prefab::input` is lighter: padding 12, radius 8, no fill, focus
+`Border { Accent, 1, 8 }` and no ring; the `Search` kind leads with a
+24 px magnifier in `Accent`.
+
+### `list_row`
+
+The data row in loft and pick. Selection is a tint plus a 2 px leading
+edge, never an outline.
+
+| Property | Value |
+|---|---|
+| Height | 34, padding 4 |
+| Leading edge | 2 px wide, 26 px tall (`prefab::mark`), present on every row |
+| Rest | no fill, edge empty, icon `OnSurfaceMuted` |
+| Hover | `Background(SurfaceHover)` |
+| Selected | `Background(AccentMuted)`, edge `Accent`, icon `Tint(Accent)` |
+| Metadata columns | `Mono`, `OnSurfaceMuted` |
+| Column headers | 30 high, `Mono`, `OnSurfaceFaint`; active sort column `OnSurfaceMuted`; hover `OnSurface` |
+
+`prefab::nav_row` (sidebars) follows the same language: height 30, radius
+7, padding 4, 16 px icon. Selected: `Background(AccentMuted)`,
+`Tint(Accent)`. Otherwise icon `OnSurfaceMuted`, hover
+`Background(SurfaceHover)`, focus `Ring { AccentRing, 2 }`.
+
+### `tab`
+
+Fixed width, label ellipsized, height 30, radius 8 on all corners (the ABI
+has no per-corner radius). Tab strip: `SurfaceElevated`, tabs
+bottom-aligned, 2 px between tabs. The active tab takes the colour of the
+content below it.
+
+| | beak | spell |
+|---|---|---|
+| Strip height | 36 | tab height + 2 x 4 padding |
+| Tab width | 160 | 200 |
+| Active fill | `Surface` | `Page` |
+| Active marker | 2 px `Accent` bar inside the tab's top edge | none |
+| Inactive | no fill, label `OnSurfaceMuted` | no fill, label `OnSurfaceMuted` |
+| Hover (inactive) | `Background(SurfaceMuted)` | `Background(SurfaceMuted)` |
+| Close | 22 x 22 `X` button on every tab, radius 4, hover `SurfaceHover` | `X` on the active tab only, `Accent` if unsaved else `OnSurfaceMuted` |
+| Unsaved, inactive | | 8 x 8 `Accent` dot in the close slot |
+
+### Other prefabs
+
+| Prefab | Rest | Hover | Active | Focus |
+|---|---|---|---|---|
+| `button` `Primary` | `Accent`, label `OnAccent` | `AccentMuted` | `AccentMuted` | `Border { Accent, 2, 8 }` |
+| `button` `Secondary` | `SurfaceElevated` | `SurfaceMuted` | `Border` | same |
+| `button` `Ghost` | `Surface` | `SurfaceMuted` | `Border` | same |
+| `button` `Destructive` | `Danger`, label `OnAccent` | `Warning` | `Warning` | same |
+| `menu_bar_with_icon` label | `Body`, `OnSurfaceMuted`, padding 8 | `SurfaceHover`, `OnSurface`, radius 4 | | |
+| `popover_menu` row | `Body`, padding 8, shortcut `Caption` `OnSurfaceFaint` | `SurfaceMuted`, radius 4 | | |
+| `breadcrumb` segment | `Mono`, `OnSurfaceMuted`; last segment `SurfaceHover` | `SurfaceHover`, radius 4 | | |
+| `list_row` (launcher style) | padding 16, 24 px icon | `SurfaceMuted`, radius 4 | | `Border { OnSurfaceMuted, 1, 4 }` |
+| `list_row` selected | `SurfaceElevated`, `Border { Accent, 1, 4 }`, icon `Accent` | | | |
+| `grid_item` | padding 8, 64 px icon | `SurfaceMuted`, radius 8 | | `Border { OnSurfaceMuted, 1, 8 }` |
+| `grid_item` selected | `SurfaceElevated`, `Border { Accent, 1, 8 }`, icon `Accent` | | | |
+
+Buttons have padding 12 and radius 8. Containers:
+
+| Prefab | Fill | Border | Radius | Padding |
+|---|---|---|---|---|
+| `card` `Inset` | `Surface` | `Border` 1 | 12 | 16 |
+| `card` `Panel`, `Sheet` | `SurfaceElevated` | none | 12 | 16 |
+| `dialog` | `SurfaceElevated` | none | 12 | 16 (12 at `Compact`) |
+| `popover_menu` | `SurfaceElevated` | `Border` 1 | 8 | 4, min width 180 |
+| `sidebar_pane` | `SurfaceMuted` | none | 0 | 8 |
+| `sidebar_section` label | `Mono`, `OnSurfaceFaint`, padding 8 | | | |
+| `badge` | `SurfaceMuted`, `Caption` | none | 0 | 4 |
+
+### Built-in leaf painting
+
+What the compositor draws for a leaf without app modifiers:
+
+| Widget | Drawing |
+|---|---|
+| `Button` | `Accent` fill unless a `Background` is set; label `Body`, `OnSurface` or the tint; 16 px icon; inset 8 x 4 |
+| `Input` | no fill; text inset 4; value `Body` `OnSurface`; placeholder `OnSurfaceFaint`; width from the placeholder, min 120 |
+| `TextArea` | no fill; `Mono` 13; placeholder `OnSurfaceMuted`; gutter numbers `OnSurfaceFaint` with a 1 px `Border` rule |
+| `Checkbox` | 16 x 16, `Border` frame, 2 px inset filled `Accent` when checked, else `Surface` |
+| `Slider` | 4 px track `SurfaceMuted`, fill and 14 px thumb `Accent`, radius 2 |
+| `Divider` | 1 px `Border` |
+| `Canvas` | `SurfaceMuted` until the app commits pixels |
+| `Scroll` scrollbar | overlay thumb 4 px wide, 2 px from the edge, `OnSurfaceMuted`, radius 2, min length 24; only when content overflows |
+
+## 3a. Focus and text input
+
+| Event | Behaviour |
+|---|---|
+| Window's first commit | Focus is on nothing, unless a text widget carries `Modifier::Autofocus` |
+| A commit while nothing is focused | An `Autofocus` text widget takes focus |
+| `FocusRequest(n)` with a new `n` | That `Input`/`TextArea` takes focus with its whole text selected |
+| Click on an `Input`/`TextArea` | Focus moves there; the caret goes to the clicked position |
+| Click on a field row (a subtree with exactly one text widget and no other click target) | Focus moves to its text widget; the caret goes to the end |
+| Click anywhere else in the window | Focus is released |
+| Tab / Shift+Tab | Next / previous focusable widget (`Button`, `Input`, `TextArea`, `Checkbox`, anything with `OnClick`), wrapping |
+| Focus leaves a field | The typed buffer stays on screen and is parked under that field |
+| Focus returns to that field | The parked buffer, caret and selection resume |
+
+Only a focused `Input` or `TextArea` has an editor. Its buffer leads the
+app's tree by one round trip, which is why it is parked and not dropped.
+
+| Element | Value |
+|---|---|
+| Caret | 2 px wide, one line high, `OnSurface`; drawn only while focused; no blink |
+| Selection | `AccentMuted` under the glyphs, min width 2 |
+| Focused empty `Input` | caret only, no placeholder |
+| Masked `Input` (`Modifier::Mask`) | one bullet per character |
+| Double / triple click | select word / line |
+| Enter | `TextArea`: newline. `Input`: submit if it has an `on_submit`, else passed on as a key |
+| Tab in a `TextArea` | inserts 4 spaces |
+| Ctrl+C / X / V / A | copy, cut, paste, select all |
+
+## 4. Window chrome
+
+The compositor draws the border, the focus halo and a close button. It
+draws no title and no shadow; the app fills the inside.
+
+| Property | Value |
+|---|---|
+| Gap between tiles | `shade.gaps`, default 8 |
+| Border width | `shade.border`, default 1 |
+| Corner radius | `shade.rounding`, default 10; content radius = rounding - border |
+| Fullscreen window | no border, square corners, no close button |
+
+### Border colour
+
+| | Wallpaper set | No wallpaper |
+|---|---|---|
+| Focused | 45 degree gradient between wallpaper palette colours 1 and 2, each raised to luma >= 80 | `shade.border_active` (hex) or `AccentLine` |
+| Unfocused | wallpaper palette colour 8 | `shade.border_inactive` (hex) or `Border` |
+| Blend | 235/256 | 130/256 |
+
+### Focus halo
+
+| Property | Value |
+|---|---|
+| Width | `shade.glow`, default 6, at most the gap; 0 turns it off |
+| Shown | on the focused tile when at least two tiles share the workspace |
+| Colour | wallpaper accent (section 2, `auto` row) if a wallpaper is set, else the focused border colour |
+| Strength | steady 100/255; on a focus change it starts at 255 and settles over 240 ms |
+
+### Close button
+
+Drawn on every tiled or floating window except panels, overlays,
+`Surface` windows and fullscreen windows.
+
+| Property | Value |
+|---|---|
+| Hit box | 26 x 26 |
+| Position | centred in a 36 px band at the top; right inset equal to the top inset (5) |
+| Glyph | `X`, 16 px, `OnSurfaceMuted` (glass palette on `loop`) |
+
+### Glass
+
+`loop` terminal windows and translucent panels are drawn over a blur of
+the wallpaper. Glass values are derived from the wallpaper once it is set;
+a key set with `set` wins, `unset` returns it to automatic, `shade glass`
+reports both.
+
+| Value | Automatic | Key |
+|---|---|---|
+| Blur radius (on the 1/4-size image) | `2 + detail / 4`, clamped to 2..5 | `shade.blur` (0 off, max 8) |
+| `loop` fill weight | enough to keep text at 6:1 contrast over the median wallpaper luma, clamped to 160..208 of 256 | `shade.opacity` (0..256) |
+| Panel fill opacity | `loop` weight x 255/256 + 30, max 255 | `shade.chrome_opacity` (0..255) |
+| Brightness ceiling under text | from the 6:1 contrast to dark `OnSurface` | `shade.dark_ceil` (0..255) |
+| Wallpaper colour in the fill | 26/256 (10 %) | `shade.glass_tint` (0..40 %) |
+
+`loop` glass is the dark `Surface` at the `loop` weight. A panel is
+translucent only when its tree's root is a `Stack`: the scene clears
+transparent and fills backgrounds at the panel opacity. Strut panels
+(`deck`) take `shade.bar_opacity` if set, else `shade.chrome_opacity`.
+Setting `shade.chrome_opacity` clears the per-panel keys. Panel geometry
+is in [`PANEL.md`](PANEL.md).
+
+Every other widget window is opaque and clears to the theme's `Surface`.
+
+### Screenshot flash
+
+The screen dips towards black at 110/255 and drains quadratically over
+120 ms.
+`shade.flash_opacity` sets the peak; 0 turns it off.
+
+## 5. App window structure
+
+The compositor places the close button in a 36 px top band, so apps put
+their top band at that height. `prefab::menu_bar_with_icon` builds it:
+
+| Band | Value |
+|---|---|
+| Menu bar | min height 36, `SurfaceElevated`, padding 4, 2 px between items |
+| App icon | 16 px, `Accent`, padding 4 |
+| Menu labels | as in section 3, followed by a flex spacer |
+
+The rest is app code. The values the first-party apps share:
+
+| Element | Value | Apps |
+|---|---|---|
+| Tab strip | 36, `SurfaceElevated` | beak |
+| Toolbar | 44, padding 8, spacing 8 | beak |
+| Field | 30 | beak, loft, pick |
+| Sidebar width | 176 | loft |
+| Content | `Page` | beak, spell |
+| Address field lead icon | `Lock` in `Success` for `https://`, else `Bird` in `Accent` | beak |
+
+## 6. Config keys
+
+`set` and `unset` re-render every scene at once. `shade.gaps`,
+`shade.border` and `shade.rounding` are read when the compositor starts
+and when `shade.scale` changes; `shade.border_active` and
+`shade.border_inactive` only when the compositor starts.
+`theme <dark|light|auto>` is also an intent of its own.
+
+| Key | Values | Default | Changes |
+|---|---|---|---|
+| `theme` | `dark`, `light`, `auto` | `auto` | Palette of non-glass windows |
+| `accent` | `rose`, `sage`, `blue`, `amber`, `#RRGGBB`, `auto` | `auto` | `Accent` and derived tokens |
+| `code.scheme` | `auto` or a scheme name | `auto` | Code tokens |
+| `shade.scale` | 1.0 to 3.0 | by screen width | All lengths and font sizes |
+| `shade.gaps` | px | 8 | Gap between tiles |
+| `shade.border` | px | 1 | Window border width |
+| `shade.rounding` | px | 10 | Window corner radius |
+| `shade.border_active` | hex | `AccentLine` | Focused border, without wallpaper |
+| `shade.border_inactive` | hex | `Border` | Unfocused border, without wallpaper |
+| `shade.glow` | px, 0 off | 6 | Focus halo width |
+| `shade.bar_margin` | px | 6 | Gap between a strut panel and the screen edge |
+| `shade.blur` | 0..8 | auto | Glass blur |
+| `shade.opacity` | 0..256 | auto | `loop` glass fill |
+| `shade.chrome_opacity` | 0..255 | auto | Panel fill opacity |
+| `shade.bar_opacity` | 0..255 | `shade.chrome_opacity` | Strut panel fill opacity |
+| `shade.dark_ceil` | 0..255 | auto | Glass brightness ceiling under text |
+| `shade.glass_tint` | 0..40 (%) | auto (10) | Wallpaper colour in glass |
+| `shade.flash_opacity` | 0..255 | 110 | Screenshot flash |
