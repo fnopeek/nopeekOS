@@ -25,7 +25,7 @@ pub struct Task {
     /// may block at yield points). Native run-to-completion tasks
     /// (intents) leave this false and run directly. See `smp::fiber`.
     pub is_fiber: bool,
-    /// A background app (autostart: dock, bar). These share one core
+    /// A background app (autostart: deck). These share one core
     /// (`per_core::app_core`) instead of taking an empty core each, which
     /// a vCPU could have used.
     pub shared: bool,

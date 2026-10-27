@@ -49,7 +49,7 @@ bitflags! {
         /// (beak). Distinct from NETCTL (WiFi-supplicant control): NET is
         /// simply "may make outbound TLS requests", the browser's fetch cap.
         const NET       = 0b1000_0000_0000;
-        /// System UI roles: the bar panel, the dock, overlays that take the
+        /// System UI roles: the panel, overlays that take the
         /// keyboard focus, modal windows, power off. An app that has them
         /// can put itself in front of the user and read what is typed, so
         /// only the shell's own modules declare it.
@@ -358,7 +358,7 @@ fn rights_from_caps_byte(b: u8) -> Rights {
 // need an extension right ship a 2-byte section; a 1-byte (or absent)
 // section grants nothing from byte 2.
 const CAP2_BIT_NET: u8 = 0x01; // npk_http_request (beak's outbound fetch)
-const CAP2_BIT_SHELL: u8 = 0x02; // system UI roles (bar, dock, launcher, picker)
+const CAP2_BIT_SHELL: u8 = 0x02; // system UI roles (panel, launcher, picker)
 
 fn rights_from_caps_byte2(b: u8) -> Rights {
     let mut r = Rights::empty();

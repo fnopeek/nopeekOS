@@ -402,67 +402,13 @@ pub(crate) fn npk_window_set_clipboard_sink(ctx: &mut HostState) -> i32 {
     0
 }
 
-pub(crate) fn npk_window_set_dock(ctx: &mut HostState, w: i32, h: i32) -> i32 {
-    let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
-        return -1;
-    }
-    if w <= 0 || h <= 0 { return -1; }
-    let (w, h) = (phys(w), phys(h));
-
-    let mut wid = ctx.widget_window_id;
-    if wid == 0 {
-        // Promote the spawning terminal to a widget window if there
-        // is one; otherwise create a fresh widget window. Unlike
-        // the overlay path we do not focus it — the dock is a
-        // background overlay that never owns keyboard focus.
-        let terminal_idx = ctx.terminal_idx;
-        let promoted = if terminal_idx != 255 {
-            crate::shade::with_compositor(|c|
-                c.promote_terminal_to_widget(terminal_idx)
-            ).flatten()
-        } else {
-            None
-        };
-
-        let new_id = match promoted {
-            Some(id) => {
-                ctx.terminal_idx = 255;
-                id.0
-            }
-            None => {
-                let title = ctx.module_name.clone();
-                match crate::shade::with_compositor(|comp| {
-                    comp.create_widget_window(
-                        if title.is_empty() { "dock" } else { title.as_str() }).0
-                }) {
-                    Some(v) => v,
-                    None => return -1,
-                }
-            }
-        };
-        ctx.widget_window_id = new_id;
-        wid = new_id;
-    }
-
-    let ok = crate::shade::with_compositor(|comp|
-        comp.set_dock(crate::shade::WindowId(wid), w as u32, h as u32)
-    ).unwrap_or(false);
-
-    if ok {
-        crate::shade::request_render();
-        0
-    } else {
-        -1
-    }
-}
-
 pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
-    if w <= 0 || h <= 0 || edge < 0 || behavior < 0 { return -1; }
+    // Only the bottom strut panel exists.
+    if w <= 0 || h <= 0 || (edge, behavior) != (0, 1) { return -1; }
     let (w, h) = (phys(w), phys(h));
     // A panel is a strip along an edge, and its size becomes a pixel buffer
     // on the next commit: clamp it to a strip of the screen.
@@ -503,14 +449,6 @@ pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32
     ).unwrap_or(false);
 
     if ok { crate::shade::request_render(); 0 } else { -1 }
-}
-
-pub(crate) fn npk_battery(ctx: &mut HostState) -> i32 {
-    let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
-        return -1;
-    }
-    crate::status::battery_packed().unwrap_or(-1)
 }
 
 /// Reads one byte from an ACPI SystemMemory operation region.
@@ -855,8 +793,7 @@ const WAIT_WIFI_CMD: i32 = 8;
 /// Manager (NETCTL): the driver queued an event (`npk_wifi_poll_event`).
 const WAIT_WIFI_EVENT: i32 = 16;
 /// A watched topic changed — windows, battery, volume (`crate::notify`).
-/// RENDER-gated like the calls that read them (`npk_bar_state`,
-/// `npk_battery`).
+/// RENDER-gated like the calls that read them (`npk_bar_state`).
 const WAIT_STATE: i32 = 32;
 /// Driver registered as the GPU service: the compositor queued a job
 /// (`npk_gpudev_poll`).
@@ -3059,7 +2996,7 @@ pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i3
 pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32, verb_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     // Launching a microvm hands a guest the network, the user's home and
-    // sound: a shell role (launcher, dock), not something every module with
+    // sound: a shell role (launcher, panel), not something every module with
     // the default EXECUTE may do.
     let need = capability::Rights::EXECUTE | capability::Rights::SHELL;
     if capability::check_global(&cap_id, need).is_err() {

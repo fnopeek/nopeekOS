@@ -414,9 +414,9 @@ reports both.
 
 `loop` glass is the dark `Surface` at the `loop` weight. A panel is
 translucent only when its tree's root is a `Stack`: the scene clears
-transparent and fills backgrounds at the panel opacity. Strut panels
-(`deck`) take `shade.bar_opacity` if set, else `shade.chrome_opacity`.
-Setting `shade.chrome_opacity` clears the per-panel keys. Panel geometry
+transparent and fills backgrounds at the panel opacity. The panel
+(`deck`) takes `shade.bar_opacity` if set, else `shade.chrome_opacity`.
+Setting `shade.chrome_opacity` clears `shade.bar_opacity`. Panel geometry
 is in [`PANEL.md`](PANEL.md).
 
 Every other widget window is opaque and clears to the theme's `Surface`.
@@ -473,7 +473,7 @@ re-tiles the workspace.
 | `shade.blur` | 0..8 | auto | Glass blur |
 | `shade.opacity` | 0..256 | auto | `loop` glass fill |
 | `shade.chrome_opacity` | 0..255 | auto | Panel fill opacity |
-| `shade.bar_opacity` | 0..255 | `shade.chrome_opacity` | Strut panel fill opacity |
+| `shade.bar_opacity` | 0..255 | `shade.chrome_opacity` | Panel fill opacity override |
 | `shade.dark_ceil` | 0..255 | auto | Glass brightness ceiling under text |
 | `shade.glass_tint` | 0..40 (%) | auto (10) | Wallpaper colour in glass |
 | `shade.flash_opacity` | 0..255 | 110 | Screenshot flash |

@@ -164,9 +164,9 @@ pub enum Token {
 pub struct IconId(pub u16);
 
 /// The named icons. `IconId` is a number, not a closed enum: a module that
-/// only passes an icon on (the dock showing an app's icon) must not have to
-/// know every icon there is, or each new icon would mean rebuilding dock,
-/// drun and bar. The atlas is looked up by number, and a number it lacks
+/// only passes an icon on (the panel showing an app's icon) must not have to
+/// know every icon there is, or each new icon would mean rebuilding deck
+/// and drun. The atlas is looked up by number, and a number it lacks
 /// draws nothing.
 ///
 /// Wire format: postcard writes an enum variant index and a `u16` as the

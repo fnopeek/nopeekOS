@@ -532,7 +532,7 @@ host_imports! {
 
     // npk_unix_time() -> seconds since the epoch, UTC, or 0 if the clock is
     // not readable. Ungated, like npk_ticks: the wall clock is not a secret —
-    // it is on the bar and stamped into every npkFS entry. `npk_ticks` cannot
+    // it is on the panel and stamped into every npkFS entry. `npk_ticks` cannot
     // stand in for it, because it restarts at every boot and a cookie's
     // `Expires` is an absolute date.
     ctx fn npk_unix_time() -> i64;
@@ -596,7 +596,7 @@ host_imports! {
 
     // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> bytes or -1
     // Returns only the `.npk.app_meta` custom-section payload of the module
-    // `sys/wasm/<name>`, extracted kernel-side. Launchers (drun/dock) read an
+    // `sys/wasm/<name>`, extracted kernel-side. Launchers (drun, deck) read an
     // app's icon/name/description with this without fetching the whole
     // module, which can be several MB (the section sits at the end).
     // `name` is confined to a bare child of `sys/wasm/` (no path traversal).
@@ -654,7 +654,7 @@ host_imports! {
     // npk_window_set_overlay_at(x, y, w, h) -> i32
     // Like npk_window_set_overlay but positions the overlay's top-left at
     // (x, y) instead of centring it — for corner-anchored dropdowns (e.g.
-    // the volume slider under the bar). Creates/promotes + focuses the
+    // the volume slider next to the panel). Creates/promotes + focuses the
     // caller's widget window, same as the centred overlay path.
     //
     // Returns 0 on success, -1 on cap denied / bad args / no compositor.
@@ -675,23 +675,11 @@ host_imports! {
     // stealing text copy/paste from other apps. Returns 0 / -1.
     ctx fn npk_window_set_clipboard_sink() -> i32;
 
-    // npk_window_set_dock(w, h) -> i32
-    // Turn the calling app's widget window into a bottom auto-hide dock:
-    // overlay (no tiling strut), never modal, never focused on reveal,
-    // global across workspaces. Starts hidden; the compositor slides it
-    // in when the cursor holds the bottom edge. Like set_overlay but
-    // bottom-anchored instead of centred, and it does not grab focus.
-    //
-    // Returns 0 on success, -1 on cap denied / bad args / no compositor.
-    ctx fn npk_window_set_dock(w: i32, h: i32) -> i32;
-
     // npk_window_set_panel(edge, behavior, w, h) -> i32
-    // Generalised edge panel (see docs/spec/PANEL.md): edge 0=Bottom 1=Top,
-    // behavior 0=AutoHide overlay (dock) 1=Strut (bar; at the bottom the
-    // deck). Creates/promotes
-    // the caller's widget window without grabbing focus (like the dock),
-    // then hands it to the compositor's panel config. `set_dock` above is
-    // the (Bottom, AutoHide) wrapper of this.
+    // The bottom strut panel (see docs/spec/PANEL.md): only edge 0 (bottom)
+    // with behavior 1 (strut) is accepted. Creates/promotes the caller's
+    // widget window without grabbing focus, then hands it to the
+    // compositor's panel config.
     //
     // Returns 0 on success, -1 on cap denied / bad args / no compositor.
     ctx fn npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32;
@@ -706,10 +694,9 @@ host_imports! {
     // One line per open app window:
     // "<flags>\t<workspace>\t<title>\t<id>\t<caption>", flags being a
     // decimal bitmask (1 = focused, 2 = on the active workspace), `title`
-    // the module name, `caption` what the bar shows; `id` and `caption`
-    // only for a SHELL caller. Panels and overlays are excluded. The dock derives its running/active indicators from
-    // this, the bar its occupied-workspace hints, the deck its window
-    // list; the kernel stays free of app names.
+    // the module name, `caption` what the panel shows; `id` and `caption`
+    // only for a SHELL caller. Panels and overlays are excluded. The panel
+    // derives its window list from this; the kernel stays free of app names.
     mem fn npk_window_titles(buf_ptr: i32, max: i32) -> i32;
 
     // npk_window_activate(id) -> i32 — switch to the workspace of window
@@ -728,14 +715,6 @@ host_imports! {
 
     // npk_popup_close(popup) -> i32 — close popup `popup`; no PopupDone.
     ctx fn npk_popup_close(popup: i32) -> i32;
-
-    // npk_battery() -> i32 — battery state for the bar plugin. Returns -1
-    // when no battery is known (desktops/QEMU → segment stays empty), else
-    // (status << 8) | percent, with status 0=discharging 1=charging 2=full
-    // 3=plugged-idle and percent in 0..=100. Prefers the AML driver's report
-    // (acpi.wasm, vendor-independent via _BST/_BIF); falls back to the
-    // standardised SBS-over-SMBus path for SBS laptops.
-    ctx fn npk_battery() -> i32;
 
     // Status items.
     // npk_status_set(key, icon, value, flags, text, opens) -> 0 / -1:
@@ -786,7 +765,7 @@ host_imports! {
 
     // npk_battery_report(packed): the AML driver pushes the decoded battery
     // state ((status<<8)|percent, or -1 for absent) into the kernel cache
-    // that npk_battery() returns.
+    // that the battery status item reads.
     ctx fn npk_battery_report(packed: i32);
 
     // npk_battery_detail(rate, remaining, full, voltage_mv, unit): the raw
@@ -827,10 +806,10 @@ host_imports! {
     ctx fn npk_audio_set_volume(pct: i32) -> i32;
     ctx fn npk_audio_get_volume() -> i32;
 
-    // npk_workspace_switch(n) -> i32 — switch to workspace n (bar clicks).
+    // npk_workspace_switch(n) -> i32 — switch to workspace n (panel clicks).
     ctx fn npk_workspace_switch(n: i32) -> i32;
 
-    // npk_power() -> i32 — ACPI S5 power-off (bar power button). Does not
+    // npk_power() -> i32 — ACPI S5 power-off (panel power button). Does not
     // return on success.
     ctx fn npk_power() -> i32;
 

@@ -317,9 +317,7 @@ pub fn fill_rounded_rect_aa(shadow: *mut u8, info: &FbInfo,
 // Precomputed "glass" tint: blend(bg_color, wallpaper, opacity) for the whole
 // screen, cached and recomputed only when bg/opacity/wallpaper change. The
 // translucent terminal chrome interior memcpys a row from this instead of
-// blending per pixel, so its cost does not grow with window size. This
-// matters while the dock resizes the terminal every frame, which the chrome
-// cache cannot catch.
+// blending per pixel, so its cost does not grow with window size.
 static GLASS_TINT: spin::Mutex<Option<(u64, u32, alloc::vec::Vec<u32>)>> =
     spin::Mutex::new(None);
 

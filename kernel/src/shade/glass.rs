@@ -1,6 +1,6 @@
 //! Glass parameters — computed from the wallpaper and the theme.
 //!
-//! Glass (loop, dock, bar) is a fill blended over the blurred wallpaper.
+//! Glass (loop, the panel) is a fill blended over the blurred wallpaper.
 //! How much blur, how much fill, and where the fill must hold the text
 //! legible depend on the picture: a calm dark image wants a light touch, a
 //! bright busy one wants more of everything, so no fixed set per theme
@@ -40,7 +40,7 @@ pub struct Params {
     pub blur: usize,
     /// Fill weight of the loop glass, 0..256.
     pub loop_opacity: u32,
-    /// Fill weight of dock and bar, 0..255.
+    /// Fill weight of the panel, 0..255.
     pub chrome_opacity: u32,
     pub ink: GlassInk,
 }
@@ -75,7 +75,7 @@ pub fn blur_radius(detail: u32) -> usize {
     key("shade.blur").map(|v| v.min(8) as usize).unwrap_or_else(|| auto_blur(detail))
 }
 
-/// Glass is dark in both themes — loop, dock and bar are the only glass,
+/// Glass is dark in both themes. loop and the panel are the only glass,
 /// and dark glass with light text reads over any wallpaper; only ordinary
 /// apps follow the theme.
 pub fn params() -> Params {
@@ -126,7 +126,7 @@ pub fn report() {
     let src = |k: &str| if key(k).is_some() { "set" } else { "auto" };
     kprintln!("  blur       {:>3}  ({})    shade.blur", p.blur, src("shade.blur"));
     kprintln!("  loop       {:>3}  ({})    shade.opacity        0-256", p.loop_opacity, src("shade.opacity"));
-    kprintln!("  dock/bar   {:>3}  ({})    shade.chrome_opacity 0-255", p.chrome_opacity, src("shade.chrome_opacity"));
+    kprintln!("  panel      {:>3}  ({})    shade.chrome_opacity 0-255", p.chrome_opacity, src("shade.chrome_opacity"));
     kprintln!("  ceiling    {:>3}  ({})    shade.dark_ceil      most brightness under text",
         p.ink.ceil, src("shade.dark_ceil"));
     kprintln!("  tint       {:>3}% ({})    shade.glass_tint     wallpaper colour in the glass",

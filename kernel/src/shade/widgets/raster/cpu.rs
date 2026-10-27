@@ -665,7 +665,7 @@ fn blend_over(dst: u32, src: u32, src_alpha: u8) -> u32 {
     // formula (out_a = 255, same colour), so opaque scenes are unaffected.
     // A transparent scene accumulates
     // real coverage alpha, which the compositor then composites over the
-    // wallpaper (translucent bar pills, crisp glyphs, no halo).
+    // wallpaper (translucent panel pills, crisp glyphs, no halo).
     let dst_contrib = da * (255 - sa) / 255;
     let out_a = sa + dst_contrib;
     if out_a == 0 { return 0; }

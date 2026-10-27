@@ -48,9 +48,9 @@ pub enum WindowKind {
 #[allow(dead_code)]
 pub struct Window {
     pub id: WindowId,
-    /// The window's name; the dock matches running apps on it.
+    /// The window's name; the panel matches running apps on it.
     pub title: String,
-    /// What the app inside calls its window (a guest's page title); the bar
+    /// What the app inside calls its window (a guest's page title); the panel
     /// shows it instead of `title` when set.
     pub caption: String,
     /// Position relative to screen origin (set by WM layout).
@@ -95,16 +95,11 @@ pub struct Window {
     /// shade-actions that would shift focus or reshape the grid are
     /// suppressed. Set by the app via `npk_window_set_modal`.
     pub modal: bool,
-    /// Dock window: an auto-hide overlay anchored to the bottom edge
-    /// (`npk_window_set_dock`). Implies `is_overlay`. Excluded from the
-    /// focus cycle; the compositor owns its reveal/hide slide and keeps
-    /// its `workspace` synced to the active one (global across spaces).
-    pub is_dock: bool,
-    /// Bar window: a top-edge strut panel (`npk_window_set_panel(Top,
+    /// Panel window: the bottom strut panel (`npk_window_set_panel(Bottom,
     /// Strut)`). Implies `is_overlay`. Positioned by the compositor into
-    /// the bar band, always visible, global across workspaces, never
-    /// focused. Rendered with the translucent-tray blit like the dock.
-    pub is_bar: bool,
+    /// the panel band, always visible, global across workspaces, never
+    /// focused. Rendered with the translucent panel blit.
+    pub is_panel: bool,
     /// Light-dismiss: close this window when a click lands outside it
     /// (opt-in via `npk_window_set_light_dismiss`). Used by transient
     /// overlays like the volume slider. Independent of `modal`.
@@ -143,8 +138,7 @@ impl Window {
             kind: WindowKind::Terminal,
             is_overlay: false,
             modal: false,
-            is_dock: false,
-            is_bar: false,
+            is_panel: false,
             light_dismiss: false,
             popup_of: None,
             popup_slot: 0,

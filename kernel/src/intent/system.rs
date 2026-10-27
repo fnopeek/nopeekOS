@@ -922,7 +922,7 @@ fn intent_ec_battery_dump() {
     kprintln!();
 
     // Decoded HP-EC battery — offsets from the DSDT Field(ECRM): BSEL/BFC_/
-    // BRC_/BST_ (mAh). This is what the bar segment shows.
+    // BRC_/BST_ (mAh). This is what the battery item shows.
     let bsel = crate::ec::read(0x86).unwrap_or(0xff);
     let full = crate::ec::read_u16(0x8d).unwrap_or(0);
     let rem = crate::ec::read_u16(0xa1).unwrap_or(0);
@@ -1385,7 +1385,7 @@ pub fn intent_gpu(args: &str) {
 pub fn intent_shade(args: &str) {
     match args.trim() {
         // The window list with its full state (kind, terminal, PID, root
-        // flag). `window_lines`, which the dock reads, shows only titles and
+        // flag). `window_lines`, which the panel reads, shows only titles and
         // cannot explain why a closed app is still alive.
         "windows" | "wins" => {
             let dump = crate::shade::with_compositor(|c| c.dump_windows())
@@ -1492,9 +1492,9 @@ pub fn intent_shade(args: &str) {
                     kprintln!("  windows: {}", comp.window_count());
                     kprintln!("  workspace: {}/4", comp.active_workspace + 1);
                     kprintln!("  gaps: {}px  border: {}px", comp.gaps, comp.border);
-                    match comp.top_strut {
-                        Some(s) => kprintln!("  bar: strut {}px (+{}px margin)", s.pill_h, s.margin),
-                        None => kprintln!("  bar: none"),
+                    match comp.bottom_strut {
+                        Some(s) => kprintln!("  panel: bottom strut {}px (+{}px margin)", s.pill_h, s.margin),
+                        None => kprintln!("  panel: none"),
                     }
                 });
             } else {
@@ -1786,7 +1786,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("driver <name>", "Load a WASM hardware driver");
             help_row("firefox", "Firefox in a tiled MicroVM (video via VA-API)");
             kprintln!("[npk]");
-            help_note("the dock and Mod+D start the same modules; 'modules' lists them");
+            help_note("the panel and Mod+D start the same modules; 'modules' lists them");
         }
         "desktop" | "shade" | "compositor" | "wm" | "display" | "wallpaper" | "wp" => {
             help_head("desktop", "shade: the tiling compositor");
@@ -1807,10 +1807,8 @@ pub fn intent_help_topic(topic: &str) {
             kprintln!("[npk]");
             help_note("config: shade.gaps, shade.border, shade.rounding, shade.glow,");
             help_note("        shade.opacity, shade.mod, shade.blur  (`shade glass` shows them)");
-            help_note("panels: shade.chrome_opacity sets all panels (0-255) and");
-            help_note("        clears shade.bar_opacity / shade.dock_opacity,");
-            help_note("        which then override strut / auto-hide panels again.");
-            help_note("        bar text + icon px: 'font:' / 'icon:' in sys/config/bar");
+            help_note("panel:  shade.chrome_opacity sets the panel (0-255) and");
+            help_note("        clears shade.bar_opacity, which then overrides it again.");
             help_note("        shade.flash_opacity: screenshot blink (0-255, 0 = off)");
         }
         "system" | "status" => {
@@ -1973,12 +1971,12 @@ pub fn intent_set(args: &str) {
         }
         crate::config::set(key, value);
         kprintln!("[npk] {} = {}", key, value);
-        // The shared panel knob is the master: it drops any per-panel
-        // override so it always moves bar and dock.
+        // The shared panel knob is the master: it drops the panel's own
+        // override so it always moves the panel.
         if key == "shade.chrome_opacity"
-            && crate::shade::widgets::palette::clear_panel_opacity_overrides()
+            && crate::shade::widgets::palette::clear_panel_opacity_override()
         {
-            kprintln!("[npk] cleared shade.bar_opacity / shade.dock_opacity");
+            kprintln!("[npk] cleared shade.bar_opacity");
         }
         apply_config_change(key);
     } else {
@@ -2007,7 +2005,7 @@ pub fn intent_unset(args: &str) {
 /// Make a changed rendering key visible at once, not on the next incidental
 /// redraw. Panel translucency is baked into the panel's pixel buffer at
 /// rasterize time, so a recomposite alone would show the old value until the
-/// app next commits (up to a minute for the bar) — the cached scenes are
+/// app next commits (up to a minute for the panel) — the cached scenes are
 /// re-rasterized first, the same step the `theme` intent takes.
 fn apply_config_change(key: &str) {
     if key.starts_with("shade.") || key.starts_with("code.")

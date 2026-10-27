@@ -518,7 +518,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
 /// Full recomposite → blit. Scene is composed clean into the back buffer
 /// (no cursor), swapped to front, then the cursor is saved-under + baked
 /// into the front and the whole frame blitted (cursor included → atomic,
-/// no flicker; incl. the dock reveal animation + the microvm tile).
+/// no flicker; incl. animations + the microvm tile).
 fn render_frame_full() {
     note_render(0);
     let t0 = crate::interrupts::rdtsc();
@@ -862,8 +862,7 @@ pub fn request_render() {
 
 /// Does the shell loop have to come back within one frame even without an
 /// event? True while something moves on its own — a swap animation, the
-/// screenshot flash, the focus glow, the dock (its dwell and debounce count
-/// calls, and it slides) — or a guest frame waits out its rate cap, a close
+/// screenshot flash, the focus glow — or a guest frame waits out its rate cap, a close
 /// request waits for its answer, or a render is still pending. Otherwise the
 /// shell sleeps until something wakes it.
 pub fn needs_tick() -> bool {
@@ -924,7 +923,7 @@ pub fn handle_action(action: input::ShadeAction) {
             // via remove_scene when the closed window's kind is Widget.
             with_compositor(|comp| {
                 if let Some(id) = comp.focused {
-                    // Never close a panel (dock/bar) via Mod+Q — they are
+                    // Never close the panel via Mod+Q — it is
                     // managed chrome. Focus shouldn't land on one, but guard
                     // here too in case some path focuses a panel.
                     if !comp.is_panel(id) {
@@ -1209,7 +1208,7 @@ pub fn launch_app(name: &str) {
 }
 
 /// `ttl_ticks` = None for a resident service. Autostart entries are exactly
-/// that: a WiFi driver, a supplicant, the dock. The default 600 000 ticks are
+/// that: a WiFi driver, a supplicant, the panel. The default 600 000 ticks are
 /// 100 minutes at 100 Hz — after which every gated host call of a still-running
 /// module starts failing, which looks like the device breaking, not like a
 /// capability expiring.
@@ -1327,7 +1326,7 @@ pub fn poll_render() {
         render_frame();
     }
 
-    // The guest named its windows: the bar shows them from the next notify.
+    // The guest named its windows: the panel shows them from the next notify.
     let titles = crate::microvm::devices::virtio_console_pci::take_titles();
     if titles.iter().any(Option::is_some) {
         note_shell_fingerprint(with_compositor(|comp| {
@@ -1357,21 +1356,6 @@ pub fn poll_render() {
     // Reap close requests a guarded app never answered.
     if with_compositor(|comp| comp.tick_close_requests()).unwrap_or(false) {
         render_frame();
-    }
-
-    // Drive the auto-hide dock. Feed it the current cursor Y so the reveal
-    // dwell / hide debounce advance even while the cursor is parked, then
-    // advance the slide. Re-render the frame while it's moving.
-    let (_, cy) = cursor::atomic_pos();
-    let (dock_moving, full) = with_compositor(|comp| {
-        comp.dock_update_reveal(cy);
-        let moving = comp.dock_tick();
-        (moving, comp.needs_full_redraw)
-    }).unwrap_or((false, false));
-    // A step of the slide repaints where the dock was and is; the tiles move
-    // (a whole frame) only when the slide starts hiding or ends revealing.
-    if dock_moving {
-        if full { render_frame(); } else { render_damaged_front(); }
     }
 
     // Process each mouse event with clean cursor restore + redraw
@@ -1828,15 +1812,14 @@ pub fn default_config() -> &'static [(&'static str, &'static str, &'static str)]
         ("shade.border", "1", "Window border width (px at 1x)"),
         ("shade.border_active", "", "Active window border color (hex; empty = palette AccentLine)"),
         ("shade.border_inactive", "", "Inactive window border color (hex; empty = palette Border)"),
-        ("shade.bar_margin", "6", "Gap between a strut panel and the screen edge (px)"),
+        ("shade.bar_margin", "6", "Gap between the panel and the screen edge (px)"),
         ("shade.rounding", "10", "Window corner radius (px at 1x)"),
         ("shade.opacity", "auto", "loop glass fill (0-256; auto from wallpaper + theme, see `shade glass`)"),
         ("shade.blur", "auto", "Blur behind glass (0 = off, 1-8; auto from wallpaper detail)"),
         ("shade.dark_ceil", "auto", "Glass: most brightness under text (0-255; auto from text contrast)"),
         ("shade.glass_tint", "auto", "Wallpaper colour in the glass (0-40 %; auto 10)"),
         ("shade.chrome_opacity", "", "Panel opacity (0-255; auto from wallpaper + theme)"),
-        ("shade.bar_opacity", "", "Strut panel opacity, deck included (0-255; empty = shade.chrome_opacity)"),
-        ("shade.dock_opacity", "", "Auto-hide panel opacity (0-255; empty = shade.chrome_opacity)"),
+        ("shade.bar_opacity", "", "Panel opacity override (0-255; empty = shade.chrome_opacity)"),
         ("shade.flash_opacity", "", "Screenshot dim strength (0-255, 0 = off; empty = 110)"),
     ]
 }

@@ -1179,8 +1179,8 @@ fn common_prefix(strings: &[String]) -> String {
 
 /// Idle Core 0 until the next interrupt instead of busy-spinning between
 /// poll cycles. While a focused app (widget / intent / wasm) runs on a
-/// worker, Core 0 only needs to wake to forward input, drive the cursor /
-/// dock, and detect completion. The per-core 100 Hz LAPIC timer guarantees
+/// worker, Core 0 only needs to wake to forward input, drive the cursor,
+/// and detect completion. The per-core 100 Hz LAPIC timer guarantees
 /// a wake within 10 ms (plain HLT = C1 keeps the timer ticking), and
 /// keyboard / mouse / net IRQs wake it immediately.
 #[inline]
@@ -1267,7 +1267,7 @@ pub fn wake_shell() {
 /// something wakes it, so other Core-0 fibers run.
 ///
 /// How long: one frame (10 ms) while anything needs the loop on its own:
-/// an animation or the dock (`shade::needs_tick`), a network timer or a
+/// an animation (`shade::needs_tick`), a network timer or a
 /// polled card (`net::needs_tick`), a held USB key, input that no
 /// interrupt reports, serial mode, a cooperative guest. Otherwise one
 /// second, which drives the link check and the idle GC. Everything else
@@ -1666,8 +1666,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             }
         }
 
-        // No loop window is focused (desktop, or a non-terminal like the
-        // dock/a widget has focus): there is no terminal session to drive.
+        // No loop window is focused (desktop, or a non-terminal like a
+        // widget has focus): there is no terminal session to drive.
         // Without this, keys typed on the bare desktop would be read into a
         // stale terminal session and executed. Idle here instead: shade
         // keybinds (Mod+Enter to open a loop, Mod+D launcher) and the mouse

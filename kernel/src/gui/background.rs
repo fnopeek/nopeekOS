@@ -61,7 +61,7 @@ fn back_plane(pair: &mut [Plane; 2], front: *mut u8, w: u32, h: u32, pages: usiz
 }
 
 /// The wallpaper, heavily blurred, same size and pitch. Glass surfaces
-/// (loop, dock, bar) blend over this instead of the sharp image: a
+/// (loop, the panel) blend over this instead of the sharp image: a
 /// translucent light panel over sharp texture leaves the texture
 /// competing with the text on it, and blur is what makes glass readable.
 /// Computed once per wallpaper — the wallpaper is static, so reading it

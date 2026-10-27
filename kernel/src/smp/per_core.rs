@@ -1038,7 +1038,7 @@ fn least_loaded(cid: usize) -> bool {
     true
 }
 
-/// The core the background apps share (autostart: dock, bar); 0 = none yet.
+/// The core the background apps share (autostart: deck); 0 = none yet.
 ///
 /// Each of them sleeps on events almost all the time, yet on a core of its
 /// own it makes that core unusable for a vCPU (`microvm::cpu::protected_cores`).

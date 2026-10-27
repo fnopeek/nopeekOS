@@ -166,7 +166,7 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
         return;
     }
     // Persistent engine default. Modules started by autostart or the driver
-    // path (`dock`, `bar`, `audio_hda`, `wifid`) can only run under forge
+    // path (`deck`, `audio_hda`, `wifid`) can only run under forge
     // this way.
     if let Some(rest) = name.strip_prefix("default") {
         let arg = rest.trim();

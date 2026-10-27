@@ -77,7 +77,7 @@ pub enum Fit {
     Scale,
     /// 1:1, cropped where larger, its last row/column repeated where
     /// smaller (a guest frame on its way to a new tile size, a window while
-    /// the dock slides).
+    /// a split is dragged).
     Extend,
 }
 
@@ -99,7 +99,7 @@ pub enum Item {
     },
     /// Opaque window content in a rounded inner rect, corners anti-aliased.
     Content { src: Source, dst: Rect, radius: u32, fit: Fit },
-    /// A panel (bar, dock): per-pixel alpha, translucent pixels as glass
+    /// A panel: per-pixel alpha, translucent pixels as glass
     /// over a blur of what lies beneath.
     Panel { src: Source, dst: Rect },
     /// Text layer: pixels with alpha set replace what is beneath.

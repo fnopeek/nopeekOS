@@ -1,6 +1,6 @@
 //! snap — screenshot tool for nopeekOS.
 //!
-//! One-shot, no window (full-screen mode). Launched by the bar's camera
+//! One-shot, no window (full-screen mode). Launched by deck's screenshot
 //! button via `npk_launch("snap", "full" | "region")`:
 //!   - "full"   → capture the whole composited screen, save as PNG.
 //!   - "region" → not implemented yet; falls back to a full capture.

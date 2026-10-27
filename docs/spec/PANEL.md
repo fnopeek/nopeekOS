@@ -1,21 +1,22 @@
 # PANEL.md: the panel, status items and popups
 
-A panel is a WASM widget app whose window the compositor keeps along a
-screen edge; the compositor owns the geometry, the app the content. The
-shipped panel is `deck` (`tools/wasm/deck`), one bottom strip.
+A panel is a WASM widget app whose window the compositor keeps along the
+bottom screen edge; the compositor owns the geometry, the app the content.
+The shipped panel is `deck` (`tools/wasm/deck`), one bottom strip. There
+is at most one panel.
 
 ## Becoming a panel
 
 `npk_window_set_panel(edge, behavior, w, h) -> i32` (RENDER + SHELL).
-`deck` calls it once at start with `edge = 0` (bottom), `behavior = 1`
-(strut) and `h = 44` logical px.
+The only accepted pair is `edge = 0` (bottom), `behavior = 1` (strut).
+`deck` calls it once at start with that pair and `h = 44` logical px.
 
 - The caller's widget window is created (or its terminal promoted)
   without taking focus.
 - `w` and `h` are logical px, converted to physical; `h` is clamped to a
-  quarter of the screen height and raised to at least 22 px. For the
-  bottom strut `w` is ignored: the window spans the screen width minus
-  `shade.bar_margin` on each side.
+  quarter of the screen height and raised to at least 22 px. `w` is
+  ignored: the window spans the screen width minus `shade.bar_margin` on
+  each side.
 - The window sits `shade.bar_margin` above the bottom edge. The tiling
   area gives up `margin + h` at the bottom (`bottom_band()`), plus the
   usual `shade.gaps`.
@@ -29,8 +30,8 @@ shipped panel is `deck` (`tools/wasm/deck`), one bottom strip.
   popups are) is cleared transparent and its backgrounds are filled at
   the panel opacity. Panels and their popups use the dark glass palette.
 
--1 when the right is missing, a size is not positive, or the pair is
-unknown.
+-1 when the right is missing, a size is not positive, or the pair is not
+`(0, 1)`.
 
 ## deck layout
 
@@ -154,7 +155,7 @@ popup `popup` (0..7) of the caller's widget window.
 
 | Function | Right | Returns |
 |---|---|---|
-| `npk_window_set_panel(edge, behavior, w, h)` | RENDER + SHELL | 0 / -1 |
+| `npk_window_set_panel(edge, behavior, w, h)` | RENDER + SHELL | 0 / -1; only `(0, 1)`, the bottom strut |
 | `npk_bar_state(buf, max)` | RENDER | bytes; `"HH:MM\n<ws_count>\n<ws_active>\n<title>"`, local time from `timezone`, truncated to `max` |
 | `npk_window_titles(buf, max)` | RENDER | bytes; lines `<flags>\t<workspace>\t<module>`, plus `\t<id>\t<caption>` for SHELL; flags 1 focused, 2 on the active workspace |
 | `npk_window_activate(id)` | RENDER + SHELL | 0 / -1; switches to the window's workspace and focuses it; refuses panels and overlays |
@@ -177,21 +178,14 @@ wrappers; `deck` declares the other imports itself.
 |---|---|
 | `autostart` | modules started at boot, space or comma separated, 400 ms apart; the setup seed is `deck acpi audio_hda` |
 | `shade.bar_margin` | gap between the panel and the screen edge, logical px (default 6) |
-| `shade.chrome_opacity` | panel opacity 0..255 (default derived from the wallpaper); setting it clears `shade.bar_opacity` and `shade.dock_opacity` |
-| `shade.bar_opacity` | overrides the opacity of the strut panels, including `deck` |
+| `shade.chrome_opacity` | panel opacity 0..255 (default derived from the wallpaper); setting it clears `shade.bar_opacity` |
+| `shade.bar_opacity` | overrides the opacity of the panel |
 | `timezone` | zone of the clock in `npk_bar_state` (a zone name such as `Europe/Zurich`, a POSIX TZ string, or a fixed offset), daylight saving included |
 
 ## Present in the compositor, unused
 
 No shipped module uses these:
 
-- `set_panel(edge = 1, behavior = 1)`: a top strut (`TopStrut`,
-  `top_band()`), same geometry rules at the top edge.
-- `set_panel(edge = 0, behavior = 0)` and `npk_window_set_dock(w, h)`
-  (RENDER + SHELL): a bottom auto-hide overlay (`DockState`) that slides
-  in when the pointer holds the bottom edge, with `shade.dock_opacity`.
-- `npk_battery()` (RENDER): no module imports it; status items read the
-  battery directly.
 - The `title` line of `npk_bar_state` and the `value` field of status
   items: provided, but `deck` does not show them.
 - Status items with place 1 (quick): accepted, not drawn by `deck`.

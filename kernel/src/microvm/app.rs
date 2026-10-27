@@ -4,7 +4,7 @@
 use core::sync::atomic::{AtomicU8, Ordering};
 
 pub struct App {
-    /// The intent that starts it, and the title of its windows: the dock
+    /// The intent that starts it, and the title of its windows: the panel
     /// matches its entry against it.
     pub name: &'static str,
     /// npkFS object of its read-only squashfs image.

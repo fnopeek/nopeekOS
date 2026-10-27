@@ -95,9 +95,9 @@ fn udelay(us: u64) {
 /// `i801_wait_intr`. Returns the latched error flags (0 = success) or None
 /// on timeout. A healthy word read completes in a handful of 250 µs polls;
 /// we cap at ~30 ms (vs Linux's 200 ms) deliberately — this runs on the
-/// bar's fiber, so a wedged bus must not stall the clock for a fifth of a
-/// second every poll. A best-effort battery read that times out just leaves
-/// the segment stale until the next tick.
+/// panel's fiber (its status items), so a wedged bus must not stall the
+/// clock for a fifth of a second every poll. A best-effort battery read that
+/// times out just leaves the item stale until the next tick.
 fn wait_intr(base: PortRange) -> Option<u8> {
     for _ in 0..120 {
         udelay(250);
@@ -116,7 +116,7 @@ fn wait_intr(base: PortRange) -> Option<u8> {
 /// None if the controller is absent, busy-stuck, or the device NAKs.
 pub fn read_word(addr: u8, cmd: u8) -> Option<u16> {
     // Held for the whole transaction: the host registers are one set, and a
-    // second caller (bar battery, `akku`) would overwrite address and command.
+    // second caller (the battery item, `akku`) would overwrite address and command.
     let smba = SMBA.lock();
     let base = (*smba)?;
 

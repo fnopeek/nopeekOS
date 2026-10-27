@@ -169,7 +169,7 @@ pub fn current() -> Palette {
     cached(None)
 }
 
-/// The palette of one theme, whichever is active. Glass (loop, dock, bar)
+/// The palette of one theme, whichever is active. Glass (loop, the panel)
 /// is always dark; only ordinary apps follow the theme.
 pub fn current_in(light: bool) -> Palette {
     cached(Some(light))
@@ -231,15 +231,13 @@ fn cached(light: Option<bool>) -> Palette {
     pal
 }
 
-/// Palette for a widget window: dock and bar are glass and stay dark.
+/// Palette for a widget window: the panel is glass and stays dark.
 pub fn for_window(window_id: u32) -> Palette {
     if is_panel(window_id) { current_in(false) } else { current() }
 }
 
 pub fn is_panel(window_id: u32) -> bool {
-    window_id != 0 && (BAR_WINDOW.load(Ordering::Relaxed) == window_id
-        || DOCK_WINDOW.load(Ordering::Relaxed) == window_id
-        || DECK_WINDOW.load(Ordering::Relaxed) == window_id
+    window_id != 0 && (PANEL_WINDOW.load(Ordering::Relaxed) == window_id
         || PANEL_POPUPS.iter().any(|p| p.load(Ordering::Relaxed) == window_id))
 }
 
@@ -259,7 +257,7 @@ pub fn set_popup_panel(window_id: u32, on: bool) {
     }
 }
 
-/// Opacity (0..255) of floating chrome — the bar card and the dock tray.
+/// Opacity (0..255) of floating chrome, the panel.
 /// Derived from the wallpaper (`shade::glass`), `shade.chrome_opacity`
 /// overrides it.
 pub fn chrome_opacity() -> u32 {
@@ -272,58 +270,39 @@ fn opacity_key(key: &str) -> Option<u32> {
         .map(|v| v.min(255))
 }
 
-// The panel windows, published by the compositor. The rasterizer runs
+// The panel window, published by the compositor. The rasterizer runs
 // while the SCENES lock is held and must not reach for the compositor
-// lock, so the ids travel as plain atomics. 0 = no such panel.
-static BAR_WINDOW:  AtomicU32 = AtomicU32::new(0);
-static DOCK_WINDOW: AtomicU32 = AtomicU32::new(0);
-static DECK_WINDOW: AtomicU32 = AtomicU32::new(0);
+// lock, so the id travels as a plain atomic. 0 = no panel.
+static PANEL_WINDOW: AtomicU32 = AtomicU32::new(0);
 
-pub fn set_bar_window(id: Option<u32>) {
-    BAR_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
+pub fn set_panel_window(id: Option<u32>) {
+    PANEL_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
 }
 
-pub fn set_dock_window(id: Option<u32>) {
-    DOCK_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
-}
-
-pub fn set_deck_window(id: Option<u32>) {
-    DECK_WINDOW.store(id.unwrap_or(0), Ordering::Relaxed);
-}
-
-/// Drop both per-panel overrides. Called when `shade.chrome_opacity` is
-/// set: the shared knob is the master, so setting it always moves both
-/// panels again — otherwise a value tried once on the bar would silently
+/// Drop the panel's own override. Called when `shade.chrome_opacity` is
+/// set: the shared knob is the master, so setting it always moves the
+/// panel again; otherwise a value tried once on the panel would silently
 /// outrank every later shared setting, with no way back short of editing
 /// the config blob. Returns true if anything was actually cleared.
-pub fn clear_panel_opacity_overrides() -> bool {
-    let bar  = crate::config::unset("shade.bar_opacity");
-    let dock = crate::config::unset("shade.dock_opacity");
-    bar || dock
+pub fn clear_panel_opacity_override() -> bool {
+    crate::config::unset("shade.bar_opacity")
 }
 
-/// Opacity for one panel window: its own knob if set, else the shared
-/// `shade.chrome_opacity`, else the theme default. Lets the bar stay
-/// legible while the dock reads more like glass (or the other way round).
-/// Setting the shared knob clears these — see above.
+/// Opacity for a window drawn as a panel: `shade.bar_opacity` for the
+/// panel itself if set, else the shared `shade.chrome_opacity`, else the
+/// theme default. Setting the shared knob clears the override (see above).
 pub fn panel_opacity(window_id: u32) -> u32 {
-    let key = if window_id != 0 && (BAR_WINDOW.load(Ordering::Relaxed) == window_id
-        || DECK_WINDOW.load(Ordering::Relaxed) == window_id)
-    {
-        "shade.bar_opacity"
-    } else if window_id != 0 && DOCK_WINDOW.load(Ordering::Relaxed) == window_id {
-        "shade.dock_opacity"
-    } else {
+    if window_id == 0 || PANEL_WINDOW.load(Ordering::Relaxed) != window_id {
         return chrome_opacity();
-    };
-    opacity_key(key).unwrap_or_else(chrome_opacity)
+    }
+    opacity_key("shade.bar_opacity").unwrap_or_else(chrome_opacity)
 }
 
 pub fn resolve(token: Token) -> u32 {
     current().colors[token as u8 as usize]
 }
 
-/// A token as drawn on glass — loop, dock and bar are dark glass in both
+/// A token as drawn on glass: loop and the panel are dark glass in both
 /// themes, since light glass over a busy wallpaper is less legible.
 pub fn resolve_glass(token: Token) -> u32 {
     current_in(false).colors[token as u8 as usize]

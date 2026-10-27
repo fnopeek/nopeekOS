@@ -5,7 +5,7 @@
 //! of charge (0x0D, 0..100 %) and a status word (0x16) whose bits classify
 //! charging vs discharging. No ACPI/AML needed — but it only works if the
 //! pack sits directly on the SMBus (some laptops hide it behind the EC, in
-//! which case [`read`] simply returns None and the bar segment stays empty).
+//! which case [`read`] simply returns None and no battery item is shown).
 
 use crate::smbus;
 use core::sync::atomic::{AtomicI32, Ordering};
@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicI32, Ordering};
 // Battery state reported by the ACPI driver (acpi.wasm), encoded as
 // (status << 8) | percent, or -1 for "no battery / no report yet".
 // The driver runs the firmware's _BST/_BIF (vendor-independent) and pushes
-// here; `npk_battery()` returns this.
+// here; the battery status item (`status::battery_packed`) reads this.
 static REPORT: AtomicI32 = AtomicI32::new(-1);
 
 /// Called by the AML driver via `npk_battery_report`.
@@ -46,8 +46,8 @@ pub fn detail() -> Option<Detail> {
     *DETAIL.lock()
 }
 
-/// The latest driver report (or -1). `npk_battery()` returns this, falling
-/// back to the standardised SBS-over-SMBus path for desktops/SBS laptops.
+/// The latest driver report (or -1). `status::battery_packed` falls back
+/// to the standardised SBS-over-SMBus path for desktops/SBS laptops.
 pub fn cached() -> i32 {
     REPORT.load(Ordering::Acquire)
 }

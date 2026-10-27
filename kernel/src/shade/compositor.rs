@@ -13,24 +13,6 @@ use super::window::{Window, WindowId, WindowState};
 use super::terminal;
 use super::cursor::MouseState;
 
-/// Bottom hot-edge band (px) that arms the dock reveal.
-const DOCK_HOT_EDGE_PX: i32 = 2;
-/// Ticks (100 Hz) the cursor must hold the hot-edge before revealing.
-const DOCK_REVEAL_DWELL_TICKS: u32 = 8;
-/// Ticks the cursor must be away from the dock before it hides again.
-const DOCK_HIDE_DEBOUNCE_TICKS: u32 = 25;
-/// Slack above the dock's top counted as "still over the dock".
-const DOCK_HIDE_MARGIN_PX: i32 = 6;
-/// Height (1× px, scaled at draw time) of the collapsed-dock presence
-/// bar — a thin, dock-width tray-coloured strip that hints "a dock lives
-/// here" without reserving space or showing the icons.
-const DOCK_HANDLE_H: u32 = 5;
-/// Floating gap below the revealed dock (1× px, scaled), so it hovers
-/// detached from the bottom edge the way the bar's pills do.
-const DOCK_BOTTOM_GAP: u32 = 12;
-
-
-
 /// Focus halo. The focused tile bleeds a little accent into the gap around
 /// it: a 1 px border in a wallpaper-derived colour is invisible on half the
 /// wallpapers, a halo reads on all of them because it does not compete with
@@ -74,7 +56,7 @@ const CLOSE_BTN_BAND: u32 = 36;
 const CLOSE_BTN_GLYPH: u32 = 16;
 
 /// Screen rect `(x, y, w, h)` of a window's platform close button, or
-/// `None` for panels (dock/bar are managed chrome — never closable here)
+/// `None` for the panel (managed chrome, never closable here)
 /// and windows too narrow to host the button. Shared by the renderer and
 /// the click hit-test so the drawn disc and the clickable area always
 /// coincide.
@@ -82,10 +64,10 @@ const CLOSE_BTN_GLYPH: u32 = 16;
 fn close_button_rect(win: &Window, border: u32)
     -> Option<(u32, u32, u32, u32)>
 {
-    // No X on managed chrome (dock/bar), on transient overlays (drun and
+    // No X on managed chrome (the panel), on transient overlays (drun and
     // other launchers — dismissed with Esc, not closed), or on Surface
     // windows (the microvm browser owns its own close via its UI).
-    if win.is_dock || win.is_bar || win.is_overlay { return None; }
+    if win.is_panel || win.is_overlay { return None; }
     if win.kind == crate::shade::window::WindowKind::Surface { return None; }
     // A fullscreen window has no chrome; the X would float over its content.
     if win.state == WindowState::Fullscreen { return None; }
@@ -167,42 +149,7 @@ pub struct DragState {
     pub h_target: Option<WindowId>,
 }
 
-/// Auto-hide bottom dock state. The compositor owns the reveal/hide
-/// slide; the app only declares itself via `npk_window_set_dock` and
-/// renders its content.
-#[derive(Clone, Copy)]
-pub struct DockState {
-    pub id: WindowId,
-    /// Dock (tray) height in px.
-    pub thickness: u32,
-    /// Floating gap below the tray when shown (px) — like the bar margin,
-    /// so the revealed dock hovers detached from the bottom edge.
-    pub gap: u32,
-    /// Reveal target the hot-edge logic drives toward.
-    pub target_shown: bool,
-    /// Current slide offset: 0 = fully shown (floating), `thickness + gap`
-    /// = fully hidden (below the screen edge).
-    pub offset: u32,
-    /// Ticks the cursor has held the bottom hot-edge (reveal dwell).
-    pub dwell: u32,
-    /// Ticks the cursor has been away from the dock while shown (hide debounce).
-    pub debounce: u32,
-}
-
-/// Top strut panel registered via
-/// `npk_window_set_panel(Top, Strut)`. The app reports its height; the kernel
-/// reserves a `margin + pill_h` band at the top and lays tiles below it. The
-/// app owns all rendering; there is no native fallback.
-#[derive(Clone, Copy)]
-pub struct TopStrut {
-    pub id: WindowId,
-    /// Visible panel height in px (reported by the app via set_panel `h`).
-    pub pill_h: u32,
-    /// Gap to the screen edge / tiles (px).
-    pub margin: u32,
-}
-
-/// What the bar names a window by: its caption if it set one, else its title.
+/// What the panel names a window by: its caption if it set one, else its title.
 fn display_title(w: &Window) -> alloc::string::String {
     match (w.caption.is_empty(), w.kind) {
         (true, _) => w.title.clone(),
@@ -215,9 +162,8 @@ fn display_title(w: &Window) -> alloc::string::String {
     }
 }
 
-/// Bottom strut panel registered via `npk_window_set_panel(Bottom, Strut)`:
-/// a bar and a dock in one (`deck.wasm`). Reserves a `margin + pill_h` band
-/// at the bottom like `TopStrut` does at the top. Its menus are popups.
+/// Bottom strut panel registered via `npk_window_set_panel(Bottom, Strut)`.
+/// Reserves a `margin + pill_h` band at the bottom; its menus are popups.
 #[derive(Clone, Copy)]
 pub struct BottomStrut {
     pub id: WindowId,
@@ -227,7 +173,7 @@ pub struct BottomStrut {
     pub margin: u32,
 }
 
-/// Compositor manages all windows, the bar, and rendering state.
+/// Compositor manages all windows, the panel, and rendering state.
 #[allow(dead_code)]
 pub struct Compositor {
     /// Screen dimensions.
@@ -263,11 +209,6 @@ pub struct Compositor {
     pub rounding: u32,
     /// Full redraw needed (including aurora background).
     pub needs_full_redraw: bool,
-    /// Screen areas to compose with the next partial repaint besides the
-    /// dirty windows: where the sliding dock was.
-    extra_damage: Vec<Rect>,
-    /// The dock reserve the tiles were last laid out for.
-    dock_reserved: u32,
     /// Background has been drawn (skip on partial updates).
     pub aurora_drawn: bool,
     /// Mouse cursor state.
@@ -288,13 +229,7 @@ pub struct Compositor {
     /// Timer tick the halo was last repainted at — the callers can run far
     /// more often than the animation has frames.
     glow_last_tick: u64,
-    /// Auto-hide bottom panel, if an app has registered one.
-    pub dock: Option<DockState>,
-    /// Top strut panel, if an app has registered one. `None`
-    /// reserves no top band (tiles use the full height). The app renders
-    /// itself — there is no native fallback.
-    pub top_strut: Option<TopStrut>,
-    /// Bottom strut panel, if a deck app has registered one.
+    /// Bottom strut panel, if an app has registered one.
     pub bottom_strut: Option<BottomStrut>,
     /// The window that had the keyboard before the first popup took it.
     pub popup_prev_focus: Option<WindowId>,
@@ -328,8 +263,6 @@ impl Compositor {
             focus_told: None,
             rounding,
             needs_full_redraw: true,
-            extra_damage: Vec::new(),
-            dock_reserved: 0,
             aurora_drawn: false,
             mouse: {
                 let mut m = MouseState::new();
@@ -341,8 +274,6 @@ impl Compositor {
             flash: None,
             focus_glow: None,
             glow_last_tick: 0,
-            dock: None,
-            top_strut: None,
             bottom_strut: None,
             popup_prev_focus: None,
             term_layers: alloc::collections::BTreeMap::new(),
@@ -391,7 +322,7 @@ impl Compositor {
     /// meet, and the band stops one pixel short of the neighbour's rect
     /// (tiles stand `gaps` apart, band columns are `[edge, edge + gaps)`).
     /// The workspace area is inset by `gaps` on all four sides, so the band
-    /// stays on wallpaper at the screen edges and under the bar too.
+    /// stays on wallpaper at the screen edges and above the panel too.
     fn glow_width(&self) -> u32 {
         let w = crate::config::get("shade.glow")
             .and_then(|s| s.parse::<u32>().ok())
@@ -475,40 +406,20 @@ impl Compositor {
         self.compose(target, info, damage)
     }
 
-    /// Height reserved at the top for the bar strut (0 if no bar registered).
-    fn top_band(&self) -> u32 {
-        self.top_strut.map(|s| s.margin + s.pill_h).unwrap_or(0)
-    }
-
-    /// Height reserved at the bottom for the deck strut (0 if none).
+    /// Height reserved at the bottom for the panel strut (0 if none).
     fn bottom_band(&self) -> u32 {
         self.bottom_strut.map(|s| s.margin + s.pill_h).unwrap_or(0)
     }
 
-    /// Usable workspace area (excluding the top bar band + bottom dock).
+    /// Usable workspace area (excluding the bottom panel band).
     fn workspace_area(&self) -> (u32, u32, u32, u32) {
-        let top = self.top_band();
         let x = self.gaps;
-        let y = top + self.gaps;
+        let y = self.gaps;
         let w = self.screen_w.saturating_sub(self.gaps * 2);
-        let h = self.screen_h.saturating_sub(top)
+        let h = self.screen_h
             .saturating_sub(self.bottom_band())
-            .saturating_sub(self.gaps * 2)
-            .saturating_sub(self.dock_bottom_reserve());
+            .saturating_sub(self.gaps * 2);
         (x, y, w, h)
-    }
-
-    /// Vertical band the tiling area gives up at the bottom for the
-    /// auto-hide dock: the dock band plus a top gap equal to its floating
-    /// bottom gap, once it is fully revealed and meant to stay. While it
-    /// slides it is an overlay over the tiles:
-    /// revealing, the tiles keep their size until the dock is up; hiding,
-    /// they take the space back at once and the dock slides away over them.
-    /// The tiles are laid out once per slide, not per step.
-    fn dock_bottom_reserve(&self) -> u32 {
-        let Some(dock) = self.dock else { return 0 };
-        if !dock.target_shown || dock.offset != 0 { return 0 }
-        (dock.thickness + 2 * dock.gap).saturating_sub(self.gaps)
     }
 
     /// Where a newly opened window hangs in the dwindle tree: it splits the
@@ -546,8 +457,7 @@ impl Compositor {
             && w.state == WindowState::Tiled
             && w.visible
             && !w.is_overlay
-            && !w.is_dock
-            && !w.is_bar
+            && !w.is_panel
     }
 
     /// Is this window part of the active workspace's tiling right now?
@@ -560,10 +470,10 @@ impl Compositor {
     }
 
     /// The fullscreen window on the active workspace, if any. A fullscreen
-    /// window covers the whole screen over the bar, the dock and every tile;
+    /// window covers the whole screen over the panel and every tile;
     /// at most one is ever fullscreen at a time (focusing or toggling another
-    /// steals the state). While one is active the bar/dock/chrome are
-    /// suppressed and the hot-edge dock reveal is disarmed.
+    /// steals the state). While one is active the panel and chrome are
+    /// suppressed.
     pub fn active_fullscreen(&self) -> Option<WindowId> {
         self.windows.iter()
             .find(|w| w.state == WindowState::Fullscreen
@@ -687,7 +597,7 @@ impl Compositor {
         self.z_order.insert(0, id);
         // Deliberately not focus_window(id) — keep focus on the shell
         // that spawned us, so the user's next keystroke lands there.
-        // But this insert(0) put us above the dock, so re-pin it on top.
+        // But this insert(0) put us above the panel, so re-pin it on top.
         self.retile();
         self.pin_overlays_to_front();
         self.needs_full_redraw = true;
@@ -800,8 +710,8 @@ impl Compositor {
         if pid != 0 { crate::process::exit(pid); }
         // Re-tile: the promoted window kept whatever geometry it had as a
         // terminal (often fullscreen). Without this a second app launched
-        // from the dock would stack behind the first instead of splitting.
-        // Overlay/panel apps (drun, dock, bar) call set_overlay/set_panel
+        // from the panel would stack behind the first instead of splitting.
+        // Overlay/panel apps (drun, deck) call set_overlay/set_panel
         // right after, which un-tiles them again, so this is a no-op for them.
         self.retile();
         self.needs_full_redraw = true;
@@ -887,7 +797,7 @@ impl Compositor {
     }
 
     /// The UI scale changed from `old` to `new` (1/120 units): apps sized
-    /// their panels, dock and overlays once, in logical px, so convert the
+    /// their panel and overlays once, in logical px, so convert the
     /// physical sizes here. Popups close with `PopupDone`; the app opens
     /// them again at the new size.
     pub fn rescale_app_geometry(&mut self, old: u32, new: u32) {
@@ -897,16 +807,10 @@ impl Compositor {
         let popups: alloc::vec::Vec<WindowId> = self.windows.iter()
             .filter(|w| w.popup_of.is_some()).map(|w| w.id).collect();
         for id in popups { self.close_popup(id, true); }
-        if let Some(t) = self.top_strut { self.set_bar_panel(t.id, 0, f(t.pill_h)); }
         if let Some(b) = self.bottom_strut { self.set_bottom_panel(b.id, f(b.pill_h)); }
-        if let Some(d) = self.dock {
-            if let Some((w, h)) = self.windows.iter().find(|w| w.id == d.id).map(|w| (w.width, w.height)) {
-                self.set_dock_panel(d.id, f(w), f(h));
-            }
-        }
         let (sw, sh) = (self.screen_w, self.screen_h);
         for win in self.windows.iter_mut()
-            .filter(|w| w.is_overlay && !w.is_bar && !w.is_dock && w.popup_of.is_none())
+            .filter(|w| w.is_overlay && !w.is_panel && w.popup_of.is_none())
         {
             win.width = f(win.width).clamp(1, sw);
             win.height = f(win.height).clamp(1, sh);
@@ -934,7 +838,7 @@ impl Compositor {
     /// Position an overlay window's top-left at `(x, y)` with size `(w, h)`,
     /// clamped to the screen. Like `set_overlay` but app-positioned instead
     /// of centred — for dropdowns that anchor to a screen corner (e.g. the
-    /// volume slider just under the bar). Does not touch focus.
+    /// volume slider next to the panel). Does not touch focus.
     pub fn set_overlay_at(&mut self, id: WindowId, x: i32, y: i32, w: u32, h: u32) -> bool {
         let screen_w = self.screen_w;
         let screen_h = self.screen_h;
@@ -982,21 +886,11 @@ impl Compositor {
         }).map(|w| w.id)
     }
 
-    /// Bottom edge of the dock's resting baseline. The bar is a top strut, so
-    /// the dock always rests at the screen bottom.
-    fn dock_baseline(&self) -> u32 {
-        self.screen_h
-    }
-
-    /// `npk_window_set_panel` host fn — configure `id` as an edge panel.
-    /// `edge`: 0=Bottom, 1=Top. `behavior`: 0=AutoHide overlay (dock),
-    /// 1=Strut (bar). Bottom+AutoHide is the dock (slide + handle);
-    /// Top+Strut is the bar; Bottom+Strut is the deck. Returns false for
-    /// other combinations.
-    pub fn set_panel(&mut self, id: WindowId, edge: u8, behavior: u8, w: u32, h: u32) -> bool {
+    /// `npk_window_set_panel` host fn: configure `id` as the panel.
+    /// Only `edge` 0 (bottom) with `behavior` 1 (strut) exists; any other
+    /// combination returns false. `w` is advisory.
+    pub fn set_panel(&mut self, id: WindowId, edge: u8, behavior: u8, _w: u32, h: u32) -> bool {
         match (edge, behavior) {
-            (0, 0) => self.set_dock_panel(id, w, h),
-            (1, 1) => self.set_bar_panel(id, w, h),
             (0, 1) => self.set_bottom_panel(id, h),
             _ => false,
         }
@@ -1014,7 +908,7 @@ impl Compositor {
         let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
             win.state = crate::shade::window::WindowState::Floating;
             win.is_overlay = true;
-            win.is_bar = true;
+            win.is_panel = true;
             win.modal = false;
             win.workspace = active_ws;
             win.x = margin;
@@ -1030,7 +924,7 @@ impl Compositor {
         if !found { return false; }
 
         self.bottom_strut = Some(BottomStrut { id, pill_h, margin });
-        crate::shade::widgets::palette::set_deck_window(Some(id.0));
+        crate::shade::widgets::palette::set_panel_window(Some(id.0));
         if self.focused == Some(id) { self.focused = None; }
         self.retile();
         self.z_order.retain(|&wid| wid != id);
@@ -1040,149 +934,14 @@ impl Compositor {
         true
     }
 
-    /// Top strut bar. The app reports its height via `h`; the compositor
-    /// reserves a `margin + h` band at the top and lays tiles below it.
-    /// Full width minus the margin, always visible, global across workspaces,
-    /// never focused, rendered with the panel blit. `w` is advisory.
-    fn set_bar_panel(&mut self, id: WindowId, _w: u32, h: u32) -> bool {
-        let screen_w = self.screen_w;
-        let margin = bar_margin();
-        let pill_h = h.max(22); // floor so a too-small report still fits content
-        let active_ws = self.active_workspace;
-
-        let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-            win.state = crate::shade::window::WindowState::Floating;
-            win.is_overlay = true;
-            win.is_bar = true;
-            win.modal = false;
-            win.workspace = active_ws;
-            win.x = margin;
-            win.y = margin;
-            win.width = screen_w.saturating_sub(margin * 2).max(120);
-            win.height = pill_h;
-            win.visible = true;
-            win.dirty = true;
-            true
-        } else {
-            false
-        };
-
-        if found {
-            self.top_strut = Some(TopStrut { id, pill_h, margin });
-            crate::shade::widgets::palette::set_bar_window(Some(id.0));
-            // If the spawn path focused it, drop focus — panels never hold it.
-            if self.focused == Some(id) { self.focused = None; }
-            self.retile();
-            // Pin the bar to the front of the z-order; keep the dock pinned too.
-            self.z_order.retain(|&wid| wid != id);
-            self.z_order.insert(0, id);
-            self.pin_overlays_to_front();
-            self.needs_full_redraw = true;
-        }
-        found
-    }
-
-    /// Back-compat wrapper for the `npk_window_set_dock` host fn.
-    pub fn set_dock(&mut self, id: WindowId, w: u32, h: u32) -> bool {
-        self.set_panel(id, 0, 0, w, h)
-    }
-
-    /// Bottom auto-hide dock. Overlay (no strut, excluded from retile),
-    /// never modal, never focused on reveal, global across workspaces.
-    /// Starts fully hidden.
-    fn set_dock_panel(&mut self, id: WindowId, w: u32, h: u32) -> bool {
-        let screen_w = self.screen_w;
-        let screen_h = self.screen_h;
-        let active_ws = self.active_workspace;
-
-        let dw = w.min(screen_w.saturating_sub(40)).max(120);
-        // Cap at full screen height: a popover-bearing dock expands so the
-        // menu has room above the tray and click-outside lands inside the
-        // dock window. The visible tray still floats at the bottom.
-        let dh = h.min(screen_h).max(40);
-
-        // Detect a resize on an already-set-up dock. Preserve the dock state
-        // (visible / offset / target_shown) so reopening the popover doesn't
-        // re-hide the tray; only the geometry is updated.
-        let already_dock = self.dock.map(|d| d.id == id).unwrap_or(false);
-        let same_size = self.windows.iter()
-            .find(|w| w.id == id)
-            .map(|w| w.width == dw && w.height == dh)
-            .unwrap_or(false);
-        if already_dock && same_size {
-            return true;
-        }
-
-        let found = if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-            win.state = crate::shade::window::WindowState::Floating;
-            win.is_overlay = true;
-            win.is_dock = true;
-            win.modal = false;
-            win.workspace = active_ws;
-            win.width = dw;
-            win.height = dh;
-            win.x = screen_w.saturating_sub(dw) / 2;
-            win.dirty = true;
-            true
-        } else {
-            false
-        };
-
-        if found {
-            let gap = crate::shade::widgets::scale::len(DOCK_BOTTOM_GAP);
-            let baseline = self.dock_baseline() as i32;
-            // On an in-place resize, keep the existing visibility so a
-            // popover-open expand doesn't flicker the dock through a hide
-            // cycle. Brand-new docks start hidden as before.
-            let (target_shown, offset, visible) = if already_dock {
-                let d = self.dock.unwrap();
-                let preserved_visible = self.windows.iter()
-                    .find(|w| w.id == id)
-                    .map(|w| w.visible)
-                    .unwrap_or(true);
-                (d.target_shown, d.offset.min(dh + gap), preserved_visible)
-            } else {
-                (false, dh + gap, false)
-            };
-            // Position the window with the visible tray near the baseline
-            // and the popover space stretching upward inside the window.
-            // Mirrors `dock_tick`: y = baseline - (thickness + gap) + offset
-            // so the floating gap above the screen edge is preserved.
-            let slide = dh as i32 + gap as i32;
-            let win_y = (baseline - slide + offset as i32).max(0) as u32;
-            if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-                win.y = win_y;
-                win.visible = visible;
-            }
-            self.dock = Some(DockState {
-                id,
-                thickness: dh,
-                gap,
-                target_shown,
-                offset,
-                dwell: 0,
-                debounce: 0,
-            });
-            crate::shade::widgets::palette::set_dock_window(Some(id.0));
-            // If the spawn path focused it, drop focus — panels never hold it.
-            if self.focused == Some(id) { self.focused = None; }
-            // Overlay → tiling grid is untouched, but retile reclaims any
-            // slot this window held if it was previously tiled.
-            self.retile();
-            self.pin_overlays_to_front();
-            self.needs_full_redraw = true;
-        }
-        found
-    }
-
-    /// Live state the bar app renders: (workspace_count, active_workspace,
+    /// Live state the panel renders: (workspace_count, active_workspace,
     /// focused window title). Fed to WASM via `npk_bar_state`.
     pub fn bar_info(&self) -> (u8, u8, alloc::string::String) {
-        // Title of the focused real app window — never a panel/overlay
-        // (the dock window is titled "dock"). If nothing real is focused
-        // (panels clear focus), fall back to the topmost real window on the
-        // active workspace so the bar still shows what's open.
-        let is_app = |w: &&Window| !w.is_overlay && !w.is_dock && !w.is_bar;
+        // Title of the focused real app window, never a panel/overlay. If
+        // nothing real is focused (panels clear focus), fall back to the
+        // topmost real window on the active workspace so the panel still
+        // shows what's open.
+        let is_app = |w: &&Window| !w.is_overlay && !w.is_panel;
         let title = self.focused
             .and_then(|fid| self.windows.iter().find(|w| w.id == fid))
             .filter(is_app)
@@ -1214,7 +973,7 @@ impl Compositor {
         for wid in &self.z_order {
             let Some(w) = self.windows.iter().find(|w| w.id == *wid) else { continue };
             eat(&w.id.0.to_le_bytes());
-            eat(&[w.workspace, w.visible as u8, w.is_overlay as u8, w.is_dock as u8, w.is_bar as u8]);
+            eat(&[w.workspace, w.visible as u8, w.is_overlay as u8, w.is_panel as u8]);
             eat(w.title.as_bytes());
             eat(&[0xFF]);
             eat(w.caption.as_bytes());
@@ -1226,18 +985,16 @@ impl Compositor {
     /// One line per real app window:
     /// `<flags>\t<workspace>\t<title>\t<id>\t<caption>`, flags being a
     /// decimal bitmask (1 = focused, 2 = on the active workspace), `title`
-    /// the module name and `caption` what the bar shows for it (tabs and
+    /// the module name and `caption` what the panel shows for it (tabs and
     /// line breaks blanked). Panels and transient overlays are excluded.
-    /// Feeds the dock's running/active indicators, the bar's
-    /// occupied-workspace hints and the deck's window list; the kernel
-    /// names no app. `id` and `caption` only with `full`: a caption is what
+    /// Feeds the panel's window list; the kernel names no app. `id` and `caption` only with `full`: a caption is what
     /// another app shows (a page title), so only the shell may read it.
     pub fn window_lines(&self, full: bool) -> alloc::string::String {
         use core::fmt::Write;
         let mut out = alloc::string::String::new();
         for wid in &self.z_order {
             let Some(w) = self.windows.iter().find(|w| w.id == *wid) else { continue };
-            if w.is_overlay || w.is_dock || w.is_bar { continue; }
+            if w.is_overlay || w.is_panel { continue; }
             let mut flags = 0u8;
             if Some(w.id) == self.focused { flags |= 1; }
             if w.workspace == self.active_workspace { flags |= 2; }
@@ -1255,9 +1012,9 @@ impl Compositor {
     }
 
     /// Every window with its real state: the view needed when an app is
-    /// visually closed but still lives on in `top` and the dock.
+    /// visually closed but still lives on in `top` and the panel.
     ///
-    /// `window_lines` (what the dock sees) shows only titles and omits
+    /// `window_lines` (what the panel sees) shows only titles and omits
     /// overlays and panels, which hides exactly which window survived and
     /// of which kind.
     pub fn dump_windows(&self) -> alloc::string::String {
@@ -1281,8 +1038,7 @@ impl Compositor {
             let mut flags = alloc::string::String::new();
             if Some(w.id) == self.focused { flags.push_str("focused "); }
             if w.is_overlay { flags.push_str("overlay "); }
-            if w.is_dock { flags.push_str("dock "); }
-            if w.is_bar { flags.push_str("bar "); }
+            if w.is_panel { flags.push_str("panel "); }
             if w.split_from.is_none() { flags.push_str("ROOT "); }
             if !w.visible { flags.push_str("hidden "); }
             let _ = writeln!(out, "  {:>2}  {}  {:>4}  {:>3}   {}  {:<21} {}",
@@ -1292,134 +1048,9 @@ impl Compositor {
     }
 
     /// Something moves on its own and needs the next frame (see
-    /// `shade::needs_tick`). The dock's dwell and debounce count calls, so
-    /// while either runs, or the slide has not reached its target, the loop
-    /// must keep calling at the frame rate.
+    /// `shade::needs_tick`).
     pub fn needs_tick(&self) -> bool {
-        let dock_busy = self.dock.as_ref().is_some_and(|d| {
-            let slide = d.thickness + d.gap;
-            let target = if d.target_shown { 0 } else { slide };
-            d.dwell > 0 || d.debounce > 0 || d.offset != target
-        });
-        self.animation.is_some() || self.flash.is_some() || self.focus_glow.is_some() || dock_busy
-    }
-
-    /// Drive the dock reveal/hide intent from the current cursor Y.
-    /// Called every frame (poll_render) so dwell/debounce advance even
-    /// while the cursor is parked. Suppressed during a drag/resize so the
-    /// dock never fights a tile being dragged toward the bottom.
-    pub fn dock_update_reveal(&mut self, cursor_y: i32) {
-        // A fullscreen window takes the whole screen; the bottom hot-edge
-        // must not peek the dock up over it.
-        if self.active_fullscreen().is_some() {
-            if let Some(dock) = self.dock.as_mut() {
-                dock.target_shown = false;
-                dock.dwell = 0;
-            }
-            return;
-        }
-        let dragging = self.drag.is_some();
-        let baseline = self.dock_baseline() as i32;
-        // "Desktop free" = no real (non-overlay) window on this workspace.
-        // The dock then stays revealed as a launcher home surface; launching
-        // anything (terminal, widget, browser) hides it again — the bottom
-        // hot-edge still peeks it back on demand.
-        let desktop_empty = !self.windows.iter().any(|w|
-            !w.is_overlay && w.workspace == self.active_workspace);
-        let Some(dock) = self.dock.as_mut() else { return };
-
-        if dragging {
-            dock.dwell = 0;
-            return;
-        }
-
-        if desktop_empty {
-            dock.target_shown = true;
-            dock.debounce = 0;
-            dock.dwell = 0;
-            return;
-        }
-
-        if dock.target_shown {
-            // Hide once the cursor leaves the dock band for long enough.
-            // The shown tray floats `gap` px above the baseline.
-            let dock_top = baseline - (dock.thickness + dock.gap) as i32;
-            let over_dock = cursor_y >= dock_top - DOCK_HIDE_MARGIN_PX;
-            if over_dock {
-                dock.debounce = 0;
-            } else {
-                dock.debounce = dock.debounce.saturating_add(1);
-                if dock.debounce >= DOCK_HIDE_DEBOUNCE_TICKS {
-                    dock.target_shown = false;
-                    dock.dwell = 0;
-                }
-            }
-        } else {
-            // Reveal once the cursor holds the bottom hot-edge.
-            if cursor_y >= baseline - DOCK_HOT_EDGE_PX {
-                dock.dwell = dock.dwell.saturating_add(1);
-                if dock.dwell >= DOCK_REVEAL_DWELL_TICKS {
-                    dock.target_shown = true;
-                    dock.debounce = 0;
-                }
-            } else {
-                dock.dwell = 0;
-            }
-        }
-    }
-
-    /// Advance the dock slide one frame. Returns true while moving (caller
-    /// re-renders). Eases the offset toward 0 (shown, floating) /
-    /// `thickness + gap` (hidden, below the edge).
-    pub fn dock_tick(&mut self) -> bool {
-        let baseline = self.dock_baseline() as i32;
-        let screen_w = self.screen_w;
-
-        let (id, offset, slide, now_visible) = {
-            let Some(dock) = self.dock.as_mut() else { return false };
-            let slide = (dock.thickness + dock.gap) as i32;
-            let target = if dock.target_shown { 0 } else { slide };
-            let cur = dock.offset as i32;
-            if cur == target { return false; }
-            let delta = target - cur;
-            // Ease-out: step a quarter of the remaining distance, min 2 px.
-            let step = (delta.abs() / 4).max(2).min(delta.abs());
-            let next = if delta > 0 { cur + step } else { cur - step };
-            dock.offset = next.max(0) as u32;
-            (dock.id, dock.offset, slide, dock.offset < slide as u32)
-        };
-
-        let hh = crate::shade::widgets::scale::len(DOCK_HANDLE_H);
-        let base = self.dock_baseline();
-        if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
-            // Where it was, and the resting handle, are repainted too.
-            if win.visible {
-                self.extra_damage.push(Rect::new(win.x, win.y, win.width, win.height));
-            }
-            self.extra_damage.push(Rect::new(win.x, base.saturating_sub(hh), win.width, hh));
-            win.x = screen_w.saturating_sub(win.width) / 2;
-            // Shown (offset 0): top = baseline - slide = baseline - thickness
-            // - gap → tray floats `gap` above the edge. Hidden (offset slide):
-            // top = baseline → fully below the usable area.
-            win.y = (baseline - slide + offset as i32).max(0) as u32;
-            win.visible = now_visible;
-            win.dirty = true;
-        }
-        // The tiles move only when the reserve changes: at the start of a
-        // hide, at the end of a reveal.
-        let reserve = self.dock_bottom_reserve();
-        if reserve != self.dock_reserved {
-            self.dock_reserved = reserve;
-            self.retile();
-            self.needs_full_redraw = true;
-        }
-        // The slide is over: what waited for the motion to end (widgets
-        // laid out at their tile size, guests told theirs) happens now.
-        if !self.geometry_in_motion() {
-            self.retile();
-            self.needs_full_redraw = true;
-        }
-        true
+        self.animation.is_some() || self.flash.is_some() || self.focus_glow.is_some()
     }
 
     /// True iff any visible window on the active workspace is modal.
@@ -1432,12 +1063,10 @@ impl Compositor {
             && w.visible)
     }
 
-    /// Is `id` a panel (dock or bar)? Panels are managed chrome — they
-    /// never hold focus and must not be closed by Mod+Q.
+    /// Is `id` the panel? Panels are managed chrome: they never hold
+    /// focus and must not be closed by Mod+Q.
     pub fn is_panel(&self, id: WindowId) -> bool {
-        self.dock.map(|d| d.id) == Some(id)
-            || self.top_strut.map(|s| s.id) == Some(id)
-            || self.bottom_strut.map(|s| s.id) == Some(id)
+        self.bottom_strut.map(|s| s.id) == Some(id)
     }
 
     /// A user gesture asked for `id` to close (Mod+Q, the title-bar X).
@@ -1490,22 +1119,10 @@ impl Compositor {
         }
         self.close_popups_of(id, false);
 
-        // If the dock app's window goes away, forget the dock so the
-        // reveal/tick machinery no-ops.
-        if self.dock.map(|d| d.id) == Some(id) {
-            self.dock = None;
-            crate::shade::widgets::palette::set_dock_window(None);
-        }
-        // Bar window gone → free the top strut band; tiles reclaim the height.
-        if self.top_strut.map(|s| s.id) == Some(id) {
-            self.top_strut = None;
-            crate::shade::widgets::palette::set_bar_window(None);
-            self.retile();
-            self.needs_full_redraw = true;
-        }
+        // Panel gone: free its strut band; tiles reclaim the height.
         if self.bottom_strut.map(|s| s.id) == Some(id) {
             self.bottom_strut = None;
-            crate::shade::widgets::palette::set_deck_window(None);
+            crate::shade::widgets::palette::set_panel_window(None);
             self.retile();
             self.needs_full_redraw = true;
         }
@@ -1580,8 +1197,8 @@ impl Compositor {
     }
 
     /// Focus the topmost real window of the active workspace and point
-    /// ACTIVE_IDX + the cursor at it. Panels (dock/bar) are never focused —
-    /// otherwise closing the last app window would focus the dock and the
+    /// ACTIVE_IDX + the cursor at it. Panels are never focused —
+    /// otherwise closing the last app window would focus the panel and the
     /// next Mod+Q would close it. No real window left → focus None (empty
     /// desktop) and Mod+Q no-ops.
     ///
@@ -1615,10 +1232,10 @@ impl Compositor {
 
     /// Set focus to a window.
     pub fn focus_window(&mut self, id: WindowId) {
-        // Panels (dock / bar) are never focusable — focusing them would
+        // Panels are never focusable — focusing them would
         // route keyboard input into a window that ignores it (the shell
         // appears to hang). Refuse, no matter which path asked.
-        if self.windows.iter().any(|w| w.id == id && (w.is_dock || w.is_bar)) {
+        if self.windows.iter().any(|w| w.id == id && (w.is_panel)) {
             return;
         }
         self.focused = Some(id);
@@ -1646,8 +1263,7 @@ impl Compositor {
             self.retile();
             self.needs_full_redraw = true;
         }
-        // The dock is never focused, so the insert(0) above would bury it
-        // behind the just-focused window. Re-pin it to the very top.
+        // Popups and modals must stay above the just-focused window.
         self.pin_overlays_to_front();
         // Don't set needs_full_redraw — render_damaged handles 2 windows only
     }
@@ -1656,7 +1272,7 @@ impl Compositor {
     /// to its workspace and focus it. Panels and overlays are refused.
     pub fn activate_window(&mut self, id: WindowId) -> bool {
         let Some(ws) = self.windows.iter()
-            .find(|w| w.id == id && !w.is_overlay && !w.is_dock && !w.is_bar)
+            .find(|w| w.id == id && !w.is_overlay && !w.is_panel)
             .map(|w| w.workspace)
         else { return false };
         self.switch_workspace(ws);
@@ -1678,7 +1294,7 @@ impl Compositor {
     /// `place_popup`, holding the keyboard (`xdg_popup.grab`).
     pub fn open_popup(&mut self, parent: WindowId, slot: u8) -> Option<WindowId> {
         let (ws, title, panel) = self.windows.iter().find(|w| w.id == parent)
-            .map(|w| (w.workspace, w.title.clone(), w.is_bar || w.is_dock))?;
+            .map(|w| (w.workspace, w.title.clone(), w.is_panel))?;
         // A new popup takes the keyboard, so only the app the user is
         // working with may open one: its window or one of its popups has the
         // focus, or it just got a press or key (a panel is never focused).
@@ -1797,13 +1413,9 @@ impl Compositor {
         true
     }
 
-    /// Keep the dock window at the front of the z-order (topmost). Render
+    /// Keep popups and the modal window at the front of the z-order. Render
     /// passes iterate `z_order.rev()`, drawing index 0 last → on top.
     fn pin_overlays_to_front(&mut self) {
-        if let Some(dock) = self.dock {
-            self.z_order.retain(|&wid| wid != dock.id);
-            self.z_order.insert(0, dock.id);
-        }
         // Popups above every panel and window they open from.
         let popups: Vec<WindowId> = self.z_order.iter().rev().copied()
             .filter(|id| self.windows.iter().any(|w| w.id == *id && w.popup_of.is_some()))
@@ -1816,7 +1428,7 @@ impl Compositor {
         // cosmetic: `modal_blocks` swallows every click outside it, so a
         // buried modal would eat the pointer while invisible — the whole
         // screen would go dead. Pinning it last puts it in front of the
-        // dock too.
+        // popups too.
         if let Some(id) = self.modal_window() {
             self.z_order.retain(|&wid| wid != id);
             self.z_order.insert(0, id);
@@ -1829,7 +1441,7 @@ impl Compositor {
         let popups: Vec<WindowId> = self.windows.iter()
             .filter(|w| w.popup_of.is_some()).map(|w| w.id).collect();
         for id in popups { self.close_popup(id, true); }
-        // The keys go up to 9; only the workspaces the bar actually shows
+        // The keys go up to 9; only the workspaces the panel actually shows
         // exist, and switching past them would leave it with nothing to mark.
         if ws >= self.workspace_count { return; }
         // Leaving a workspace drops any fullscreen on it — a fullscreen
@@ -1838,28 +1450,9 @@ impl Compositor {
         let _ = self.clear_fullscreen_except(None);
         self.active_workspace = ws;
 
-        // The dock is global: follow the active workspace and snap shut so
-        // it re-reveals on demand rather than popping up mid-slide.
-        let baseline = self.dock_baseline();
-        if let Some(dock) = self.dock {
-            if let Some(win) = self.windows.iter_mut().find(|w| w.id == dock.id) {
-                win.workspace = ws;
-                win.visible = false;
-                win.y = baseline;
-            }
-            if let Some(d) = self.dock.as_mut() {
-                d.target_shown = false;
-                d.offset = d.thickness;
-                d.dwell = 0;
-                d.debounce = 0;
-            }
-        }
-
-        // The bar and the deck are global too: follow the active workspace,
-        // stay visible.
-        for bw in [self.top_strut.map(|s| s.id), self.bottom_strut.map(|s| s.id)]
-            .into_iter().flatten()
-        {
+        // The panel is global: it follows the active workspace and stays
+        // visible.
+        if let Some(bw) = self.bottom_strut.map(|s| s.id) {
             if let Some(win) = self.windows.iter_mut().find(|w| w.id == bw) {
                 win.workspace = ws;
                 win.visible = true;
@@ -1870,7 +1463,7 @@ impl Compositor {
         }
 
         self.focused = self.z_order.iter()
-            .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws && !w.is_dock && !w.is_bar))
+            .find(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == ws && !w.is_panel))
             .copied();
 
         if let Some(fid) = self.focused {
@@ -1940,8 +1533,8 @@ impl Compositor {
     /// opened (`Window::split_from`), so the tree is stored on the windows
     /// themselves and needs no separate structure.
     pub fn retile(&mut self) {
-        // A fullscreen window covers the whole screen, over the bar, the dock
-        // and every tile. Placed before the dwindle below and before the
+        // A fullscreen window covers the whole screen, over the panel and
+        // every tile. Placed before the dwindle below and before the
         // empty-workspace early return, so a lone fullscreen window (no tiles
         // behind it) is still sized and its guest still told the full size.
         let (sw, sh) = (self.screen_w, self.screen_h);
@@ -2069,14 +1662,10 @@ impl Compositor {
         }
     }
 
-    /// Tiles are moving through sizes nobody keeps: the dock is sliding,
-    /// or a split line is being dragged.
+    /// Tiles are moving through sizes nobody keeps: a split line is being
+    /// dragged.
     fn geometry_in_motion(&self) -> bool {
-        let dock_sliding = self.dock.is_some_and(|d| {
-            let target = if d.target_shown { 0 } else { d.thickness + d.gap };
-            d.offset != target
-        });
-        dock_sliding || self.drag.is_some_and(|d| d.mode == DragMode::Resize)
+        self.drag.is_some_and(|d| d.mode == DragMode::Resize)
     }
 
     /// Push every Surface window's content rect into the surface
@@ -2106,7 +1695,6 @@ impl Compositor {
 
     /// The whole frame, composed into `target`.
     pub fn render(&mut self, target: *mut u8, info: &FbInfo) {
-        self.extra_damage.clear();
         self.compose(target, info, alloc::vec![Rect::new(0, 0, info.width, info.height)]);
         for win in &mut self.windows {
             win.dirty = false;
@@ -2180,7 +1768,7 @@ impl Compositor {
         let opacity = crate::shade::glass::params().loop_opacity;
         let in_motion = self.geometry_in_motion() || self.animation.is_some();
 
-        // While a window is fullscreen the bar, dock and every other tile are
+        // While a window is fullscreen the panel and every other tile are
         // hidden; only the fullscreen window, its popups and any modal draw.
         let fs = self.active_fullscreen();
 
@@ -2195,7 +1783,7 @@ impl Compositor {
             {
                 continue;
             }
-            let panel = win.is_dock || win.is_bar || win.popup_of.is_some();
+            let panel = win.is_panel || win.popup_of.is_some();
             let fullscreen = win.state == WindowState::Fullscreen;
             let cb = if panel || fullscreen { 0 } else { border };
             plans.push(Plan {
@@ -2274,8 +1862,8 @@ impl Compositor {
                     // A pure move only updates the origin; a new size lays the
                     // scene out again — except mid-motion, where the old
                     // pixels stand in until the motion ends: cropped or
-                    // extended at the bottom and right while the dock slides
-                    // or a split is dragged (the content stays where it is),
+                    // extended at the bottom and right while a split is
+                    // dragged (the content stays where it is),
                     // stretched while windows swap tiles.
                     // Panels do not tile and always lay out at their size.
                     let (lw, lh) = if in_motion && !p.panel {
@@ -2302,11 +1890,6 @@ impl Compositor {
                 items.push(Item::CloseGlyph { rect, size: crate::shade::widgets::scale::len(CLOSE_BTN_GLYPH), color });
             }
         }
-        if fs.is_none() {
-            if let Some(h) = self.dock_handle_item() {
-                items.push(h);
-            }
-        }
         // Last of all, over everything: the screenshot flash.
         let flash = self.flash_alpha();
         if flash > 0 {
@@ -2314,23 +1897,6 @@ impl Compositor {
                 alpha: flash.min(255), radius: 0 });
         }
         Scene { items }
-    }
-
-    /// The collapsed-dock presence bar at the resting edge while the dock is
-    /// fully hidden: as wide as the dock, in its translucent tray colour,
-    /// ~5 px tall — enough to signal "a dock lives here".
-    fn dock_handle_item(&self) -> Option<Item> {
-        let dock = self.dock.as_ref()?;
-        if dock.offset < dock.thickness + dock.gap { return None; }
-        let win = self.windows.iter().find(|w| w.id == dock.id)?;
-        let hh = crate::shade::widgets::scale::len(DOCK_HANDLE_H);
-        let tray = crate::shade::widgets::palette::resolve_glass(crate::shade::widgets::abi::Token::SurfaceElevated);
-        Some(Item::Fill {
-            rect: Rect::new(win.x, self.dock_baseline().saturating_sub(hh), win.width, hh),
-            color: tray & 0x00FF_FFFF,
-            alpha: crate::shade::widgets::palette::panel_opacity(dock.id.0).min(255),
-            radius: hh / 2,
-        })
     }
 
     /// Draw the focused terminal's input line into its text layer; the
@@ -2357,7 +1923,7 @@ impl Compositor {
         }
         let screen = Rect::new(0, 0, info.width, info.height);
         let damage: Vec<Rect> = self.windows.iter()
-            .filter(|w| w.dirty && (w.workspace == self.active_workspace || w.is_dock) && w.visible)
+            .filter(|w| w.dirty && w.workspace == self.active_workspace && w.visible)
             .map(|w| {
                 // The halo band too: the tile that just lost focus loses its
                 // halo there, the one that gained it gets it.
@@ -2365,8 +1931,6 @@ impl Compositor {
                 Rect::new(w.x, w.y, w.width, w.height).grow(g).intersect(&screen)
             })
             .collect();
-        let mut damage = damage;
-        damage.extend(self.extra_damage.drain(..).map(|r| r.intersect(&screen)).filter(|r| !r.is_empty()));
         if damage.is_empty() { return damage; }
         let painted = self.compose(target, info, damage);
         for win in &mut self.windows {
@@ -2432,7 +1996,7 @@ impl Compositor {
         let mut best: Option<(WindowId, i32)> = None;
 
         for win in &self.windows {
-            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock || win.is_bar { continue; }
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_panel { continue; }
 
             let cx = win.x as i32 + win.width as i32 / 2;
             let cy = win.y as i32 + win.height as i32 / 2;
@@ -2464,7 +2028,7 @@ impl Compositor {
     /// Focus next window on active workspace (cycle).
     pub fn focus_next(&mut self) {
         let ws_windows: Vec<WindowId> = self.z_order.iter()
-            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock && !w.is_bar))
+            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_panel))
             .copied()
             .collect();
 
@@ -2480,7 +2044,7 @@ impl Compositor {
     /// Focus previous window on active workspace (cycle).
     pub fn focus_prev(&mut self) {
         let ws_windows: Vec<WindowId> = self.z_order.iter()
-            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_dock && !w.is_bar))
+            .filter(|&&wid| self.windows.iter().any(|w| w.id == wid && w.workspace == self.active_workspace && w.visible && !w.is_panel))
             .copied()
             .collect();
 
@@ -2706,15 +2270,15 @@ impl Compositor {
         // Regular LMB click: focus window + dispatch widget event
         if self.mouse.left_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
-                // The dock must not steal keyboard focus from the tile you
-                // were working in — clicking an icon launches/focuses an
-                // app, the dock itself stays unfocused. Hit-test/events
+                // The panel must not steal keyboard focus from the tile you
+                // were working in; clicking an icon launches/focuses an
+                // app, the panel itself stays unfocused. Hit-test/events
                 // below still fire.
-                let is_dock_win = self.windows.iter()
-                    .any(|w| w.id == wid && (w.is_dock || w.is_bar));
+                let is_panel_win = self.windows.iter()
+                    .any(|w| w.id == wid && w.is_panel);
                 // Focus on first click into an unfocused window; later
                 // clicks on the same focused widget should dispatch.
-                let focus_changed = !is_dock_win && self.focused != Some(wid);
+                let focus_changed = !is_panel_win && self.focused != Some(wid);
                 if focus_changed {
                     self.focus_window(wid);
                 }
@@ -2759,8 +2323,8 @@ impl Compositor {
         // Plain RMB (no Mod): right-click for context menus. Hit-test the
         // widget tree and push ContextAction(id) + raw MouseButton{Right}.
         // Mod+RMB is the resize-drag above; this branch is only reached
-        // when `!mod_held`. The dock must not steal keyboard focus (same
-        // exclusion as LMB), so we skip the focus shift on dock/bar.
+        // when `!mod_held`. The panel must not steal keyboard focus (same
+        // exclusion as LMB), so we skip the focus shift on it.
         if !mod_held && self.mouse.right_clicked() {
             if let Some(wid) = self.window_at(mx, my) {
                 let is_widget = self.windows.iter()
@@ -2967,7 +2531,7 @@ impl Compositor {
         // Find nearest window in direction (same logic as focus_direction)
         let mut best: Option<(WindowId, i32)> = None;
         for win in &self.windows {
-            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_dock || win.is_bar { continue; }
+            if win.id == fid || win.workspace != self.active_workspace || !win.visible || win.is_panel { continue; }
             let cx = win.x as i32 + win.width as i32 / 2;
             let cy = win.y as i32 + win.height as i32 / 2;
             let rel_x = cx - focused.0;
@@ -3245,7 +2809,7 @@ impl Compositor {
     pub fn scroll_hit_at(&self, x: i32, y: i32) -> Option<ScrollHit> {
         let wid = self.window_at(x, y)?;
         let win = self.windows.iter().find(|w| w.id == wid)?;
-        if win.is_dock || win.is_bar { return None; }
+        if win.is_panel { return None; }
         let border = self.border;
         let pad = term_pad();
         let text_rect = (

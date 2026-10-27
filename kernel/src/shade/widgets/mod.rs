@@ -2734,7 +2734,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         0 => {
             // Title the window with the module name so launch paths can
             // find an already-running instance (re-focus / singleton +
-            // npk_open tab routing) and the bar shows the app name.
+            // npk_open tab routing) and the panel shows the app name.
             let title = if module_name.is_empty() { "widget" } else { module_name };
             let id = crate::shade::with_compositor(|c| c.create_widget_window(title))
                 .ok_or(-3i32);
@@ -2751,7 +2751,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         // The same content rect `build_scene` draws with: a panel or a
         // popup has no border. Laid out any other way, every commit lands at
         // the wrong size and offset until the next frame lays it out again.
-        let border = if win.is_dock || win.is_bar || win.popup_of.is_some() { 0 } else { c.border };
+        let border = if win.is_panel || win.popup_of.is_some() { 0 } else { c.border };
         Some((
             win.content_x(border) as i32,
             win.content_y(border) as i32,
@@ -2935,7 +2935,7 @@ fn rasterize_buffer_with_overlays(
     RASTERIZED.fetch_add(1, Ordering::Relaxed);
     let mut pixels = crate::shade::buffers::PixelBuffer::new(rect.w, rect.h);
 
-    // Translucent-panel detection: the bar (and only the bar) roots its tree
+    // Translucent-panel detection: a panel (and only a panel) roots its tree
     // in a `Stack`. Such a scene clears transparent and fills backgrounds at
     // the chrome opacity, so glyphs stay full-coverage and the compositor
     // composites the whole scene over the wallpaper by per-pixel alpha (no
