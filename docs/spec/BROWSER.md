@@ -1,718 +1,378 @@
-# BROWSER.md — Native, Sandboxed Web Browser (`beak`)
+# beak
 
-A **native** web browser for nopeekOS: HTML + CSS + JavaScript rendered
-directly through the widget/compositor stack, over the native `net::tcp` +
-TLS stack — **no Linux guest, no microVM**. Runs as a single WASM widget
-app inside the trust boundary. Untrusted web JS is *doubly contained*.
+`beak` is the native web browser of nopeekOS. It fetches HTML, CSS,
+JavaScript, images and fonts through the kernel's HTTP client, renders the
+page with its own engine into a pixel buffer and shows it in a widget
+window. It runs as one WASM module; page JavaScript runs in an interpreter
+inside that module.
 
-> Status: **Stage 0 shipped and running on hardware** (beak 0.1.44,
-> 2026-07-22). ~13k lines of engine + a 1.3k-line shell render real
-> Wikipedia, google.ch and Marginalia articles: DOM, full cascade, external
-> stylesheets, block/inline/table/flex/grid layout, positioning, PNG + SVG,
-> HTML GET forms. **No JavaScript yet** — that is Stage 1.
->
-> This document is both the design skeleton and the running status. Sections
-> §1, §2, §4, §7, §9 are the *vision* and have held up unchanged; §3, §5, §6
-> and §10 carry the **as-built** state and are updated as things land. The
-> per-feature conformance numbers live in `docs/spec/CONFORMANCE.md`.
->
-> Relationship to the existing browser: the microVM+LibreWolf stays as the
-> **compatibility browser** (full modern web, JS-heavy SPA webapps). `beak`
-> is the **native browser** — lighter, capability-gated, principle-pure,
-> covering the readable + lightly-dynamic web and growing over time. They
-> coexist; they are not a replacement for each other.
+Conformance numbers are in [`CONFORMANCE.md`](CONFORMANCE.md).
 
----
+## Where it runs
 
-## 1. Why
+`beak` is a widget app (`tools/wasm/beak`, a `cdylib` built for WASM). The
+kernel runs it under forge or wasmi; both bind the same host-function list
+(`kernel/src/wasm/forge_glue.rs`).
 
-The microVM browser is the one place the OS violates its own manifesto:
-behind the WASM trust boundary sits a *complete Linux 6.18 + POSIX +
-Firefox* — exactly the legacy stack nopeekOS threw out on page 1. It also
-drags the whole net-bridge perf saga (`memory/project_browser_net_perf.md`,
-`project_netbench_coldstart.md`), 2 GiB guest RAM, 9p, audio RT-promotion.
+It declares `RENDER`, `CANVAS` and `NET` in `.npk.caps`
+(`[caps::RENDER | caps::CANVAS, caps::ext::NET]`, `NET` being bit `0x01` of
+the second byte); the host function table below shows what each opens.
+`beak` holds no `READ` or `WRITE`. Its only storage is its private area
+`priv/beak/`, which the kernel opens to the module of that name without a
+capability (`wasm::is_own_private`). The cookie jar lives there.
+`build.rs` writes the `.npk.app_meta` section.
 
-A native browser instead:
+## Crates
 
-- **Embodies all 5 principles** — capability-gated networking, WASM-
-  sandboxed, content rendered through *our* compositor, runtime-driven.
-- **Cheap** — a few MB WASM app on the native net stack (which already does
-  ~gigabit for OTA), vs. a whole Linux VM.
-- **Safer than Firefox** (§4) — the sandbox model falls out for free and is
-  *stronger* than a process sandbox.
+`tools/wasm/beak-engine` is the engine: `no_std` + `alloc`, no host
+functions, built and tested on the host. `tools/wasm/beak` is the shell:
+host imports, chrome, tabs, input, the fetch loop and the cookie file.
 
-## 2. Scope — honest boundary
+The engine never calls the host. Where it needs something from outside, the
+shell lends it a function pointer: the clock (`Engine::set_clock`), the
+random source (`js::random::set_source`), the script deadline
+(`Interp::deadline`) and the mid-script layout hook (`Interp::relayout`).
+Everything the engine wants fetched it puts in a queue the shell drains.
 
-The goal is **"the biggest part of the internet"**, not Servo-completeness.
-No small graphical browser does JS-heavy sites *well* — that cannot exist;
-the web platform is the largest API in computing. So we draw a line:
+Engine modules (`beak-engine/src`):
 
-**In scope (target: renders correctly):**
-- Content + lightly-dynamic sites: news, Wikipedia, blogs, docs, forums,
-  HN, GitHub (read), search results, most shop product pages.
-- HTML5 tolerant parsing, CSS (box model, **Flexbox + Grid**, position,
-  typography, colors/borders/backgrounds, media queries), images.
-- JavaScript: language + enough Web Platform (DOM, events, timers, `fetch`)
-  that jQuery/light-React/Vue *content* renders and links/forms work.
-
-**Beyond the v1 *target* (NOT a hard wall — the frontier, §9):**
-- Heavy SPA webapps (Figma, Google Docs, online IDEs), `<video>`,
-  WebGL/WebGPU, WebRTC, Service/Web Workers, extensions, DRM/EME.
-
-These are past the *initial* target, not past what's *possible*. This
-project's whole history is "impossible → shortcut" (WLAN via WASM driver,
-audio-RT via PID-1 promoter, this browser via double-containment). So §2 is
-where v1 *lands*; §9 is the frontier with the known attack vector for each
-wall. `beak` grows toward and then past this boundary stage by stage (§6),
-and never degrades to *blank* — see the Reader-mode fallback (§9.7).
-
-**A wall that is not technical (found 2026-07-20).** "Search results" is in
-the in-scope list above, and rendering them is not the problem — *being
-allowed to fetch them* is. Measured against the live engines: Google
-`/search` is a JS shell (we render a blank page), DuckDuckGo html returns a
-202 anti-bot challenge, Mojeek demands verification, searx.be answers 403.
-A full Firefox User-Agent did **not** lift any of these — they fingerprint,
-they don't just read the UA. The one engine that answers plainly is
-**Marginalia** (built for text/no-JS clients), which is why the address bar's
-omnibox points there. Google's homepage, by contrast, renders beautifully.
-The lesson generalises: from here on, some failures are policy, not
-capability — measure which one before building anything (§8.1 is the same
-story for HTTP/1.1).
-
-## 3. Architecture
-
-Solid arrows are built and running; the dashed JS box is Stage 1.
-
-```
-  npk_http_request ──▶ HTML bytes ──▶ [Tokenizer] ──▶ DOM tree (Rust)
-   (NET cap, TLS)                                        │  ╎
-                                                         │  ╎ mutate
-  CSS bytes ──▶ [CSS parser] ──▶ stylesheets ──┐         ▼  ╎
-   (<style> + external <link>)                 ▼      ┌ ─ ─ ─ ─ ─ ─ ┐
-                                        [Style: cascade,  JS engine  ╎ ◀── <script>
-                                         specificity,   │ (interpreter,
-                                         inherit, vars] │  no JIT §4)╎
-                                               │        └ ─ ─ ─ ─ ─ ─┘
-                                               ▼                  ╎ DOM/CSSOM/
-                                        [Layout: OUR block+inline, ╎ fetch/timer
-                                         table, flex, grid,  ◀ ─ ─ ┘ host objects
-                                         box model, position]
-                                               │
-                                               ▼
-                                        [Paint: OUR rasteriser + fontdue]
-                                               │
-                                               ▼
-                                        Widget::Canvas ──▶ compositor
-                                        (npk_canvas_commit, raw BGRA)
-```
-
-**Layout is ours, not taffy** (§7-D2). `fontdue` is the only third-party
-piece in the render path, and only to turn glyph outlines into coverage
-bitmaps — the same crate the kernel UI uses.
-
-**The real monster is NOT the JS engine — it's the DOM + Web Platform + the
-re-entrant layout loop.** The *language* JS is the small, solved part. Real
-sites bottom out in `querySelector`, `element.style.x = …`,
-`addEventListener`, and `getBoundingClientRect` / `offsetWidth` — which force
-*synchronous* layout mid-script. So the engine must:
-
-- own a **live DOM** (Rust) that JS mutates, which dirties style + layout;
-- run the **event loop** (microtasks/macrotasks, `setTimeout`);
-- support **synchronous layout-on-read** (a script reads `offsetWidth` →
-  layout must flush now);
-- dispatch **events** (capture/bubble: click, input, scroll);
-- expose **`fetch`/XHR** wired to the native net stack.
-
-The JS engine is a bytecode interpreter bolted to this. The DOM/CSSOM/event-
-loop glue + a re-entrant layout engine is where the effort concentrates.
-
-### 3.1 Crate layout (as built)
-
-```
-tools/wasm/beak-engine/    # PURE no_std+alloc core — NO host-fn deps (portable, host-testable, §10)
-  src/
-    lib.rs      380   public API: Engine, stylesheet_links, image_srcs
-    dom.rs      599   tolerant HTML tokenizer + tree builder; Element.seq identity
-    css.rs     1183   css-syntax-3 subset: rules, selector lists, specificity, @media
-    style.rs   2017   ComputedStyle, UA sheet as data, inheritance, cascade incl. !important
-    values.rs   458   lengths/units (em, rem, %, calc), Units ctx
-    vars.rs     502   CSS custom properties (--x, var()), @media-aware collection
-    color.rs    914   CSS Color 4 (named, hex, rgb/hsl/hwb/lab/lch, colour spaces)
-    layout.rs  4194   OUR layout: block+inline flow, table, flex, grid, box model, position
-    raster.rs   315   display list → BGRA (glyph cache, synthetic bold/italic, image blit)
-    fonts.rs     82   embedded subsetted faces (see assets/subset.sh)
-    image.rs    429   PNG decode (8-bit RGB/RGBA + palette), decode budget
-    forms.rs    507   form/control collection, FormState, successful-control rules, urlencode
-    svg.rs     1446   SVG subset: paths, shapes, fill + stroke
-  tests/
-    wpt.rs            the oracle: WPT reftests → render → pixel-compare
-    diag.rs           dev tool (DPAGE/DWIDTHS/DCTRL/…), untracked on purpose
-
-tools/wasm/beak/           # nopeekOS shell (the WASM app), 1258 lines
-  src/lib.rs        menu bar, toolbar, address bar/omnibox, history, Canvas body,
-                    sub-resource fetching, form focus + submission, scroll, theming
-```
-
-Everything is `no_std` + `alloc`. That rules out `html5ever`/Servo (std,
-huge) — the HTML/CSS/DOM core is hand-rolled (§7-D0). The only third-party
-crates in the engine are `fontdue` (glyph rasterisation) and `miniz_oxide`
-(PNG inflate).
-
-**Not built as designed:** there is no `platform.rs` / `Platform` trait yet,
-and no separate `beak-desktop` adapter. The split the trait was meant to
-enforce happened anyway — the engine crate has zero host-fn dependencies and
-runs natively on the dev box (§10) — but the shell calls `npk_*` directly
-rather than through an abstraction. A desktop port would add the trait then;
-the cost of retrofitting it turned out to be low, because the seam held.
-
-## 4. Security model — the crown jewel
-
-`beak` fetches untrusted HTML/CSS/JS and runs that JS in an interpreter that
-*itself* runs inside the WASM trust boundary. Untrusted web JS is **doubly
-contained**:
-
-- **Box 1** — page JS runs in the JS interpreter → no native code gen, no
-  memory outside the engine's own heap objects.
-- **Box 2** — the interpreter runs inside `beak`'s WASM boundary → formally
-  bounded, capability-gated, no syscalls except our host fns.
-
-Malicious page JS can do *only* what `beak` exposes to it (DOM ops + `fetch`
-through the capability-gated NET host fn). No path to native code, no memory
-outside linear memory, no host access beyond declared caps. This is
-*stronger* isolation than a browser process sandbox — and it's free.
-
-**The invariant that keeps it airtight: interpreter, NEVER a JIT.** A JS JIT
-needs host-granted W^X executable memory; granting that punches a hole in
-the sandbox. So "no JIT" is a **security invariant**, not a perf compromise.
-(A future WASM-emitting JIT that asks the host to instantiate modules is a
-deliberate, separately-gated escalation surface — *not* v1.)
-
-**Capabilities.** `beak` declares a new **NET** bit in its `.npk.caps`
-section (analogous to HARDWARE 0x40, CAPTURE, CANVAS —
-`memory/project_widget_app_caps.md`). It gets NET + RENDER + CANVAS. It does
-**not** get WRITE / filesystem — page content never touches npkFS unless a
-download is explicitly, separately capability-granted (v2). Same-origin
-policy + no local-file scheme enforced in `net.rs`, above the capability.
-
-**Security checkpoint (per CLAUDE.md):** "Can page JS escape through this?"
-The whole design answers *No* by construction: page JS never sees anything
-but DOM host objects and a scoped `fetch`.
-
-## 5. What we already have vs. what's missing
-
-**Have (reuse directly):**
-- Net: `net::tcp` + TLS chain enforcement + DNS (OTA does ~gigabit natively).
-- Render: compositor, alpha-compositing, glyph atlas/fonts, **Canvas escape-
-  hatch**, PNG decode (wallpaper module).
-- Browser-shell primitives (built for Spell/loft): `TextArea` (address bar),
-  `Scroll` + clip-rect (page viewport), `Span` runs (styled/clickable text →
-  links!), `Popover`, mouse selection + copy/paste (v0.227.0),
-  `Modifier::Tint/Scale/NodeId`.
-- WASM app platform: caps, singleton routing, `npk_open`/launch-args, tabs.
-
-**Built since (was the "missing" list):**
-- **HTML** tolerant tokenizer + tree builder (`dom.rs`) — implied end tags,
-  raw-text `<script>`/`<style>`, entities, implicit `<html>`/`<body>`.
-- **CSS** parser + cascade (`css.rs`/`style.rs`) — hand-rolled, no vendored
-  `cssparser`/`selectors`. Full order: inherited → UA sheet → author
-  (specificity + doc order) → inline, then a second `!important` pass.
-  Plus custom properties (`vars.rs`), CSS Color 4 (`color.rs`), `@media`.
-- **Layout, ours** (`layout.rs`) — block + inline flow, tables, flexbox,
-  grid, the box model, positioning. No taffy, as decided in §7-D2.
-- **Paint, ours** (`raster.rs`) — display list → BGRA, glyph cache,
-  synthetic bold/italic, image blit.
-- **PNG** decode + an **SVG** subset (`svg.rs`, fill + stroke).
-- **HTML GET forms** (`forms.rs`) — inputs, buttons, checkboxes, selects,
-  textareas; successful-control rules; submit → `GET action?field=val`.
-- Host fns: **`npk_http_request`** (NET cap) and **`npk_http_final_url`**
-  (the URL the body actually came from, after redirects — a browser needs it
-  to resolve relative sub-resources correctly).
-- ABI additions that landed for beak: `npk_canvas_rect` (canvas viewport →
-  1:1 paint + click coords), `Event::Wheel`, `npk_theme_token`, and a
-  press into a `Widget::Canvas` releasing the compositor's text focus
-  (without which the app never sees a key).
-
-**Still missing:**
-- **JS engine** — our own; language grown as a subset (§7-D1). Stage 1.
-- **The glue** — DOM/CSSOM host objects, event loop, event dispatch,
-  synchronous reflow-on-read, `fetch`/XHR bridge. Stage 2.
-- **JPEG** decoder — most web photos are JPEG and currently render as
-  placeholders. The single biggest remaining *image* gap.
-- **HTTP/2** in the kernel — see §8, this is not a nicety: parts of the web
-  now rate-limit HTTP/1.1 clients outright.
-- `@import` and relative `url()` *inside* CSS are not resolved.
-- Text selection in form fields, non-ASCII keyboard input.
-- Cookies on SUB-RESOURCES: only the document request carries them, so an
-  image or stylesheet behind a login still comes back unauthenticated.
-  `npk_http_request_many` (the multiplexed sub-resource path) takes no
-  headers yet.
-- Cookie PERSISTENCE: the jar is session-only, see §5.1.
-
-**Verified against the tree (2026-07-03, all since confirmed by use):**
-- ABI is browser-ready: `Widget::Canvas` + `npk_canvas_commit` (CANVAS cap
-  0x20, raw BGRA upload) = the page-raster target; `Scroll` = viewport;
-  `Input` = address bar; `Popover`/`Menu` = context menus.
-- Host TLS/HTTP already existed: `intent::http::https_get` +
-  `https_get_streaming` (used by OTA) over `net::tcp::connect` + `net::dns`.
-  The browser's fetch is a thin host-fn wrapper over these.
-- The `.npk.caps` section was **full** at 1 byte (READ/WRITE/EXEC/RENDER/
-  CAPTURE/CANVAS/HARDWARE/NETCTL) → extended to 2 bytes, with **NET** as
-  bit 11. NETCTL (0x80) is WiFi-supplicant control, NOT general net — it was
-  deliberately not reused.
-
-## 6. Staged milestones (each a demoable artifact, no cliff)
-
-| Stage | Content | Proves | State |
-|-------|---------|--------|-------|
-| **0** | fetch HTTPS → HTML parse → CSS → **our** layout → paint. **No JS.** | the whole pipeline; de-risks everything | ✅ **shipped** (0.1.44) |
-| **3′** | Flexbox, Grid, `position:*`, box model, tables, external CSS, images, forms. | "biggest part of the internet", pre-JS | ✅ **shipped** — pulled forward, see below |
-| **1** | Embed JS engine: `console.log`, inline `<script>` against a read-only DOM. | engine runs *in the sandbox* | next |
-| **2** | The hard glue: live DOM mutation → reflow, event loop + timers, `fetch`/XHR, click/input dispatch. | real dynamic web | after 1 |
-
-**The order changed, deliberately.** Stage 3's layout work turned out to be
-the thing standing between us and real sites, not JS — a Wikipedia article,
-google.ch's homepage and Marginalia's results all render *without a line of
-JavaScript*. So flexbox/grid/position/tables/forms were pulled forward ahead
-of the JS engine, and Stage 3 is largely done before Stage 1 starts. What is
-left for the original Stage 3 is CSSOM, which needs JS anyway.
-
-Stage 0's demo target (`example.com`, then a Wikipedia article with
-headings, links and an image) was met on 2026-07-03 and has been the daily
-regression check since.
-
-**Choosing test targets:** does the content ship *in the delivered HTML*
-(server-rendered → fair game), or does the page hand back an empty
-`<div id="root">` (SPA → structurally unreachable before Stage 2)? Wikipedia
-qualifies and is the primary target: 1,878 visible words are in the served
-HTML and `<html class="client-nojs">` is MediaWiki's officially supported
-branch, with only 65 CSS rules gated on `.client-js`.
-
-## 7. Decisions
-
-**D0 — Own the engine (decided).** No wholesale vendoring of foreign render
-or JS engines (taffy / Servo / Blitz / QuickJS / Boa). We build the engine
-ourselves, clean-slate — "how would you build this *today*, without dragging
-millions of lines of legacy." Adapt good *ideas* freely; do not copy code.
-Keeps control, minimizes external deps, and — the real engineering payoff —
-lets us design DOM ↔ style ↔ layout ↔ paint ↔ JS-host-objects as *one*
-coherent model with unified dirty-tracking, instead of impedance-matching
-foreign libraries with mismatched memory models. The trickiest seam
-(reflow-on-read, §8) gets designed once, coherently.
-
-**D1 — JS engine: our own, language as a growing subset.** Like the CSS
-subset (§2): implement the ES surface real content sites actually use, grow
-it demand-driven. Clean-slate architecture (parser → bytecode → interpreter
-→ GC), *informed by* studying Boa (pure-Rust design) and QuickJS (compact
-interpreter design) — ideas, not code. Honest caveat (§8): this is the one
-true mountain — the ES spec is genuinely huge, and "no legacy" shrinks it
-less here because the *spec itself* is the weight. Mitigated by sequencing
-(Stage 0 ships a useful owned browser first) and by growing the language as
-a subset, not chasing conformance.
-
-**D2 — Layout: our own (decided, no taffy).** Hand-roll block + inline flow,
-then Flexbox, then Grid — each a precisely-specified CSS algorithm, hard but
-bounded (weeks per layer, not years). taffy stays a *reference* for its
-box-tree + measure-fn model; we don't vendor it.
-
-### 7.1 How the decisions held up (2026-07-22)
-
-- **D0/D2 were right, and the estimate was optimistic in a useful way.** Each
-  layout layer took days, not weeks — but `layout.rs` is 4,194 lines and is
-  now the piece that most often needs care. The predicted payoff (one coherent
-  model, no impedance-matching) showed up in an unglamorous way: features slot
-  in without rework *because* we own every layer, and the cascade seam designed
-  at the UA-sheet step absorbed author CSS, external sheets, `@media`, custom
-  properties and `!important` in turn, each time without restructuring.
-- **The order was wrong, and correcting it was the biggest single win.** The
-  plan put JS at Stage 1 and "full flexbox/grid" at Stage 3. Reality: real
-  sites are unreadable without layout and perfectly readable without JS. §6
-  now reflects the corrected order.
-- **The thing that actually accelerated everything was §10's testability
-  bonus**, not any decision in §7 — see §10.
-- **Two recurring bug patterns, both from owning the whole stack.** (1) *A
-  feature must go into all three walks* — block flow, inline flow **and**
-  `layout_box` (flex/grid items, table cells). Adding `<img>` to only the
-  block walk made Wikipedia's `<a><img>` thumbnails vanish; adding form
-  controls to only two walks made real search boxes render nothing, because
-  they sit in `display:flex`. (2) *Measurement passes must roll back what they
-  collect* — the height-measuring passes discard ops but once kept controls,
-  so the same control was recorded four times at stale positions.
-
-## 8. Risks / open questions
-
-- **JS engine = bounded grunt work, NOT a research risk.** ECMA-262 defines
-  *every* behavior precisely, and ships **test262** (~50k executable
-  conformance tests) as an oracle — so we never *guess* conformance, we run
-  it (fits `feedback_test_on_hw.md` / messen-nicht-raten). The surface is
-  large (RegExp, Promises, generators, async, Proxy, typed arrays, the
-  numeric tower) but fully *mapped*; the only constraint is throughput, which
-  keeps dropping (AI code-gen). "Alpha Centauri" framing: start now, grow the
-  language as a subset (§2), let the vehicle get faster mid-flight. Stage 0
-  ships value with *no* JS meanwhile.
-- **Reflow-on-read** (sync layout mid-script) is the trickiest engine seam —
-  get the dirty-bit + flush model right early (Stage 2), it colors the DOM API.
-- **Text/inline layout** — line-breaking (UAX #14) + bidi + shaping. Latin +
-  simple scripts are ours to build; full complex-script shaping (Arabic,
-  Indic — HarfBuzz territory) is a later frontier, degrade until then.
-- **Fonts** — enough coverage (CJK, emoji) for real pages, or a v2
-  fallback-box story?
-- **Perf** — a bytecode interpreter is fine for content sites; the JS→WASM
-  AOT tier (§9.1) is the lever if app-like sites demand it. Measure on HW
-  (`memory/feedback_test_on_hw.md`), don't guess.
-- **Cookie persistence** — the jar exists (v0.263.0) but dies with the
-  process. A session cookie is a credential, and a credential at rest is its
-  own decision: where it lives, who else can read it, whether it is
-  encrypted. Closing beak logs you out until that is answered.
-
-### 8.1 HTTP/1.1 is now a walled garden (measured 2026-07-22)
-
-This one was filed under "SNI+ALPN, v2" and turned out to be a *blocker*,
-not a nicety. Fetching a Wikipedia article's images produced a wall of
-`HTTP 429` after the fourth one. Reproduced host-side and bisected — same
-IP, same User-Agent, same headers, runs back to back:
-
-| Variant | Result |
+| Module | Content |
 |---|---|
-| HTTP/1.1, one connection | 4× 200, then **429 throughout** |
-| HTTP/1.1 + `Accept-Encoding` / `Referer` | unchanged |
-| HTTP/1.1, fresh connection per request + 300 ms pacing | almost all 429 |
-| **HTTP/2** | **20 of 20 = 200** |
+| `dom` | tolerant HTML tree builder (WHATWG §13 subset), `entities` (the full named-reference table), `charset` (UTF-8 and windows-1252) |
+| `css`, `style`, `values`, `vars`, `color`, `media` | stylesheet parser and selector matching, cascade and computed style with the UA sheet as data, lengths and `calc()`, custom properties, CSS Color 4, media and container queries |
+| `layout` | block and inline flow, tables, flex, grid, positioning, floats; produces a display list of `DrawOp`s, link and element rects |
+| `raster` | `Engine`: holds faces and images, paints a display list into BGRA |
+| `fonts`, `gsub`, `woff`, `woff2` | six embedded faces (Inter, Noto Sans Mono), `@font-face` loading, GSUB ligatures |
+| `image`, `ico`, `svg`, `webp`, `picture` | PNG, JPEG, ICO, SVG, lossy WebP; `<picture>`/`srcset` selection |
+| `forms`, `select` | form controls, submission encoding; text selection and find |
+| `cookies`, `site` | the cookie jar; origin, site and the Public Suffix List |
+| `js` | the JavaScript engine and the DOM binding (below) |
 
-HTTP/2 was run *while* the IP was already being limited and still got clean
-200s; HTTP/1.1 immediately afterwards hit the wall again. So it is not IP
-reputation, not the UA, not missing headers — **Wikimedia's Varnish
-front-end throttles HTTP/1.1 clients**, because every real browser speaks
-h2. Sustainable HTTP/1.1 rate: **~0.5 requests/second**.
+Third-party crates in the engine: `fontdue` (glyph coverage), `ttf-parser`
+(GSUB tables), `hashbrown`, `miniz_oxide` (PNG, WOFF), `libm`, `zune-jpeg`,
+`brotli-decompressor` (WOFF2). The VP8 decoder in `webp/` is ported from
+`image-webp` with only the `std` parts replaced.
 
-Two consequences worth writing down, because both are the obvious move and
-both are wrong:
+## Loading a page
 
-- **`Retry-After` backoff does not help.** The header says `retry-after: 1`,
-  but waiting 2 s still returns 429. It would be HTTP-correct and still take
-  40+ seconds per page.
-- **Parallel HTTP/1.1 connections make it worse.** The limiter counts per
-  IP, not per connection — six connections just reach the wall sooner.
+A navigation is a chain of stages (`NavStage`). Each starts one
+asynchronous host request; `nav_pump` collects it on a later turn of the
+main loop, which keeps painting and taking keys meanwhile. Nothing is
+painted between the document and its stylesheets.
 
-**So HTTP/2 is the answer, and it is the same work as parallelism:**
-multiplexing many requests over one connection is what the browsers we are
-being compared against actually do. It collapses three problems at once —
-the 429s, the missing concurrency, and the ~8 serial round-trips before the
-first paint. Groundwork: our TLS 1.3 client sent no ALPN extension at all
-(we never offered h2); `tls_connect_alpn` + `TlsSession::alpn()` now exist.
-The rest is frames + HPACK + flow control + streams (RFC 9113 / 7541).
-Planned simplification: advertise `SETTINGS_HEADER_TABLE_SIZE = 0` so the
-server may not use HPACK's dynamic table and our decoder needs only the
-static one — fully spec-compliant, and it removes a whole moving part.
+1. **Document.** `nav_begin` reports the target to `npk_net_context`,
+   cancels the previous load, drops the JS session and calls
+   `npk_http_begin` (GET, or POST for forms) with the jar's cookies. On
+   arrival the shell files `Set-Cookie`, decodes to UTF-8 (`Content-Type`
+   charset or sniff) and takes the final URL as document URL and base.
+2. **Stylesheets.** Every `<link rel=stylesheet>`, resolved and deduplicated,
+   goes out as one batch (`npk_http_begin_many[_hdr]`).
+3. **`@import`.** Imported sheets are fetched round by round, each resolved
+   against its own sheet's URL.
+4. **Scripts.** External classic and module scripts are fetched as a batch;
+   then `run_scripts` runs them (see JavaScript).
+5. **Module graph, `import()`, script-inserted sheets and scripts.** Each is
+   fetched in rounds until nothing new is requested or its round cap is hit.
+6. **Done.** The page is laid out and painted; images are queued.
 
-**Status.** Sub-resources went over h2 first (`get_all`, one connection per
-host, bodies buffered). The DOCUMENT stayed on HTTP/1.1 until v0.307.0 — and
-so stayed the only request Wikimedia still throttled, four of them per page
-load (301, document, auth 302, auth 200) inside two seconds, which is a 429
-on the second visit. Since v0.307.0 the document speaks h2 too: one streamed
-request (`Http2::request`), placed BELOW the redirect logic in
-`https_get_once`, so `https_request_streaming` remains the only place that
-follows a 3xx and keeps its three rules — the 301/302/303 method switch,
-dropping the caller's headers when a hop leaves the origin, and keeping each
-hop's `Set-Cookie`. Every login is a redirect chain, so that placement is the
-whole design. OTA still asks for HTTP/1.1 (`HttpRequest::try_h2` is off by
-default): an update that cannot download is the one failure that cannot be
-fixed over the air.
+After the first layout the shell fetches images in batches of four, CSS
+background images the layout names, and the page's `@font-face` fonts
+(at most 12 per round). Only what lands in the visible band triggers a
+repaint.
 
-Details and the repro recipe: `memory/project_beak_http_fetch.md`.
+A failed document fetch shows a local error page (`neterror.rs`) from
+`npk_http_last_error`'s `kind\tmessage`: inline HTML, escaped, loading
+nothing. `beak:selftest` (also `about:selftest`, `beak:test`) is compiled
+into the binary (`selftest.html`) and takes the normal path after the fetch.
 
----
+Address bar input (`typed_to_url`): `http://` and `https://` stay as typed,
+something that looks like a host gets `https://`, anything else becomes a
+search on `https://marginalia-search.com/search?query=`.
 
-## 9. Frontier — moving the boundary (the shortcuts)
+Shell limits per page: document 3 MiB; 64 linked sheets, 8 MiB together;
+32 external scripts, 8 MiB together; module graph 256 URLs in 24 rounds;
+512 images; 6 `fetch`/XHR in flight, 2 MiB per response.
 
-§2's "beyond v1" list is a set of walls, each with a known attack vector.
-None is a principle violation; all are "hard but crackable" — the project's
-signature move. Ordered by leverage.
+## Rendering
 
-**9.1 — JS too slow (interpreter, no JIT).** The biggest wall for app-like
-sites. *Shortcut:* **JS→WASM AOT of hot functions.** The engine already
-lowers to bytecode; lower hot functions further to **WASM**, and have the
-*host* instantiate them as a child module with a `beak`-controlled import
-table. Critically this **preserves the no-JIT security invariant (§4)** —
-the emitted code is WASM, verified by the same trusted validator that runs
-`beak` itself, so it's as contained as `beak`. Not a native JIT; a WASM-
-emitting tier. Precedent: Javy (QuickJS→WASM), Porffor (JS→WASM AOT).
-Profile-guided, hot 10% only. New host capability: "instantiate child
-module" — gate hard, bound by fuel/memory (a malicious page must not force
-unbounded compilation). *Difficulty: research-y, Stage 4+.*
+**Style.** Cascade: inherited values, the UA sheet, author rules by
+specificity and order, inline style, then `!important`. At-rules handled
+are `@media`, `@container`, `@supports`, `@font-face`, `@property`,
+`@layer` and `@import`; unsupported selectors and at-rules are dropped.
+UA colours come from a `Theme`; the shell sets a fixed light page palette
+(white canvas, black text, `#0000EE` links), independent of the desktop
+theme.
 
-**9.2 — Web platform too broad (thousands of APIs).** A *coverage* wall, not
-speed. *Shortcut — highest leverage:* **push platform breadth into
-injectable JS polyfills.** A real browser can't (it *is* the platform);
-`beak` can. The native Rust core implements only the *irreducible*
-primitives (DOM nodes, layout-read, timers, `fetch`, rAF, events);
-everything else (IntersectionObserver, ResizeObserver, URL, structured
-clone, …) ships as our own `beak-runtime.js` prelude (ideas adapted from
-core-js — not its code). Moves surface from Rust (hard) to JS (easy,
-rewritable, fully ours). *Difficulty: medium, huge payoff.*
+**Layout.** `Layout` is computed once per (content generation, width) and
+reused for scrolling; the viewport height counts only when the page's
+geometry depends on it. Display types: block, inline, inline-block,
+inline-flex, list-item, flex, grid, the table types and `contents`.
+Positioning: static, relative, absolute, fixed, sticky. `direction: rtl`
+sets the base direction; there is no bidi reordering.
 
-**9.3 — DOM / reflow thrashing.** SPAs do thousands of mutations + layout
-reads. *Shortcut:* batch mutations, dirty-region layout, flush once per
-frame unless a script forces a sync read (`offsetWidth`). Standard browser
-tech. Our layout is currently whole-document per invalidation, with a cache
-so scrolling doesn't re-lay-out; incrementality is a Stage-2 concern.
-*Difficulty: medium.*
+**Paint.** `Engine::paint` draws the display list into a viewport-sized
+BGRA buffer. On a pure scroll the shell shifts the buffer and paints only
+the band that came into view.
 
-**9.4 — Fancy CSS (transforms, gradients, animations, opacity).** *Shortcut:*
-the Canvas escape-hatch already does arbitrary 2D — transforms/gradients/
-compositing are raster ops we can already emit; `requestAnimationFrame` maps
-to the compositor frame tick. Skip 3D-transforms/filters/blend-modes first,
-degrade gracefully. *Difficulty: low–medium.*
+**Compositing.** The chrome is a widget tree sent with `npk_scene_commit`:
+menu bar, tab strip, toolbar with back, forward, reload/stop and the address
+field, the page canvas (`Widget::Canvas`, id 1), and when open the find bar
+and the inspect status line. The page buffer goes to that canvas with
+`npk_canvas_commit`; `npk_canvas_rect` gives its size and position for
+layout width and hit testing. The address field shows the registrable
+domain (Public Suffix List) at full strength and the rest muted.
 
-**9.5 — `<video>`.** *Shortcut:* software WASM codec (dav1d for AV1, or
-software H.264) decoding frames painted to a canvas surface; audio via the
-existing HDA path (`project_audio_hda.md`). Low-res first. Not forbidden by
-any principle — just CPU. *Difficulty: medium–hard.*
+The View menu has reload, a site-CSS toggle (UA sheet only) and inspect
+mode (a click outlines and logs the element box).
 
-**9.6 — WebGL / WebGPU.** *Shortcut (far-future):* map a minimal WebGL onto
-the native GPU work (BCS blitter + modeset, `project_gpu_4k_display.md`).
-*Difficulty: hard, later.*
+## JavaScript
 
-**9.7 — Universal safety net: Reader-mode extraction.** When a site won't
-render cleanly, run a Readability-style pass over the DOM to extract the
-article content and render *that* cleanly. **Degrade to content, never to
-blank.** Makes "the biggest part of the internet" *readable* even where it's
-not pixel-perfect — and it's a small, high-value win. *Difficulty: low.*
-*Partly built:* the shell has a **Site-CSS on/off toggle** (Ansicht menu) that
-falls back to UA-only styling, which is the cheap half of this and doubles as
-the A/B tool when a site's own CSS makes things worse. The Readability-style
-content *extraction* is not built.
+The engine is in `beak-engine/src/js`, written from scratch.
 
-## 10. Portability — engine core vs platform port (Linux/Windows too)
+- **Lexer and parser.** Recursive descent with precedence climbing, ESTree
+  AST, cover grammar for arrow parameters, scripts and modules. Early errors
+  are incomplete.
+- **Two machines, one semantics.** `compile` turns a program or a function
+  body into bytecode for `vm`; what the compiler declines runs whole in the
+  tree walker (`eval`, `expr`). A unit is never split between them, and both
+  call the same helpers in `interp`. Generators and async functions run on
+  their own `Vm`, which can be suspended.
+- **Memory.** Values are `Rc<RefCell<Object>>` with full property
+  descriptors. There is no cycle collector: cycles live until the
+  interpreter is dropped, which happens on every navigation and tab switch.
+- **Strings** index Unicode code points, not UTF-16 code units
+  (`"\u{1F600}".length` is 1). RegExp is a backtracking matcher with a step
+  cap, `\p{…}` tables generated from the UCD.
+- **Built-ins** include Proxy, Reflect, BigInt (own bignum), typed arrays,
+  `DataView`, Map/Set/WeakMap/WeakSet/WeakRef, iterator helpers, JSON,
+  `structuredClone`, `URL`/`URLSearchParams`, `Date` (UTC only,
+  `getTimezoneOffset()` is 0) and `Intl` with `DateTimeFormat`,
+  `NumberFormat`, `PluralRules`, `RelativeTimeFormat` and `Segmenter`
+  (English and German data). There is no `WebAssembly`, `SharedArrayBuffer`
+  or `Atomics`.
 
-The engine — HTML/CSS/JS/layout/paint — is pure, platform-agnostic
-computation; only the *shell* is nopeekOS-specific. Structure `beak` as a
-pure **engine core** behind a narrow **`Platform` trait** (ports & adapters),
-with per-OS adapters:
+**DOM binding** (`dombind.rs` with `dombind/extra.rs`, `dombind/surface.rs`).
+The parsed tree is flattened into an arena (`Doc`); a JS node is an index,
+wrapped once so identity holds. `Doc::to_dom` writes the arena back, and the
+shell hands it to the engine (`set_scripted_dom`) whenever a script round
+left it dirty. Layout reads (`getBoundingClientRect` and similar) answer
+from the boxes of the last layout; the `relayout` hook lays the page out
+again mid-script when the tree changed. `getComputedStyle` and `matchMedia`
+use the same cascade and media state as layout.
 
-    trait Platform {
-        fn fetch(&self, url: &str) -> Result<Vec<u8>, Error>;  // nopeek: npk_http_request | native: rustls
-        fn present(&mut self, bgra: &[u8], w: u32, h: u32);    // nopeek: npk_canvas_commit | native: window blit
-        fn poll_input(&mut self) -> Option<InputEvent>;        // nopeek: npk_event_poll   | native: winit
-        fn now_ms(&self) -> u64;                                // JS timers / rAF
-    }
+Web APIs present on the global object: `document` (with `write`), `window`,
+`self`, `location`, `history`, `navigator`, `console`, `crypto`
+(`getRandomValues`, `randomUUID`, no `subtle`), `localStorage` and
+`sessionStorage` (in memory only), timers, `requestAnimationFrame`,
+`requestIdleCallback`, `queueMicrotask`, `performance`, `fetch` with
+`Request`/`Response`/`Headers`/`AbortController`, `XMLHttpRequest`,
+`WebSocket`, `FormData`, `TextEncoder`/`TextDecoder`, `DOMParser`, XPath,
+`MutationObserver`, `ResizeObserver`, `IntersectionObserver`,
+`PerformanceObserver`, `customElements`, `ShadowRoot`, `CSS`,
+`atob`/`btoa`, the `HTML*Element` interfaces and the event constructors.
+There is no `Blob`, `FileReader`, `Worker`, `postMessage`, `indexedDB` or
+service worker. `navigator.userAgent` is `Mozilla/5.0 (nopeekOS) beak`;
+`crypto` exists only when the host lent a random source
+(`npk_random_bytes` in beak).
 
-The engine paints the page into its own pixel buffer (OUR text rasterizer,
-not the compositor glyph atlas), so it needs the host only for *surface +
-input + fetch + clock* — nothing OS-bound. ~90% (the engine) is portable;
-only the thin adapter differs per platform.
+**Script round** (`run_scripts`). After the stylesheets, one session is
+built from the fully parsed document. Classic scripts run in document order
+(inline and external, `nomodule` skipped, non-JS `type`s skipped, a script
+that fails to parse as a script is retried as a module); module scripts are
+linked and evaluated after them. One failing script does not stop the next.
+Then `DOMContentLoaded`; `load` and `pageshow` fire once the first layout
+exists.
 
-**Decide it NOW:** free at scaffold time, expensive to retrofit. A `Platform`
-trait from day one → the native port is "add a second impl"; reaching for
-`npk_*` directly everywhere means untangling it later.
+**Event loop.** `run_timers` drains microtasks, then runs due timers. The
+timer clock is virtual: when nothing is due and no fetch is pending, it
+jumps to the earliest deadline. The shell calls it after every entry point
+(load, each dispatched UI event, an arriving `fetch` or WebSocket message,
+observer delivery, the module and sheet rounds); after each entry point it
+also applies cookie writes, `history` operations, scroll requests and
+`location` navigations. `requestAnimationFrame` callbacks are due at once.
 
-**Bonus 1 — native-host testability (big):** the pure engine crate runs on
-the Linux dev box with a headless adapter, so layout tests and **test262**
-run at native speed *without booting nopeekOS* — accelerates the JS climb (§8).
-This paid off more than anything else in the design: **5,786 WPT reftests**
-are vendored and run in ~5 minutes on the dev box (**3,626 passing** as of
-2026-07-22), and `tests/diag.rs` renders any real page to a BMP, so a
-rendering defect can be reproduced, bisected and fixed without hardware in
-the loop. Numbers and how to run it: `docs/spec/CONFORMANCE.md`.
+**Budget.** Each run of page code gets a wall-clock deadline of 900 s
+(checked every 65 536 steps), a step cap of 2·10¹⁰ and a call-depth limit.
+A run blocks the shell loop while it computes.
 
-**Bonus 2 — one binary, same sandbox:** on desktop, run the *same* `beak.wasm`
-under `wasmtime` with host-fn shims mirroring the nopeek ABI → identical
-double-containment (§4) on all three platforms.
+## Networking
 
-**Stays nopeek-specific (does NOT port):** the sandbox/cap model (§4,
-`.npk.caps` NET — desktop falls back to OS process sandbox or the wasmtime
-route above); the widget-ABI chrome (address bar as `Widget::Input` — native
-draws its own); npkFS integration (downloads, `.open-in-loft` — native uses
-the real FS). All shell, not engine.
+All network I/O is the kernel's (`kernel/src/intent/http.rs`, `http2/`,
+`crypto/tls`), reached through the host functions below.
 
-**Status (2026-07-22): the portability bonus is real and load-bearing, the
-`Platform` trait is not.** Page rendering does go through our own layout +
-rasteriser into a Canvas, so the engine crate genuinely has no host
-dependency — it compiles and runs on the Linux dev box, which is where the
-WPT oracle and the `diag.rs` page renderer live. That, not the trait, is
-what made the last weeks of work possible: nearly every rendering bug was
-found and fixed **without booting nopeekOS**, by rendering the real page to
-a BMP on the dev box.
+- **TLS 1.3** with certificate verification in the kernel. A failure has a
+  stable kind (`cert.untrusted`, `cert.expired`, `net.connect`, …) for the
+  error page.
+- **HTTP/2** is offered through ALPN on every browser request and used when
+  the server agrees, else HTTP/1.1 with a keep-alive pool. Batches are
+  multiplexed per host. The kernel asks for gzip and inflates it.
+- **Plain `http://`** is refused unless `net.allow_plain_http` is `1` and
+  the host is a literal private or loopback address; it is GET only.
+- **Redirects** (301/302/303/307/308) are followed by the kernel, at most
+  three per request. Caller headers are dropped once a hop changes host;
+  301/302/303 after a non-GET become GET without body; TLS never downgrades
+  (a plaintext hop may upgrade). Each hop's
+  response headers are returned under a `:hop <url>` line, which no server
+  can forge because the kernel drops header lines that start with `:`.
+- **Header hygiene** (`header_line_is_safe`, `method_is_safe`): a method is
+  1 to 16 uppercase ASCII letters; a header line has no control characters
+  except tab, a graphic-ASCII name and at most 2048 bytes; `Host`,
+  `Content-Length`, `Transfer-Encoding`, `Connection` and `Accept-Encoding`
+  are the kernel's. A bad line refuses the request; a bad per-URL cookie
+  line in a batch is dropped instead.
+- **Asynchronous jobs** (`intent/fetch.rs`): `begin` returns a handle; one
+  worker fiber runs the synchronous client, preferably not on core 0, the
+  microVM core or the caller's. Limits: 16 jobs, 4 per process, 64 MiB
+  reserved, 64 URLs per batch. `cancel` acts at the next chunk; `take`
+  frees the job and alone fills the response getters (cleared on failure,
+  untouched by a batch).
 
-What was *not* built is the trait itself — the shell calls `npk_*` directly
-instead of implementing `Platform`. The §10 warning ("decide it NOW, free at
-scaffold time, expensive to retrofit") turned out to be too pessimistic in
-this case, because the engine/shell boundary held on its own: the engine
-never grew a host call to hide behind an abstraction. A desktop port would
-introduce the trait at that point, over a small surface (fetch, present,
-input, clock).
+**Cookies** (`beak-engine/src/cookies.rs`; policy is beak's, the kernel
+only carries bytes). The jar holds 256 cookies, dropping the oldest. It handles `Domain`, `Path`, `Secure`, `HttpOnly`, `Expires` (both
+date spellings), `Max-Age` and the `__Secure-`/`__Host-` prefixes; a cookie
+is replaced on (name, domain, path) and an expired one deletes. Selection
+for a request is by domain, path, `Secure` and expiry. Every request
+carries the matching cookies: the document, each URL of a sub-resource
+batch (one line per URL) and same-origin `fetch`/XHR. Script sees and sets
+only non-`HttpOnly` cookies and cannot overwrite an `HttpOnly` one.
+`Set-Cookie` is filed against the hop that sent it. Persistent cookies are
+written to `priv/beak/cookies` when the jar changes and restored at start;
+session cookies live until beak quits.
 
-## 11. JavaScript — die Leiter steht vor der Maschine (2026-09-01)
+## Security model
 
-Drei Dinge haben JS von „zu langsam" auf „machbar" geschoben, und alle drei
-sind gemessen, nicht gehofft:
+Page code runs in beak's interpreter, which emits no native code, inside
+beak's WASM sandbox, which reaches only the host functions below. Page code
+has no path to a host function: every request it makes is a queue entry the
+shell decides on.
 
-1. **forge.** Ein Bytecode-Interpreter im wasm-Sandkasten ist die Form, die
-   eine JS-Maschine hat. Unter wasmi kostete CPython 45x nativ, unter forge
-   3,26x. Wikipedias Startskript rechnet sich damit von 9-22 s auf 0,7-1,6 s
-   am Geraet.
-2. **Async fetch (§ oben).** `begin`/`poll`/`take` ist das Primitiv, auf dem
-   ein Promise-basiertes `fetch()` sitzt. Ein `fetch`, das blockiert, ist in
-   JS sinnlos — Promises, Timer und die Task-Queue setzen voraus, dass die App
-   ihre Schleife behaelt.
-3. **Das Relayout kostet 150 ms statt 1280.** Jede DOM-Mutation zieht ein box
-   layout nach sich; bei 1280 ms war ein `classList.toggle` das Ende der Seite.
+**Enforced by beak** (inside the module, so only against the page):
 
-### Was gemessen wurde, bevor eine Zeile Engine entstand
+- `fetch`, `XMLHttpRequest` and `sendBeacon` go to the document's origin
+  only; a foreign URL rejects or fails before any request
+  (`same_origin_url` in `js/fetch.rs`). `<img>`, stylesheets, scripts and
+  fonts load cross-origin but never hand bytes to page code.
+- `WebSocket` connects only to the page's host; `ws://` from an `https`
+  page is refused, and the shell drives `wss://` only.
+- `history.pushState`/`replaceState` may not change the origin.
+- Script navigation is limited to `http(s)` and the self-test page, eight in
+  a row; `javascript:` and `data:` are rejected by the engine.
+- The `$262` test hook exists only when a test runner enables it.
 
-- **Aufruf-Zensus** (`tools/jsscope/apicensus.mjs`): welche Web-APIs der
-  Zielkorpus zur LAUFZEIT ruft, getrennt nach Laden und Bedienen. 60 APIs
-  decken 89,4 % der Ladeaufrufe. Beim Laden ist es fast nur Baum-Lesen (30,9 %)
-  und `addEventListener` (12,0 %); `fetch` steht auf Platz 74, `customElements`
-  kommt nie vor. Layout-Lesen (`getBoundingClientRect` & Co.) taucht erst beim
-  BEDIENEN auf — dort auf Platz 2.
-- **test262** (`tools/test262/`): die Sprachzahl, mit V8 als Grundlinie
-  (99,41 %). WPTs `dom/`/`html/` sind selbst JavaScript und kommen erst NACH
-  der Bindung; test262 braucht kein DOM und geht sofort.
+**Enforced by the kernel** (holds even against beak itself):
 
-### Stand: Lexer, Parser, Auswertung (beak 0.44.0)
+- Every network call checks `NET`; handles (`npk_http_*`, `npk_tls_*`) are
+  answered only to the process that opened them, and a process's jobs and
+  sockets are released when it ends.
+- **Reach** (`kernel/src/intent/reach.rs`). Addresses are classed `Local`
+  (0/8, 127/8, 169.254/16), `Private` (10/8, 172.16/12, 192.168/16,
+  100.64/10) or `Public`. A request may go to the same or a more open
+  class than the document, never to a more closed one. beak reports the
+  document URL with `npk_net_context`; the kernel resolves it and keeps
+  only the class, defaulting to `Public` when it cannot. The check runs on
+  the resolved address of every hop of `npk_http_begin`, every host of a
+  batch and every `npk_tls_connect`. beak sets the context to the target
+  before a navigation, so a navigation may go anywhere while the page's own
+  requests stay within its class.
+- Header and method hygiene, redirect rules and plaintext policy as under
+  Networking.
+- Storage: without `READ`/`WRITE`, beak reads only `priv/beak/` and writes
+  only there and to its own settings file `sys/config/beak`.
 
-`beak-engine/src/js/` — `lexer.rs`, `ast.rs` (ESTree-Form), `parser.rs`.
-Rekursiver Abstieg, Vorrangkletterung, Deckgrammatik statt Vorausschau.
-Selbst geschrieben und nicht portiert, aus dem umgekehrten Grund wie bei WebP:
-die guten JS-Parser sind gross, `std`-gebunden und arenenbasiert.
+## Tabs
 
-Zwei Zahlen, beide aus `cargo test --test test262`:
+Up to 10 tabs. One `Engine` and one set of fetch buffers serve the active
+tab; a background tab is frozen to what restores it (URL, address text,
+history, scroll position, title) and refetched when it becomes active
+again. Freezing cancels its requests and drops its JS session, so script
+state does not survive a switch. Each tab has its own back/forward history
+of up to 64 entries. `npk_open` on a running beak opens a new tab.
 
-| | 0.42.0 | 0.43.0 |
-|---|---|---|
-| **test262, Parse-Orakel** | 94,39 % | **96,84 %** von 91 523 Varianten |
-| — faelschlich abgelehnt | 36 | **36** (kostet die Seite) |
-| — faelschlich angenommen | 5 102 | **2 859** (fehlender Fruehfehler; die Seite laeuft) |
-| **Zielkorpus, echter Code** | 437/437 | **437 von 437 = 100 %** |
+## Input and events
 
-**0.44.0 wertet aus.** Ein Baumlaeufer (`js/value.rs`, `interp.rs`, `eval.rs`,
-`expr.rs`, `builtins.rs`), gemessen an test262:
-
-| | |
+| Input | Effect |
 |---|---|
-| **test262, Ausfuehrung** | **41,52 %** von 69 194 Varianten |
-| V8 auf demselben Korpus | 99,41 % — die DIFFERENZ ist die Arbeit |
+| Ctrl+L | focus the address field |
+| Ctrl+T, Ctrl+W, Ctrl+1 to 8, Ctrl+9 | new tab, close tab, that tab, the last tab |
+| Ctrl+F | find bar (Enter next, Escape close) |
+| Ctrl+C | copy the page selection (`npk_clipboard_set`) |
+| wheel; arrows, Page Up/Down, Space, Home, End | scroll; the keys only when no page control has focus |
+| left click | page handlers first; then a control, a link (followed on release), `<summary>`, or the start of a text selection |
+| middle click on a link | open it in a background tab |
 
-Das Mindestziel war nicht geraten: test262s eigener Vorspann (`assert.js` +
-`sta.js`) muss laufen, sonst besteht kein einziger Test. Er laeuft.
+Page events dispatched by the shell: `mousedown`, `mouseup`, `click`,
+`keydown`, `input`, `change`, `focus`/`blur`/`focusin`/`focusout`, `submit`,
+`scroll`, `resize`, `DOMContentLoaded`, `load`, `pageshow`. Listeners
+support capture, `once`, `passive` and `signal`; `preventDefault` on a
+click stops beak from following the link. Pointer, scroll and resize
+events are dispatched only when the page has registered a listener.
 
-**Warum ein Baumlaeufer und kein Bytecode.** Die Form der Verteilerschleife ist
-eine Entwurfsentscheidung, und wasms `return_call` waere dort der Hebel — nur
-gibt es heute keine Zahl, gegen die er sich messen liesse. Der test262-Lauf ist
-das Netz, das eine spaetere Umstellung ueberhaupt erst verantwortbar macht.
+Form controls are painted into the canvas and edited by beak itself
+(`FormState` holds the user's edits). Submission encodes the successful
+controls as `application/x-www-form-urlencoded`: GET replaces the action's
+query, POST sends them as the body.
 
-Bewusst offen und im Lauf gezaehlt: RegExp, Symbole, Generatoren, async,
-Proxy, BigInt, TypedArrays, Date, `eval`. Zaehlende Freigabe ohne Sammler —
-Zyklen bleiben liegen, tragbar fuer einen Browser, der je Seite aufraeumt.
+`:hover` restyles the page when its last full layout took at most 250 ms;
+a slower page gets no hover.
 
-0.43.0 baut die Fruehfehler: `delete a.#x`, Rest-Element-Regeln, `import()`
-ohne Spread, `await`/`yield` als Bindungsname in async/Generator (auch
-GEFLUECHTET: `\u0061wait`), `arguments` im Feld-Initialisierer, `super()`
-darin, doppelte Parameter, `"use strict"` neben nicht-einfachen Parametern,
-Zifferntrenner, Alt-Oktal im strengen Modus, doppelte lexikalische
-Deklaration.
+## Host functions
 
-Die zweite Zahl ist fuer beak die wichtigere: das sind die Skripte, die
-Chromium beim Laden der zwoelf Seiten wirklich geparst hat — minifiziert,
-ausgeliefert, kein Testfall.
+| Function | Gate |
+|---|---|
+| `npk_scene_commit`, `npk_event_poll`, `npk_canvas_rect`, `npk_close_widget` | `RENDER` |
+| `npk_canvas_commit` | `CANVAS` |
+| `npk_clipboard_set` | `RENDER` and window focus |
+| `npk_http_begin` | `NET`; method and header checks; reach |
+| `npk_http_begin_many`, `npk_http_begin_many_hdr` | `NET`; cookie line check; reach |
+| `npk_http_poll`, `npk_http_take`, `npk_http_take_many`, `npk_http_cancel` | owning process |
+| `npk_http_status`, `npk_http_response_headers`, `npk_http_final_url`, `npk_http_content_type`, `npk_http_last_error`, `npk_net_context` | `NET` |
+| `npk_tls_connect`, `npk_tls_send`, `npk_tls_recv`, `npk_tls_close` | `NET`; owning process; reach on connect |
+| `npk_random_bytes` | none; at most 64 KiB per call |
+| `npk_fetch`, `npk_store` | own private area `priv/beak/` (`npk_store` also `sys/config/beak`) |
+| `npk_launch_arg`, `npk_sleep`, `npk_ticks`, `npk_unix_time`, `npk_log_serial` | none checked in `host_core.rs` |
 
-Die fehlenden Fruehfehler sind nach Familie kartiert (Klassen 1 810, RegExp-
-Literale 738, Blockbereich 191, Objektliterale 181). RegExp-Literale werden
-BEWUSST nicht geprueft: das ist Sache der RegExp-Maschine, und ein Parser, der
-es doch tut, lehnt Muster ab, die er nur nicht kennt.
+`npk_http_take` returns the body for any status (`npk_http_status` has
+it). `npk_tls_connect` blocks for the handshake; `npk_tls_recv` returns at
+once (0 = nothing yet, -1 = closed).
 
-## Appendix — host fns as built
+## Testing on the host
 
-```
-npk_http_request(url_ptr, url_len, buf_ptr, buf_max) -> bytes | -1   // NET cap
-    // GET only. Follows redirects; returns the BODY, not status+headers.
-    // Runs over net::tcp + TLS with the kernel's keep-alive pool.
+`cargo test` in `tools/wasm/beak-engine` runs the unit tests, including
+the kernel's `reach.rs`, which the crate mounts into its test tree. Suite
+runs and their numbers: [`CONFORMANCE.md`](CONFORMANCE.md).
 
-npk_http_final_url(buf_ptr, buf_max) -> len | -1                     // NET cap
-    // The URL the last request's body actually came from, after redirects
-    // (RFC 3986 §5.1.3). Without it, relative sub-resources resolve against
-    // the URL we ASKED for and every one of them repeats the document's own
-    // redirect. Cleared on error so a stale URL can't leak into the next page.
-```
+`tests/`:
 
-The proposal was a full request/response fn (method, headers, body, status).
-What shipped first was narrower — GET, body only — which is all Stage 0
-needed. **v0.263.0 built the rest of it**, because the two things that
-narrowing cost turned out to be the same two things a person needs to log in
-anywhere: `npk_http_send` (method, caller headers, request body) plus
-`npk_http_response_headers` / `npk_http_status`.
+- `wpt.rs`: renders the vendored reftests in `tests/wpt/` and their
+  references, compares pixels against `wpt-baseline.tsv`.
+- `test262.rs`: parse oracle and execution run (`TEST262=<checkout>`).
+- `vehicles.py`: splits the WPT result into its two denominators.
+- `apigap.rs`: DOM members real pages call that the engine lacks, ranked
+  (`APICENSUS=<file>`).
+- `gap.rs`: which declared properties of a real page win, and whether the
+  engine implements them.
+- `fixtures.rs`: every class a fixture uses has a rule in its stylesheet.
+- `diag.rs`: display list of one reftest and its reference (`DIAG=`).
 
-Two rules the boundary enforces, both about the fact that a header block is
-just text a sandboxed app hands us:
-- **CR, LF and every other control character are refused** in a method or a
-  header line. A newline in a header VALUE ends the block early and what
-  follows is read as a second request — one check is what stops an app from
-  smuggling one through us.
-- **`Host`, `Content-Length`, `Transfer-Encoding` and `Connection` are ours**,
-  never the caller's. `Host` decides which virtual host answers; the other
-  three frame the message, and a body that disagrees with its announced
-  length is exactly the shape of a request-smuggling bug.
+`examples/` (`cargo run --release --example <name>`):
 
-Cookie POLICY stays out of the kernel: which cookie belongs on which request
-is RFC 6265, and that is the browser's job (`beak_engine::cookies`).
+- Scripts: `selftest` (the shipped self-test page), `jsrun` (one JS file,
+  prints the console), `pagerun` (a page's script round), `wallcheck`
+  (where shipped scripts die first), `firstfail` (first failure in a script
+  corpus), `predict2` (do scripts change the tree visibly).
+- DOM and events: `domtest` (binding), `e2e` (tree change reaches the
+  picture), `evt` (click handler gets painted), `hitchk` (click finds its
+  target), `hoverchk` (hit boxes vs. `:hover`), `ctlpaint` (control
+  repaint equals full layout).
+- Layout and paint: `pagedump`, `opdump` (draw commands of a file, a
+  snippet), `boxprobe` (boxes), `pagerender` (page to BMP), `cmpcheck`
+  (per Bootstrap component).
+- Cost: `laytime`, `gcstime` (layout, `getComputedStyle`), `heapcheck`
+  (heap per component), `realmcost` (realm size and release).
+- Decoders and protocols: `imgcheck` (why an image was dropped),
+  `woffcheck` (WOFF against TTF), `ligcheck` (ligature icons), `wsreal`
+  (WebSocket framing, live), `bigmath` (bignum vs. node), `rejs`, `retest`
+  (RegExp with and without the engine).
 
-### Fetching without standing still (v0.318.0)
-
-Both requests above are synchronous: the calling module sits INSIDE the host
-call for the whole exchange — DNS, TCP, TLS, the wait for the first byte — and
-a WASM fiber in a host call cannot paint, cannot read a key and cannot let its
-peers run. For a browser that is the whole complaint, and no timeout is short
-enough to make freezing acceptable: a server that goes quiet froze the window
-for as long as it stayed quiet.
-
-So the wait moved off the caller's stack. Same requests, split in two:
-
-```
-npk_http_begin(method_ptr, method_len, url_ptr, url_len,
-               hdrs_ptr, hdrs_len, body_ptr, body_len, buf_max)
-    -> handle >= 1, or -1 (reason via npk_http_last_error)
-npk_http_begin_many(urls_ptr, urls_len, out_max) -> handle >= 1, or -1
-
-npk_http_poll(handle)   ->  1 answer waiting · 0 running
-                           -1 failed · -2 no such handle
-
-npk_http_take(handle, buf_ptr, buf_max)
-    -> bytes · -1 failed · -2 unknown · -3 still running
-       Frees the handle and fills the same five getters npk_http_send fills.
-npk_http_take_many(handle, out_ptr, out_max, lens_ptr, lens_max)
-    -> count · -1 · -2 · -3.  Touches none of the getters: a batch has one
-       status per URL and no headers, and clobbering the document's headers
-       with a picture's would be worse than silence.
-
-npk_http_cancel(handle) -> 0.  Idempotent.
-```
-
-The kernel side is `intent::fetch`: a job table plus a worker fiber that runs
-exactly the same synchronous client (`https_request_streaming` /
-`https_get_many`, unchanged — there is deliberately no second HTTP
-implementation) on a core that is never Core 0, never the microvm's, and never
-the caller's. The HTTP client did NOT become asynchronous; its blocking recv
-loops now block a fiber nobody is waiting on.
-
-Three rules the boundary keeps:
-
-- **A handle is only answered to its owner** (the caller's pid, not its word),
-  so guessing a small integer cannot read another app's document. A caller
-  with no process — the inline execution paths — is refused outright and uses
-  the synchronous pair, which is right for it anyway.
-- **`take` always frees**, on success and on failure alike, and it is the only
-  thing that publishes into the response getters. A caller can never read one
-  request's answer and attribute it to the next.
-- **Cancelling never interrupts an exchange.** It takes effect at the next
-  chunk boundary and otherwise just discards the answer — which is all the
-  caller can observe, since it stopped waiting the moment it got its handle.
-
-beak's side is a two-stage navigation (`nav_begin` → `nav_pump`): the document,
-then its stylesheets, strictly ordered, with nothing painted between them —
-stylesheets are render-blocking, and drawing the bare document first costs a
-full layout the arriving CSS throws away. Images and backgrounds run as one
-batch in flight each. The reload button becomes a stop button while a page is
-loading, which is only possible now that the fetch is something one can stop.
-
-The name `beak` (nopeek → the bird's beak) stuck, and follows the lowercase
-app-naming convention (loft, dock, bar, drun, spell, iris, snap, volume).
+Dev-only features of `beak-engine`: `diag-boxes`, `strict-probe`,
+`heap-census` (needs `--test-threads=1`), `miss-census`.
