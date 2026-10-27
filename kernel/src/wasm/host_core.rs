@@ -1046,6 +1046,11 @@ pub(crate) fn npk_stream_close(ctx: &mut HostState, idx: i32) -> i32 {
 /// its own authority, so an ungated injection would let any module run
 /// commands.
 pub(crate) fn npk_key_inject(ctx: &mut HostState, byte: i32) -> i32 {
+    // Typed keys reach whatever has the focus, so only the remote console
+    // may inject them, not every module that drives hardware.
+    if ctx.module_name != "debug" {
+        return -1;
+    }
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
         return -1;
