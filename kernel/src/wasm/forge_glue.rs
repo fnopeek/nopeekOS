@@ -462,6 +462,12 @@ host_imports! {
     // it anyway. Apps that don't opt in are unaffected.
     ctx fn npk_window_set_close_guard(on: i32) -> i32;
 
+    // npk_window_close_cancel() -> 0 / -1
+    // Answer an outstanding `CloseRequest` with "stay open" (the user
+    // cancelled the unsaved-work dialog): the next close gesture asks again,
+    // and a power-off or restart waiting on this window is cancelled.
+    ctx fn npk_window_close_cancel() -> i32;
+
     // npk_pick_mkdir(path_ptr, path_len) -> 0 / -1
     // Create a directory on behalf of an open file dialog.
     //
@@ -809,9 +815,14 @@ host_imports! {
     // npk_workspace_switch(n) -> i32 — switch to workspace n (panel clicks).
     ctx fn npk_workspace_switch(n: i32) -> i32;
 
-    // npk_power() -> i32 — ACPI S5 power-off (panel power button). Does not
-    // return on success.
+    // npk_power() -> 0 / -1 — power off in order (panel power button): apps
+    // are asked to close, the microVM saves, then npkFS syncs and the
+    // machine goes off (`shutdown`). Returns at once; an app that stays open
+    // cancels it.
     ctx fn npk_power() -> i32;
+
+    // npk_restart() -> 0 / -1 — the same, ending in a restart.
+    ctx fn npk_restart() -> i32;
 
     // npk_fs_list(prefix_ptr, prefix_len, out_ptr, out_cap, recursive) -> i32
     // Enumerate npkFS keys under `prefix`. If recursive=0, only direct

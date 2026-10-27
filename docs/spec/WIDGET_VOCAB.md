@@ -442,7 +442,7 @@ skipped.
 | `Clipboard(ClipKind)` | Ctrl+C/X/V (`Copy`/`Cut`/`Paste`) no text widget consumed; only after `npk_window_set_clipboard_sink`. |
 | `Open(String)` | `npk_open` targeted this already running app; the payload is the launch argument. |
 | `Picked { path, tag }` | A `host::pick` file dialog finished; empty `path` = cancelled, `tag` as passed. |
-| `CloseRequest` | The user asked to close the window after `npk_window_set_close_guard(1)`. Call `host::close_widget()` to go; a second close gesture or a few seconds of silence close it anyway. |
+| `CloseRequest` | The user asked to close the window (or the system is powering off or restarting) after `npk_window_set_close_guard(1)`. Call `host::close_widget()` to go, or `npk_window_close_cancel()` to stay (the user cancelled the unsaved-work dialog): that also cancels a pending power-off. A second close gesture, or a few seconds without any frame, closes it anyway. |
 | `PopupDone { popup }` | The compositor closed popup `popup` opened with `npk_popup`. |
 | `Focus(bool)` | The app's window (or one of its popups) got (`true`) or lost (`false`) the keyboard. Moving between the window and its own popups sends nothing. |
 

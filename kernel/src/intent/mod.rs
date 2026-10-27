@@ -2464,12 +2464,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
 
         "halt" | "shutdown" | "poweroff" => {
             if require_cap(vault, &session, Rights::EXECUTE, "halt") {
-                system::intent_halt();
+                crate::shutdown::request(crate::shutdown::Kind::PowerOff);
             }
         }
         "reboot" | "restart" => {
             if require_cap(vault, &session, Rights::EXECUTE, "reboot") {
-                system::intent_reboot();
+                crate::shutdown::request(crate::shutdown::Kind::Restart);
             }
         }
 

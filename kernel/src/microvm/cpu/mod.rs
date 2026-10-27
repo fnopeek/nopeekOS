@@ -1458,6 +1458,13 @@ impl DevPoll {
     }
 }
 
+/// A guest exists in any state, from requested to not yet reaped: true until
+/// its home image is saved and Core 0 has torn it down. A shutdown waits
+/// for this, not for the window, which goes first.
+pub fn vm_busy() -> bool {
+    VM_RUN_STATE.load(Ordering::Acquire) != VM_IDLE || vm_active()
+}
+
 /// Is a guest running right now, on any path? Anything that means "is
 /// there a guest" wants this rather than `vm_active`.
 pub fn guest_running() -> bool {

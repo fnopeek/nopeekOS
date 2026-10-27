@@ -53,6 +53,7 @@ unsafe extern "C" {
     fn npk_status_list(buf_ptr: i32, max: i32) -> i32;
     fn npk_workspace_switch(n: i32) -> i32;
     fn npk_power() -> i32;
+    fn npk_restart() -> i32;
     fn npk_launch(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
     fn npk_launch_at(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32, anchor: i32) -> i32;
 }
@@ -99,6 +100,11 @@ fn workspace_switch(n: u32) {
 fn power() {
     // SAFETY: FFI without pointers.
     unsafe { npk_power() };
+}
+
+fn restart() {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_restart() };
 }
 
 fn launch(app: &str, arg: &str) {
@@ -285,6 +291,7 @@ const ROW_HOVER: u32 = 60_000;       // + row index (hover)
 const LAUNCHER: u32 = 90_000;
 const POWER: u32 = 90_001;
 const SHOT: u32 = 90_002;
+const RESTART: u32 = 90_003;
 /// + index into the status list.
 const STATUS_BASE: u32 = 90_100;
 const STATUS_MAX: u32 = 32;
@@ -686,7 +693,10 @@ impl Deck {
                 self.toggle_windows(NODE_SLOT_BASE + slot as u32, ids);
                 true
             }
-            POWER => { power(); false }
+            // The apps are asked to close first (their windows may prompt), so
+            // the menu gets out of the way.
+            POWER => { self.close_menu(); power(); true }
+            RESTART => { self.close_menu(); restart(); true }
             SHOT => { launch("snap", "region"); false }
             _ if (STATUS_BASE..STATUS_BASE + STATUS_MAX).contains(&id) => {
                 let i = id - STATUS_BASE;
@@ -911,6 +921,7 @@ impl Deck {
                         Modifier::MinWidth(BTN), Modifier::MinHeight(BTN),
                         Modifier::Tint(Token::OnSurfaceMuted),
                     ]),
+                restart_button(),
                 power_button(),
             ],
             spacing: Spacing::Sm.as_u16(),
@@ -1185,18 +1196,27 @@ fn search_field(value: &str, focus_n: u32) -> Widget {
 /// Power off: grey at rest like its neighbours, red under the pointer —
 /// the warning where it is about to be pressed, not before.
 fn power_button() -> Widget {
+    system_button(IconId::Power, POWER, Token::Danger)
+}
+
+/// Restart, beside power off; it ends the same way for every app.
+fn restart_button() -> Widget {
+    system_button(IconId::ArrowClockwise, RESTART, Token::Warning)
+}
+
+fn system_button(icon: IconId, action: u32, hover: Token) -> Widget {
     prefab::center_box(
-        Widget::Icon { id: IconId::Power, size: ICON_PX, modifiers: Vec::new() },
+        Widget::Icon { id: icon, size: ICON_PX, modifiers: Vec::new() },
         alloc::vec![
             Modifier::MinWidth(BTN),
             Modifier::MinHeight(BTN),
             Modifier::Rounded(CELL_RADIUS),
             Modifier::Tint(Token::OnSurfaceMuted),
-            Modifier::OnClick(ActionId(POWER)),
+            Modifier::OnClick(ActionId(action)),
             Modifier::Hover(alloc::vec![
                 Modifier::Background(Token::SurfaceHover),
                 Modifier::Rounded(CELL_RADIUS),
-                Modifier::Tint(Token::Danger),
+                Modifier::Tint(hover),
             ]),
         ])
 }

@@ -1358,6 +1358,9 @@ pub fn poll_render() {
         render_frame();
     }
 
+    // A power-off or restart waiting for apps and the guest.
+    crate::shutdown::tick();
+
     // Process each mouse event with clean cursor restore + redraw
     while let Some(evt) = crate::xhci::poll_mouse() {
         handle_mouse(&evt);

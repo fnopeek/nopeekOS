@@ -1089,6 +1089,36 @@ impl Compositor {
         self.close_window(id);
     }
 
+    /// Ask every app window to close, as the user's close gesture would: a
+    /// guarded one gets `CloseRequest`, a microVM window asks its guest to
+    /// end. The panel, popups and terminals stay. Returns how many were asked.
+    pub fn request_close_all_apps(&mut self) -> usize {
+        let ids: Vec<WindowId> = self.windows.iter()
+            .filter(|w| Self::is_app_window(w))
+            .map(|w| w.id)
+            .collect();
+        for &id in &ids {
+            if !crate::shade::widgets::close_pending_for(id.0) {
+                self.request_close_window(id);
+            }
+        }
+        ids.len()
+    }
+
+    /// App windows still open: what a shutdown waits for.
+    pub fn app_windows_left(&self) -> usize {
+        self.windows.iter().filter(|w| Self::is_app_window(w)).count()
+    }
+
+    fn is_app_window(w: &Window) -> bool {
+        !w.is_panel && w.popup_of.is_none() && w.kind != crate::shade::window::WindowKind::Terminal
+    }
+
+    /// Title of a window, for messages.
+    pub fn window_title(&self, id: WindowId) -> Option<alloc::string::String> {
+        self.windows.iter().find(|w| w.id == id).map(|w| w.title.clone())
+    }
+
     /// Close guarded windows that never answered their `CloseRequest`, so
     /// a hung app can't leave an immortal window behind.
     pub fn tick_close_requests(&mut self) -> bool {

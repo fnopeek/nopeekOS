@@ -139,6 +139,12 @@ pub(crate) fn npk_window_set_close_guard(ctx: &mut HostState, on: i32) -> i32 {
     0
 }
 
+pub(crate) fn npk_window_close_cancel(ctx: &mut HostState) -> i32 {
+    let wid = ctx.widget_window_id;
+    if wid == 0 { return -1; }
+    if crate::shade::widgets::cancel_close_request(wid) { 0 } else { -1 }
+}
+
 pub(crate) fn npk_screen_size(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     let ok = capability::check_global(&cap_id, capability::Rights::RENDER).is_ok()
@@ -654,7 +660,16 @@ pub(crate) fn npk_power(ctx: &mut HostState) -> i32 {
     if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
         return -1;
     }
-    crate::acpi::power_off();
+    crate::shutdown::request(crate::shutdown::Kind::PowerOff);
+    0
+}
+
+pub(crate) fn npk_restart(ctx: &mut HostState) -> i32 {
+    let cap_id = ctx.cap_id;
+    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+        return -1;
+    }
+    crate::shutdown::request(crate::shutdown::Kind::Restart);
     0
 }
 

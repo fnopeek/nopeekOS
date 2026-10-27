@@ -66,7 +66,8 @@ catalog (modules with app metadata except `deck`, `drun`, `pick`,
 substring of display or launch name. Up/Down and pointer hover move the
 selection, Enter or a click launches (`spawn_module` or `run_intent`) and
 closes. Footer: the user name (last component of the home directory) and
-a power button calling `npk_power()`. Esc closes the popup.
+a restart button calling `npk_restart()` and a power button calling
+`npk_power()`; either closes the popup. Esc closes the popup.
 
 **Main loop**: drain events; re-read `npk_bar_state`, `npk_window_titles`
 and `npk_status_list`; commit the bar, then the popup, only on a change;
@@ -165,7 +166,7 @@ popup `popup` (0..7) of the caller's widget window.
 | `npk_status_clear(key)` | none | 0 |
 | `npk_status_list(buf, max)` | RENDER | bytes, the needed size when larger than `max`, -1 when refused |
 | `npk_launch_at(app, arg, anchor)` | EXECUTE | 0 / -1 |
-| `npk_power()` | RENDER + SHELL | ACPI S5 power-off |
+| `npk_power()`, `npk_restart()` | RENDER + SHELL | 0 / -1, returns at once. Every app window is asked to close as the user's close gesture would (a guarded one gets `CloseRequest`, a microVM window asks its guest to end and the home image is saved); when none is left and no guest runs (at most 60 s for the guest), npkFS syncs and the machine powers off or restarts. An app that answers with `npk_window_close_cancel` cancels it. The `halt` and `reboot` intents take the same path |
 
 `deck` declares `READ | EXEC | RENDER` and the extended `SHELL` right.
 Only `npk_status_set` / `npk_status_clear` (`npk_sys::status_set`,

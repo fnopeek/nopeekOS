@@ -49,6 +49,7 @@ mod audio;
 mod intent;
 mod config;
 mod time;
+mod shutdown;
 mod vga;
 mod hw;
 mod fatal;

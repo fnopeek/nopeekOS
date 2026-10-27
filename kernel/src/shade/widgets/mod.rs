@@ -534,6 +534,11 @@ pub fn close_pending() -> bool {
     !PENDING_CLOSE.lock().is_empty()
 }
 
+/// `window_id` has a close request outstanding.
+pub fn close_pending_for(window_id: u32) -> bool {
+    PENDING_CLOSE.lock().contains_key(&window_id)
+}
+
 /// How long a guarded window has to react to `CloseRequest` before the
 /// compositor closes it anyway. Ticks run at 100 Hz, so ~2 s.
 ///
@@ -570,6 +575,23 @@ pub fn note_close_request_alive(window_id: u32) {
         entry.1 = true;
     }
 }
+
+/// The app answered its `CloseRequest` with "stay open" (the user cancelled
+/// its unsaved-work dialog). The request is over: a later close gesture asks
+/// again instead of closing outright, and a shutdown waiting on this window
+/// stops (`take_close_cancelled`).
+pub fn cancel_close_request(window_id: u32) -> bool {
+    if PENDING_CLOSE.lock().remove(&window_id).is_none() { return false; }
+    *CLOSE_CANCELLED.lock() = Some(window_id);
+    true
+}
+
+/// The window whose close request was last cancelled, once.
+pub fn take_close_cancelled() -> Option<u32> {
+    CLOSE_CANCELLED.lock().take()
+}
+
+static CLOSE_CANCELLED: Mutex<Option<u32>> = Mutex::new(None);
 
 /// Guarded windows that never reacted within the deadline.
 pub fn expired_close_requests(now: u64) -> alloc::vec::Vec<u32> {

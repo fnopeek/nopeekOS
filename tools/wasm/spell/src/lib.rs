@@ -53,6 +53,14 @@ use nopeek_widgets::host;
 #[link(wasm_import_module = "env")]
 unsafe extern "C" {
     fn npk_window_set_close_guard(on: i32) -> i32;
+    fn npk_window_close_cancel() -> i32;
+}
+
+/// Tell the window manager the close it asked for is off: the next close
+/// asks again, and a power-off waiting on this window stops.
+fn window_close_cancel() {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_window_close_cancel() };
 }
 
 fn window_set_close_guard(on: bool) {
@@ -523,6 +531,7 @@ impl Spell {
     }
 
     fn cancel_quit(&mut self) {
+        if self.quitting { window_close_cancel(); }
         self.quitting = false;
         self.quit_total = 0;
         self.quit_done = 0;

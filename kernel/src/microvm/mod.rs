@@ -32,5 +32,5 @@ pub mod linux;
 pub use cpu::{
     decode_io_exit_qualification, guest_running, init, report, run_substrate_test, vm_active,
     output_of_window, output_window, take_outputs_changed, vm_bind_window, vm_close_for_window,
-    vm_core_serve, vm_has_window, vm_open, vm_poll_slice, LaunchOutcome,
+    vm_busy, vm_core_serve, vm_has_window, vm_open, vm_poll_slice, LaunchOutcome,
 };
