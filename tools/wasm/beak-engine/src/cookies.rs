@@ -46,6 +46,9 @@ static mut JAR: Option<Jar> = None;
 
 /// The browser's jar. One per process, created on first use.
 fn global() -> &'static mut Jar {
+    // SAFETY: the engine runs on one thread, and every caller of `global` uses the
+    // borrow within its own body without calling `global` again, so no two `&mut`
+    // overlap. Tests build their own `Jar`.
     unsafe {
         let p = core::ptr::addr_of_mut!(JAR);
         if (*p).is_none() {

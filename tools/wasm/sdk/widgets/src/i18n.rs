@@ -74,6 +74,7 @@ pub fn lang() -> Lang {
 #[cfg(target_arch = "wasm32")]
 fn query() -> Lang {
     let mut buf = [0u8; 16];
+    // SAFETY: the host writes at most `buf.len()` bytes into `buf`, borrowed for the call.
     let n = unsafe { npk_locale(buf.as_mut_ptr() as i32, buf.len() as i32) };
     if n <= 0 {
         return Lang::En;

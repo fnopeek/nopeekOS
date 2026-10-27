@@ -59,6 +59,7 @@ pub fn probe() -> Option<Capabilities> {
     // VM_CR (0xC001_0114) — bit 4 SVMDIS, bit 3 SVMLOCK.
     // If SVMDIS=1 and the lock bit (CPUID 8000_000A EDX[2] SVM-Lock)
     // is set, BIOS sealed SVM off. Surface cleanly.
+    // SAFETY: VM_CR exists on every CPU with CPUID 8000_0001 ECX[2] (SVM), checked above.
     let vm_cr = unsafe { super::rdmsr(VM_CR) };
     let svmdis = vm_cr & VM_CR_SVMDIS != 0;
     let (_, _, _, edx_a) = super::cpuid(0x8000_000A, 0);

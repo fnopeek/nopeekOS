@@ -1031,6 +1031,7 @@ impl Interp {
             props,
             live: {
                 #[cfg(feature = "heap-census")]
+                // SAFETY: one thread runs the engine; a plain read of the counter.
                 { unsafe { (&raw const super::value::LIVE_OBJECTS).read() } }
                 #[cfg(not(feature = "heap-census"))]
                 { 0 }
@@ -1191,6 +1192,8 @@ impl Interp {
     #[cfg(feature = "heap-census")]
     pub fn collect_cycles(&mut self) -> (usize, usize) {
         let keep = self.mark_reachable();
+        // SAFETY: one thread runs the engine, and this chain builds no object, so
+        // `register` cannot touch `ALL_OBJECTS` while it is borrowed.
         let dead: alloc::vec::Vec<Gc> = unsafe {
             (&mut *(&raw mut super::value::ALL_OBJECTS)).iter()
                 .filter_map(|w| w.upgrade())
@@ -1205,6 +1208,7 @@ impl Interp {
             b.kind = ObjKind::Plain;
         }
         drop(dead);
+        // SAFETY: as above; `retain` drops only dead `Weak`s, which builds no object.
         unsafe {
             let all = &mut *(&raw mut super::value::ALL_OBJECTS);
             all.retain(|w| w.strong_count() > 0);

@@ -115,6 +115,7 @@ where
 {
     // 1. VMXON region.
     let region_phys = memory::allocate_frame().ok_or("OOM allocating VMXON region")?;
+    // SAFETY: VMX is present; the only caller, `enable_and_test`, is gated by `probe()`.
     let basic = unsafe { rdmsr(IA32_VMX_BASIC) };
     let revision_id = (basic & 0x7FFF_FFFF) as u32;
 
@@ -126,6 +127,7 @@ where
     }
 
     // 2. FEATURE_CONTROL.
+    // SAFETY: exists whenever CPUID reports VMX; see above.
     let feat = unsafe { rdmsr(IA32_FEATURE_CONTROL) };
     if feat & FEAT_CTRL_LOCK == 0 {
         let new = feat | FEAT_CTRL_LOCK | FEAT_CTRL_VMX_OUTSIDE_SMX;
@@ -136,9 +138,13 @@ where
     }
 
     // 3. CR0/CR4 fixed bits + CR4.VMXE.
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr0_f0 = unsafe { rdmsr(IA32_VMX_CR0_FIXED0) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr0_f1 = unsafe { rdmsr(IA32_VMX_CR0_FIXED1) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr4_f0 = unsafe { rdmsr(IA32_VMX_CR4_FIXED0) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr4_f1 = unsafe { rdmsr(IA32_VMX_CR4_FIXED1) };
 
     let mut cr0: u64;
@@ -435,6 +441,7 @@ pub enum SliceOutcome {
 fn vmx_enter_root() -> Result<(u64, u64), &'static str> {
     // 1. VMXON region.
     let region_phys = memory::allocate_frame().ok_or("OOM allocating VMXON region")?;
+    // SAFETY: VMX is present; `open` is gated by `probe()`, `open_ap` joins such a VM.
     let basic = unsafe { rdmsr(IA32_VMX_BASIC) };
     let revision_id = (basic & 0x7FFF_FFFF) as u32;
     // SAFETY: identity-mapped, freshly-allocated, exclusive.
@@ -445,6 +452,7 @@ fn vmx_enter_root() -> Result<(u64, u64), &'static str> {
     }
 
     // 2. FEATURE_CONTROL.
+    // SAFETY: exists whenever CPUID reports VMX; see above.
     let feat = unsafe { rdmsr(IA32_FEATURE_CONTROL) };
     if feat & FEAT_CTRL_LOCK == 0 {
         let new = feat | FEAT_CTRL_LOCK | FEAT_CTRL_VMX_OUTSIDE_SMX;
@@ -455,9 +463,13 @@ fn vmx_enter_root() -> Result<(u64, u64), &'static str> {
     }
 
     // 3. CR0/CR4 fixed bits + CR4.VMXE.
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr0_f0 = unsafe { rdmsr(IA32_VMX_CR0_FIXED0) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr0_f1 = unsafe { rdmsr(IA32_VMX_CR0_FIXED1) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr4_f0 = unsafe { rdmsr(IA32_VMX_CR4_FIXED0) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; see above.
     let cr4_f1 = unsafe { rdmsr(IA32_VMX_CR4_FIXED1) };
     let mut cr0: u64;
     let mut cr4: u64;
@@ -499,6 +511,7 @@ fn vmx_enter_root() -> Result<(u64, u64), &'static str> {
         Some(p) => p,
         None => {
             // Back out of VMX root so the CPU isn't stranded.
+            // SAFETY: VMXON succeeded above, so this core is in VMX root.
             unsafe { vmx_exit_root(); }
             return Err("OOM allocating VMCS region");
         }
@@ -522,6 +535,7 @@ fn vmx_enter_root() -> Result<(u64, u64), &'static str> {
         );
     }
     if rflags_clear & (RFLAGS_CF | RFLAGS_ZF) != 0 {
+        // SAFETY: VMXON succeeded above, so this core is in VMX root.
         unsafe { vmx_exit_root(); }
         return Err("VMCLEAR failed (VMfail)");
     }
@@ -537,6 +551,7 @@ fn vmx_enter_root() -> Result<(u64, u64), &'static str> {
         );
     }
     if rflags_load & (RFLAGS_CF | RFLAGS_ZF) != 0 {
+        // SAFETY: VMXON succeeded above, so this core is in VMX root.
         unsafe { vmx_exit_root(); }
         return Err("VMPTRLD failed (VMfail)");
     }

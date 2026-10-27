@@ -932,6 +932,7 @@ impl Interp {
             let mut cur: *const RefCell<Env> = Rc::as_ptr(env);
             let mut reached = true;
             for _ in 0..h {
+                // SAFETY: `cur` is on the chain `env` keeps alive; see above.
                 let next = unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) };
                 match next { Some(p) => cur = p, None => { reached = false; break } }
             }
@@ -971,6 +972,7 @@ impl Interp {
             let mut cur: *const RefCell<Env> = Rc::as_ptr(env);
             let mut reached = true;
             for _ in 0..h {
+                // SAFETY: `cur` is on the chain `env` keeps alive; see above.
                 let next = unsafe { (*cur).borrow().parent.as_ref().map(Rc::as_ptr) };
                 match next { Some(p) => cur = p, None => { reached = false; break } }
             }

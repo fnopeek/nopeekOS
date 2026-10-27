@@ -122,10 +122,12 @@ unsafe impl std::alloc::GlobalAlloc for Loud {
         if l.size() >= LOUD_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("\n=== ALLOC {} B ===\n{}", l.size(), std::backtrace::Backtrace::force_capture());
         }
+        // SAFETY: the caller's layout, forwarded unchanged.
         unsafe { std::alloc::System.alloc(l) }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: std::alloc::Layout) {
         LIVE.fetch_sub(l.size() as i64, std::sync::atomic::Ordering::Relaxed);
+        // SAFETY: every allocation here comes from `System` with this layout.
         unsafe { std::alloc::System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: std::alloc::Layout, n: usize) -> *mut u8 {
@@ -134,12 +136,15 @@ unsafe impl std::alloc::GlobalAlloc for Loud {
         if n >= LOUD_LIMIT.load(std::sync::atomic::Ordering::Relaxed) {
             eprintln!("\n=== REALLOC {} B ===\n{}", n, std::backtrace::Backtrace::force_capture());
         }
+        // SAFETY: `p` came from `System` with `l`; the caller upholds the `realloc` contract.
         unsafe { std::alloc::System.realloc(p, l, n) }
     }
 }
 #[global_allocator]
 static A: Loud = Loud;
 
+// SAFETY: std's `Instant` is plain integers (a `timespec` on Unix) for which
+// all zeros is a valid value; it is only read after the `BUDGET` write.
 static mut DEADLINE: std::time::Instant = unsafe { core::mem::zeroed() };
 static mut T0: Option<std::time::Instant> = None;
 
@@ -152,6 +157,7 @@ fn rss_mb() -> u64 {
 }
 
 fn host_clock() -> f64 {
+    // SAFETY: single-threaded tool; `T0` is written at the start of `main`, before the engine runs.
     unsafe { (&raw const T0).read() }
         .map(|t| t.elapsed().as_secs_f64() * 1000.0)
         .unwrap_or(0.0)
@@ -163,6 +169,7 @@ fn main() {
             LOUD_LIMIT.store(n, std::sync::atomic::Ordering::Relaxed);
         }
     }
+    // SAFETY: single-threaded tool; nothing reads `T0` yet.
     unsafe { T0 = Some(std::time::Instant::now()) };
     beak_engine::js::random::set_source(host_random);
     let html_path = std::env::args().nth(1).unwrap_or_default();
@@ -227,7 +234,9 @@ fn main() {
     // runs unbounded host-side.
     if let Ok(v) = std::env::var("BUDGET") {
         if let Ok(sec) = v.parse::<u64>() {
+            // SAFETY: single-threaded tool; the closure that reads `DEADLINE` is installed after this.
             unsafe { DEADLINE = std::time::Instant::now() + std::time::Duration::from_secs(sec) };
+            // SAFETY: single-threaded tool; the closure only reads `DEADLINE`, written above.
             sess.interp.deadline = Some(|| unsafe { std::time::Instant::now() < DEADLINE });
         }
     }

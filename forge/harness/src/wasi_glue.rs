@@ -21,6 +21,9 @@ pub fn install(ctx: &mut WasiCtx) {
 /// every call because `memory.grow` may have moved the end since the last one.
 unsafe fn parts<'a>(vm: *const u64) -> (&'a mut [u8], &'a mut WasiCtx) {
     use forge_core::vmctx as v;
+    // SAFETY: `vm` is the live instance context of the calling module, whose
+    // memory is `MEM_SIZE` bytes at `MEM_BASE`; `install` set `WASI` before the
+    // instance ran, and the single-threaded run holds no other borrow of either.
     unsafe {
         let base = *vm.add(v::MEM_BASE as usize / 8) as *mut u8;
         let size = *vm.add(v::MEM_SIZE as usize / 8) as usize;

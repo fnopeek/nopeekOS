@@ -427,10 +427,15 @@ pub(super) unsafe fn setup_host_state(host_rsp: u64) -> Result<(), &'static str>
     // SAFETY: all four MSRs are architectural since SYSENTER (P6) /
     // EFER (AMD64) — always present on x86_64.
     let efer = unsafe { rdmsr(IA32_EFER) };
+    // SAFETY: FS.base MSR is architectural on x86_64.
     let fs_base = unsafe { rdmsr(IA32_FS_BASE) };
+    // SAFETY: GS.base MSR is architectural on x86_64.
     let gs_base = unsafe { rdmsr(IA32_GS_BASE) };
+    // SAFETY: the SYSENTER MSRs are architectural since P6.
     let sysenter_cs = unsafe { rdmsr(IA32_SYSENTER_CS) };
+    // SAFETY: the SYSENTER MSRs are architectural since P6.
     let sysenter_esp = unsafe { rdmsr(IA32_SYSENTER_ESP) };
+    // SAFETY: the SYSENTER MSRs are architectural since P6.
     let sysenter_eip = unsafe { rdmsr(IA32_SYSENTER_EIP) };
 
     let host_rip = exit_trampoline_addr();
@@ -584,6 +589,7 @@ const GUEST_VPID: u64 = 1;
 fn vpid_supported() -> bool {
     // SAFETY: both capability MSRs exist whenever VMX does (checked by probe).
     let sec = unsafe { super::rdmsr(IA32_VMX_PROCBASED_CTLS2) };
+    // SAFETY: as above; the capability MSR exists whenever VMX does.
     let cap = unsafe { super::rdmsr(IA32_VMX_EPT_VPID_CAP) };
     (sec >> 32) & (SEC_ENABLE_VPID as u64) != 0 && cap & (1 << 32) != 0 && cap & (1 << 42) != 0
 }
@@ -945,7 +951,9 @@ pub(super) fn setup_guest_state(guest_rip: u64) -> Result<(), &'static str> {
     // 32-bit prot mode CR0: must satisfy CR0_FIXED0/1 with PE
     // forced 1 and PG forced 0 (unrestricted-guest=1 relaxes
     // CR0_FIXED for both bits per SDM §26.3.1.1).
+    // SAFETY: IA32_VMX_CR0_FIXED0/1 exist whenever VMX does; callers are probe-gated.
     let cr0_f0 = unsafe { rdmsr(0x486) };
+    // SAFETY: IA32_VMX_CR0_FIXED0/1 exist whenever VMX does; callers are probe-gated.
     let cr0_f1 = unsafe { rdmsr(0x487) };
     let cr0_prot = (((1u64 << 0) | cr0_f0) & cr0_f1) & !(1u64 << 31);
 
@@ -1043,7 +1051,9 @@ pub(super) fn setup_guest_state_ap(sipi_vector: u8) -> Result<(), &'static str> 
     // Real-mode CR0: PE=0, PG=0. Unrestricted-guest relaxes the
     // CR0_FIXED0 must-be-1 on PE/PG (SDM §26.3.1.1); keep the other
     // fixed bits, force ET (bit 4).
+    // SAFETY: IA32_VMX_CR0_FIXED0/1 exist whenever VMX does; callers are probe-gated.
     let cr0_f0 = unsafe { rdmsr(0x486) };
+    // SAFETY: IA32_VMX_CR0_FIXED0/1 exist whenever VMX does; callers are probe-gated.
     let cr0_f1 = unsafe { rdmsr(0x487) };
     let cr0_rm = ((cr0_f0 & cr0_f1) & !((1u64 << 0) | (1u64 << 31))) | (1u64 << 4);
 
@@ -1904,9 +1914,13 @@ pub fn dump_entry_fail_state() {
     const IA32_VMX_CR0_FIXED1_MSR: u32 = 0x487;
     const IA32_VMX_CR4_FIXED0_MSR: u32 = 0x488;
     const IA32_VMX_CR4_FIXED1_MSR: u32 = 0x489;
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; this runs after a failed entry.
     let cr0_f0  = unsafe { rdmsr(IA32_VMX_CR0_FIXED0_MSR) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; this runs after a failed entry.
     let cr0_f1  = unsafe { rdmsr(IA32_VMX_CR0_FIXED1_MSR) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; this runs after a failed entry.
     let cr4_f0  = unsafe { rdmsr(IA32_VMX_CR4_FIXED0_MSR) };
+    // SAFETY: the VMX fixed-bit MSRs exist whenever VMX does; this runs after a failed entry.
     let cr4_f1  = unsafe { rdmsr(IA32_VMX_CR4_FIXED1_MSR) };
     let cr0_violation_0 = (cr0_f0 & !cr0) & 0xFFFF_FFFF;
     let cr0_violation_1 = (cr0 & !cr0_f1) & 0xFFFF_FFFF;
@@ -2028,19 +2042,23 @@ pub fn dump_entry_fail_state() {
     let pin_live   = vmread(PIN_BASED_VM_EXEC_CONTROL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let cpu_live   = vmread(CPU_BASED_VM_EXEC_CONTROL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
     let sec_live   = vmread(SECONDARY_VM_EXEC_CONTROL).unwrap_or(0xDEAD_DEAD_DEAD_DEAD);
-    const VMX_PIN_TRUE:  u32 = 0x48D;
-    const VMX_PROC_TRUE: u32 = 0x48E;
     const VMX_BASIC_MSR: u32 = 0x480;
     const VMX_PROC2_MSR: u32 = 0x48B;
+    // SAFETY: IA32_VMX_BASIC exists whenever VMX does; this runs after a failed entry.
     let basic_msr  = unsafe { rdmsr(VMX_BASIC_MSR) };
-    let pin_msr    = unsafe { rdmsr(VMX_PIN_TRUE) };
-    let proc_msr   = unsafe { rdmsr(VMX_PROC_TRUE) };
+    // SAFETY: `pinbased_ctls_msr`/`procbased_ctls_msr` pick the TRUE MSRs
+    // only when IA32_VMX_BASIC bit 55 says they exist, else the defaults.
+    let pin_msr    = unsafe { rdmsr(pinbased_ctls_msr()) };
+    // SAFETY: as above.
+    let proc_msr   = unsafe { rdmsr(procbased_ctls_msr()) };
+    // SAFETY: the guest needs EPT, so secondary controls and this MSR exist;
+    // `setup_execution_controls` read it before the failed entry.
     let proc2_msr  = unsafe { rdmsr(VMX_PROC2_MSR) };
     kprintln!("[vmx-fail] PIN={:#x} CPU={:#x} SEC={:#x}", pin_live, cpu_live, sec_live);
     kprintln!("[vmx-fail] BASIC={:#018x} (true-ctls={})", basic_msr, (basic_msr >> 55) & 1);
-    kprintln!("[vmx-fail] PIN-MSR (TRUE)={:#018x} → allowed-0={:#x} allowed-1={:#x}",
+    kprintln!("[vmx-fail] PIN-MSR={:#018x} → allowed-0={:#x} allowed-1={:#x}",
         pin_msr, pin_msr & 0xFFFF_FFFF, pin_msr >> 32);
-    kprintln!("[vmx-fail] PROC-MSR (TRUE)={:#018x} → allowed-0={:#x} allowed-1={:#x}",
+    kprintln!("[vmx-fail] PROC-MSR={:#018x} → allowed-0={:#x} allowed-1={:#x}",
         proc_msr, proc_msr & 0xFFFF_FFFF, proc_msr >> 32);
     kprintln!("[vmx-fail] PROC2-MSR={:#018x} → allowed-0={:#x} allowed-1={:#x}",
         proc2_msr, proc2_msr & 0xFFFF_FFFF, proc2_msr >> 32);

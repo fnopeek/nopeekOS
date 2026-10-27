@@ -295,6 +295,8 @@ pub fn load_into_guest_ram(
     let entry_size = core::mem::size_of::<E820Entry>();
     for (i, entry) in entries[..count].iter().enumerate() {
         let start = OFF_E820_TABLE + i * entry_size;
+        // SAFETY: `entry` is a live `repr(C, packed)` struct of plain integers, so its
+        // `entry_size` bytes are initialized and readable as `u8`.
         let entry_bytes: &[u8] = unsafe {
             core::slice::from_raw_parts(
                 entry as *const _ as *const u8,

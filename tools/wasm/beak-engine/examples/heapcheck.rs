@@ -18,15 +18,18 @@ struct Counting;
 // SAFETY: forwards every request to `System` and only counts.
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        // SAFETY: the caller's layout, forwarded unchanged.
         let p = unsafe { System.alloc(l) };
         if !p.is_null() { bump(l.size() as isize) }
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
         bump(-(l.size() as isize));
+        // SAFETY: every allocation here comes from `System` with this layout.
         unsafe { System.dealloc(p, l) }
     }
     unsafe fn realloc(&self, p: *mut u8, l: Layout, new: usize) -> *mut u8 {
+        // SAFETY: `p` came from `System` with `l`; the caller upholds the `realloc` contract.
         let q = unsafe { System.realloc(p, l, new) };
         if !q.is_null() { bump(new as isize - l.size() as isize) }
         q

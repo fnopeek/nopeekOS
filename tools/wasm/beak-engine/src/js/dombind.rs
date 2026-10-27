@@ -7311,6 +7311,7 @@ fn lossy_utf8(b: &[u8]) -> String {
             Ok(s) => { out.push_str(s); return out }
             Err(e) => {
                 let good = e.valid_up_to();
+                // SAFETY: `valid_up_to` is the prefix `from_utf8` verified as UTF-8.
                 out.push_str(unsafe { core::str::from_utf8_unchecked(&rest[..good]) });
                 out.push('\u{FFFD}');
                 match e.error_len() {

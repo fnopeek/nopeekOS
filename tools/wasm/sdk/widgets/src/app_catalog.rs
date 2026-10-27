@@ -72,8 +72,11 @@ pub fn load(exclude: &[&str]) -> Vec<AppEntry> {
     let mut entries: Vec<AppEntry> = Vec::new();
 
     let buf_ptr = core::ptr::addr_of_mut!(LIST_BUF) as *mut u8;
+    // SAFETY: the host writes at most `LIST_BUF_SIZE` bytes into `LIST_BUF`,
+    // which this single-threaded module uses only here.
     let n = unsafe { npk_list_modules(buf_ptr as i32, LIST_BUF_SIZE as i32) };
     if n > 0 {
+        // SAFETY: a positive return is the byte count written, at most `LIST_BUF_SIZE`.
         let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
         for chunk in slice.split(|&b| b == 0) {
             if chunk.is_empty() { continue; }
@@ -123,6 +126,8 @@ fn hydrate_module(module_name: &str) -> Option<AppEntry> {
 
 fn read_meta(name: &str) -> Option<AppMeta> {
     let buf_ptr = core::ptr::addr_of_mut!(META_BUF) as *mut u8;
+    // SAFETY: the host reads `name`, borrowed for the call, and writes at most
+    // `META_BUF_SIZE` bytes into `META_BUF`, used only here on this single thread.
     let n = unsafe {
         npk_app_meta(
             name.as_ptr() as i32,
@@ -132,6 +137,7 @@ fn read_meta(name: &str) -> Option<AppMeta> {
         )
     };
     if n <= 0 { return None; }
+    // SAFETY: a positive return is the byte count written, at most `META_BUF_SIZE`.
     let meta_bytes = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, n as usize) };
     app_meta::decode(meta_bytes).ok()
 }

@@ -39,6 +39,7 @@ pub fn probe() -> Option<Capabilities> {
 
     // IA32_FEATURE_CONTROL gates VMXON. Bit 2 (VMX outside SMX) must
     // be set, and bit 0 (lock) decides whether we can still toggle it.
+    // SAFETY: IA32_FEATURE_CONTROL exists when CPUID.1:ECX.VMX is set, checked above.
     let feat_ctrl = unsafe { super::rdmsr(IA32_FEATURE_CONTROL) };
     let locked = feat_ctrl & FEAT_CTRL_LOCK != 0;
     let vmx_outside_smx = feat_ctrl & FEAT_CTRL_VMX_OUTSIDE_SMX != 0;
@@ -47,6 +48,7 @@ pub fn probe() -> Option<Capabilities> {
         return None;
     }
 
+    // SAFETY: IA32_VMX_BASIC exists when CPUID.1:ECX.VMX is set, checked above.
     let basic = unsafe { super::rdmsr(IA32_VMX_BASIC) };
     let revision_id = (basic & 0x7FFF_FFFF) as u32;
     let region_size = ((basic >> 32) & 0x1FFF) as u32;
@@ -84,6 +86,7 @@ fn secondary_caps() -> (bool, bool, bool) {
     // Step 1: confirm secondary controls themselves are exposed.
     // IA32_VMX_PROCBASED_CTLS[63] = "activate secondary controls"
     // allowed-1 (bit 63 of the 64-bit MSR = bit 31 of the upper dword).
+    // SAFETY: only reached from `probe` after the CPUID VMX check.
     let prim = unsafe { super::rdmsr(IA32_VMX_PROCBASED_CTLS) };
     let secondary_allowed = (prim >> 63) & 1 != 0;
     if !secondary_allowed {
@@ -91,6 +94,7 @@ fn secondary_caps() -> (bool, bool, bool) {
     }
 
     // Step 2: read secondary capabilities. Allowed-1 bits in upper 32.
+    // SAFETY: exists because PROCBASED_CTLS allows secondary controls (bit 63), checked above.
     let sec = unsafe { super::rdmsr(IA32_VMX_PROCBASED_CTLS2) };
     let allowed1 = (sec >> 32) as u32;
 
