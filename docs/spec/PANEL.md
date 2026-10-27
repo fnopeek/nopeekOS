@@ -179,7 +179,7 @@ wrappers; `deck` declares the other imports itself.
 | `shade.bar_margin` | gap between the panel and the screen edge, logical px (default 6) |
 | `shade.chrome_opacity` | panel opacity 0..255 (default derived from the wallpaper); setting it clears `shade.bar_opacity` and `shade.dock_opacity` |
 | `shade.bar_opacity` | overrides the opacity of the strut panels, including `deck` |
-| `timezone` | offset applied to the clock in `npk_bar_state` |
+| `timezone` | zone of the clock in `npk_bar_state` (a zone name such as `Europe/Zurich`, a POSIX TZ string, or a fixed offset), daylight saving included |
 
 ## Present in the compositor, unused
 

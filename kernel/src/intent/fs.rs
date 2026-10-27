@@ -447,7 +447,7 @@ pub fn intent_disk_info() {
                 kprintln!("  Free:      {} MB / {} MB", free_mb, total_mb);
                 match crate::storage::npkfs::fs::last_gc() {
                     Some(g) => {
-                        let ago = crate::drivers::rtc::read_unix_time()
+                        let ago = crate::time::now()
                             .zip(Some(g.when_unix))
                             .filter(|(now, w)| *w != 0 && *now >= *w)
                             .map(|(now, w)| now - w);

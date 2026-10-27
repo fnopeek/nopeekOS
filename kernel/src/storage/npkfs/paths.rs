@@ -361,11 +361,10 @@ pub fn mkdir(root: &[u8; 32], path: &str) -> Result<[u8; 32], PathError> {
     insert_entry_at(root, &segs, entry, /* allow_replace */ false)
 }
 
-/// Capture current Unix time from the host RTC. Returns 0 ("unknown")
-/// if the RTC isn't readable yet — safe default that the loft listing
-/// renders as "—" rather than "1970-01-01".
+/// Current Unix time, or 0 ("unknown") while the clock is unset, which the
+/// loft listing renders as "—" rather than "1970-01-01".
 fn now_unix() -> u64 {
-    crate::drivers::rtc::read_unix_time().unwrap_or(0)
+    crate::time::now_or_zero()
 }
 
 /// Remove `path`. Files are dropped unconditionally; directories must

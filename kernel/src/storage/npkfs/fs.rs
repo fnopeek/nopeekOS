@@ -524,7 +524,7 @@ pub fn gc() -> Result<GcStats, Error> {
     // Record this run so `disk` can report when GC last completed and
     // whether it was clean (no corrupt objects skipped).
     *LAST_GC.lock() = Some(LastGc {
-        when_unix: crate::drivers::rtc::read_unix_time().unwrap_or(0),
+        when_unix: crate::time::now_or_zero(),
         kept: reachable.len(),
         removed,
         failed,

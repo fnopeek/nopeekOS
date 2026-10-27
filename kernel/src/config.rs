@@ -109,6 +109,7 @@ pub fn load() {
         Ok((data, _)) => {
             CONFIG.lock().deserialize(&data);
             bump();
+            crate::time::zone::load_from_config();
         }
         Err(_) => {
             // No config yet — fresh system
@@ -134,6 +135,7 @@ pub fn set(key: &str, value: &str) {
     save();
     if key == "bootlog" { crate::serial::set_verbose(bootlog_verbose()); }
     if key == "keyboard" { crate::keyboard::cache_layout(); }
+    if key == "timezone" { crate::time::zone::load_from_config(); }
 }
 
 /// Remove a config value and persist.
@@ -142,6 +144,7 @@ pub fn unset(key: &str) -> bool {
     if removed { bump(); save(); }
     if key == "bootlog" { crate::serial::set_verbose(false); }
     if key == "keyboard" { crate::keyboard::cache_layout(); }
+    if key == "timezone" { crate::time::zone::load_from_config(); }
     removed
 }
 
@@ -149,38 +152,6 @@ pub fn unset(key: &str) -> bool {
 /// otherwise they only reach `dmesg` and `sys/log/boot`.
 pub fn bootlog_verbose() -> bool {
     get("bootlog").as_deref() == Some("verbose")
-}
-
-/// Get timezone offset in minutes (e.g. +120 for UTC+2).
-pub fn timezone_offset_minutes() -> i32 {
-    let lock = CONFIG.lock();
-    match lock.get("timezone") {
-        Some(val) => parse_timezone_offset(val),
-        None => 0,
-    }
-}
-
-/// Parse timezone string: "+2", "-5", "+5:30", "+05:45"
-fn parse_timezone_offset(s: &str) -> i32 {
-    let s = s.trim();
-    if s.is_empty() { return 0; }
-
-    let (sign, rest) = if s.starts_with('-') {
-        (-1i32, &s[1..])
-    } else if s.starts_with('+') {
-        (1i32, &s[1..])
-    } else {
-        (1i32, s)
-    };
-
-    if let Some((h, m)) = rest.split_once(':') {
-        let hours: i32 = h.trim().parse().unwrap_or(0);
-        let mins: i32 = m.trim().parse().unwrap_or(0);
-        sign * (hours * 60 + mins)
-    } else {
-        let hours: i32 = rest.parse().unwrap_or(0);
-        sign * hours * 60
-    }
 }
 
 /// List all config entries.
@@ -192,7 +163,7 @@ pub fn list() -> Vec<(String, String)> {
 
 /// Known config keys with descriptions.
 pub const KNOWN_KEYS: &[(&str, &str)] = &[
-    ("timezone", "UTC offset (e.g. +2, -5, +5:30)"),
+    ("timezone", "Zone (e.g. Europe/Zurich), a POSIX TZ string, or a fixed offset (+1, -5, +5:30)"),
     ("keyboard", "Keyboard layout (e.g. de_CH, us, de_DE)"),
     ("lang", "UI language (en, de); apps carry the catalogs"),
     ("theme", "dark, light or auto (follows the wallpaper luminance)"),

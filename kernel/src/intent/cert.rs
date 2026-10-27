@@ -166,7 +166,7 @@ fn print_cert(info: &certstore::CertInfo) {
 /// "EXPIRED" beats a date the reader has to compare against today's.
 fn expiry(info: &certstore::CertInfo) -> String {
     let Some(na) = info.not_after else { return String::from("?") };
-    match crate::net::ntp::unix_time().or_else(crate::drivers::rtc::read_unix_time) {
+    match crate::time::now() {
         Some(now) if now > na => String::from("EXPIRED"),
         _ => fmt_date(na),
     }
@@ -175,8 +175,7 @@ fn expiry(info: &certstore::CertInfo) -> String {
 fn fmt_date(unix: u64) -> String {
     // Date only — the time of day of a CA expiry has never mattered to
     // anyone reading this list.
-    let s = crate::net::ntp::format_time(unix);
-    s.split(' ').next().unwrap_or(&s).into()
+    crate::time::format_date(unix)
 }
 
 fn truncate(s: &str, max: usize) -> String {

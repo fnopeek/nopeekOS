@@ -56,7 +56,7 @@ match w64(mem, out, 10_000_000) { Ok(()) => SUCCESS, Err(e) => e }
 pub(crate) fn clock_time_get(mem: &mut [u8], st: &mut HS, id: i32, _p: i64, out: i32) -> i32 {
 // 0 = realtime, everything else treated as monotonic.
 let now = if id == 0 {
-    (crate::rtc::read_unix_time().unwrap_or(0) as u64).saturating_mul(1_000_000_000)
+    crate::time::now_or_zero().saturating_mul(1_000_000_000)
 } else {
     crate::interrupts::ticks().saturating_mul(10_000_000)
 };

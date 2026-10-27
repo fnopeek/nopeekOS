@@ -174,7 +174,7 @@ pub(crate) fn npk_now_us(_ctx: &mut HostState) -> i64 {
 }
 
 pub(crate) fn npk_unix_time(_ctx: &mut HostState) -> i64 {
-    crate::rtc::read_unix_time().unwrap_or(0) as i64
+    crate::time::now_or_zero() as i64
 }
 
 /// Fills module memory from the kernel CSPRNG.
@@ -3090,10 +3090,8 @@ pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, m
     }
     if max <= 0 { return -1; }
 
-    let unix = crate::rtc::read_unix_time().unwrap_or(0);
-    let tz = crate::config::timezone_offset_minutes();
-    let local = unix as i64 + tz as i64 * 60;
-    let secs = ((local % 86400) + 86400) % 86400;
+    let local = crate::time::local(crate::time::now_or_zero());
+    let secs = local.rem_euclid(86_400);
     let (ws_count, ws_active, title) =
         crate::shade::with_compositor(|c| c.bar_info())
             .unwrap_or((0, 0, alloc::string::String::new()));

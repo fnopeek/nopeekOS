@@ -140,8 +140,12 @@ fn setup_identity_and_settings() -> bool {
     // === Settings ===
     kprintln!("[npk] Settings (Enter = default):");
 
-    kprint!("[npk]   Timezone  [+1]: ");
-    let tz = read_line_default("+1");
+    kprint!("[npk]   Timezone  [Europe/Zurich]: ");
+    let mut tz = read_line_default("Europe/Zurich");
+    if crate::time::zone::parse(&tz).is_none() {
+        kprintln!("[npk]   unknown zone '{}', using Europe/Zurich", tz);
+        tz = alloc::string::String::from("Europe/Zurich");
+    }
     config::set("timezone", &tz);
 
     kprint!("[npk]   Keyboard  [de_CH]: ");

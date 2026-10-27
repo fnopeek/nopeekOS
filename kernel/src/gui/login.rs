@@ -93,12 +93,9 @@ fn login_pixel(x: u32, y: u32, h: u32) -> u32 {
 
 /// Draw the large clock display.
 fn draw_clock(shadow: *mut u8, info: &FbInfo, l: &Layout) {
-    let unix = crate::rtc::read_unix_time().unwrap_or(0);
-    let tz_offset: i64 = crate::config::get("timezone")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(2); // Default CEST (UTC+2), config overrides after auth
-    let local = unix as i64 + tz_offset * 3600;
-    let secs_today = ((local % 86400) + 86400) % 86400;
+    // The zone comes from the ESP copy here; the config is still locked.
+    let local = crate::time::local(crate::time::now_or_zero());
+    let secs_today = local.rem_euclid(86_400);
     let hour = secs_today / 3600;
     let min = (secs_today % 3600) / 60;
     let time_str = format!("{:02}:{:02}", hour, min);

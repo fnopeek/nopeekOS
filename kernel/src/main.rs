@@ -48,6 +48,7 @@ mod net;
 mod audio;
 mod intent;
 mod config;
+mod time;
 mod vga;
 mod hw;
 mod fatal;
@@ -175,10 +176,11 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         kprintln!("[npk] No block device found.");
     }
 
-    // RTC: immediate wall clock (no network needed)
-    if let Some(t) = rtc::read_unix_time() {
-        net::ntp::set_time(t);
-        crate::kdebug!("[npk] RTC: {}", net::ntp::format_time(t));
+    // Wall clock from the RTC (no network needed), and the zone from the
+    // ESP copy so the login screen shows local time.
+    time::zone::load_from_esp();
+    if let Some(t) = time::init_from_rtc() {
+        crate::kdebug!("[npk] RTC: {}", time::format(t));
         vga::show_status(b"RTC clock set");
     } else {
         kprintln!("[npk] RTC: read failed");
@@ -227,15 +229,6 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         // Seed the active-interface tracker so the periodic link tick only
         // re-configures on a real change (cable pulled, WiFi associated).
         net::seed_active();
-
-        if net::ntp::sync_via_dns("pool.ntp.org") {
-            if let Some(t) = net::ntp::unix_time() {
-                kprintln!("[npk] NTP: {}", net::ntp::format_time(t));
-            }
-            vga::show_status(b"NTP synced");
-        } else {
-            kprintln!("[npk] NTP: sync failed (using RTC time)");
-        }
         // From here the host NIC is drained on its RX interrupt, not by
         // Core 0's shell loop.
         net::napi::start();

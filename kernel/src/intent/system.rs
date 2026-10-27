@@ -1673,13 +1673,16 @@ pub fn intent_audit() {
     kprintln!();
 }
 
-pub fn intent_time() {
-    if crate::net::ntp::unix_time().is_none() {
+/// `time`: the local time, and whether NTP has set it. `time sync` asks
+/// NTP now.
+pub fn intent_time(args: &str) {
+    if args.trim() == "sync" {
         kprintln!("[npk] Syncing time...");
-        crate::net::ntp::sync_via_dns("pool.ntp.org");
+        crate::time::sync_now();
     }
-    match crate::net::ntp::unix_time() {
-        Some(t) => kprintln!("{}", crate::net::ntp::format_time(t)),
+    match crate::time::now() {
+        Some(t) => kprintln!("{}  ({})", crate::time::format(t),
+            if crate::time::synced() { "NTP" } else { "RTC, not synced yet" }),
         None => kprintln!("[npk] Time unavailable. No RTC or network."),
     }
 }
@@ -1815,7 +1818,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("status", "Kernel, memory, uptime at a glance");
             help_row("top", "Live processes and cores");
             help_row("uptime", "Time since boot");
-            help_row("time", "Clock (also: date)");
+            help_row("time [sync]", "Clock (also: date); sync asks NTP now");
             help_row("dmesg [pat]", "Kernel log (dmesg prev = last boot; pat filters lines)");
             help_row("bootlog", "Log of the current boot");
             help_row("cores", "Per-core load and frequency");
@@ -1981,7 +1984,7 @@ pub fn intent_set(args: &str) {
     } else {
         kprintln!("[npk] Usage: set <key> <value>");
         kprintln!("[npk] Keys: timezone, keyboard, lang");
-        kprintln!("[npk] Example: set timezone +2");
+        kprintln!("[npk] Example: set timezone Europe/Zurich");
     }
 }
 

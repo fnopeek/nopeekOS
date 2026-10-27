@@ -1,7 +1,8 @@
-//! Minimal FAT32 writer for EFI System Partition
+//! Minimal FAT32 support for the EFI System Partition
 //!
-//! Creates a FAT32 filesystem and writes GRUB EFI, kernel, and grub.cfg.
-//! Write-once, no modify/delete needed.
+//! Creates the ESP at install, overwrites `/EFI/BOOT/BOOTX64.EFI` during an
+//! OTA update, and keeps small files in `/EFI/NOPEEK` that must be readable
+//! before npkFS is unlocked. Everything read back from the ESP is untrusted.
 
 use crate::nvme;
 
@@ -17,6 +18,15 @@ const MIN_KERNEL_RESERVED: u32 = 32768;
 
 /// FAT32 entry: end of chain
 const FAT_EOC: u32 = 0x0FFF_FFFF;
+
+const ATTR_VOLUME: u8 = 0x08;
+const ATTR_DIR: u8 = 0x10;
+const ATTR_ARCHIVE: u8 = 0x20;
+/// Long-file-name entries carry all four low attribute bits.
+const ATTR_LFN: u8 = 0x0F;
+
+/// Largest file `write_small_file` stores: one sector, so it fits any cluster.
+pub const SMALL_FILE_MAX: usize = 512;
 
 struct Fat32Writer {
     /// Absolute start sector on NVMe
@@ -327,6 +337,10 @@ pub fn create_esp(
 struct Fat32Reader {
     /// Absolute start sector of ESP on NVMe
     part_start: u64,
+    /// Reserved sectors before the first FAT (BPB RsvdSecCnt)
+    reserved: u32,
+    /// Number of FAT copies (BPB NumFATs)
+    num_fats: u32,
     /// Sectors per FAT
     fat_size: u32,
     /// First data sector (relative to partition start)
@@ -336,6 +350,55 @@ struct Fat32Reader {
     /// Total sectors in the partition (BPB TotSec32) — the bound for
     /// allocating additional clusters.
     total_sectors: u32,
+    /// First cluster of the root directory (BPB RootClus)
+    root_cluster: u32,
+    /// Highest cluster number that exists in the data area and in the FAT.
+    max_cluster: u32,
+}
+
+/// One 32-byte directory entry, located on disk.
+#[derive(Clone, Copy)]
+struct DirEntry {
+    first_cluster: u32,
+    size: u32,
+    attr: u8,
+    /// Directory cluster holding the entry, so a write can be checked against
+    /// the clusters that must not be touched.
+    cluster: u32,
+    sector: u32,
+    offset: usize,
+}
+
+struct DirScan {
+    found: Option<DirEntry>,
+    /// First free slot (0x00 or 0xE5); its cluster/sector/offset are valid,
+    /// the other fields are zero.
+    free: Option<DirEntry>,
+}
+
+/// Clusters `write_small_file` must never write or allocate.
+struct Protected {
+    /// BOOTX64.EFI's reserved run: `[start, end)`.
+    run_start: u32,
+    run_end: u32,
+    /// Root, /EFI and /EFI/BOOT.
+    dirs: [u32; 3],
+}
+
+impl Protected {
+    fn in_run(&self, c: u32) -> bool {
+        c >= self.run_start && c < self.run_end
+    }
+
+    /// A directory cluster whose entries may be rewritten.
+    fn dir_writable(&self, fs: &Fat32Reader, c: u32) -> bool {
+        fs.valid_cluster(c) && !self.in_run(c)
+    }
+
+    /// A cluster that may hold small-file or NOPEEK-directory contents.
+    fn data_writable(&self, fs: &Fat32Reader, c: u32) -> bool {
+        fs.valid_cluster(c) && !self.in_run(c) && !self.dirs.contains(&c)
+    }
 }
 
 impl Fat32Reader {
@@ -347,15 +410,47 @@ impl Fat32Reader {
         // Verify FAT32 signature
         if bs[510] != 0x55 || bs[511] != 0xAA { return Err("ESP: bad signature"); }
 
+        if u16::from_le_bytes([bs[11], bs[12]]) as usize != SECTOR_SIZE {
+            return Err("ESP: sector size is not 512");
+        }
         let spc = bs[13] as u32;
-        if spc == 0 { return Err("ESP: bad SPC"); }
+        if spc == 0 || !spc.is_power_of_two() { return Err("ESP: bad SPC"); }
         let reserved = u16::from_le_bytes([bs[14], bs[15]]) as u32;
+        if reserved == 0 { return Err("ESP: no reserved sectors"); }
         let num_fats = bs[16] as u32;
+        if num_fats == 0 || num_fats > 4 { return Err("ESP: bad FAT count"); }
         let fat_size = u32::from_le_bytes([bs[36], bs[37], bs[38], bs[39]]);
-        let data_start = reserved + num_fats * fat_size;
+        if fat_size == 0 { return Err("ESP: not FAT32"); }
         let total_sectors = u32::from_le_bytes([bs[32], bs[33], bs[34], bs[35]]);
+        let data_start = num_fats.checked_mul(fat_size)
+            .and_then(|f| f.checked_add(reserved))
+            .filter(|&d| d < total_sectors)
+            .ok_or("ESP: FATs overrun the partition")?;
+        let clusters = (total_sectors - data_start) / spc;
+        // The FAT may describe fewer clusters than the data area holds; only
+        // clusters with a FAT entry exist. 0x0FFF_FFF7 and up are markers.
+        let fat_entries = fat_size.saturating_mul((SECTOR_SIZE / 4) as u32);
+        let max_cluster = (clusters + 1).min(fat_entries.saturating_sub(1)).min(0x0FFF_FFF6);
+        let root_cluster = u32::from_le_bytes([bs[44], bs[45], bs[46], bs[47]]);
+        if max_cluster < 2 || root_cluster < 2 || root_cluster > max_cluster {
+            return Err("ESP: bad root cluster");
+        }
 
-        Ok(Fat32Reader { part_start, fat_size, data_start, spc, total_sectors })
+        Ok(Fat32Reader {
+            part_start, reserved, num_fats, fat_size, data_start, spc, total_sectors,
+            root_cluster, max_cluster,
+        })
+    }
+
+    fn valid_cluster(&self, cluster: u32) -> bool {
+        cluster >= 2 && cluster <= self.max_cluster
+    }
+
+    /// Sector (relative to the first FAT) and byte offset of a FAT entry.
+    fn fat_pos(&self, cluster: u32) -> Result<(u32, usize), &'static str> {
+        if cluster > self.max_cluster { return Err("ESP: cluster past the FAT"); }
+        let offset = cluster as usize * 4;
+        Ok(((offset / SECTOR_SIZE) as u32, offset % SECTOR_SIZE))
     }
 
     fn read_sector(&self, rel_sector: u32, buf: &mut [u8; 512]) -> Result<(), &'static str> {
@@ -387,20 +482,15 @@ impl Fat32Reader {
             .saturating_add(cluster.saturating_sub(2).saturating_mul(self.spc))
     }
 
-    /// Read next cluster from FAT chain.
+    /// Next cluster of a chain, `None` at its end. A free, reserved, bad or
+    /// out-of-range entry is an error: following it would land on another
+    /// file or, for 0 and 1, on the root directory.
     fn fat_next(&self, cluster: u32) -> Result<Option<u32>, &'static str> {
-        let offset_bytes = cluster as u64 * 4;
-        let fat_sector = RESERVED_SECTORS + (offset_bytes / 512) as u32;
-        let fat_offset = (offset_bytes % 512) as usize;
-
-        let mut sec = [0u8; 512];
-        self.read_sector(fat_sector, &mut sec)?;
-        let val = u32::from_le_bytes([
-            sec[fat_offset], sec[fat_offset + 1],
-            sec[fat_offset + 2], sec[fat_offset + 3],
-        ]) & 0x0FFF_FFFF;
-
-        if val >= 0x0FFF_FFF8 { Ok(None) } else { Ok(Some(val)) }
+        if !self.valid_cluster(cluster) { return Err("ESP: cluster out of range"); }
+        let val = self.fat_entry(cluster)?;
+        if val >= 0x0FFF_FFF8 { return Ok(None); }
+        if !self.valid_cluster(val) { return Err("ESP: corrupt FAT chain"); }
+        Ok(Some(val))
     }
 
     /// Append one free cluster to the chain ending at `last`, and return it.
@@ -409,9 +499,8 @@ impl Fat32Reader {
     /// `last + 1` is free; a wrong guess would splice another file's
     /// cluster into the kernel image.
     fn extend_chain(&self, last: u32) -> Result<u32, &'static str> {
-        let usable = (self.total_sectors.saturating_sub(self.data_start)) / self.spc + 2;
         let mut cand = last + 1;
-        while cand < usable {
+        while cand <= self.max_cluster {
             if self.fat_entry(cand)? == 0 {
                 self.fat_write(last, cand)?;
                 self.fat_write(cand, FAT_EOC)?;
@@ -424,27 +513,78 @@ impl Fat32Reader {
 
     /// Raw FAT entry for a cluster (0 = free).
     fn fat_entry(&self, cluster: u32) -> Result<u32, &'static str> {
-        let offset = cluster as u64 * 4;
+        let (sector, o) = self.fat_pos(cluster)?;
         let mut sec = [0u8; 512];
-        self.read_sector(RESERVED_SECTORS + (offset / 512) as u32, &mut sec)?;
-        let o = (offset % 512) as usize;
+        self.read_sector(self.reserved + sector, &mut sec)?;
         Ok(u32::from_le_bytes([sec[o], sec[o + 1], sec[o + 2], sec[o + 3]]) & 0x0FFF_FFFF)
     }
 
-    /// Write a FAT entry (both copies).
+    /// Write a FAT entry in every FAT copy. The top four bits are reserved
+    /// and kept (Microsoft FAT spec, "FAT32 FAT entry").
     fn fat_write(&self, cluster: u32, value: u32) -> Result<(), &'static str> {
-        let offset_bytes = cluster as u64 * 4;
-        let fat_sector = (offset_bytes / 512) as u32;
-        let fat_offset = (offset_bytes % 512) as usize;
+        if !self.valid_cluster(cluster) { return Err("ESP: cluster out of range"); }
+        let (fat_sector, o) = self.fat_pos(cluster)?;
 
-        for fat_num in 0..2u32 {
-            let abs = RESERVED_SECTORS + fat_num * self.fat_size + fat_sector;
+        for fat_num in 0..self.num_fats {
+            let abs = self.reserved + fat_num * self.fat_size + fat_sector;
             let mut sec = [0u8; 512];
             self.read_sector(abs, &mut sec)?;
-            sec[fat_offset..fat_offset + 4].copy_from_slice(&value.to_le_bytes());
+            let old = u32::from_le_bytes([sec[o], sec[o + 1], sec[o + 2], sec[o + 3]]);
+            let new = (old & 0xF000_0000) | (value & 0x0FFF_FFFF);
+            sec[o..o + 4].copy_from_slice(&new.to_le_bytes());
             self.write_sector(abs, &sec)?;
         }
         Ok(())
+    }
+
+    /// Walk a directory for an 8.3 name and for the first free slot. Stops at
+    /// the 0x00 end marker. LFN entries and the volume label never match.
+    fn scan_dir(&self, dir_cluster: u32, name: &[u8; 11]) -> Result<DirScan, &'static str> {
+        if !self.valid_cluster(dir_cluster) { return Err("ESP: directory cluster out of range"); }
+        let mut scan = DirScan { found: None, free: None };
+        let mut cluster = dir_cluster;
+        // A crafted FAT can form a cycle; bound the walk.
+        let mut steps = 0u32;
+        loop {
+            let sector = self.cluster_to_sector(cluster);
+            for s in 0..self.spc {
+                let mut sec = [0u8; 512];
+                self.read_sector(sector + s, &mut sec)?;
+                for off in (0..SECTOR_SIZE).step_by(32) {
+                    let slot = DirEntry {
+                        first_cluster: 0, size: 0, attr: 0,
+                        cluster, sector: sector + s, offset: off,
+                    };
+                    let first = sec[off];
+                    if first == 0x00 || first == 0xE5 {
+                        if scan.free.is_none() { scan.free = Some(slot); }
+                        if first == 0x00 { return Ok(scan); }
+                        continue;
+                    }
+                    let attr = sec[off + 11];
+                    if attr & ATTR_LFN == ATTR_LFN || attr & ATTR_VOLUME != 0 { continue; }
+                    if &sec[off..off + 11] == name {
+                        let cl_lo = u16::from_le_bytes([sec[off + 26], sec[off + 27]]) as u32;
+                        let cl_hi = u16::from_le_bytes([sec[off + 20], sec[off + 21]]) as u32;
+                        scan.found = Some(DirEntry {
+                            first_cluster: (cl_hi << 16) | cl_lo,
+                            size: u32::from_le_bytes([
+                                sec[off + 28], sec[off + 29], sec[off + 30], sec[off + 31],
+                            ]),
+                            attr,
+                            ..slot
+                        });
+                        return Ok(scan);
+                    }
+                }
+            }
+            match self.fat_next(cluster)? {
+                Some(next) => cluster = next,
+                None => return Ok(scan),
+            }
+            steps += 1;
+            if steps > 100_000 { return Err("FAT dir chain too long"); }
+        }
     }
 
     /// Find a directory entry by 8.3 name in a given directory cluster.
@@ -452,38 +592,71 @@ impl Fat32Reader {
     fn find_entry(&self, dir_cluster: u32, name: &[u8; 11])
         -> Result<(u32, u32, u32, usize), &'static str>
     {
-        let mut cluster = dir_cluster;
-        // Cap the directory-chain walk: a crafted/corrupt FAT can form a
-        // cluster cycle, and without a terminating 0x00 entry the loop would
-        // spin forever (DoS on the OTA path). Same bound as chain_len.
-        let mut steps = 0u32;
-        loop {
-            let sector = self.cluster_to_sector(cluster);
-            for s in 0..self.spc {
-                let mut sec = [0u8; 512];
-                self.read_sector(sector + s, &mut sec)?;
-                for i in 0..16 { // 16 entries per sector
-                    let off = i * 32;
-                    if sec[off] == 0x00 { return Err("entry not found"); }
-                    if sec[off] == 0xE5 { continue; } // deleted
-                    if &sec[off..off + 11] == name {
-                        let cl_lo = u16::from_le_bytes([sec[off + 26], sec[off + 27]]) as u32;
-                        let cl_hi = u16::from_le_bytes([sec[off + 20], sec[off + 21]]) as u32;
-                        let first_cl = (cl_hi << 16) | cl_lo;
-                        let size = u32::from_le_bytes([
-                            sec[off + 28], sec[off + 29], sec[off + 30], sec[off + 31],
-                        ]);
-                        return Ok((first_cl, size, sector + s, off));
-                    }
-                }
+        let e = self.scan_dir(dir_cluster, name)?.found.ok_or("entry not found")?;
+        Ok((e.first_cluster, e.size, e.sector, e.offset))
+    }
+
+    /// Cluster of the subdirectory `name` in `parent`, `None` if absent.
+    fn subdir(&self, parent: u32, name: &[u8; 11]) -> Result<Option<u32>, &'static str> {
+        match self.scan_dir(parent, name)?.found {
+            None => Ok(None),
+            Some(e) if e.attr & ATTR_DIR == 0 => Err("ESP: expected a directory"),
+            Some(e) if !self.valid_cluster(e.first_cluster) => {
+                Err("ESP: directory cluster out of range")
             }
-            match self.fat_next(cluster)? {
-                Some(next) => cluster = next,
-                None => return Err("entry not found"),
-            }
-            steps += 1;
-            if steps > 100_000 { return Err("FAT dir chain too long"); }
+            Some(e) => Ok(Some(e.first_cluster)),
         }
+    }
+
+    /// Replace the 32-byte entry at `slot`.
+    fn write_entry(&self, slot: &DirEntry, entry: &[u8; 32]) -> Result<(), &'static str> {
+        let mut sec = [0u8; 512];
+        self.read_sector(slot.sector, &mut sec)?;
+        sec[slot.offset..slot.offset + 32].copy_from_slice(entry);
+        self.write_sector(slot.sector, &sec)
+    }
+
+    /// Set first cluster and size of the entry at `slot`, keeping the rest.
+    fn set_entry_cluster_size(&self, slot: &DirEntry, cluster: u32, size: u32)
+        -> Result<(), &'static str>
+    {
+        let mut sec = [0u8; 512];
+        self.read_sector(slot.sector, &mut sec)?;
+        let o = slot.offset;
+        sec[o + 20..o + 22].copy_from_slice(&((cluster >> 16) as u16).to_le_bytes());
+        sec[o + 26..o + 28].copy_from_slice(&(cluster as u16).to_le_bytes());
+        sec[o + 28..o + 32].copy_from_slice(&size.to_le_bytes());
+        self.write_sector(slot.sector, &sec)
+    }
+
+    /// Write `first` into the first sector of `cluster` and zero the rest.
+    fn write_cluster(&self, cluster: u32, first: &[u8; 512]) -> Result<(), &'static str> {
+        let base = self.cluster_to_sector(cluster);
+        self.write_sector(base, first)?;
+        let zero = [0u8; 512];
+        for s in 1..self.spc {
+            self.write_sector(base + s, &zero)?;
+        }
+        Ok(())
+    }
+
+    /// A free cluster outside `keep`, searched from the end of the partition
+    /// so the space behind the kernel's run stays free for it to grow into.
+    fn alloc_cluster(&self, keep: &Protected) -> Result<u32, &'static str> {
+        let per_sector = (SECTOR_SIZE / 4) as u32;
+        let (last_sector, _) = self.fat_pos(self.max_cluster)?;
+        for fat_sector in (0..=last_sector).rev() {
+            let mut sec = [0u8; 512];
+            self.read_sector(self.reserved + fat_sector, &mut sec)?;
+            for i in (0..per_sector).rev() {
+                let c = fat_sector * per_sector + i;
+                if !keep.data_writable(self, c) { continue; }
+                let o = i as usize * 4;
+                let v = u32::from_le_bytes([sec[o], sec[o + 1], sec[o + 2], sec[o + 3]]);
+                if v & 0x0FFF_FFFF == 0 { return Ok(c); }
+            }
+        }
+        Err("ESP full")
     }
 
     /// Count clusters in a FAT chain.
@@ -520,7 +693,7 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
 
     // Navigate: root → /EFI → /EFI/BOOT → BOOTX64.EFI
     let efi_name = make_name(b"EFI", b"");
-    let (efi_cl, _, _, _) = fs.find_entry(ROOT_CLUSTER, &efi_name)?;
+    let (efi_cl, _, _, _) = fs.find_entry(fs.root_cluster, &efi_name)?;
 
     let boot_name = make_name(b"BOOT", b"");
     let (boot_cl, _, _, _) = fs.find_entry(efi_cl, &boot_name)?;
@@ -590,12 +763,157 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
 /// Free a FAT chain starting at the given cluster.
 fn free_chain(fs: &Fat32Reader, start: u32) -> Result<(), &'static str> {
     let mut cl = start;
+    let mut steps = 0u32;
     loop {
         let next = fs.fat_next(cl)?;
         fs.fat_write(cl, 0)?; // Mark as free
         match next {
             Some(n) => cl = n,
             None => break,
+        }
+        steps += 1;
+        if steps > fs.max_cluster { return Err("FAT chain too long"); }
+    }
+    Ok(())
+}
+
+/// `NAME` or `NAME.EXT` as an 11-byte 8.3 entry name. Accepts ASCII letters,
+/// digits, `_` and `-`; lower case is folded to upper case.
+fn short_name(name: &str) -> Option<[u8; 11]> {
+    let b = name.as_bytes();
+    let (base, ext) = match b.iter().position(|&c| c == b'.') {
+        Some(i) => (&b[..i], &b[i + 1..]),
+        None => (b, &b[..0]),
+    };
+    if base.is_empty() || base.len() > 8 || ext.len() > 3 { return None; }
+    if ext.is_empty() && base.len() != b.len() { return None; }
+    let ok = |c: &u8| c.is_ascii_alphanumeric() || *c == b'_' || *c == b'-';
+    if !base.iter().all(ok) || !ext.iter().all(ok) { return None; }
+    Some(make_name(base, ext))
+}
+
+const NOPEEK_DIR: [u8; 11] = *b"NOPEEK     ";
+
+/// Absolute start sector of the ESP on the NVMe boot disk, found the same
+/// way the OTA kernel update finds it (first GPT entry, ESP type GUID).
+/// `None` without NVMe, without GPT, or when the first entry is not an ESP.
+pub fn esp_start() -> Option<u64> {
+    crate::gpt::detect_esp_offset()
+}
+
+/// Read `/EFI/NOPEEK/<name>` (8.3 name, e.g. "TZ") into `buf`; returns the
+/// file length copied. `None` if the file is absent, the ESP is unreadable or
+/// inconsistent, or the file is larger than `buf` or `SMALL_FILE_MAX`.
+/// `esp_start` is what `esp_start()` returns.
+pub fn read_small_file(esp_start: u64, name: &str, buf: &mut [u8]) -> Option<usize> {
+    let name = short_name(name)?;
+    let fs = Fat32Reader::from_esp(esp_start).ok()?;
+    let efi = fs.subdir(fs.root_cluster, &make_name(b"EFI", b"")).ok()??;
+    let dir = fs.subdir(efi, &NOPEEK_DIR).ok()??;
+    let e = fs.scan_dir(dir, &name).ok()?.found?;
+    if e.attr & ATTR_DIR != 0 { return None; }
+    let len = e.size as usize;
+    if len > SMALL_FILE_MAX || len > buf.len() { return None; }
+    if len == 0 { return Some(0); }
+    if !fs.valid_cluster(e.first_cluster) { return None; }
+    let mut sec = [0u8; 512];
+    fs.read_sector(fs.cluster_to_sector(e.first_cluster), &mut sec).ok()?;
+    buf[..len].copy_from_slice(&sec[..len]);
+    Some(len)
+}
+
+/// Create or replace `/EFI/NOPEEK/<name>` with `data` (at most
+/// `SMALL_FILE_MAX` bytes), creating `/EFI/NOPEEK` when missing. An existing
+/// file is overwritten in its own cluster. Never writes into or allocates
+/// from BOOTX64.EFI's reserved run.
+///
+/// Each step writes the data cluster, then the FAT, then the directory entry,
+/// so a crash leaves at most an unreferenced allocated cluster. Overwriting
+/// an existing file writes data before size, so a crash in between leaves the
+/// new bytes under the old length.
+///
+/// Not implemented: growing `/EFI/NOPEEK` past its first cluster.
+pub fn write_small_file(esp_start: u64, name: &str, data: &[u8]) -> Result<(), &'static str> {
+    if data.len() > SMALL_FILE_MAX { return Err("ESP small file: larger than one sector"); }
+    let name = short_name(name).ok_or("ESP small file: not an 8.3 name")?;
+    let fs = Fat32Reader::from_esp(esp_start)?;
+
+    let root = fs.root_cluster;
+    let efi = fs.subdir(root, &make_name(b"EFI", b""))?.ok_or("ESP: no /EFI")?;
+    let boot = fs.subdir(efi, &make_name(b"BOOT", b""))?.ok_or("ESP: no /EFI/BOOT")?;
+    let kernel = fs.scan_dir(boot, &make_name(b"BOOTX64", b"EFI"))?
+        .found.ok_or("ESP: no BOOTX64.EFI")?;
+    if !fs.valid_cluster(kernel.first_cluster) { return Err("ESP: BOOTX64.EFI cluster out of range"); }
+    // Same size rule as `create_esp`, so the bound covers the run it laid down.
+    let kernel_clusters = (kernel.size as u64).div_ceil(SECTOR_SIZE as u64 * fs.spc as u64) as u32;
+    let run_len = kernel_clusters.saturating_mul(2).max(MIN_KERNEL_RESERVED);
+    let keep = Protected {
+        run_start: kernel.first_cluster,
+        run_end: kernel.first_cluster.saturating_add(run_len),
+        dirs: [root, efi, boot],
+    };
+    if !keep.dir_writable(&fs, efi) { return Err("ESP: /EFI inside the kernel run"); }
+
+    let dir = match fs.subdir(efi, &NOPEEK_DIR)? {
+        Some(d) if keep.data_writable(&fs, d) => d,
+        Some(_) => return Err("ESP: /EFI/NOPEEK cluster is protected"),
+        None => {
+            let slot = fs.scan_dir(efi, &NOPEEK_DIR)?.free.ok_or("ESP: /EFI is full")?;
+            if !keep.dir_writable(&fs, slot.cluster) { return Err("ESP: /EFI slot is protected"); }
+            let d = fs.alloc_cluster(&keep)?;
+            let mut sec = [0u8; 512];
+            sec[0..32].copy_from_slice(
+                &Fat32Writer::make_dir_entry(b".          ", ATTR_DIR, d, 0));
+            // `..` of a directory directly below root holds 0 (FAT spec).
+            let parent = if efi == root { 0 } else { efi };
+            sec[32..64].copy_from_slice(
+                &Fat32Writer::make_dir_entry(b"..         ", ATTR_DIR, parent, 0));
+            fs.write_cluster(d, &sec)?;
+            fs.fat_write(d, FAT_EOC)?;
+            fs.write_entry(&slot, &Fat32Writer::make_dir_entry(&NOPEEK_DIR, ATTR_DIR, d, 0))?;
+            d
+        }
+    };
+
+    let mut sec = [0u8; 512];
+    sec[..data.len()].copy_from_slice(data);
+    let size = data.len() as u32;
+
+    let scan = fs.scan_dir(dir, &name)?;
+    let (slot, existing) = match scan.found {
+        Some(e) => {
+            if e.attr & (ATTR_DIR | ATTR_VOLUME) != 0 { return Err("ESP: name is not a file"); }
+            (e, Some(e))
+        }
+        None => (scan.free.ok_or("ESP: /EFI/NOPEEK is full")?, None),
+    };
+    if !keep.dir_writable(&fs, slot.cluster) || keep.dirs.contains(&slot.cluster) {
+        return Err("ESP: /EFI/NOPEEK slot is protected");
+    }
+
+    match existing {
+        Some(e) if e.first_cluster != 0 => {
+            let c = e.first_cluster;
+            if !keep.data_writable(&fs, c) || c == dir {
+                return Err("ESP: file cluster is protected");
+            }
+            // Rejects a cluster the FAT calls free: it may belong to no one,
+            // or be handed out again.
+            fs.fat_next(c)?;
+            fs.write_cluster(c, &sec)?;
+            if e.size != size { fs.set_entry_cluster_size(&slot, c, size)?; }
+        }
+        Some(_) => {
+            let c = fs.alloc_cluster(&keep)?;
+            fs.write_cluster(c, &sec)?;
+            fs.fat_write(c, FAT_EOC)?;
+            fs.set_entry_cluster_size(&slot, c, size)?;
+        }
+        None => {
+            let c = fs.alloc_cluster(&keep)?;
+            fs.write_cluster(c, &sec)?;
+            fs.fat_write(c, FAT_EOC)?;
+            fs.write_entry(&slot, &Fat32Writer::make_dir_entry(&name, ATTR_ARCHIVE, c, size))?;
         }
     }
     Ok(())

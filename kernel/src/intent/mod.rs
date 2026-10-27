@@ -2274,7 +2274,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "time" | "clock" | "date" => {
             if require_cap(vault, &session, Rights::READ, "time") {
-                system::intent_time();
+                system::intent_time(args);
             }
         }
         "traceroute" | "trace" => {
@@ -2789,7 +2789,7 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
         let _ = write!(s, " noapic");
     }
     if let Some(epoch) =
-        crate::rtc::read_unix_time().or_else(crate::net::ntp::unix_time)
+        crate::time::now()
     {
         let _ = write!(s, " nopeektime={}", epoch);
     }

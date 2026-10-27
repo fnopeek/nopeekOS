@@ -293,6 +293,7 @@ fn succeed(mac: [u8; 6], ip: [u8; 4], reconfirmed: bool) {
     } else {
         kprintln!("[npk] DHCP: configured {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
     }
+    crate::time::request_sync();
 }
 
 fn give_up() {

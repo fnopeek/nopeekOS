@@ -421,11 +421,9 @@ pub fn verify_chain(chain: &[&[u8]], hostname: &str) -> Result<(), CertError> {
 // 1 January 2025.
 pub(crate) const CLOCK_SANE_FLOOR: u64 = 1_735_689_600;
 
-/// Current UTC seconds, or `None` when no source is trustworthy.
-/// NTP first — it is the accurate one; CMOS is the offline fallback.
+/// Current UTC seconds, or `None` when the clock is unset or implausible.
 fn now_unix() -> Option<u64> {
-    let t = crate::net::ntp::unix_time()
-        .or_else(crate::drivers::rtc::read_unix_time)?;
+    let t = crate::time::now()?;
     (t >= CLOCK_SANE_FLOOR).then_some(t)
 }
 

@@ -1,7 +1,8 @@
 //! RTC — Real-Time Clock (CMOS 0x70/0x71)
 //!
-//! Reads the hardware clock as fallback time source.
-//! BCD-encoded registers, no IRQ — just polled reads.
+//! The battery-backed clock the system time starts from at boot, kept in
+//! UTC (`time` writes it back after each NTP sync). BCD or binary as the
+//! firmware set it, no IRQ, polled.
 
 use crate::hw::Port;
 
@@ -30,6 +31,18 @@ fn read_cmos(reg: u8) -> u8 {
         CMOS_ADDR.outb(reg | 0x80); // bit 7 = disable NMI
         CMOS_DATA.inb()
     })
+}
+
+fn write_cmos(reg: u8, val: u8) {
+    crate::interrupts::without_interrupts(|| {
+        let _g = CMOS_LOCK.lock();
+        CMOS_ADDR.outb(reg | 0x80);
+        CMOS_DATA.outb(val);
+    })
+}
+
+fn bin_to_bcd(val: u8) -> u8 {
+    ((val / 10) << 4) | (val % 10)
 }
 
 fn bcd_to_bin(val: u8) -> u8 {
@@ -139,4 +152,36 @@ fn datetime_to_unix(year: u64, month: u64, day: u64, hour: u64, min: u64, sec: u
 
 fn is_leap(y: u64) -> bool {
     y % 4 == 0 && (y % 100 != 0 || y % 400 == 0)
+}
+
+/// Set the RTC to `unix` (UTC), in the format the firmware chose (BCD or
+/// binary, 12 or 24 hours), as Linux `mc146818_set_time`: the SET bit
+/// holds the update cycle while the registers are written. Years outside
+/// 2000..2099 are refused, since the year register has two digits.
+pub fn write_unix_time(unix: u64) -> bool {
+    let days = (unix / 86_400) as i64;
+    let secs = unix % 86_400;
+    let (year, month, day) = crate::time::civil_from_days(days);
+    if !(2000..2100).contains(&year) {
+        return false;
+    }
+    let (h, m, s) = ((secs / 3600) as u8, ((secs / 60) % 60) as u8, (secs % 60) as u8);
+    let b = read_cmos(REG_STATUS_B);
+    let bcd = b & 0x04 == 0;
+    let h24 = b & 0x02 != 0;
+    let hour = if h24 { h } else {
+        let h12 = if h % 12 == 0 { 12 } else { h % 12 };
+        h12 | if h >= 12 { 0x80 } else { 0 }
+    };
+    let enc = |v: u8| if bcd { bin_to_bcd(v) } else { v };
+    let hour = if h24 { enc(hour) } else { enc(hour & 0x7F) | (hour & 0x80) };
+    write_cmos(REG_STATUS_B, b | 0x80);
+    write_cmos(REG_SECONDS, enc(s));
+    write_cmos(REG_MINUTES, enc(m));
+    write_cmos(REG_HOURS, hour);
+    write_cmos(REG_DAY, enc(day as u8));
+    write_cmos(REG_MONTH, enc(month as u8));
+    write_cmos(REG_YEAR, enc((year - 2000) as u8));
+    write_cmos(REG_STATUS_B, b & !0x80);
+    true
 }
