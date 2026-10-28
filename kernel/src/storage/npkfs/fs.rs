@@ -935,15 +935,13 @@ impl StreamingWriter {
     fn flush_chunk(&mut self) -> Result<(), Error> {
         if self.buf.is_empty() { return Ok(()); }
         let chunk_len = self.buf.len();
-        // Move the chunk into an `Object::Blob`, encode + store. We
-        // take(buf) so the next chunk reuses the same allocation
-        // (Vec::take + Vec::with_capacity).
-        let bytes = core::mem::replace(&mut self.buf, Vec::with_capacity(self.chunk_size));
-        let blob = super::object::Object::Blob(bytes);
-        let (encoded, hash) = blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+        // Address first, from the buffer: a chunk already stored is neither
+        // encoded nor encrypted. The buffer is kept for the next chunk.
+        let hash = super::object::blob_content_hash(&self.buf).ok_or(PathError::Corrupt)?;
         if !storage::has(&hash) {
-            storage::put(&hash, &encoded)?;
+            storage::put_addressed(&hash, &super::object::encode_blob(&self.buf))?;
         }
+        self.buf.clear();
         self.chunk_hashes.push(hash);
         self.written += chunk_len as u64;
         // Drain the deferred batch every so often. Otherwise a long

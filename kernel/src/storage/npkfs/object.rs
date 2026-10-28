@@ -194,6 +194,19 @@ pub fn blob_content_hash(data: &[u8]) -> Option<[u8; 32]> {
     Some(*hasher.finalize().as_bytes())
 }
 
+/// The encoding of `Object::Blob(data)`, built straight from the slice:
+/// the variant tag, the length, the bytes. Its address is
+/// `blob_content_hash(data)`.
+pub fn encode_blob(data: &[u8]) -> Vec<u8> {
+    let mut varint = [0u8; 10];
+    let n = encode_varint_u64(data.len() as u64, &mut varint);
+    let mut out = Vec::with_capacity(1 + n + data.len());
+    out.push(0);
+    out.extend_from_slice(&varint[..n]);
+    out.extend_from_slice(data);
+    out
+}
+
 /// Content length of an `Object::Blob` whose encoding is `encoded` bytes
 /// long: the one `n` with `1 + varint_len(n) + n == encoded`.
 pub fn blob_len_from_encoded(encoded: u64) -> Option<u64> {

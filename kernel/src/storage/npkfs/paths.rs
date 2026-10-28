@@ -318,18 +318,22 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
 }
 
 /// `store` for data above one chunk: the chunks a streaming write would
-/// make, each its own object, encoded, hashed and encrypted in parallel,
-/// then the manifest.
+/// make, each its own object, hashed, encoded, encrypted and written in
+/// parallel, then the manifest.
 fn store_chunked(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathError> {
     let pieces: Vec<&[u8]> = data.chunks(super::fs::STREAMING_CHUNK_SIZE).collect();
     let hashes: Vec<spin::Mutex<[u8; 32]>> = pieces.iter().map(|_| spin::Mutex::new([0; 32])).collect();
     let failed: spin::Mutex<Option<PathError>> = spin::Mutex::new(None);
     crate::smp::par::for_each(pieces.len(), &|i| {
-        let r = Object::Blob(pieces[i].to_vec()).encode_and_hash()
-            .map_err(|_| PathError::Corrupt)
-            .and_then(|(bytes, hash)| Ok((storage::put(&hash, &bytes)?, hash)));
+        let r = super::object::blob_content_hash(pieces[i]).ok_or(PathError::Corrupt)
+            .and_then(|hash| {
+                if !storage::has(&hash) {
+                    storage::put_addressed(&hash, &super::object::encode_blob(pieces[i]))?;
+                }
+                Ok(hash)
+            });
         match r {
-            Ok(((), hash)) => *hashes[i].lock() = hash,
+            Ok(hash) => *hashes[i].lock() = hash,
             Err(e) => { failed.lock().get_or_insert(e); }
         }
     });

@@ -822,6 +822,17 @@ pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
 /// dedup). The first put owns the on-disk extents; subsequent ones see
 /// the entry already present and return Ok.
 pub fn put(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
+    put_inner(hash, payload, true)
+}
+
+/// `put` for a caller that computed `hash` from these exact bytes just
+/// before (`blob_content_hash`, `encode_and_hash`): the address is not
+/// computed a second time.
+pub fn put_addressed(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
+    put_inner(hash, payload, false)
+}
+
+fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsError> {
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
 
@@ -837,8 +848,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
     }
     let t_dedup = rdtsc();
 
-    let computed = crypto::object_address(payload).ok_or(FsError::Locked)?;
-    if computed != *hash {
+    if verify && crypto::object_address(payload).ok_or(FsError::Locked)? != *hash {
         return Err(FsError::InvalidName);
     }
     let t_hash = rdtsc();
@@ -887,11 +897,9 @@ pub fn put(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
         allocated += try_size;
     }
 
-    // Write payload bytes across the extents — direct to disk via the
-    // single-cmd PRP-list extent path, bypassing the 64-slot block
-    // cache. Pushing 4096 blocks of a 16 MB blob through that cache
-    // thrashes it completely (every block evicts a metadata block,
-    // synchronous writebacks one-at-a-time). Crash-safe because the
+    // Write payload bytes across the extents — direct to disk, bypassing
+    // the metadata block cache, which a 16 MB blob pushed through it
+    // would empty of every B-tree node. Crash-safe because the
     // data isn't referenced from any committed Tree until commit_root
     // flips the SB; a crash mid-write just leaves orphan blocks in the
     // bitmap (reclaimed at next gc / not visible to any walk).
@@ -905,38 +913,37 @@ pub fn put(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
     }
     let t_alloc = rdtsc();
 
+    // The blocks are ours, so the device write needs no lock: other puts
+    // allocate, write and insert meanwhile, as `get` reads unlocked.
+    drop(lock);
     let mut consumed = 0usize;
+    let mut res = Ok(());
     for ext in &all_extents {
-        let blocks = ext.block_count as usize;
-        let span = blocks * BLOCK_SIZE;
+        let span = ext.block_count as usize * BLOCK_SIZE;
         let raw_end = write_data.len().min(consumed + span);
-        let raw_len = raw_end.saturating_sub(consumed);
-
-        // A failed device write must give the blocks back, like every
-        // other error path here (the DiskFull loop frees, the btree-insert
-        // failure calls rollback_alloc). Otherwise each retry of an aborted
-        // transfer strands its extents, ending in DiskFull on a disk that
-        // looks half empty.
-        let res = if raw_len == span {
-            crate::blkdev::write_extent(
-                ext.start_block, ext.block_count, &write_data[consumed..raw_end],
-            )
-        } else {
-            // Trailing extent contains a partial last block — pad with
-            // zeros so the extent writer always sees a block-aligned
-            // input. `disk_size` recorded in the entry below is the
-            // pre-padding length, so the read path strips the padding.
-            let mut padded = alloc::vec![0u8; span];
-            padded[..raw_len].copy_from_slice(&write_data[consumed..raw_end]);
-            crate::blkdev::write_extent(ext.start_block, ext.block_count, &padded)
-        };
-        if let Err(e) = res {
-            crate::kprintln!("[npk] npkfs: write failed for {:02x}{:02x}.. — freeing {} extent(s)",
-                hash[0], hash[1], all_extents.len());
-            rollback_alloc(fs, &all_extents, 0);
-            return Err(e.into());
+        let raw = &write_data[consumed..raw_end];
+        // Whole blocks straight from the payload; a partial last block
+        // padded with zeros (`disk_size` below is the unpadded length).
+        let whole = raw.len() / BLOCK_SIZE;
+        res = crate::blkdev::write_extent(ext.start_block, whole as u64, &raw[..whole * BLOCK_SIZE]);
+        if res.is_ok() && whole < ext.block_count as usize {
+            let mut last = [0u8; BLOCK_SIZE];
+            last[..raw.len() - whole * BLOCK_SIZE].copy_from_slice(&raw[whole * BLOCK_SIZE..]);
+            res = crate::blkdev::write_extent(ext.start_block + whole as u64, 1, &last);
         }
+        if res.is_err() { break; }
         consumed += span;
+    }
+    let mut lock = FS.lock();
+    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+    // A failed device write gives the blocks back, like every other error
+    // path here; otherwise each retry of an aborted transfer strands its
+    // extents, ending in DiskFull on a disk that looks half empty.
+    if let Err(e) = res {
+        crate::kprintln!("[npk] npkfs: write failed for {:02x}{:02x}.. — freeing {} extent(s)",
+            hash[0], hash[1], all_extents.len());
+        rollback_alloc(fs, &all_extents, 0);
+        return Err(e.into());
     }
     let t_dma = rdtsc();
 
