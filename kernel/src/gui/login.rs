@@ -317,6 +317,8 @@ pub fn run() {
 
         // Poll network while waiting
         crate::net::poll();
+        // A keyboard plugged in here, or behind a hub, is enumerated now.
+        crate::xhci::hotplug();
 
         // Poll keyboard (non-blocking)
         if let Some(key) = crate::keyboard::read_key() {

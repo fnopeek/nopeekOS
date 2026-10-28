@@ -69,7 +69,7 @@ pub fn describe(n: usize) {
 
 /// Where, which, how fast, and what it is (or how enumeration failed).
 fn headline(d: &UsbListed) -> String {
-    let at = format!("{:02x}:{:02x}.{} port {}", d.ctrl.bus, d.ctrl.device, d.ctrl.function, d.dev.port + 1);
+    let at = format!("{:02x}:{:02x}.{} port {}", d.ctrl.bus, d.ctrl.device, d.ctrl.function, d.dev.port);
     let speed = speed_name(d.dev.speed);
     if let Some((step, cc)) = d.dev.failed {
         return format!("{}  {} speed  enumeration failed at {}: {}", at, speed, step, cc_name(cc));

@@ -711,6 +711,18 @@ run_qemu_generic() {
         )
         log "QEMU_USB=split: keyboard on xhci, mouse on a SECOND controller"
     fi
+    # QEMU_USB=hub puts the keyboard behind a hub and the mouse behind a
+    # second hub on that one, to test hubs and route strings two tiers deep.
+    if [ "${QEMU_USB:-}" = "hub" ]; then
+        usb_args=(
+            -device qemu-xhci,id=xhci
+            -device usb-hub,bus=xhci.0,port=1,id=hub1
+            -device usb-kbd,bus=xhci.0,port=1.1,id=kbd
+            -device usb-hub,bus=xhci.0,port=1.2,id=hub2
+            -device usb-mouse,bus=xhci.0,port=1.2.1,id=mouse
+        )
+        log "QEMU_USB=hub: keyboard behind a hub, mouse behind a hub on that hub"
+    fi
     # QEMU_USB_HOST=vid:pid passes a real USB device of this machine through
     # to the first controller (e.g. 03f0:5341, a keyboard+mouse receiver).
     # QEMU needs write access to its /dev/bus/usb node.
@@ -718,6 +730,14 @@ run_qemu_generic() {
         local hvid="${QEMU_USB_HOST%%:*}" hpid="${QEMU_USB_HOST##*:}"
         usb_args+=(-device "usb-host,bus=xhci.0,vendorid=0x$hvid,productid=0x$hpid")
         log "QEMU_USB_HOST=$QEMU_USB_HOST: passed through to xhci"
+    fi
+
+    # QEMU_QMP=<socket path> opens a QMP socket, e.g. to plug USB devices
+    # out and in while the system runs (device_del, device_add).
+    local -a qmp_args=()
+    if [ -n "${QEMU_QMP:-}" ]; then
+        qmp_args=(-qmp "unix:$QEMU_QMP,server,nowait")
+        log "QEMU_QMP=$QEMU_QMP: QMP socket"
     fi
 
     local audiodev="${QEMU_AUDIODEV:-}"
@@ -746,6 +766,7 @@ run_qemu_generic() {
         -drive file="$DISK_IMG",format=raw,if=none,id=drive0 \
         -device nvme,drive=drive0,serial=nopeekos-test \
         "${usb_args[@]}" \
+        "${qmp_args[@]}" \
         -device intel-hda \
         -device hda-output,audiodev=snd0 \
         -audiodev "$audiodev" \
