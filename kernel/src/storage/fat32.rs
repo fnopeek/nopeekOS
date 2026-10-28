@@ -756,6 +756,8 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
 
     // Update directory entry with new file size
     fs.update_entry_size(dir_sec, dir_off, data.len() as u32)?;
+    // Out of the controller's volatile write cache before anyone reboots.
+    nvme::flush().map_err(|_| "ESP flush")?;
 
     Ok(())
 }

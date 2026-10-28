@@ -3,6 +3,7 @@
 //! Memory-mapped I/O via BAR0. Admin + I/O queue pairs.
 //! Exposes same block API as virtio_blk for npkFS compatibility.
 
+use alloc::vec::Vec;
 use crate::{kprintln, pci, memory};
 use crate::hw::{DmaRegion, Mmio};
 use crate::virtio_blk::BlkError;
@@ -56,15 +57,6 @@ const ADMIN_QUEUE_SIZE: u16 = 16;
 const IO_QUEUE_DEPTH: u32 = 1024;
 /// Spec minimum for an I/O queue (CAP.MQES >= 1).
 const IO_QUEUE_MIN: u32 = 2;
-
-/// The I/O queue depth in use, set once at init.
-static IO_Q_DEPTH: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(IO_QUEUE_MIN as u16);
-
-/// Commands one submission may keep outstanding: a queue of N entries holds
-/// at most N - 1 (NVMe base spec 4.1, "Full Queue").
-fn queue_room() -> usize {
-    IO_Q_DEPTH.load(Ordering::Relaxed) as usize - 1
-}
 
 // Submission Queue Entry (64 bytes)
 #[repr(C)]
@@ -141,6 +133,12 @@ struct NvmeState {
     /// it at zero: a later command must never take an earlier one's
     /// completion as its own.
     io_inflight: u16,
+    /// Free I/O command ids. An id indexes `io_busy` and `prp`, so a
+    /// completion finds its command's resources, as blk-mq tags do.
+    io_free: Vec<u16>,
+    io_busy: Vec<bool>,
+    /// One PRP list page per command id.
+    prp: Vec<DmaRegion>,
     /// A completion did not arrive in time. Its command may still run and
     /// DMA at any moment, so the queue is closed for good: refusing I/O is
     /// safe, guessing which completion belongs to whom is not.
@@ -152,51 +150,16 @@ struct NvmeState {
 static NVME: Mutex<Option<NvmeState>> = Mutex::new(None);
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-// DMA buffer for data transfers (one 4KB page, identity-mapped)
+// The Dataset Management range of `discard_blocks` (one 4 KB page).
 static DMA_BUF: Mutex<Option<DmaRegion>> = Mutex::new(None);
 
-/// Pool of pre-allocated 4 KB DMA buffers for batched I/O. With a single
-/// shared `DMA_BUF`, every block transfer is necessarily synchronous —
-/// the source/dest pointer would race otherwise. The pool lets us submit
-/// up to `DMA_POOL_SLOTS` commands in flight, ring the doorbell once,
-/// then collect all completions in a single drain.
-///
-/// 256 slots × 4 KB = 1 MB. Sized to hold `MAX_INFLIGHT` cmds × 128
-/// blocks/cmd = 256 slots, so a 1 MB read can keep two cmds in flight
-/// simultaneously.
-const DMA_POOL_SLOTS: usize = 256;
+/// Pages one PRP list addresses (NVMe base spec 4.1.1: a 4 KB list holds
+/// 512 entries). A command never needs a second list page because a
+/// transfer is cut at `MAX_BLOCKS_PER_CMD`, which is at most this.
+const PRP_LIST_ENTRIES: u32 = 512;
 
-/// Largest batch submitted at once: what both the DMA pool and the queue hold.
-fn max_batch() -> usize {
-    DMA_POOL_SLOTS.min(queue_room())
-}
-static DMA_POOL_BASE: Mutex<Option<DmaRegion>> = Mutex::new(None);
-
-/// Number of NVMe commands `read_extent` / `write_extent` keep in
-/// flight before draining. Bounded by both the PRP-list pool and the
-/// DMA pool — each in-flight cmd consumes one PRP-list slot and up to
-/// `MAX_BLOCKS_PER_CMD` data slots. 4 = 1 MB at MDTS=128.
-const MAX_INFLIGHT: usize = 4;
-
-/// Max in-flight cmds for the multi-extent read path. Sized for the
-/// fragmented-blob case: a 1 MB blob split into 257 single-block
-/// extents wants as many concurrent cmds as the SSD can pipeline.
-/// 32 cmds × 1 block = 32 pool slots — plenty of headroom in the
-/// 256-slot pool.
-const MAX_INFLIGHT_MULTI: usize = 32;
-
-/// PRP-list scratch pool. NVMe spec: a transfer covering ≥3 4 KB pages
-/// uses `prp1` for the first page and a "PRP List" — a 4 KB block
-/// holding up to 512 page-pointers — addressed by `prp2`. Sized for
-/// `MAX_INFLIGHT_MULTI` so the multi-extent path can fully parallelise.
-const PRP_LIST_POOL_SLOTS: usize = MAX_INFLIGHT_MULTI;
-static PRP_LIST_POOL_BASE: Mutex<Option<DmaRegion>> = Mutex::new(None);
-
-/// Max data blocks per single NVMe READ/WRITE command. Computed from
-/// Identify Controller's MDTS field (offset 77) at init time; capped to
-/// `DMA_POOL_SLOTS` so a single cmd fits in our DMA pool. Treated as a
-/// hard upper bound by `read_extent` / `write_extent`; larger transfers
-/// are split into multiple cmds.
+/// Largest single READ/WRITE in 4 KB blocks: MDTS, bounded by what one
+/// PRP list page addresses. Set at init.
 static MAX_BLOCKS_PER_CMD: AtomicU32 = AtomicU32::new(64);
 
 /// Write submission entry `idx` of `sq` as one volatile store.
@@ -260,15 +223,13 @@ const IO_TIMEOUT_SECS: u64 = 30;
 const HALT_STEP_US: u64 = 100;
 
 impl NvmeState {
-    /// Queue one I/O command without ringing the doorbell. Returns its id.
-    fn io_push(&mut self, mut cmd: SqEntry) -> u16 {
-        let cid = self.command_id;
+    /// Queue `cmd` under the free id `cid` without ringing the doorbell.
+    fn io_push(&mut self, cid: u16, mut cmd: SqEntry) {
         cmd.command_id = cid;
-        self.command_id = self.command_id.wrapping_add(1);
+        self.io_busy[cid as usize] = true;
         sq_write(&self.io_sq, self.io_sq_tail, cmd);
         self.io_sq_tail = (self.io_sq_tail + 1) % self.io_q_depth;
         self.io_inflight += 1;
-        cid
     }
 
     /// Hand everything queued so far to the controller.
@@ -277,8 +238,9 @@ impl NvmeState {
         ring_sq_doorbell(self, 1, self.io_sq_tail);
     }
 
-    /// Take the next completion: `(command id, status code)`. A timeout
-    /// closes the queue (see `io_dead`).
+    /// Take the next completion: `(command id, status code)`, its id free
+    /// again. A timeout, or a completion for an id not in flight, closes
+    /// the queue (see `io_dead`).
     fn io_reap(&mut self) -> Result<(u16, u16), BlkError> {
         let t0 = crate::interrupts::rdtsc();
         let deadline = t0.saturating_add(crate::interrupts::tsc_freq().saturating_mul(IO_TIMEOUT_SECS));
@@ -296,18 +258,36 @@ impl NvmeState {
                 self.io_cq_head = (self.io_cq_head + 1) % self.io_q_depth;
                 if self.io_cq_head == 0 { self.io_phase = !self.io_phase; }
                 ring_cq_doorbell(self, 1, self.io_cq_head);
-                self.io_inflight = self.io_inflight.saturating_sub(1);
                 record_drain(t0, self.msix_vector);
-                return Ok((entry.command_id, (entry.status >> 1) & 0x7FF));
+                let cid = entry.command_id;
+                if !self.io_busy.get(cid as usize).copied().unwrap_or(false) {
+                    kprintln!("[npk] nvme: completion for id {}, which is not in flight", cid);
+                    self.io_close();
+                    return Err(BlkError::IoError);
+                }
+                self.io_busy[cid as usize] = false;
+                self.io_free.push(cid);
+                self.io_inflight -= 1;
+                return Ok((cid, (entry.status >> 1) & 0x7FF));
             }
             if crate::interrupts::rdtsc() > deadline {
-                self.io_dead = true;
                 kprintln!("[npk] nvme: no completion within {} s, I/O queue closed until reboot",
                     IO_TIMEOUT_SECS);
+                self.io_close();
                 return Err(BlkError::Timeout);
             }
             core::hint::spin_loop();
         }
+    }
+
+    /// Give up the I/O queue. Commands still in flight may DMA into the
+    /// callers' buffers at any time, and those buffers are freed once the
+    /// call returns: bus mastering goes off first, so the controller
+    /// reaches no memory any more.
+    fn io_close(&mut self) {
+        let cmd = pci::read32(self.pci_addr, 0x04);
+        pci::write32(self.pci_addr, 0x04, cmd & !0x04);
+        self.io_dead = true;
     }
 
     /// Halt this core until an interrupt (the completion's MSI-X), at most
@@ -334,40 +314,115 @@ impl NvmeState {
         });
     }
 
-    /// Wait for every command in flight. Reports the first error status,
-    /// but only after all of them are done.
-    fn io_wait_all(&mut self) -> Result<(), BlkError> {
-        let mut err = None;
-        while self.io_inflight > 0 {
-            let (_, status) = self.io_reap()?;
-            if status != 0 && err.is_none() { err = Some(BlkError::IoError); }
-        }
-        err.map_or(Ok(()), Err)
-    }
-
     /// Entry check of every I/O path: the queue is usable and empty.
     fn io_ready(&mut self) -> Result<(), BlkError> {
         if self.io_dead { return Err(BlkError::IoError); }
-        let _ = self.io_wait_all();
-        if self.io_dead { Err(BlkError::IoError) } else { Ok(()) }
+        while self.io_inflight > 0 {
+            self.io_reap()?;
+        }
+        Ok(())
+    }
+
+    /// The PRP entries of a transfer of `len` bytes at virtual `addr`
+    /// (dword aligned, at most `PRP_LIST_ENTRIES` pages past the first):
+    /// `prp1`, and `prp2` as the second page or command `cid`'s list
+    /// (NVMe base spec 4.1.1, Linux `nvme_pci_setup_prps`).
+    fn map_prps(&self, cid: u16, addr: u64, len: usize) -> Result<(u64, u64), BlkError> {
+        let first = 4096 - (addr & 0xFFF) as usize;
+        let prp1 = phys(addr)?;
+        if len <= first { return Ok((prp1, 0)); }
+        let pages = (len - first).div_ceil(4096);
+        let mut page = (addr & !0xFFF) + 4096;
+        if pages == 1 { return Ok((prp1, phys(page)?)); }
+        let list = &self.prp[cid as usize];
+        for j in 0..pages {
+            list.w64(j as u64 * 8, phys(page)?);
+            page += 4096;
+        }
+        Ok((prp1, list.phys()))
+    }
+
+    /// Run `segs` as `opcode` commands with `flags` in CDW12, straight
+    /// to and from the callers' memory. As many commands are outstanding
+    /// as the queue holds, and each completion lets the next one in. After
+    /// an error nothing new is submitted; the call returns once every
+    /// submitted command has completed, with the first error.
+    fn transfer(&mut self, opcode: u8, flags: u32, segs: &[Seg]) -> Result<(), BlkError> {
+        self.io_ready()?;
+        for s in segs {
+            if s.addr & 3 != 0 || s.len % SECTOR_SIZE != 0 || s.lba.checked_add((s.len / SECTOR_SIZE) as u64)
+                .is_none_or(|end| end > self.total_lbas)
+            {
+                return Err(BlkError::OutOfRange);
+            }
+        }
+        let max = MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as usize * BLOCK_SIZE;
+        let (mut si, mut done) = (0usize, 0usize);
+        let mut err = None;
+        loop {
+            let mut queued = false;
+            while si < segs.len() && err.is_none() {
+                let Some(cid) = self.io_free.pop() else { break };
+                let s = segs[si];
+                let n = (s.len - done).min(max);
+                let (prp1, prp2) = match self.map_prps(cid, s.addr + done as u64, n) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        self.io_free.push(cid);
+                        err = Some(e);
+                        break;
+                    }
+                };
+                let lba = s.lba + (done / SECTOR_SIZE) as u64;
+                let mut cmd = SqEntry::zeroed();
+                cmd.opcode = opcode;
+                cmd.nsid = 1;
+                cmd.prp1 = prp1;
+                cmd.prp2 = prp2;
+                cmd.cdw10 = lba as u32;
+                cmd.cdw11 = (lba >> 32) as u32;
+                cmd.cdw12 = (n / SECTOR_SIZE - 1) as u32 | flags;
+                self.io_push(cid, cmd);
+                queued = true;
+                done += n;
+                if done == s.len { si += 1; done = 0; }
+            }
+            if queued { self.io_ring(); }
+            if self.io_inflight == 0 { break; }
+            let (_, status) = self.io_reap()?;
+            if status != 0 && err.is_none() { err = Some(BlkError::IoError); }
+        }
+        // The controller's writes into the buffers before the caller's reads.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
+        nvme_msix_confirm(self.msix_vector);
+        err.map_or(Ok(()), Err)
     }
 }
 
-/// Submit a command to I/O queue 1 and wait for its completion.
-fn io_command(state: &mut NvmeState, cmd: SqEntry) -> Result<CqEntry, BlkError> {
+/// One stretch of a transfer: `len` bytes at virtual `addr`, from LBA `lba`.
+#[derive(Clone, Copy)]
+struct Seg {
+    lba: u64,
+    addr: u64,
+    len: usize,
+}
+
+/// The physical address of kernel virtual `addr`.
+fn phys(addr: u64) -> Result<u64, BlkError> {
+    crate::mm::paging::translate(addr).ok_or(BlkError::OutOfRange)
+}
+
+/// Submit a data-less command (flush, or one whose data is in `DMA_BUF`)
+/// and wait for it.
+fn io_command(state: &mut NvmeState, cmd: SqEntry) -> Result<(), BlkError> {
     state.io_ready()?;
-    let cid = state.io_push(cmd);
+    let cid = state.io_free.pop().ok_or(BlkError::IoError)?;
+    state.io_push(cid, cmd);
     state.io_ring();
-    let (got, status) = state.io_reap()?;
-    if got != cid {
-        // The queue was empty, so this completion answers nothing we sent.
-        state.io_dead = true;
-        kprintln!("[npk] nvme: completion for id {} while waiting for {}, I/O queue closed", got, cid);
-        return Err(BlkError::IoError);
-    }
+    let (_, status) = state.io_reap()?;
     if status != 0 { return Err(BlkError::IoError); }
     nvme_msix_confirm(state.msix_vector);
-    Ok(CqEntry { dw0: 0, _rsvd: 0, sq_head: 0, sq_id: 1, command_id: cid, status: 0 })
+    Ok(())
 }
 
 /// One-shot confirmation that NVMe completions raise our MSI-X ISR, without
@@ -444,7 +499,6 @@ pub fn init() -> bool {
         return false;
     }
     let io_q_depth = max_queue_entries.min(IO_QUEUE_DEPTH) as u16;
-    IO_Q_DEPTH.store(io_q_depth, Ordering::Relaxed);
 
     // Disable controller
     let cc = regs.r32(REG_CC);
@@ -507,6 +561,9 @@ pub fn init() -> bool {
         oncs: 0,
         command_id: 1,
         io_inflight: 0,
+        io_free: Vec::new(),
+        io_busy: Vec::new(),
+        prp: Vec::new(),
         io_dead: false,
         msix_vector: 0,
         pci_addr: dev.addr,
@@ -547,20 +604,18 @@ pub fn init() -> bool {
 
     // MDTS (Maximum Data Transfer Size) at offset 77, 1 byte. Units of
     // 2^(12 + CAP.MPSMIN) bytes; for MPSMIN=0 (~all NVMe SSDs) that's
-    // pages of 4 KB. 0 means "no limit". Cap at DMA_POOL_SLOTS so a
-    // single cmd always fits in our staging pool.
+    // pages of 4 KB. 0 means "no limit"; one PRP list page bounds it then.
     let mdts: u8 = identify_buf.r8(77u64);
     let mpsmin = ((cap >> 48) & 0xF) as u32;
-    let pool_cap = DMA_POOL_SLOTS as u32;
     let hw_max_blocks = if mdts == 0 {
-        pool_cap
+        PRP_LIST_ENTRIES
     } else {
-        let pages = 1u32 << (mdts as u32);
+        let pages = 1u32.checked_shl(mdts as u32).unwrap_or(u32::MAX);
         let bytes_per_page = 1u32 << (12 + mpsmin);
         let blocks = pages.saturating_mul(bytes_per_page) / BLOCK_SIZE as u32;
         blocks.max(1)
     };
-    let max_blocks_per_cmd = hw_max_blocks.min(pool_cap);
+    let max_blocks_per_cmd = hw_max_blocks.min(PRP_LIST_ENTRIES);
     MAX_BLOCKS_PER_CMD.store(max_blocks_per_cmd, Ordering::Relaxed);
 
     let model_str = core::str::from_utf8(&state.model).unwrap_or("?").trim();
@@ -689,33 +744,25 @@ pub fn init() -> bool {
     state.io_sq = io_sq;
     state.io_cq = io_cq;
 
-    // Allocate DMA buffer for block I/O
+    // The DSM range page.
     let dma = match DmaRegion::alloc_zeroed(1) {
         Some(r) => r,
         None => { kprintln!("[npk] nvme: failed to allocate DMA buf"); return false; }
     };
     *DMA_BUF.lock() = Some(dma);
 
-    // Allocate the batched-I/O DMA pool. Failure here just means
-    // batched paths fall back to the single-buffer slow path; the
-    // device still works.
-    if let Some(pool) = DmaRegion::alloc_zeroed(DMA_POOL_SLOTS) {
-        *DMA_POOL_BASE.lock() = Some(pool);
-    } else {
-        kprintln!("[npk] nvme: WARN — could not allocate {}-page DMA pool, batched flush disabled",
-            DMA_POOL_SLOTS);
+    // One command id per entry the queue can hold outstanding, each with
+    // its PRP list page.
+    let ids = io_q_depth - 1;
+    for cid in 0..ids {
+        let Some(page) = DmaRegion::alloc_zeroed(1) else {
+            kprintln!("[npk] nvme: no memory for the PRP list of command {}", cid);
+            return false;
+        };
+        state.prp.push(page);
     }
-
-    // Allocate the PRP-list scratch pool. Each multi-page extent cmd
-    // takes one slot. Without this we can still service single-block
-    // reads/writes via `read_block` / `write_block`, so failure is
-    // recoverable but disables the fast path.
-    if let Some(pool) = DmaRegion::alloc_zeroed(PRP_LIST_POOL_SLOTS) {
-        *PRP_LIST_POOL_BASE.lock() = Some(pool);
-    } else {
-        kprintln!("[npk] nvme: WARN — could not allocate {}-page PRP-list pool, extent path disabled",
-            PRP_LIST_POOL_SLOTS);
-    }
+    state.io_busy = alloc::vec![false; ids as usize];
+    state.io_free = (0..ids).rev().collect();
 
     // Free identify buffer
     memory::deallocate_frame(identify_buf.phys());
@@ -738,245 +785,161 @@ pub fn block_count() -> Option<u64> {
     capacity().map(|sectors| sectors / (BLOCK_SIZE / SECTOR_SIZE) as u64)
 }
 
-/// Read a 512-byte sector.
-pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlkError> {
+const SECTORS_PER_BLOCK: u64 = (BLOCK_SIZE / SECTOR_SIZE) as u64;
+
+/// The first LBA of 4 KB block `block`.
+fn block_lba(block: u64) -> Result<u64, BlkError> {
+    block.checked_mul(SECTORS_PER_BLOCK).ok_or(BlkError::OutOfRange)
+}
+
+/// `stretches` (first LBA, bytes) laid end to end in a buffer at `base`,
+/// neighbours on the disk merged into one segment.
+fn segs_at(stretches: &[(u64, usize)], base: u64) -> Vec<Seg> {
+    let mut segs: Vec<Seg> = Vec::with_capacity(stretches.len());
+    let mut addr = base;
+    for &(lba, len) in stretches {
+        match segs.last_mut() {
+            Some(s) if s.lba + (s.len / SECTOR_SIZE) as u64 == lba => s.len += len,
+            _ => segs.push(Seg { lba, addr, len }),
+        }
+        addr += len as u64;
+    }
+    segs
+}
+
+/// A dword-aligned scratch buffer of `len` bytes, for callers whose own
+/// buffer the controller cannot address.
+fn with_aligned<R>(len: usize, f: impl FnOnce(&mut [u8]) -> R) -> R {
+    let mut tmp = alloc::vec![0u8; len + 3];
+    let off = tmp.as_ptr().align_offset(4);
+    f(&mut tmp[off..off + len])
+}
+
+fn total(stretches: &[(u64, usize)]) -> usize {
+    stretches.iter().map(|s| s.1).sum()
+}
+
+/// Read `stretches` (first LBA, bytes) into `out`, one after the other.
+fn read_lbas(stretches: &[(u64, usize)], out: &mut [u8]) -> Result<(), BlkError> {
+    if total(stretches) != out.len() { return Err(BlkError::OutOfRange); }
+    if out.as_ptr() as usize & 3 != 0 {
+        return with_aligned(out.len(), |tmp| {
+            read_lbas(stretches, tmp)?;
+            out.copy_from_slice(tmp);
+            Ok(())
+        });
+    }
+    let segs = segs_at(stretches, out.as_mut_ptr() as u64);
     let mut nvme = NVME.lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    if sector >= state.total_lbas { return Err(BlkError::OutOfRange); }
+    state.transfer(NVM_READ, 0, &segs)
+}
 
-    let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
+/// Write `input` to `stretches` (first LBA, bytes), one after the other.
+fn write_lbas(stretches: &[(u64, usize)], input: &[u8], flags: u32) -> Result<(), BlkError> {
+    if total(stretches) != input.len() { return Err(BlkError::OutOfRange); }
+    if input.as_ptr() as usize & 3 != 0 {
+        return with_aligned(input.len(), |tmp| {
+            tmp.copy_from_slice(input);
+            write_lbas(stretches, tmp, flags)
+        });
+    }
+    let segs = segs_at(stretches, input.as_ptr() as u64);
+    let mut nvme = NVME.lock();
+    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+    state.transfer(NVM_WRITE, flags, &segs)
+}
 
-    let mut cmd = SqEntry::zeroed();
-    cmd.opcode = NVM_READ;
-    cmd.nsid = 1;
-    cmd.prp1 = dma.phys();
-    cmd.cdw10 = sector as u32;         // Starting LBA (low)
-    cmd.cdw11 = (sector >> 32) as u32; // Starting LBA (high)
-    cmd.cdw12 = 0;                     // Number of LBs - 1 (0 = 1 sector)
+/// Force Unit Access in CDW12: on stable media before the completion.
+const CDW12_FUA: u32 = 1 << 30;
 
-    io_command(state, cmd)?;
-
-    dma.copy_out(0u64, buf);
-    Ok(())
+/// Read a 512-byte sector.
+pub fn read_sector(sector: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlkError> {
+    read_lbas(&[(sector, SECTOR_SIZE)], buf)
 }
 
 /// Write a 512-byte sector.
 pub fn write_sector(sector: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlkError> {
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    if sector >= state.total_lbas { return Err(BlkError::OutOfRange); }
-
-    let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
-    dma.copy_in(0u64, buf);
-
-    let mut cmd = SqEntry::zeroed();
-    cmd.opcode = NVM_WRITE;
-    cmd.nsid = 1;
-    cmd.prp1 = dma.phys();
-    cmd.cdw10 = sector as u32;
-    cmd.cdw11 = (sector >> 32) as u32;
-    cmd.cdw12 = 0; // 1 sector
-
-    io_command(state, cmd)?;
-    Ok(())
+    write_lbas(&[(sector, SECTOR_SIZE)], buf, 0)
 }
 
 /// Read a 4KB block (8 sectors).
 pub fn read_block(block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), BlkError> {
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
-    let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-
-    let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
-
-    let mut cmd = SqEntry::zeroed();
-    cmd.opcode = NVM_READ;
-    cmd.nsid = 1;
-    cmd.prp1 = dma.phys();
-    cmd.cdw10 = sector as u32;
-    cmd.cdw11 = (sector >> 32) as u32;
-    cmd.cdw12 = 7; // 8 sectors - 1
-
-    io_command(state, cmd)?;
-
-    dma.copy_out(0u64, buf);
-    Ok(())
+    read_lbas(&[(block_lba(block)?, BLOCK_SIZE)], buf)
 }
 
-/// Submit up to `max_batch()` write-block commands in parallel and
-/// wait for them all. Returns Ok only if every command completed
-/// without error. Falls back to per-block sequential writes when the
-/// batch is too large or the pool isn't available.
-///
-/// This is the path `cache::flush` takes once it has more than one
-/// dirty block — replaces N sequential synchronous writes (N × disk
-/// latency) with one batch (~1 × disk latency, modulo NVMe ordering).
+/// Write a 4KB block (8 sectors).
+pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    write_lbas(&[(block_lba(block)?, BLOCK_SIZE)], buf, 0)
+}
+
+/// Like `write_block` but with Force Unit Access: the controller must place the
+/// data on stable media before completing, regardless of its volatile write
+/// cache. Used for the npkFS superblock so it is durable the instant the commit
+/// returns, without a separate full-cache FLUSH after it.
+pub fn write_block_fua(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
+    write_lbas(&[(block_lba(block)?, BLOCK_SIZE)], buf, CDW12_FUA)
+}
+
+/// Write each `(block, data)`, all of them in flight together. Ok only if
+/// every write completed without error.
 pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkError> {
     if items.is_empty() { return Ok(()); }
-
-    // Batch larger than the pool → fall back to sequential. `cache::flush`
-    // never exceeds its cache slot count, so no internal chunking.
-    if items.len() > max_batch() {
+    if items.iter().all(|(_, b)| b.as_ptr() as usize & 3 == 0) {
+        let mut segs: Vec<Seg> = Vec::with_capacity(items.len());
         for &(block, buf) in items {
-            write_block(block, buf)?;
-        }
-        return Ok(());
-    }
-
-    let pool = match *DMA_POOL_BASE.lock() {
-        Some(r) => r,
-        None => {
-            // Pool wasn't allocated — fall back.
-            for &(block, buf) in items {
-                write_block(block, buf)?;
+            let (lba, addr) = (block_lba(block)?, buf.as_ptr() as u64);
+            match segs.last_mut() {
+                Some(s) if s.lba + (s.len / SECTOR_SIZE) as u64 == lba && s.addr + s.len as u64 == addr =>
+                    s.len += BLOCK_SIZE,
+                _ => segs.push(Seg { lba, addr, len: BLOCK_SIZE }),
             }
-            return Ok(());
         }
-    };
-
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    state.io_ready()?;
-
-    // Every range first: nothing may be queued if any of them is bad.
-    for &(block, _) in items {
-        if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
+        let mut nvme = NVME.lock();
+        let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+        return state.transfer(NVM_WRITE, 0, &segs);
     }
-
-    // Stage every payload into its own DMA pool slot + push every SQ
-    // entry, then ring the doorbell exactly once. `items.len() <= max_batch()`,
-    // so the tail cannot wrap onto our own un-acked head.
-    for (i, &(block, buf)) in items.iter().enumerate() {
-        let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-        let off = (i as u64) * BLOCK_SIZE as u64;
-        // The controller does not own the slot until the doorbell below.
-        pool.copy_in(off, buf);
-
-        let mut cmd = SqEntry::zeroed();
-        cmd.opcode = NVM_WRITE;
-        cmd.nsid = 1;
-        cmd.prp1 = pool.phys() + off;
-        cmd.cdw10 = sector as u32;
-        cmd.cdw11 = (sector >> 32) as u32;
-        cmd.cdw12 = 7;
-        state.io_push(cmd);
-    }
-    state.io_ring();
-    state.io_wait_all()
+    let stretches = items.iter().map(|&(b, _)| Ok((block_lba(b)?, BLOCK_SIZE)))
+        .collect::<Result<Vec<_>, BlkError>>()?;
+    with_aligned(items.len() * BLOCK_SIZE, |tmp| {
+        for (i, (_, buf)) in items.iter().enumerate() {
+            tmp[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE].copy_from_slice(&buf[..]);
+        }
+        write_lbas(&stretches, tmp, 0)
+    })
 }
 
-/// Submit up to `max_batch()` read-block commands in parallel and
-/// wait for them all. `output` is the destination buffer, sized
-/// `blocks.len() * BLOCK_SIZE` — block i lands at `output[i*B..i*B+B]`.
-/// Falls back to sequential `read_block` when the batch exceeds the
-/// pool (or the pool isn't available).
-///
-/// Read-side analog of `write_blocks_batch`. Same SQ submit + drain
-/// pattern, with one key extra: a memory fence after the drain so the
-/// CPU's copy from pool slots doesn't observe stale data ahead of the
-/// DMA writes.
+/// Read `blocks` into `output`, block i at `output[i * BLOCK_SIZE..]`, all
+/// of them in flight together.
 pub fn read_blocks_batch(blocks: &[u64], output: &mut [u8]) -> Result<(), BlkError> {
-    if blocks.is_empty() { return Ok(()); }
-    if output.len() != blocks.len() * BLOCK_SIZE {
-        return Err(BlkError::OutOfRange);
-    }
-
-    let pool = match *DMA_POOL_BASE.lock() {
-        Some(r) => r,
-        None => {
-            for (i, &block) in blocks.iter().enumerate() {
-                let dst = &mut output[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
-                let dst_arr: &mut [u8; BLOCK_SIZE] = dst.try_into().unwrap();
-                read_block(block, dst_arr)?;
-            }
-            return Ok(());
-        }
-    };
-
-    // Chunk into batches that fit both the DMA pool and the queue.
-    if blocks.len() > max_batch() {
-        let mut offset = 0;
-        while offset < blocks.len() {
-            let take = (blocks.len() - offset).min(max_batch());
-            let chunk_blocks = &blocks[offset..offset + take];
-            let chunk_out = &mut output[offset * BLOCK_SIZE..(offset + take) * BLOCK_SIZE];
-            read_blocks_batch_inner(chunk_blocks, chunk_out, &pool)?;
-            offset += take;
-        }
-        return Ok(());
-    }
-
-    read_blocks_batch_inner(blocks, output, &pool)
+    let stretches = blocks.iter().map(|&b| Ok((block_lba(b)?, BLOCK_SIZE)))
+        .collect::<Result<Vec<_>, BlkError>>()?;
+    read_lbas(&stretches, output)
 }
 
-/// Single ≤ `max_batch()` read batch. Pool-based, queue-depth ≈ N.
-fn read_blocks_batch_inner(blocks: &[u64], output: &mut [u8], pool: &DmaRegion) -> Result<(), BlkError> {
-
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    state.io_ready()?;
-
-    for &block in blocks {
-        if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
-    }
-    for (i, &block) in blocks.iter().enumerate() {
-        let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-        let dma = pool.phys() + (i as u64) * BLOCK_SIZE as u64;
-
-        let mut cmd = SqEntry::zeroed();
-        cmd.opcode = NVM_READ;
-        cmd.nsid = 1;
-        cmd.prp1 = dma;
-        cmd.cdw10 = sector as u32;
-        cmd.cdw11 = (sector >> 32) as u32;
-        cmd.cdw12 = 7;
-        state.io_push(cmd);
-    }
-    state.io_ring();
-    state.io_wait_all()?;
-
-    // Ensure DMA writes are visible before we read from the pool.
-    core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-    for i in 0..blocks.len() {
-        let dst = &mut output[i * BLOCK_SIZE..(i + 1) * BLOCK_SIZE];
-        pool.copy_out((i as u64) * BLOCK_SIZE as u64, dst);
-    }
-    Ok(())
+/// Read `count` 4 KB blocks starting at `start_block` into `output`
+/// (`count * BLOCK_SIZE` bytes).
+pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<(), BlkError> {
+    if count == 0 { return Ok(()); }
+    let len = usize::try_from(count).ok().and_then(|c| c.checked_mul(BLOCK_SIZE)).ok_or(BlkError::OutOfRange)?;
+    read_lbas(&[(block_lba(start_block)?, len)], output)
 }
 
-/// Whether `count` 4 KB blocks from `block` lie inside the namespace.
-fn block_in_range(state: &NvmeState, block: u64, count: u64) -> bool {
-    let per = (BLOCK_SIZE / SECTOR_SIZE) as u64;
-    match block.checked_mul(per).zip(count.checked_mul(per)) {
-        Some((start, n)) => start.checked_add(n).is_some_and(|end| end <= state.total_lbas),
-        None => false,
-    }
+/// Write `count` 4 KB blocks of `input` starting at `start_block`.
+pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), BlkError> {
+    if count == 0 { return Ok(()); }
+    let len = usize::try_from(count).ok().and_then(|c| c.checked_mul(BLOCK_SIZE)).ok_or(BlkError::OutOfRange)?;
+    write_lbas(&[(block_lba(start_block)?, len)], input, 0)
 }
 
-// ── Single-command extent transfers (PRP list path) ───────────────────
-//
-// A naive `read_blocks_batch` issues one NVMe cmd per 4 KB page; a 1 MB
-// read becomes 256 round-trips through SQ/CQ. NVMe's PRP list mechanism
-// (spec 4.3) lets a single cmd address up to 512 pages via a "PRP List"
-// block — `prp1` is the first page, `prp2` points at the list, and the
-// list holds entries for the remaining pages. With our contiguous DMA
-// pool that costs one extra block-size scratch buffer per cmd in
-// flight; in exchange a 1 MB read drops to ~2 cmds (one per
-// `MAX_BLOCKS_PER_CMD` chunk) and the SSD's internal pipelining gets to
-// do its job instead of draining a SQ on every page.
-
-/// Build a PRP-list scratch block in `list`. Page 0 of the
-/// transfer goes into `cmd.prp1` directly; this list addresses pages
-/// `1..count` (inclusive of the second page, exclusive of `count`).
-/// Caller must ensure `count >= 3` and `count - 1 <= 512`.
-fn build_prp_list(list: &DmaRegion, dma_base: u64, count: u64) {
-    debug_assert!(count >= 3 && count - 1 <= 512);
-    for j in 0..(count - 1) {
-        let page_addr = dma_base + (j + 1) * BLOCK_SIZE as u64;
-        list.w64(j * 8, page_addr);
-    }
+/// Read a list of (start_block, count_blocks) extents into `output`, one
+/// after the other, all of them in flight together.
+pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<(), BlkError> {
+    let stretches = extents.iter().map(|&(start, count)| {
+        let len = usize::try_from(count).ok().and_then(|c| c.checked_mul(BLOCK_SIZE)).ok_or(BlkError::OutOfRange)?;
+        Ok((block_lba(start)?, len))
+    }).collect::<Result<Vec<_>, BlkError>>()?;
+    read_lbas(&stretches, output)
 }
 
 // [nvme-spin] rolling spin-duration stats over the shared completion drain.
@@ -1009,310 +972,6 @@ fn record_drain(t0: u64, vector: crate::irq::Irq) {
         );
         }
     }
-}
-
-/// Submit a single READ command spanning `chunk_blocks` consecutive
-/// 4 KB blocks starting at `start_sector`. `chunk_blocks` must be ≤
-/// `DMA_POOL_SLOTS` and ≤ `MAX_BLOCKS_PER_CMD`. Caller drains.
-fn submit_extent_cmd(
-    state: &mut NvmeState,
-    opcode: u8,
-    start_sector: u64,
-    chunk_blocks: u64,
-    dma_base: u64,
-    prp_list: &DmaRegion,
-) {
-    let prp1 = dma_base;
-    let prp2 = if chunk_blocks == 1 {
-        0
-    } else if chunk_blocks == 2 {
-        dma_base + BLOCK_SIZE as u64
-    } else {
-        build_prp_list(prp_list, dma_base, chunk_blocks);
-        prp_list.phys()
-    };
-
-    let mut cmd = SqEntry::zeroed();
-    cmd.opcode = opcode;
-    cmd.nsid = 1;
-    cmd.prp1 = prp1;
-    cmd.prp2 = prp2;
-    cmd.cdw10 = start_sector as u32;
-    cmd.cdw11 = (start_sector >> 32) as u32;
-    cmd.cdw12 = (chunk_blocks as u32 * 8 - 1) & 0xFFFF;
-    state.io_push(cmd);
-    state.io_ring();
-}
-
-/// Read `count` 4 KB blocks starting at `start_block` into `output`.
-/// Up to `MAX_INFLIGHT` PRP-list cmds are kept in flight at once: the
-/// SSD's internal channels stay busy while we drain + memcpy the
-/// completed batch. `output.len()` must equal `count * BLOCK_SIZE`.
-pub fn read_extent(start_block: u64, count: u64, output: &mut [u8]) -> Result<(), BlkError> {
-    if count == 0 { return Ok(()); }
-    if output.len() != (count as usize) * BLOCK_SIZE {
-        return Err(BlkError::OutOfRange);
-    }
-
-    let pool = match *DMA_POOL_BASE.lock() {
-        Some(r) => r,
-        None => {
-            for i in 0..count {
-                let dst: &mut [u8; BLOCK_SIZE] = (&mut output
-                    [(i as usize) * BLOCK_SIZE..((i as usize) + 1) * BLOCK_SIZE])
-                    .try_into().unwrap();
-                read_block(start_block + i, dst)?;
-            }
-            return Ok(());
-        }
-    };
-    let prp_pool = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
-    let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
-        .min(DMA_POOL_SLOTS as u64 / MAX_INFLIGHT as u64);
-
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    state.io_ready()?;
-    if !block_in_range(state, start_block, count) { return Err(BlkError::OutOfRange); }
-
-    // Submit + drain in batches of MAX_INFLIGHT. Each in-flight cmd
-    // owns its own slice of the DMA pool + its own PRP-list slot, so
-    // they can complete out of order. We drain in submission order so
-    // the memcpy-out is straight-line.
-    let mut offset = 0u64;
-    while offset < count {
-        let mut batch: [(u64, u64, u64); MAX_INFLIGHT] = [(0, 0, 0); MAX_INFLIGHT];
-        let mut batch_len = 0usize;
-
-        // Submit phase: queue up to MAX_INFLIGHT cmds.
-        for slot in 0..MAX_INFLIGHT.min(queue_room()) {
-            if offset >= count { break; }
-            let chunk = (count - offset).min(max_per_cmd);
-            let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-
-            let dma_off = (slot as u64) * max_per_cmd * BLOCK_SIZE as u64;
-            let prp_list = prp_pool.sub((slot as u64) * BLOCK_SIZE as u64, BLOCK_SIZE as u64);
-            submit_extent_cmd(state, NVM_READ, start_sector, chunk, pool.phys() + dma_off, &prp_list);
-            batch[batch_len] = (offset, chunk, dma_off);
-            batch_len += 1;
-            offset += chunk;
-        }
-
-        // Drain phase: wait for every cmd in this batch to finish.
-        state.io_wait_all()?;
-        // Make all DMA writes visible before we copy out.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        // Memcpy phase: pool slot → caller buffer for each cmd we just
-        // drained. Order matches submission order, so output is
-        // contiguous block-by-block.
-        for i in 0..batch_len {
-            let (out_off, chunk, dma_off) = batch[i];
-            let start = (out_off as usize) * BLOCK_SIZE;
-            pool.copy_out(dma_off, &mut output[start..start + (chunk as usize) * BLOCK_SIZE]);
-        }
-    }
-
-    Ok(())
-}
-
-/// Write `count` 4 KB blocks of `input` starting at `start_block`.
-/// Up to `MAX_INFLIGHT` cmds in flight at once. Symmetric to
-/// `read_extent` — staged into the DMA pool first, then submitted.
-pub fn write_extent(start_block: u64, count: u64, input: &[u8]) -> Result<(), BlkError> {
-    if count == 0 { return Ok(()); }
-    if input.len() != (count as usize) * BLOCK_SIZE {
-        return Err(BlkError::OutOfRange);
-    }
-
-    let pool = match *DMA_POOL_BASE.lock() {
-        Some(r) => r,
-        None => {
-            for i in 0..count {
-                let src: &[u8; BLOCK_SIZE] = input
-                    [(i as usize) * BLOCK_SIZE..((i as usize) + 1) * BLOCK_SIZE]
-                    .try_into().unwrap();
-                write_block(start_block + i, src)?;
-            }
-            return Ok(());
-        }
-    };
-    let prp_pool = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
-    let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
-        .min(DMA_POOL_SLOTS as u64 / MAX_INFLIGHT as u64);
-
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    state.io_ready()?;
-    if !block_in_range(state, start_block, count) { return Err(BlkError::OutOfRange); }
-
-    let mut offset = 0u64;
-    while offset < count {
-
-        // Stage + submit phase.
-        for slot in 0..MAX_INFLIGHT.min(queue_room()) {
-            if offset >= count { break; }
-            let chunk = (count - offset).min(max_per_cmd);
-            let start_sector = (start_block + offset) * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-
-            let dma_off = (slot as u64) * max_per_cmd * BLOCK_SIZE as u64;
-            let start = (offset as usize) * BLOCK_SIZE;
-            pool.copy_in(dma_off, &input[start..start + (chunk as usize) * BLOCK_SIZE]);
-            // Per-cmd fence: the SSD must see this slot's payload
-            // before reading it. Combined fence after the loop would
-            // also work but per-cmd is clearer.
-            core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-            let prp_list = prp_pool.sub((slot as u64) * BLOCK_SIZE as u64, BLOCK_SIZE as u64);
-            submit_extent_cmd(state, NVM_WRITE, start_sector, chunk, pool.phys() + dma_off, &prp_list);
-            offset += chunk;
-        }
-
-        // Drain phase.
-        state.io_wait_all()?;
-    }
-
-    Ok(())
-}
-
-/// Read a list of (start_block, count_blocks) extents into `output`.
-/// All extents are concatenated in order: extent 0 → output[0..N₀ * 4096],
-/// extent 1 → output[N₀ * 4096 .. (N₀+N₁) * 4096], etc.
-///
-/// Submit-phase batches up to `MAX_INFLIGHT_MULTI` cmds at once so the
-/// SSD's internal channels can pipeline all of them. Critical for
-/// fragmented blobs, where many single-block extents would otherwise be
-/// sequential round-trips.
-pub fn read_multi_extent(extents: &[(u64, u64)], output: &mut [u8]) -> Result<(), BlkError> {
-    if extents.is_empty() { return Ok(()); }
-    // Sanity-check size: total blocks must match output buffer.
-    let total_blocks: u64 = extents.iter().map(|&(_, c)| c).sum();
-    if output.len() != (total_blocks as usize) * BLOCK_SIZE {
-        return Err(BlkError::OutOfRange);
-    }
-
-    let pool = match *DMA_POOL_BASE.lock() {
-        Some(r) => r,
-        None => {
-            // Fallback: per-extent calls (will use the per-block path
-            // when the pool is gone too). Slow but correct.
-            let mut off = 0usize;
-            for &(start, count) in extents {
-                let bytes = (count as usize) * BLOCK_SIZE;
-                read_extent(start, count, &mut output[off..off + bytes])?;
-                off += bytes;
-            }
-            return Ok(());
-        }
-    };
-    let prp_pool = (*PRP_LIST_POOL_BASE.lock()).ok_or(BlkError::NotInitialized)?;
-    let max_per_cmd = (MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed) as u64)
-        .min(DMA_POOL_SLOTS as u64);
-
-    // Phase 1 — split any oversized extent into chunks ≤ max_per_cmd
-    // and compute the output offset for each chunk. Done up front so
-    // the submit loop is a single linear pass.
-    let mut work: alloc::vec::Vec<(u64, u64, usize)> =
-        alloc::vec::Vec::with_capacity(extents.len());
-    let mut output_off = 0usize;
-    for &(start, count) in extents {
-        let mut sub_start = start;
-        let mut remaining = count;
-        while remaining > 0 {
-            let take = remaining.min(max_per_cmd);
-            work.push((sub_start, take, output_off));
-            output_off += (take as usize) * BLOCK_SIZE;
-            sub_start += take;
-            remaining -= take;
-        }
-    }
-
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    state.io_ready()?;
-    if !extents.iter().all(|&(start, count)| block_in_range(state, start, count)) {
-        return Err(BlkError::OutOfRange);
-    }
-
-    // Phase 2 — process work in batches of `MAX_INFLIGHT_MULTI` cmds.
-    // Each batch: greedy-fill until we hit the inflight cap or pool
-    // capacity, submit all, drain all, memcpy all into `output`.
-    let mut wi = 0;
-    while wi < work.len() {
-        // Per-batch state. We track each in-flight cmd's pool offset
-        // and target output offset so the post-drain memcpy knows
-        // where each chunk lands.
-        let mut batch: [(u64, usize, u64); MAX_INFLIGHT_MULTI] =
-            [(0, 0, 0); MAX_INFLIGHT_MULTI]; // (dma_off, output_off, blocks)
-        let mut batch_len = 0usize;
-        let mut pool_used = 0u64;
-
-        while wi < work.len() && batch_len < MAX_INFLIGHT_MULTI.min(queue_room()) {
-            let (start, count, out_off) = work[wi];
-            // Pool capacity check — can't fit this chunk in the
-            // remaining slots; close the batch and process it.
-            if pool_used + count > DMA_POOL_SLOTS as u64 { break; }
-
-            let start_sector = start * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-
-            let dma_off = pool_used * BLOCK_SIZE as u64;
-            let prp_list = prp_pool.sub((batch_len as u64) * BLOCK_SIZE as u64, BLOCK_SIZE as u64);
-
-            submit_extent_cmd(state, NVM_READ, start_sector, count, pool.phys() + dma_off, &prp_list);
-            batch[batch_len] = (dma_off, out_off, count);
-            batch_len += 1;
-            pool_used += count;
-            wi += 1;
-        }
-
-        // Drain all of them, errors included, before anything returns.
-        state.io_wait_all()?;
-        // Make all DMA writes visible before the memcpy-out.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
-
-        // Copy each completed chunk to its output offset.
-        for i in 0..batch_len {
-            let (dma_off, out_off, blocks) = batch[i];
-            let bytes = (blocks as usize) * BLOCK_SIZE;
-            pool.copy_out(dma_off, &mut output[out_off..out_off + bytes]);
-        }
-    }
-
-    Ok(())
-}
-
-/// Write a 4KB block (8 sectors).
-pub fn write_block(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
-    write_block_inner(block, buf, false)
-}
-
-/// Like `write_block` but with Force Unit Access: the controller must place the
-/// data on stable media before completing, regardless of its volatile write
-/// cache. Used for the npkFS superblock so it is durable the instant the commit
-/// returns, without a separate full-cache FLUSH after it.
-pub fn write_block_fua(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkError> {
-    write_block_inner(block, buf, true)
-}
-
-fn write_block_inner(block: u64, buf: &[u8; BLOCK_SIZE], fua: bool) -> Result<(), BlkError> {
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
-    if !block_in_range(state, block, 1) { return Err(BlkError::OutOfRange); }
-    let sector = block * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-
-    let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
-    dma.copy_in(0u64, buf);
-
-    let mut cmd = SqEntry::zeroed();
-    cmd.opcode = NVM_WRITE;
-    cmd.nsid = 1;
-    cmd.prp1 = dma.phys();
-    cmd.cdw10 = sector as u32;
-    cmd.cdw11 = (sector >> 32) as u32;
-    cmd.cdw12 = 7 | if fua { 1 << 30 } else { 0 }; // 8 sectors - 1, + FUA bit
-
-    io_command(state, cmd)?;
-    Ok(())
 }
 
 /// Force the controller's volatile write cache to stable media (NVM Flush,
@@ -1391,8 +1050,8 @@ pub fn serial_number() -> Option<alloc::string::String> {
     Some(alloc::string::String::from(s))
 }
 
-/// Maximum data per single READ/WRITE cmd in 4 KB blocks (clamped to
-/// our DMA pool). Computed from MDTS at init.
+/// Maximum data per single READ/WRITE cmd in 4 KB blocks: MDTS, at most
+/// what one PRP list page addresses.
 pub fn max_blocks_per_cmd() -> u32 {
     MAX_BLOCKS_PER_CMD.load(Ordering::Relaxed)
 }
