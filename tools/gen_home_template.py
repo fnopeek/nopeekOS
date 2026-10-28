@@ -7,8 +7,8 @@ only its NON-ZERO 512-byte sectors in a tiny custom container:
 
     "NHT1" | image_size:u32_le | num_entries:u32_le | (sector_idx:u32_le, data[512])*
 
-`seed_home_image()` in virtio_blk_pci.rs allocates a zeroed image of
-`image_size` bytes and patches the listed sectors in.
+`seed_home_image()` in virtio_blk_pci.rs sizes a zero image of
+`image_size` bytes and writes the listed sectors in.
 
 Feature set + label are pinned to match the original 64 MiB template
 (volume `nopeekhome`, has_journal + metadata_csum + 64bit + …) so the

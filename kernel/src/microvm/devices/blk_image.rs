@@ -117,6 +117,25 @@ impl BlkImage {
         }
     }
 
+    /// An image of no bytes stored as `path`; `grow` gives it its size.
+    pub fn empty(path: &'static str) -> Self {
+        Self {
+            chunks: Arc::new(Chunks {
+                len: 0,
+                chunk: TAIL_CHUNK,
+                hashes: Vec::new(),
+                slots: Vec::new(),
+                touched: Vec::new(),
+                failed: AtomicBool::new(false),
+                loaded: AtomicUsize::new(0),
+                prefetched: AtomicUsize::new(0),
+            }),
+            dirty: Vec::new(),
+            tail: Vec::new(),
+            path: Some(path),
+        }
+    }
+
     /// Open `path` for chunk-wise reads and queue it for prefetch. `None` if
     /// it is missing, stored as one Blob, or its chunks are not uniformly
     /// sized; the caller then falls back to a whole read. `all` prefetches

@@ -180,8 +180,9 @@ pub struct VirtioBlk {
     grow_refused: bool,
     /// Fill level, in percent, at which the home image grows.
     grow_at_pct: u64,
-    /// Largest size the home image may grow to, in bytes.
-    grow_max: u64,
+    /// Largest size the home image may grow to, in bytes, when the user
+    /// set one; otherwise npkFS and RAM alone bound it.
+    grow_max: Option<u64>,
     /// Tick of the last growth.
     grown_at: Option<u64>,
     /// Diagnostic counters (limited, to avoid log spam).
@@ -198,8 +199,6 @@ const GROW_AT_PCT: u64 = 80;
 /// The smallest step worth growing by; less free npkFS space than twice
 /// this and the image stays as it is.
 const MIN_GROW_BYTES: u64 = 64 * 1024 * 1024;
-/// Largest home image; `set microvm_home_max <GiB>` overrides it.
-const MAX_HOME_BYTES: u64 = 16 << 30;
 /// Ticks (100 Hz) between two growths.
 const GROW_INTERVAL_TICKS: u64 = 30 * 100;
 /// Share of the space added by the last growth, in percent, that must hold
@@ -225,7 +224,7 @@ impl VirtioBlk {
         dev.grow_max = crate::config::get("microvm_home_max")
             .and_then(|v| v.trim().parse::<u64>().ok())
             .filter(|g| *g >= 1)
-            .map_or(MAX_HOME_BYTES, |g| g.saturating_mul(1 << 30));
+            .map(|g| g.saturating_mul(1 << 30));
         dev
     }
 
@@ -243,7 +242,7 @@ impl VirtioBlk {
             || r.dev_bytes != cap
             || r.fs_bytes < cap
             || (r.used_bytes as u128) * 100 < (r.data_bytes as u128) * self.grow_at_pct as u128
-            || cap >= self.grow_max
+            || self.grow_max.is_some_and(|m| cap >= m)
         {
             return false;
         }
@@ -260,7 +259,7 @@ impl VirtioBlk {
             .map_or(0, |(_, free_blocks, _, _)| free_blocks * crate::npkfs::BLOCK_SIZE as u64);
         let ram = (super::guest_mem::frames_spare() * crate::memory::PAGE_SIZE) as u64;
         let chunk = crate::npkfs::STREAMING_CHUNK_SIZE as u64;
-        let step = cap.min(free / 2).min(ram / 2).min(self.grow_max - cap) / chunk * chunk;
+        let step = cap.min(free / 2).min(ram / 2).min(self.grow_max.map_or(u64::MAX, |m| m - cap)) / chunk * chunk;
         if step < MIN_GROW_BYTES {
             if !self.grow_refused {
                 self.grow_refused = true;
@@ -331,7 +330,7 @@ impl VirtioBlk {
             pending_kick_queue: None,
             grow_refused: false,
             grow_at_pct: GROW_AT_PCT,
-            grow_max: MAX_HOME_BYTES,
+            grow_max: None,
             grown_at: None,
             notify_log_count: 0,
             serviced_log_count: 0,
@@ -705,54 +704,44 @@ static HOME_TEMPLATE: &[u8] = include_bytes!("home_template.bin");
 /// PID-1's first `mount -t ext4 /dev/vda` succeeds.
 fn load_or_init_backing(path: &'static str) -> BlkImage {
     let fresh = (CAPACITY_SECTORS * 512) as usize;
-    let usable = |len: usize| len >= fresh && len % 512 == 0;
     if let Some(img) = BlkImage::open_lazy(path, false) {
-        if usable(img.len()) {
+        if img.len() >= fresh && img.len() % 512 == 0 {
             kprintln!("[virtio-blk] home image opened ({} MiB, chunks on demand) /dev/vda", img.len() >> 20);
             return img;
         }
         kprintln!("[virtio-blk] home image of {} bytes cannot be a disk, reseeding", img.len());
-    } else if let Ok((data, _hash)) = crate::npkfs::fetch(path) {
-        if usable(data.len()) {
-            kprintln!("[virtio-blk] loaded home image ({} MiB) /dev/vda", data.len() >> 20);
-            return BlkImage::resident(data);
-        }
-        kprintln!("[virtio-blk] home image of {} bytes cannot be a disk, reseeding", data.len());
     }
-    BlkImage::resident(seed_home_image(fresh))
+    seed_home_image(path, fresh)
 }
 
-/// Expand `HOME_TEMPLATE` into a fresh `cap`-byte empty ext4 image.
-fn seed_home_image(cap: usize) -> alloc::vec::Vec<u8> {
-    let mut v = alloc::vec![0u8; cap];
+/// A fresh `cap`-byte empty ext4 image from `HOME_TEMPLATE`: zeros that
+/// take no memory until written, with the template's sectors written in.
+fn seed_home_image(path: &'static str, cap: usize) -> BlkImage {
+    let mut img = BlkImage::empty(path);
+    if !img.grow(cap) {
+        kprintln!("[virtio-blk] WARN: cannot size a fresh home image to {} bytes", cap);
+        return img;
+    }
     let t = HOME_TEMPLATE;
-    if t.len() >= 12 && &t[0..4] == b"NHT1" {
-        let img = u32::from_le_bytes([t[4], t[5], t[6], t[7]]) as usize;
-        let n = u32::from_le_bytes([t[8], t[9], t[10], t[11]]) as usize;
-        if img == cap {
-            let mut off = 12;
-            for _ in 0..n {
-                if off + 4 + 512 > t.len() {
-                    break;
-                }
-                let idx = u32::from_le_bytes([t[off], t[off + 1], t[off + 2], t[off + 3]]) as usize;
-                off += 4;
-                let dst = idx * 512;
-                if dst + 512 <= cap {
-                    v[dst..dst + 512].copy_from_slice(&t[off..off + 512]);
-                }
-                off += 512;
-            }
-            kprintln!(
-                "[virtio-blk] seeded fresh ext4 home image ({} bytes) /dev/vda — NO saved profile found",
-                cap
-            );
-            return v;
+    if t.len() < 12 || &t[0..4] != b"NHT1"
+        || u32::from_le_bytes([t[4], t[5], t[6], t[7]]) as usize != cap
+    {
+        kprintln!("[virtio-blk] WARN: home template invalid (size {} != {}), zero image",
+            HOME_TEMPLATE.len(), cap);
+        return img;
+    }
+    let n = u32::from_le_bytes([t[8], t[9], t[10], t[11]]) as usize;
+    for e in t[12..].chunks_exact(4 + 512).take(n) {
+        let dst = u32::from_le_bytes([e[0], e[1], e[2], e[3]]) as usize * 512;
+        if dst + 512 > cap || img.write_with(dst, 512, |b| b.copy_from_slice(&e[4..])).is_none() {
+            kprintln!("[virtio-blk] WARN: home template sector at {} not written", dst);
         }
     }
-    kprintln!("[virtio-blk] WARN: home template invalid (size {} != {}), zero image",
-        HOME_TEMPLATE.len(), cap);
-    v
+    kprintln!(
+        "[virtio-blk] seeded fresh ext4 home image ({} MiB) /dev/vda — NO saved profile found",
+        cap >> 20
+    );
+    img
 }
 
 /// Open the read-only squashfs userspace bundle from npkFS. Returns
