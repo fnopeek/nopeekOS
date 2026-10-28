@@ -310,7 +310,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  mount --bind /tmp/hosts /etc/hosts 2>/dev/null; \
                  mkdir -p /tmp/moz /tmp/bcache /tmp/gleandb; \
                  ( [ -b /dev/vda ] && echo '<0>[moz-disk] /dev/vda present' > /dev/kmsg || echo '<0>[moz-disk] /dev/vda ABSENT' > /dev/kmsg ); \
-                 if mount -t ext4 -o nosuid,nodev /dev/vda /tmp/moz 2>/tmp/mnterr; then \
+                 if mount -t ext4 -o nosuid,nodev,discard /dev/vda /tmp/moz 2>/tmp/mnterr; then \
                    echo '<0>[moz-disk] ext4 mounted at /tmp/moz (persist OK)' > /dev/kmsg; \
                  else \
                    echo '<0>[moz-disk] ext4 mount FAILED -> profile lives in RAM, NO persist:' > /dev/kmsg; \

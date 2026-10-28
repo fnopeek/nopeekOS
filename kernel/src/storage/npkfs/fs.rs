@@ -791,9 +791,19 @@ fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathE
     Ok(out)
 }
 
-/// Length and storage hash of the last zero chunk stored
-/// (`StreamingWriter::append_zero_chunk`).
+/// Length and storage hash of the last zero chunk asked for.
 static ZERO_CHUNK: spin::Mutex<Option<(usize, [u8; 32])>> = spin::Mutex::new(None);
+
+/// Storage hash of a chunk of `len` zero bytes, stored or not. None while
+/// the disk is locked.
+pub fn zero_chunk_hash(len: usize) -> Option<[u8; 32]> {
+    if let Some((_, h)) = (*ZERO_CHUNK.lock()).filter(|(l, _)| *l == len) {
+        return Some(h);
+    }
+    let h = super::object::blob_content_hash(&alloc::vec![0u8; len])?;
+    *ZERO_CHUNK.lock() = Some((len, h));
+    Some(h)
+}
 
 /// Chunks between deferred-batch flushes during a streaming write.
 const STREAM_COMMIT_EVERY: usize = 16;
@@ -853,19 +863,13 @@ impl StreamingWriter {
         if !self.buf.is_empty() || len == 0 || len > self.chunk_size {
             return Err(PathError::Corrupt);
         }
-        let known = (*ZERO_CHUNK.lock()).filter(|(l, h)| *l == len && storage::has(h));
-        let hash = match known {
-            Some((_, h)) => h,
-            None => {
-                let blob = super::object::Object::Blob(alloc::vec![0u8; len]);
-                let (encoded, hash) = blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
-                if !storage::has(&hash) {
-                    storage::put(&hash, &encoded)?;
-                }
-                *ZERO_CHUNK.lock() = Some((len, hash));
-                hash
-            }
-        };
+        let mut hash = zero_chunk_hash(len).ok_or(PathError::Corrupt)?;
+        if !storage::has(&hash) {
+            let blob = super::object::Object::Blob(alloc::vec![0u8; len]);
+            let (encoded, stored) = blob.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+            storage::put(&stored, &encoded)?;
+            hash = stored;
+        }
         self.chunk_hashes.push(hash);
         self.written += len as u64;
         Ok(())

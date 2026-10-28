@@ -10,6 +10,9 @@
 //! Saving writes only the chunks the guest changed and reuses the stored
 //! blobs for the rest.
 //!
+//! A chunk the guest discards or zeroes whole is dropped and saved as the
+//! shared zero chunk; a stored zero chunk is never read.
+//!
 //! An image can grow (`grow`): the added part is a tail of chunks that
 //! read as zeros until the guest writes them, and a never-written one is
 //! saved as the shared zero chunk.
@@ -22,6 +25,16 @@ use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use spin::Mutex;
 
+/// Where a chunk's bytes are. Only the device turns a chunk into `Zero` or
+/// back; the prefetch worker only loads a `Stored` one.
+enum Slot {
+    /// In npkFS under its hash, not read yet.
+    Stored,
+    Loaded(Box<[u8]>),
+    /// All zeros, held nowhere.
+    Zero,
+}
+
 /// Chunk storage shared between the device and the prefetch worker.
 struct Chunks {
     len: usize,
@@ -30,7 +43,7 @@ struct Chunks {
     /// Storage hash per chunk, or empty when the image did not come from a
     /// chunked object (then every chunk is resident from the start).
     hashes: Vec<[u8; 32]>,
-    slots: Vec<Mutex<Option<Box<[u8]>>>>,
+    slots: Vec<Mutex<Slot>>,
     /// Chunk read by the guest this run, whoever loaded it.
     touched: Vec<AtomicBool>,
     /// Set when a chunk failed to load; the disk then fails with IOERR
@@ -56,34 +69,70 @@ impl Chunks {
         }
     }
 
-    /// Run `f` on chunk `i`, loading it first if nobody has yet.
+    /// Run `f` on chunk `i`, loading it first if nobody has yet; a zero
+    /// chunk becomes zeros in memory.
     fn with<R>(&self, i: usize, f: impl FnOnce(&mut [u8]) -> R) -> Option<R> {
         self.touched[i].store(true, Ordering::Relaxed);
         let mut slot = self.slots[i].lock();
-        if slot.is_none() {
-            if self.failed.load(Ordering::Acquire) {
-                return None;
+        match &*slot {
+            Slot::Loaded(_) => {}
+            Slot::Stored => {
+                if self.failed.load(Ordering::Acquire) {
+                    return None;
+                }
+                *slot = Slot::Loaded(self.fetch(i)?);
+                self.loaded.fetch_add(1, Ordering::Relaxed);
             }
-            *slot = Some(self.fetch(i)?);
-            self.loaded.fetch_add(1, Ordering::Relaxed);
+            Slot::Zero => *slot = Slot::Loaded(zeroed(self.chunk_len(i))?),
         }
-        slot.as_deref_mut().map(f)
+        match &mut *slot {
+            Slot::Loaded(b) => Some(f(b)),
+            _ => None,
+        }
+    }
+
+    fn is_zero(&self, i: usize) -> bool {
+        matches!(*self.slots[i].lock(), Slot::Zero)
+    }
+
+    fn is_loaded(&self, i: usize) -> bool {
+        matches!(*self.slots[i].lock(), Slot::Loaded(_))
     }
 
     /// Prefetch chunk `i` unless it is already there. The read and decrypt
     /// run without the slot lock, so the guest is never held up by it.
     fn prefetch(&self, i: usize) {
-        if self.slots[i].lock().is_some() || self.failed.load(Ordering::Acquire) {
+        if !matches!(*self.slots[i].lock(), Slot::Stored) || self.failed.load(Ordering::Acquire) {
             return;
         }
         let Some(c) = self.fetch(i) else { return };
         let mut slot = self.slots[i].lock();
-        if slot.is_none() {
-            *slot = Some(c);
+        // The device may have zeroed it meanwhile.
+        if matches!(*slot, Slot::Stored) {
+            *slot = Slot::Loaded(c);
             self.loaded.fetch_add(1, Ordering::Relaxed);
             self.prefetched.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+/// `len` zero bytes that stay in host RAM until the VM ends: only while
+/// the host keeps its reserve after them.
+fn zeroed(len: usize) -> Option<Box<[u8]>> {
+    if super::guest_mem::frames_spare() * crate::memory::PAGE_SIZE < 2 * len {
+        return None;
+    }
+    let mut v = Vec::new();
+    v.try_reserve_exact(len).ok()?;
+    v.resize(len, 0);
+    Some(v.into_boxed_slice())
+}
+
+/// The chunk an offset lies in: a stored one or one added by `grow`.
+#[derive(Clone, Copy)]
+enum Part {
+    Base(usize),
+    Tail(usize),
 }
 
 pub struct BlkImage {
@@ -105,7 +154,7 @@ impl BlkImage {
                 len,
                 chunk: len.max(1),
                 hashes: Vec::new(),
-                slots: alloc::vec![Mutex::new(Some(bytes.into_boxed_slice()))],
+                slots: alloc::vec![Mutex::new(Slot::Loaded(bytes.into_boxed_slice()))],
                 touched: alloc::vec![AtomicBool::new(true)],
                 failed: AtomicBool::new(false),
                 loaded: AtomicUsize::new(1),
@@ -149,8 +198,14 @@ impl BlkImage {
             return None;
         }
         let n = hashes.len();
-        let mut slots: Vec<Mutex<Option<Box<[u8]>>>> = (0..n).map(|_| Mutex::new(None)).collect();
-        slots[0] = Mutex::new(Some(first.into_boxed_slice()));
+        let zero = crate::npkfs::zero_chunk_hash(chunk);
+        let mut slots: Vec<Mutex<Slot>> = (0..n)
+            .map(|i| {
+                let whole = len - i * chunk >= chunk;
+                Mutex::new(if whole && zero == Some(hashes[i]) { Slot::Zero } else { Slot::Stored })
+            })
+            .collect();
+        slots[0] = Mutex::new(Slot::Loaded(first.into_boxed_slice()));
         let chunks = Arc::new(Chunks {
             len,
             chunk,
@@ -225,6 +280,9 @@ impl BlkImage {
         let i = off / c.chunk;
         let at = off - i * c.chunk;
         let n = max.min(c.chunk_len(i) - at);
+        if c.is_zero(i) {
+            return Some(f(&ZEROS[..n.min(ZEROS.len())]));
+        }
         c.with(i, |b| f(&b[at..at + n]))
     }
 
@@ -234,16 +292,8 @@ impl BlkImage {
         if off >= c.len {
             let (t, at) = self.tail_at(off)?;
             let n = max.min(TAIL_CHUNK - at);
-            // A new chunk stays in host RAM until the VM ends: only while
-            // the host keeps its reserve after it.
             if self.tail[t].is_none() {
-                if super::guest_mem::frames_spare() * crate::memory::PAGE_SIZE < 2 * TAIL_CHUNK {
-                    return None;
-                }
-                let mut v = Vec::new();
-                v.try_reserve_exact(TAIL_CHUNK).ok()?;
-                v.resize(TAIL_CHUNK, 0);
-                self.tail[t] = Some(v.into_boxed_slice());
+                self.tail[t] = Some(zeroed(TAIL_CHUNK)?);
             }
             return self.tail[t].as_deref_mut().map(|b| f(&mut b[at..at + n]));
         }
@@ -253,6 +303,67 @@ impl BlkImage {
         let r = c.with(i, |b| f(&mut b[at..at + n]))?;
         self.dirty[i] = true;
         Some(r)
+    }
+
+    /// The chunk holding image offset `off`, its start and its length.
+    fn part_at(&self, off: usize) -> Option<(Part, usize, usize)> {
+        let c = &self.chunks;
+        if off < c.len {
+            let i = off / c.chunk;
+            return Some((Part::Base(i), i * c.chunk, c.chunk_len(i)));
+        }
+        let (t, at) = self.tail_at(off)?;
+        Some((Part::Tail(t), off - at, TAIL_CHUNK))
+    }
+
+    /// Zero `[start, end)`. A chunk covered whole is dropped and reads as
+    /// zeros; a part of one is cleared where the chunk is in memory, and
+    /// the chunk dropped once it holds only zeros. With `force` (write
+    /// zeroes) a part of a chunk not in memory is loaded and cleared;
+    /// without it (discard) that part keeps its bytes. False when a chunk
+    /// could not be loaded or the range does not fit.
+    pub fn zero_range(&mut self, start: usize, end: usize, force: bool) -> bool {
+        let mut pos = start;
+        while pos < end {
+            let Some((part, base, size)) = self.part_at(pos) else { return false };
+            let stop = end.min(base + size);
+            let (a, z) = (pos - base, stop - base);
+            let whole = a == 0 && z == size;
+            match part {
+                Part::Base(i) => {
+                    let c = &self.chunks;
+                    if whole {
+                        *c.slots[i].lock() = Slot::Zero;
+                        self.dirty[i] = true;
+                    } else if !c.is_zero(i) && (force || c.is_loaded(i)) {
+                        let Some(empty) = c.with(i, |b| {
+                            b[a..z].fill(0);
+                            b.iter().all(|&x| x == 0)
+                        }) else {
+                            return false;
+                        };
+                        if empty {
+                            *c.slots[i].lock() = Slot::Zero;
+                        }
+                        self.dirty[i] = true;
+                    }
+                }
+                Part::Tail(t) => {
+                    let empty = match &mut self.tail[t] {
+                        Some(b) if !whole => {
+                            b[a..z].fill(0);
+                            b.iter().all(|&x| x == 0)
+                        }
+                        _ => true,
+                    };
+                    if empty {
+                        self.tail[t] = None;
+                    }
+                }
+            }
+            pos = stop;
+        }
+        true
     }
 
     /// Store which chunks the guest touched, for the next run's prefetch;
@@ -281,10 +392,25 @@ impl BlkImage {
         if c.failed.load(Ordering::Acquire) {
             return Err(crate::npkfs::FsError::Corrupt);
         }
-        let reuse = !c.hashes.is_empty() && c.chunk == crate::npkfs::STREAMING_CHUNK_SIZE;
+        let aligned = c.chunk == crate::npkfs::STREAMING_CHUNK_SIZE;
+        let reuse = !c.hashes.is_empty() && aligned;
         let mut w = crate::npkfs::open_streaming_write(path)?;
         let (mut written, mut reused) = (0, 0);
         for i in 0..c.slots.len() {
+            if c.is_zero(i) {
+                if aligned {
+                    w.append_zero_chunk(c.chunk_len(i)).map_err(|_| crate::npkfs::FsError::Corrupt)?;
+                } else {
+                    let mut left = c.chunk_len(i);
+                    while left > 0 {
+                        let k = left.min(ZEROS.len());
+                        w.write(&ZEROS[..k]).map_err(|_| crate::npkfs::FsError::Corrupt)?;
+                        left -= k;
+                    }
+                }
+                reused += 1;
+                continue;
+            }
             if reuse && !self.dirty[i] {
                 w.append_stored_chunk(c.hashes[i], c.chunk_len(i))
                     .map_err(|_| crate::npkfs::FsError::Corrupt)?;

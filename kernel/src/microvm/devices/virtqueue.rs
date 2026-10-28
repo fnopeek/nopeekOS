@@ -27,6 +27,14 @@ const VIRTIO_BLK_T_IN:     u32 = 0;
 const VIRTIO_BLK_T_OUT:    u32 = 1;
 const VIRTIO_BLK_T_FLUSH:  u32 = 4;
 const VIRTIO_BLK_T_GET_ID: u32 = 8;
+const VIRTIO_BLK_T_DISCARD: u32 = 11;
+const VIRTIO_BLK_T_WRITE_ZEROES: u32 = 13;
+
+/// `virtio_blk_discard_write_zeroes.flags`: the range may be deallocated.
+const VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP: u32 = 1;
+/// Ranges per discard or write-zeroes request (`max_discard_seg`,
+/// `max_write_zeroes_seg`).
+pub const BLK_ZERO_SEG_MAX: u32 = 128;
 
 // Status return codes (1 byte at the tail descriptor)
 const VIRTIO_BLK_S_OK:     u8 = 0;
@@ -192,6 +200,41 @@ fn backing_range(off: Option<u64>, n: usize, len: usize) -> Option<(usize, usize
     (end <= len).then_some((start, end))
 }
 
+/// The ranges of a discard or write-zeroes request in descriptor `d`, each
+/// `virtio_blk_discard_write_zeroes { le64 sector; le32 num_sectors;
+/// le32 flags }` (virtio 1.2 §5.2.6), zeroed in `backing`. A discard keeps
+/// what it cannot drop cheaply; write zeroes clears every byte.
+fn zero_ranges(mem: &GuestMem, d: Desc, write_zeroes: bool, backing: &mut super::blk_image::BlkImage,
+               read_only: bool) -> u8 {
+    const SEG: u32 = 16;
+    if d.flags & VRING_DESC_F_WRITE != 0 || d.len == 0 || d.len % SEG != 0 || d.len / SEG > BLK_ZERO_SEG_MAX
+        || read_only
+    {
+        return VIRTIO_BLK_S_IOERR;
+    }
+    // Discard knows no flags; write zeroes only `unmap`.
+    let allowed = if write_zeroes { VIRTIO_BLK_WRITE_ZEROES_FLAG_UNMAP } else { 0 };
+    for k in 0..(d.len / SEG) as u64 {
+        let at = d.addr + k * SEG as u64;
+        let (Some(sector), Some(num), Some(flags)) = (mem.read_u64(at), mem.read_u32(at + 8), mem.read_u32(at + 12))
+        else {
+            return VIRTIO_BLK_S_IOERR;
+        };
+        if flags & !allowed != 0 {
+            return VIRTIO_BLK_S_UNSUPP;
+        }
+        let Some((start, end)) = backing_range(sector.checked_mul(SECTOR_SIZE), num as usize * SECTOR_SIZE as usize,
+                                               backing.len())
+        else {
+            return VIRTIO_BLK_S_IOERR;
+        };
+        if !backing.zero_range(start, end, write_zeroes) {
+            return VIRTIO_BLK_S_IOERR;
+        }
+    }
+    VIRTIO_BLK_S_OK
+}
+
 /// Walk one descriptor chain, perform the I/O, write the status byte.
 /// Returns the number of bytes written into the guest's buffers (used
 /// in the used-ring `len` field — virtio-blk convention is data bytes
@@ -319,6 +362,11 @@ fn service_one_request(
             }
             VIRTIO_BLK_T_FLUSH => {
                 // No-op — changed chunks are held in RAM until `save`.
+            }
+            VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_WRITE_ZEROES => {
+                if status == VIRTIO_BLK_S_OK {
+                    status = zero_ranges(mem, d, req_type == VIRTIO_BLK_T_WRITE_ZEROES, backing, read_only);
+                }
             }
             _ => { status = VIRTIO_BLK_S_UNSUPP; }
         }

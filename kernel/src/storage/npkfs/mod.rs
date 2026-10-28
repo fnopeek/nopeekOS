@@ -33,7 +33,7 @@ pub mod paths;
 pub mod fs;
 
 pub use types::{FsError, BLOCK_SIZE};
-pub use fs::STREAMING_CHUNK_SIZE;
+pub use fs::{zero_chunk_hash, STREAMING_CHUNK_SIZE};
 
 /// Per-operation perf-timing logs (`[put]`/`[get]`/`[fs::read]`/
 /// `[fs::write]` with µs breakdowns). Off by default because a large
