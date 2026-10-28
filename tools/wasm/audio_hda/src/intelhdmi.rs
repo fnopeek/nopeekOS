@@ -270,16 +270,23 @@ pub fn poll() {
     setup(r.0, r.1, r.2, r.3, r.4);
 }
 
-/// Set up the codec for one stereo stream to the pin a display reports
-/// present: the Tiger Lake probe (all pins and converters, DP 1.2), the
-/// pin, its converter (`i915_pin_cvt_fixup`), the stream
-/// (`i915_hsw_setup_stream`) and the audio infoframe. Returns the
-/// converter, 0 when no pin reports a display.
-pub fn setup(mmio: i32, cad: u32, afg: u32, stream_tag: u32, format: u16) -> u32 {
+/// `intel_hsw_common_init`: every pin and converter enabled, DP 1.2. More
+/// widgets appear, which the caller reads again
+/// (`snd_hda_codec_update_widgets`). Returns the first converter, whose
+/// formats the stream takes (`hdmi_add_cvt`), 0 for none.
+pub fn intel_hsw_common_init(mmio: i32, cad: u32, afg: u32) -> u32 {
     intel_haswell_enable_all_pins(mmio, cad);
     intel_haswell_fixup_enable_dp12(mmio, cad);
+    let w = get_param(mmio, cad, afg, PARAM_SUB_NODE_COUNT);
+    let mut cvts = [0u32; 8];
+    if converters(mmio, cad, (w >> 16) & 0xff, w & 0xff, &mut cvts) == 0 { 0 } else { cvts[0] }
+}
 
-    // snd_hda_codec_update_widgets: the enable made more widgets appear.
+/// Set up the codec, after [`intel_hsw_common_init`], for one stereo
+/// stream to the pin a display reports present: the pin, its converter
+/// (`i915_pin_cvt_fixup`), the stream (`i915_hsw_setup_stream`) and the
+/// audio infoframe. Returns the converter, 0 when no pin reports a display.
+pub fn setup(mmio: i32, cad: u32, afg: u32, stream_tag: u32, format: u16) -> u32 {
     let w = get_param(mmio, cad, afg, PARAM_SUB_NODE_COUNT);
     let (w_start, w_count) = ((w >> 16) & 0xff, w & 0xff);
 

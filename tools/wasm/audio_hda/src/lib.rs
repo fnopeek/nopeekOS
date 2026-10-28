@@ -187,8 +187,15 @@ fn setup_output(out: &mut Output) -> Option<DevFormat> {
             Some(fmt)
         }
         Output::IntelHdmi(c) => {
-            // One stereo stream (`intelhdmi::setup`).
-            let (rates, widths) = c.supported_pcm(c.afg);
+            // One stereo stream (`intelhdmi::setup`) in what the first
+            // converter takes, read once the converters are enabled.
+            let cvt = intelhdmi::intel_hsw_common_init(c.mmio, c.cad, c.afg);
+            if cvt == 0 {
+                log("[audio_hda] HDMI codec without converters\n");
+                return None;
+            }
+            c.read_nodes();
+            let (rates, widths) = c.supported_pcm(cvt);
             let fmt = pick_format(rates, widths, 2)?;
             (intelhdmi::setup(c.mmio, c.cad, c.afg, STREAM_TAG, fmt.word) != 0).then_some(fmt)
         }
