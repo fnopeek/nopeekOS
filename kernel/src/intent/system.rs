@@ -2049,6 +2049,7 @@ pub fn intent_reboot() -> ! {
     kprintln!();
     kprintln!("[npk] Rebooting...");
     crate::npkfs::sync();
+    crate::nvme::shutdown();
     kprintln!();
     // SAFETY: the machine is being reset: interrupts go off on this core, the
     // port writes hit the chipset reset control (0xCF9) and the i8042 (0x64),
@@ -2345,6 +2346,7 @@ pub fn intent_halt() -> ! {
     kprintln!();
     kprintln!("[npk] Shutting down...");
     crate::npkfs::sync();
+    crate::nvme::shutdown();
     kprintln!("[npk] Goodbye.");
     kprintln!();
     // SAFETY: the machine is being powered off: the port writes hit the QEMU

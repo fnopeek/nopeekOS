@@ -144,6 +144,8 @@ struct NvmeState {
     /// safe, guessing which completion belongs to whom is not.
     io_dead: bool,
     msix_vector: crate::irq::Irq, // interrupt of the I/O CQ completion MSI-X (0 = none/poll)
+    /// The controller uses host memory (`setup_host_mem`).
+    host_mem: bool,
     pci_addr: pci::PciAddr,     // for live MSI-X read-back (disk diagnostic)
 }
 
@@ -574,6 +576,7 @@ pub fn init() -> bool {
         prp: Vec::new(),
         io_dead: false,
         msix_vector: 0,
+        host_mem: false,
         pci_addr: dev.addr,
     };
 
@@ -604,6 +607,14 @@ pub fn init() -> bool {
     // Dataset Management (TRIM/Deallocate). Not byte 256: that is OACS
     // (Optional Admin Command Support).
     state.oncs = identify_buf.r16(520u64);
+    // Host memory buffer wishes (HMPRE, HMMIN, HMMINDS in 4 KiB units,
+    // HMMAXD), for `setup_host_mem` once the namespace is known.
+    let hmb = HostMemAsk {
+        preferred: identify_buf.r32(272u64) as u64 * 4096,
+        min: identify_buf.r32(276u64) as u64 * 4096,
+        min_chunk: identify_buf.r32(332u64) as u64 * 4096,
+        max_descs: identify_buf.r16(336u64) as usize,
+    };
     // VWC (Volatile Write Cache) at byte 525; bit 0 = a volatile write cache is
     // present. When set, completed writes may sit in controller DRAM until an
     // NVM Flush — which is exactly why the npkFS commit issues a flush barrier
@@ -674,6 +685,8 @@ pub fn init() -> bool {
     } else {
         kprintln!("[npk] nvme: {} MB ({} sectors)", size_mb, nsze);
     }
+
+    setup_host_mem(&mut state, hmb);
 
     // Create I/O Completion Queue (QID=1)
     let io_cq_pages = ((io_q_depth as usize * 16) + 4095) / 4096;
@@ -780,6 +793,111 @@ pub fn init() -> bool {
     *NVME.lock() = Some(state);
     true
 }
+
+/// Linux `max_host_mem_size_mb`: the most host memory a controller gets.
+const MAX_HOST_MEM: u64 = 128 << 20;
+/// Largest piece of the host memory buffer tried first (Linux: the largest
+/// page-allocator block, 4 MiB on x86).
+const HOST_MEM_CHUNK: u64 = 4 << 20;
+const ADM_FEAT_HOST_MEM: u32 = 0x0d;
+
+/// What Identify Controller asks for a host memory buffer.
+struct HostMemAsk {
+    preferred: u64,
+    min: u64,
+    min_chunk: u64,
+    max_descs: usize,
+}
+
+/// Hand the controller the host memory it asks for (Linux
+/// `nvme_setup_host_mem`): DRAM-less SSDs keep their mapping tables there
+/// and are slow without it. Pieces of `HOST_MEM_CHUNK` down to the
+/// controller's smallest, listed in a descriptor table, enabled with Set
+/// Features 0x0d. The memory stays the controller's until `shutdown`.
+fn setup_host_mem(state: &mut NvmeState, ask: HostMemAsk) {
+    if ask.preferred == 0 { return; }
+    let preferred = ask.preferred.min(MAX_HOST_MEM);
+    if ask.min > preferred {
+        kprintln!("[npk] nvme: host memory buffer needs {} MB, more than {} MB; not set up",
+            ask.min >> 20, MAX_HOST_MEM >> 20);
+        return;
+    }
+    let smallest = ask.min_chunk.max(2 * 4096);
+    let mut chunk = HOST_MEM_CHUNK.min(preferred);
+    while chunk >= smallest {
+        let mut entries = preferred.div_ceil(chunk) as usize;
+        if ask.max_descs != 0 { entries = entries.min(ask.max_descs); }
+        let Some(descs) = DmaRegion::alloc_zeroed((entries * 16).div_ceil(4096)) else { return };
+        let mut pieces: Vec<(u64, u64)> = Vec::new();
+        let mut size = 0u64;
+        while size < preferred && pieces.len() < entries {
+            let len = chunk.min(preferred - size);
+            let Some(piece) = DmaRegion::alloc_zeroed((len / 4096) as usize) else { break };
+            descs.w64(pieces.len() as u64 * 16, piece.phys());
+            descs.w32(pieces.len() as u64 * 16 + 8, (len / 4096) as u32);
+            pieces.push((piece.phys(), len / 4096));
+            size += len;
+        }
+        if size > 0 && size >= ask.min {
+            let mut cmd = SqEntry::zeroed();
+            cmd.opcode = ADM_SET_FEATURES;
+            cmd.cdw10 = ADM_FEAT_HOST_MEM;
+            cmd.cdw11 = 1; // EHM: enable host memory
+            cmd.cdw12 = (size / 4096) as u32;
+            cmd.cdw13 = descs.phys() as u32;
+            cmd.cdw14 = (descs.phys() >> 32) as u32;
+            cmd.cdw15 = pieces.len() as u32;
+            if admin_command(state, cmd).is_ok() {
+                state.host_mem = true;
+                kprintln!("[npk] nvme: host memory buffer {} MB in {} piece(s)", size >> 20, pieces.len());
+                return;
+            }
+            kprintln!("[npk] nvme: the controller refused its host memory buffer");
+        }
+        for (phys, pages) in pieces {
+            memory::deallocate_contiguous(phys, pages as usize);
+        }
+        memory::deallocate_contiguous(descs.phys(), (entries * 16).div_ceil(4096));
+        if size > 0 && size >= ask.min { return; }
+        chunk /= 2;
+    }
+}
+
+/// Before power-off or reset (Linux `nvme_dev_disable` for shutdown): the
+/// controller gives the host memory back, then shuts down normally
+/// (CC.SHN), which puts its volatile write cache on media. No I/O after.
+pub fn shutdown() {
+    let mut nvme = NVME.lock();
+    let Some(state) = nvme.as_mut() else { return };
+    let _ = state.io_ready();
+    AVAILABLE.store(false, Ordering::Relaxed);
+    if state.host_mem {
+        let mut cmd = SqEntry::zeroed();
+        cmd.opcode = ADM_SET_FEATURES;
+        cmd.cdw10 = ADM_FEAT_HOST_MEM;
+        let _ = admin_command(state, cmd);
+        state.host_mem = false;
+    }
+    let cc = state.regs.r32(REG_CC);
+    state.regs.w32(REG_CC, (cc & !CC_SHN_MASK) | CC_SHN_NORMAL);
+    let deadline = crate::interrupts::rdtsc()
+        .saturating_add(crate::interrupts::tsc_freq().saturating_mul(SHUTDOWN_TIMEOUT_SECS));
+    while state.regs.r32(REG_CSTS) & CSTS_SHST_MASK != CSTS_SHST_DONE {
+        if crate::interrupts::rdtsc() > deadline {
+            kprintln!("[npk] nvme: shutdown not complete within {} s", SHUTDOWN_TIMEOUT_SECS);
+            return;
+        }
+        core::hint::spin_loop();
+    }
+}
+
+/// CC.SHN (bits 15:14) and CSTS.SHST (bits 3:2).
+const CC_SHN_MASK: u32 = 3 << 14;
+const CC_SHN_NORMAL: u32 = 1 << 14;
+const CSTS_SHST_MASK: u32 = 3 << 2;
+const CSTS_SHST_DONE: u32 = 2 << 2;
+/// Linux `shutdown_timeout`.
+const SHUTDOWN_TIMEOUT_SECS: u64 = 5;
 
 pub fn is_available() -> bool {
     AVAILABLE.load(Ordering::Relaxed)

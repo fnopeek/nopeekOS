@@ -470,6 +470,9 @@ pub fn intent_disk_info() {
                     }
                     None => kprintln!("  GC:        seit Boot nicht gelaufen"),
                 }
+                if let Some((held, dirty)) = crate::storage::npkfs::storage::cache_held() {
+                    kprintln!("  Cache:     {} blocks ({} MB), {} dirty", held, held * 4 / 1024, dirty);
+                }
             }
 
             print_crypto_bench();
