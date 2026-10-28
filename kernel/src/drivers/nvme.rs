@@ -353,6 +353,7 @@ impl NvmeState {
             if s.addr & 3 != 0 || s.len % SECTOR_SIZE != 0 || s.lba.checked_add((s.len / SECTOR_SIZE) as u64)
                 .is_none_or(|end| end > self.total_lbas)
             {
+                kprintln!("[npk] nvme: refused segment lba {} at {:#x}, {} B", s.lba, s.addr, s.len);
                 return Err(BlkError::OutOfRange);
             }
         }
@@ -368,6 +369,7 @@ impl NvmeState {
                 let (prp1, prp2) = match self.map_prps(cid, s.addr + done as u64, n) {
                     Ok(p) => p,
                     Err(e) => {
+                        kprintln!("[npk] nvme: no physical address for {:#x} (+{} B)", s.addr + done as u64, n);
                         self.io_free.push(cid);
                         err = Some(e);
                         break;
@@ -389,8 +391,11 @@ impl NvmeState {
             }
             if queued { self.io_ring(); }
             if self.io_inflight == 0 { break; }
-            let (_, status) = self.io_reap()?;
-            if status != 0 && err.is_none() { err = Some(BlkError::IoError); }
+            let (cid, status) = self.io_reap()?;
+            if status != 0 && err.is_none() {
+                kprintln!("[npk] nvme: opcode {:#04x} (id {}) failed, status {:#05x}", opcode, cid, status);
+                err = Some(BlkError::IoError);
+            }
         }
         // The controller's writes into the buffers before the caller's reads.
         core::sync::atomic::fence(core::sync::atomic::Ordering::SeqCst);
@@ -407,8 +412,11 @@ struct Seg {
     len: usize,
 }
 
-/// The physical address of kernel virtual `addr`.
+/// The physical address of kernel virtual `addr`: itself in the identity
+/// map, where the heap lives (Linux `virt_to_phys`), else from the page
+/// tables (the kernel stacks).
 fn phys(addr: u64) -> Result<u64, BlkError> {
+    if addr < crate::mm::paging::IDENTITY_END { return Ok(addr); }
     crate::mm::paging::translate(addr).ok_or(BlkError::OutOfRange)
 }
 

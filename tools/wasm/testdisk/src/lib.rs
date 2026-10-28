@@ -269,7 +269,10 @@ fn file_run(size: usize, count: u32, label: &str, wbuf: &mut [u8], rbuf: &mut [u
     for i in 0..count {
         *seq += 1;
         wbuf[..8].copy_from_slice(&seq.to_le_bytes());
-        if !host::store(&name(i), &wbuf[..size]) { run.failures += 1; }
+        if !host::store(&name(i), &wbuf[..size]) {
+            print(&format!("     WARN: store {} failed\n", name(i)));
+            run.failures += 1;
+        }
     }
     let t = host::tsc_now().wrapping_sub(t0);
     run.write = mbs(bytes, t, hz);
@@ -280,7 +283,11 @@ fn file_run(size: usize, count: u32, label: &str, wbuf: &mut [u8], rbuf: &mut [u
     let before = counters();
     let t0 = host::tsc_now();
     for i in 0..count {
-        if host::fetch_into(&name(i), &mut rbuf[..size + 32]) != host::Fill::Len(size) { run.failures += 1; }
+        let got = host::fetch_into(&name(i), &mut rbuf[..size + 32]);
+        if got != host::Fill::Len(size) {
+            print(&format!("     WARN: cold fetch {}: {:?}\n", name(i), got));
+            run.failures += 1;
+        }
     }
     let t = host::tsc_now().wrapping_sub(t0);
     run.cold = mbs(bytes, t, hz);
@@ -289,7 +296,11 @@ fn file_run(size: usize, count: u32, label: &str, wbuf: &mut [u8], rbuf: &mut [u
     // Read warm, and check the last file's bytes.
     let t0 = host::tsc_now();
     for i in 0..count {
-        if host::fetch_into(&name(i), &mut rbuf[..size + 32]) != host::Fill::Len(size) { run.failures += 1; }
+        let got = host::fetch_into(&name(i), &mut rbuf[..size + 32]);
+        if got != host::Fill::Len(size) {
+            print(&format!("     WARN: warm fetch {}: {:?}\n", name(i), got));
+            run.failures += 1;
+        }
     }
     run.warm = mbs(bytes, host::tsc_now().wrapping_sub(t0), hz);
     if rbuf[..size] != wbuf[..size] {

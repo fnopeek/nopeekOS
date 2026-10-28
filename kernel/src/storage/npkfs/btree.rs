@@ -378,7 +378,11 @@ fn walk(cache: &mut BlockCache, root: u64, depth: u32, mut out: impl FnMut(Walk)
     while let Some((block, depth)) = todo.pop() {
         if depth > 64 { out(Walk::Skip(block, "deeper than 64")); continue; }
         if !seen.insert(block) { out(Walk::Skip(block, "visited twice")); continue; }
-        if read_node(cache, block, &mut buf).is_err() { out(Walk::Skip(block, "unreadable")); continue; }
+        match read_node(cache, block, &mut buf) {
+            Ok(()) => {}
+            Err(FsError::Corrupt) => { out(Walk::Skip(block, "fails its checksum")); continue; }
+            Err(_) => { out(Walk::Skip(block, "unreadable")); continue; }
+        }
         let hdr = read_header(&buf);
         if hdr.magic != BTREE_NODE_MAGIC { out(Walk::Skip(block, "bad magic")); continue; }
         match hdr.node_type {
