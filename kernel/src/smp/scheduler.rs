@@ -109,16 +109,16 @@ pub fn has_work() -> bool {
 }
 
 /// Whether the oldest waiting task is one `accept` would take, given whether
-/// it is a shared background app and how many TSC cycles it has waited. For
-/// the idle re-check.
-pub fn head_acceptable(accept: impl Fn(bool, u64) -> bool) -> bool {
+/// it is a fiber, whether it is a shared background app and how many TSC
+/// cycles it has waited. For the idle re-check.
+pub fn head_acceptable(accept: impl Fn(bool, bool, u64) -> bool) -> bool {
     let now = crate::interrupts::rdtsc();
-    INBOX.lock().front().is_some_and(|t| accept(t.shared, now.saturating_sub(t.queued)))
+    INBOX.lock().front().is_some_and(|t| accept(t.is_fiber, t.shared, now.saturating_sub(t.queued)))
 }
 
 /// Take the oldest waiting task if `accept` takes it. The decision is made
 /// under the inbox lock, so the task decided on is the task taken.
-pub fn next_task(accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
+pub fn next_task(accept: impl Fn(bool, bool, u64) -> bool) -> Option<Task> {
     take_head(false, accept)
 }
 
@@ -126,18 +126,18 @@ pub fn next_task(accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
 /// between two of its fibers: a fiber is only queued there, while a native
 /// task would hold every other fiber of the core until it returns. The order
 /// stays FIFO — a native task at the head is not skipped.
-pub fn next_fiber_task(accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
+pub fn next_fiber_task(accept: impl Fn(bool, bool, u64) -> bool) -> Option<Task> {
     if INBOX_LEN.load(Ordering::Acquire) == 0 {
         return None;
     }
     take_head(true, accept)
 }
 
-fn take_head(fiber_only: bool, accept: impl Fn(bool, u64) -> bool) -> Option<Task> {
+fn take_head(fiber_only: bool, accept: impl Fn(bool, bool, u64) -> bool) -> Option<Task> {
     let now = crate::interrupts::rdtsc();
     let mut inbox = INBOX.lock();
     if !inbox.front().is_some_and(|t| {
-        (!fiber_only || t.is_fiber) && accept(t.shared, now.saturating_sub(t.queued))
+        (!fiber_only || t.is_fiber) && accept(t.is_fiber, t.shared, now.saturating_sub(t.queued))
     }) {
         return None;
     }

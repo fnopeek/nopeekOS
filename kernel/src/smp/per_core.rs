@@ -1141,7 +1141,7 @@ pub fn admit_between_fibers(cid: usize) {
     if cid == 0 || !takes_work(cid) {
         return;
     }
-    if let Some(task) = super::scheduler::next_fiber_task(|shared, waited| accepts(cid, shared, waited)) {
+    if let Some(task) = super::scheduler::next_fiber_task(|fiber, shared, waited| accepts(cid, fiber, shared, waited)) {
         admit_fiber_task(cid, task);
     }
 }
@@ -1149,7 +1149,18 @@ pub fn admit_between_fibers(cid: usize) {
 /// Whether `cid` takes the oldest waiting task. A background app goes to the
 /// app core while that can take it; everything else, and a background app
 /// with no usable app core, goes to a least loaded core.
-fn accepts(cid: usize, shared: bool, waited: u64) -> bool {
+fn accepts(cid: usize, fiber: bool, shared: bool, waited: u64) -> bool {
+    // A core a driver lives on gives its pinned fibers the core only between
+    // other work: a native task holds it until it returns, and an app's long
+    // kernel call until that returns. While another core without a driver
+    // can take work, a native task never goes there, and an app other than
+    // the background apps of the shared app core only after waiting as long
+    // as any task may.
+    let driver_core = holds_driver(cid) && (1..=super::scheduler::worker_count().min(63))
+        .any(|c| c != cid && !holds_driver(c) && can_take(c));
+    if driver_core && !fiber {
+        return false;
+    }
     // Placement is a preference, not a reason to strand work: a core whose
     // fibers never all park (a busy-polling worker) never gets back to the
     // inbox, yet still counts as less loaded.
@@ -1164,7 +1175,22 @@ fn accepts(cid: usize, shared: bool, waited: u64) -> bool {
             return a == cid;
         }
     }
+    if driver_core {
+        return false;
+    }
     least_loaded(cid)
+}
+
+/// Whether a driver's pinned fiber lives on `c` (`mark_driver_core`).
+fn holds_driver(c: usize) -> bool {
+    c < 64 && DRIVER_CORES.load(Ordering::Relaxed) & (1 << c) != 0
+}
+
+/// Whether worker `c` takes inbox work at all.
+fn can_take(c: usize) -> bool {
+    IN_LOOP[c].load(Ordering::Acquire)
+        && takes_work(c)
+        && DEDICATED_VM_CORE.load(Ordering::Acquire) as usize != c
 }
 
 /// How long a task may wait for its preferred core before any core that
@@ -1233,7 +1259,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         let take = takes_work(cid);
         // Admit a freshly-spawned app as a fiber, or run a native intent.
         // New work arrives in the shared inbox (`scheduler::spawn`).
-        let next = if take { super::scheduler::next_task(|shared, waited| accepts(cid, shared, waited)) } else { None };
+        let next = if take { super::scheduler::next_task(|fiber, shared, waited| accepts(cid, fiber, shared, waited)) } else { None };
         if let Some(task) = next {
             if task.is_fiber {
                 admit_fiber_task(cid, task);
@@ -1291,7 +1317,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             continue; // became runnable — round again
         }
         if super::scheduler::has_work() {
-            if take && super::scheduler::head_acceptable(|shared, waited| accepts(cid, shared, waited)) {
+            if take && super::scheduler::head_acceptable(|fiber, shared, waited| accepts(cid, fiber, shared, waited)) {
                 IDLE[cid].store(false, Ordering::Relaxed);
                 crate::interrupts::irq_restore(flags);
                 continue;
