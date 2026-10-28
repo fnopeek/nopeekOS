@@ -451,8 +451,8 @@ pub fn bench_raw_read_random(ops: u64, batch: usize) -> Option<(u64, u64)> {
 
 /// Write `total` blocks of fresh content to a free area, in calls of `cmd`
 /// blocks, then flush the device's write cache; the area is freed again.
-/// `(bytes, ticks)`.
-pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64)> {
+/// `(bytes, ticks in all, ticks of the flush, free areas written)`.
+pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64, u64, u64)> {
     let cmd = cmd.clamp(1, total.max(1));
     // A free area, contiguous where the allocator can; it stays allocated
     // while the device writes, so nothing else is placed there.
@@ -481,7 +481,10 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64)> {
     let mut result = None;
     if ok && !areas.is_empty() {
         buf.resize(cmd as usize * BLOCK_SIZE, 0);
-        let mut fill = super::bench::Fill::new(crate::csprng::random_u64());
+        // Random once, then a counter in every block so none repeats; the
+        // filling stays out of the measured time.
+        super::bench::Fill::new(crate::csprng::random_u64()).bytes(&mut buf);
+        let mut stamp = 0u64;
         let t0 = crate::interrupts::rdtsc();
         let mut bytes = 0u64;
         let mut failed = false;
@@ -490,7 +493,10 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64)> {
             while off < count {
                 let n = cmd.min(count - off);
                 let len = n as usize * BLOCK_SIZE;
-                fill.bytes(&mut buf[..len]);
+                for block in buf[..len].chunks_mut(BLOCK_SIZE) {
+                    stamp += 1;
+                    block[..8].copy_from_slice(&stamp.to_le_bytes());
+                }
                 if crate::blkdev::write_extent(start + off, n, &buf[..len]).is_err() {
                     failed = true;
                     break 'areas;
@@ -499,8 +505,10 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64)> {
                 off += n;
             }
         }
+        let t1 = crate::interrupts::rdtsc();
         if !failed && crate::blkdev::flush().is_ok() {
-            result = Some((bytes, crate::interrupts::rdtsc().saturating_sub(t0)));
+            let t2 = crate::interrupts::rdtsc();
+            result = Some((bytes, t2.saturating_sub(t0), t2.saturating_sub(t1), areas.len() as u64));
         }
     }
     let mut lock = FS.lock();

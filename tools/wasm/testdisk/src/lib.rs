@@ -147,20 +147,21 @@ const PUT_STAGES: [&str; 6] = ["dedup", "hash", "encrypt", "allocate", "device",
 /// Where the time of `ticks` went: each stage's share between two counter
 /// readings, the rest outside the object layer (path layer, copies).
 fn breakdown(names: &[&str], before: &[u64], after: &[u64], ticks: u64) -> String {
+    let d: Vec<u64> = (0..names.len()).map(|i| after[i + 2].saturating_sub(before[i + 2])).collect();
+    let inside: u64 = d.iter().sum();
+    // Stages that overlapped on several cores: shares of their core time,
+    // and how many cores they kept busy on average.
+    let parallel = inside > ticks;
+    let whole = if parallel { inside } else { ticks };
     let mut s = String::new();
-    let mut inside = 0u64;
-    for (i, name) in names.iter().enumerate() {
-        let d = after[i + 2].saturating_sub(before[i + 2]);
-        inside += d;
-        let pct = if ticks == 0 { 0 } else { d * 100 / ticks };
+    for (name, &t) in names.iter().zip(&d) {
+        let pct = if whole == 0 { 0 } else { t * 100 / whole };
         if pct > 0 { s.push_str(&format!("{} {}%  ", name, pct)); }
     }
-    if inside > ticks {
-        // Stages ran on several cores at once: core time per wall time.
-        s.push_str("(core time, several cores)");
+    if parallel {
+        s.push_str(&format!("(of core time, {}.{} cores busy)", inside / ticks, inside * 10 / ticks % 10));
     } else {
-        let rest = ticks - inside;
-        let pct = if ticks == 0 { 0 } else { rest * 100 / ticks };
+        let pct = if ticks == 0 { 0 } else { (ticks - inside) * 100 / ticks };
         s.push_str(&format!("other {}%", pct));
     }
     s
@@ -198,17 +199,25 @@ fn device(hz: u64, cmd_blocks: u64) -> bool {
         }
         print(&format!("     rand read 4 KiB, {}  {} IOPS\n", label, spread(rates)));
     }
-    let mut rates = Vec::new();
-    let mut written = 0;
+    let (mut rates, mut no_flush) = (Vec::new(), Vec::new());
+    let (mut written, mut flush_ms, mut areas) = (0, 0, 0);
     for _ in 0..RUNS {
-        let mut out = [0u64; 2];
+        let mut out = [0u64; 4];
         match host::disk_bench(SEQ_WRITE, 256, SEQ_WRITE_BYTES / BLOCK, &mut out) {
-            Some(&[bytes, t]) => { rates.push(mbs(bytes, t, hz)); written = bytes; }
+            Some(&[bytes, t, flush, n]) => {
+                rates.push(mbs(bytes, t, hz));
+                no_flush.push(mbs(bytes, t.saturating_sub(flush), hz));
+                written = bytes;
+                flush_ms = flush * 1000 / hz;
+                areas = n;
+            }
             _ => ok = false,
         }
     }
-    print(&format!("     seq write    1 MiB calls  {} MB/s   {} MiB to free space, flushed\n",
-        spread(rates), written / MIB));
+    print(&format!("     seq write    1 MiB calls  {} MB/s   {} MiB to free space ({} area(s)), flushed\n",
+        spread(rates), written / MIB, areas));
+    print(&format!("        before the flush       {} MB/s   the flush took {} ms\n",
+        spread(no_flush), flush_ms));
     ok
 }
 

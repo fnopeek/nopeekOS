@@ -3582,7 +3582,7 @@ const BENCH_WINDOW_BLOCKS: u64 = 2048;
 ///   stored data → bytes, ticks
 /// - 1: device read of `a` random stored blocks in batches of `b` → ops, ticks
 /// - 2: device sequential write of `b` blocks in calls of `a`, then flush
-///   → bytes, ticks
+///   → bytes, ticks in all, ticks of the flush, free areas written
 /// - 3: write back and drop the block cache → nothing
 /// - 4: read the largest stored objects up to `a` bytes, cold → objects,
 ///   bytes, ticks
@@ -3608,7 +3608,7 @@ pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: 
                 .is_some()
         }
         1 => st::bench_raw_read_random(a, b as usize).map(|(n, t)| v.extend([n, t])).is_some(),
-        2 => st::bench_raw_write_seq(b, a).map(|(bytes, t)| v.extend([bytes, t])).is_some(),
+        2 => st::bench_raw_write_seq(b, a).map(|(bytes, t, flush, areas)| v.extend([bytes, t, flush, areas])).is_some(),
         3 => st::bench_drop_caches(),
         4 => st::bench_read_objects(a).map(|(n, bytes, t)| v.extend([n, bytes, t])).is_some(),
         5 => {
