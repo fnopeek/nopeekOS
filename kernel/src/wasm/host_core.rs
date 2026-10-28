@@ -3572,6 +3572,62 @@ pub(crate) fn npk_display_audio_done(ctx: &mut HostState) -> i32 {
     crate::audio::display_audio_done().map_or(-2, |n| n as i32)
 }
 
+/// Blocks per stretch of the sequential device read: a stretch lies in one
+/// allocated run, so a read never crosses into free space.
+const BENCH_WINDOW_BLOCKS: u64 = 2048;
+
+/// `testdisk`'s layered measurements, as u64 values into `out`:
+///
+/// - 0: device sequential read in calls of `a` blocks over `b` blocks of
+///   stored data → bytes, ticks
+/// - 1: device read of `a` random stored blocks in batches of `b` → ops, ticks
+/// - 2: device sequential write of `b` blocks in calls of `a`, then flush
+///   → bytes, ticks
+/// - 3: write back and drop the block cache → nothing
+/// - 4: read the largest stored objects up to `a` bytes, cold → objects,
+///   bytes, ticks
+/// - 5: TSC Hz, the object read and write stage counters
+///   (`npkfs::bench`), blocks per NVMe command
+///
+/// Needs WRITE, as the other benchmarks: a device write takes free blocks
+/// for its duration.
+pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: i64, b: i64,
+                             out_ptr: i32, out_len: i32) -> i32 {
+    use crate::storage::npkfs::{bench, storage as st};
+    if capability::check_global(&ctx.cap_id, capability::Rights::WRITE).is_err() || a < 0 || b < 0 {
+        return -1;
+    }
+    let (a, b) = (a as u64, b as u64);
+    let mut v: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    let ok = match kind {
+        0 => {
+            let window = a.max(BENCH_WINDOW_BLOCKS);
+            st::bench_used_windows(window, b)
+                .and_then(|w| st::bench_raw_read_seq(&w, window, a))
+                .map(|(bytes, t)| v.extend([bytes, t]))
+                .is_some()
+        }
+        1 => st::bench_raw_read_random(a, b as usize).map(|(n, t)| v.extend([n, t])).is_some(),
+        2 => st::bench_raw_write_seq(b, a).map(|(bytes, t)| v.extend([bytes, t])).is_some(),
+        3 => st::bench_drop_caches(),
+        4 => st::bench_read_objects(a).map(|(n, bytes, t)| v.extend([n, bytes, t])).is_some(),
+        5 => {
+            v.push(crate::interrupts::tsc_freq());
+            bench::GET.snapshot(&mut v);
+            bench::PUT.snapshot(&mut v);
+            v.push(crate::nvme::max_blocks_per_cmd() as u64);
+            true
+        }
+        _ => false,
+    };
+    if !ok { return -1; }
+    let bytes: alloc::vec::Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+    match write_whole(mem, out_ptr, out_len, &bytes) {
+        n if n >= 0 => v.len() as i32,
+        e => e,
+    }
+}
+
 pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::READ).is_err() {

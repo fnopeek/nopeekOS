@@ -29,6 +29,7 @@ mod format;
 mod sb_io;
 mod btree;
 pub mod storage;
+pub mod bench;
 pub mod paths;
 pub mod fs;
 

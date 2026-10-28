@@ -335,6 +335,211 @@ pub fn raw_blk_bench() -> Option<(u64, u64)> {
     Some((write_mbs, read_mbs))
 }
 
+// ── Layered benchmark (`testdisk`) ────────────────────────────────────
+
+/// The allocated runs of the data area, `(start, length)`: data stored
+/// long ago, not just written, so a read reaches the flash (a block never
+/// written reads as zeros without it).
+fn used_runs() -> Option<Vec<(u64, u64)>> {
+    let lock = FS.lock();
+    let fs = lock.as_ref()?;
+    let (start, end) = (fs.sb.data_start, fs.bitmap.total_blocks());
+    let mut runs = Vec::new();
+    let mut b = start;
+    while b < end {
+        if !fs.bitmap.is_allocated(b) {
+            b += 1;
+            continue;
+        }
+        let s = b;
+        while b < end && fs.bitmap.is_allocated(b) { b += 1; }
+        runs.try_reserve(1).ok()?;
+        runs.push((s, b - s));
+    }
+    Some(runs)
+}
+
+/// Stretches of `window` blocks inside the allocated runs, up to `total`
+/// blocks: where the sequential device read goes.
+pub fn bench_used_windows(window: u64, total: u64) -> Option<Vec<u64>> {
+    let mut out = Vec::new();
+    for (start, len) in used_runs()? {
+        let mut off = 0;
+        while off + window <= len && (out.len() as u64) * window < total {
+            out.push(start + off);
+            off += window;
+        }
+    }
+    Some(out)
+}
+
+/// Read every stretch (`window` blocks each) in calls of `cmd` blocks:
+/// `(bytes, ticks)`. No file system, no decryption.
+pub fn bench_raw_read_seq(windows: &[u64], window: u64, cmd: u64) -> Option<(u64, u64)> {
+    let cmd = cmd.clamp(1, window);
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(cmd as usize * BLOCK_SIZE).ok()?;
+    buf.resize(cmd as usize * BLOCK_SIZE, 0);
+    let t0 = crate::interrupts::rdtsc();
+    let mut bytes = 0u64;
+    for &w in windows {
+        let mut off = 0;
+        while off < window {
+            let n = cmd.min(window - off);
+            crate::blkdev::read_extent(w + off, n, &mut buf[..n as usize * BLOCK_SIZE]).ok()?;
+            bytes += n * BLOCK_SIZE as u64;
+            off += n;
+        }
+    }
+    Some((bytes, crate::interrupts::rdtsc().saturating_sub(t0)))
+}
+
+/// `ops` single blocks at random allocated places, in batches of `batch`
+/// (1 = one command at a time): `(ops, ticks)`.
+pub fn bench_raw_read_random(ops: u64, batch: usize) -> Option<(u64, u64)> {
+    let batch = batch.max(1);
+    // Uniform over the stored blocks: a random offset into all runs laid
+    // end to end, found by binary search over their running sums.
+    let runs = used_runs()?;
+    let mut ends = Vec::new();
+    ends.try_reserve_exact(runs.len()).ok()?;
+    let mut used = 0u64;
+    for &(_, len) in &runs {
+        used += len;
+        ends.push(used);
+    }
+    if used == 0 { return None; }
+    let mut blocks = Vec::new();
+    blocks.try_reserve_exact(ops as usize).ok()?;
+    for _ in 0..ops {
+        let k = crate::csprng::random_u64() % used;
+        let r = ends.partition_point(|&e| e <= k);
+        let (start, len) = runs[r];
+        blocks.push(start + len - (ends[r] - k));
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    buf.try_reserve_exact(batch * BLOCK_SIZE).ok()?;
+    buf.resize(batch * BLOCK_SIZE, 0);
+    let t0 = crate::interrupts::rdtsc();
+    for chunk in blocks.chunks(batch) {
+        if chunk.len() == 1 {
+            let one: &mut [u8; BLOCK_SIZE] = (&mut buf[..BLOCK_SIZE]).try_into().ok()?;
+            crate::blkdev::read_block(chunk[0], one).ok()?;
+        } else {
+            crate::blkdev::read_blocks_batch(chunk, &mut buf[..chunk.len() * BLOCK_SIZE]).ok()?;
+        }
+    }
+    Some((ops, crate::interrupts::rdtsc().saturating_sub(t0)))
+}
+
+/// Write `total` blocks of fresh content to a free area, in calls of `cmd`
+/// blocks, then flush the device's write cache; the area is freed again.
+/// `(bytes, ticks)`.
+pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64)> {
+    let cmd = cmd.clamp(1, total.max(1));
+    // A free area, contiguous where the allocator can; it stays allocated
+    // while the device writes, so nothing else is placed there.
+    let mut areas: Vec<(u64, u64)> = Vec::new();
+    {
+        let mut lock = FS.lock();
+        let fs = lock.as_mut()?;
+        let mut got = 0;
+        while got < total {
+            let mut want = (total - got).min(fs.bitmap.free_count() / 2);
+            if want == 0 { break; }
+            let start = loop {
+                match fs.bitmap.alloc(want) {
+                    Ok(s) => break Some(s),
+                    Err(_) if want > 1 => want = want.div_ceil(2),
+                    Err(_) => break None,
+                }
+            };
+            let Some(start) = start else { break };
+            areas.push((start, want));
+            got += want;
+        }
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let ok = buf.try_reserve_exact(cmd as usize * BLOCK_SIZE).is_ok();
+    let mut result = None;
+    if ok && !areas.is_empty() {
+        buf.resize(cmd as usize * BLOCK_SIZE, 0);
+        let mut fill = super::bench::Fill::new(crate::csprng::random_u64());
+        let t0 = crate::interrupts::rdtsc();
+        let mut bytes = 0u64;
+        let mut failed = false;
+        'areas: for &(start, count) in &areas {
+            let mut off = 0;
+            while off < count {
+                let n = cmd.min(count - off);
+                let len = n as usize * BLOCK_SIZE;
+                fill.bytes(&mut buf[..len]);
+                if crate::blkdev::write_extent(start + off, n, &buf[..len]).is_err() {
+                    failed = true;
+                    break 'areas;
+                }
+                bytes += len as u64;
+                off += n;
+            }
+        }
+        if !failed && crate::blkdev::flush().is_ok() {
+            result = Some((bytes, crate::interrupts::rdtsc().saturating_sub(t0)));
+        }
+    }
+    let mut lock = FS.lock();
+    if let Some(fs) = lock.as_mut() {
+        // TRIM is deferred (gc / idle drain), as for every free.
+        for &(start, count) in &areas {
+            for b in start..start + count {
+                fs.cache.invalidate(b);
+            }
+            fs.bitmap.free(start, count);
+        }
+    }
+    result
+}
+
+/// Write back and forget the block cache, so the next reads come from
+/// the device.
+pub fn bench_drop_caches() -> bool {
+    let mut lock = FS.lock();
+    let Some(fs) = lock.as_mut() else { return false };
+    fs.cache.drop_all().is_ok()
+}
+
+/// Read the largest objects in the store, up to `total` bytes, after the
+/// block cache is dropped: `(objects, bytes, ticks)`. What each object
+/// read spends its time on is counted in `bench::GET`.
+pub fn bench_read_objects(total: u64) -> Option<(u64, u64, u64)> {
+    let mut entries: Vec<([u8; 32], u64)> = Vec::new();
+    {
+        let mut lock = FS.lock();
+        let fs = lock.as_mut()?;
+        let root = fs.sb.btree_root;
+        btree::iter_all(&mut fs.cache, root, &mut |e: &BTreeEntryRaw| {
+            if entries.try_reserve(1).is_ok() {
+                entries.push((e.hash, e.disk_size));
+            }
+        }).ok()?;
+    }
+    entries.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    let mut pick = Vec::new();
+    let mut sum = 0;
+    for (h, size) in entries {
+        if sum >= total { break; }
+        sum += size;
+        pick.push(h);
+    }
+    if !bench_drop_caches() { return None; }
+    let t0 = crate::interrupts::rdtsc();
+    let mut bytes = 0u64;
+    for h in &pick {
+        let data = get(h).ok()??;
+        bytes += data.len() as u64;
+    }
+    Some((pick.len() as u64, bytes, crate::interrupts::rdtsc().saturating_sub(t0)))
+}
+
 // ── fsck: read-only integrity self-check ──────────────────────────────
 
 #[derive(Clone, Copy)]
@@ -760,6 +965,7 @@ pub fn put(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
     fs.sb.free_blocks = fs.bitmap.free_count();
     fs.pending_old_blocks.extend(old_blocks);
     let t_btree = rdtsc();
+    super::bench::PUT.add(write_data.len() as u64, &[t0, t_dedup, t_hash, t_enc, t_alloc, t_dma, t_btree]);
 
     if super::FS_PERF_LOG && write_data.len() >= 256 * 1024 {
         let mhz = tsc_freq().max(1) / 1_000_000;
@@ -885,6 +1091,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     }
     let t_dec = rdtsc();
     let plaintext = staging;
+    super::bench::GET.add(total_bytes as u64, &[t0, t_lock, t_btree, t_alloc, t_dma, t_dec]);
 
     // BLAKE3 verify intentionally elided. AES-GCM's tag already
     // authenticates the ciphertext under (key, nonce), and both

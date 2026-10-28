@@ -863,6 +863,10 @@ host_imports! {
     ctx fn npk_display_audio_request(bits: i32) -> i32;
     ctx fn npk_display_audio_done() -> i32;
 
+    // npk_disk_bench(kind, a, b, out_ptr, out_len) -> u64 values written
+    // or -1: testdisk's layered storage measurements. Needs WRITE.
+    mem fn npk_disk_bench(kind: i32, a: i64, b: i64, out_ptr: i32, out_len: i32) -> i32;
+
     // npk_audio_set_volume(pct) -> 0; npk_audio_get_volume() -> 0..=100.
     ctx fn npk_audio_set_volume(pct: i32) -> i32;
     ctx fn npk_audio_get_volume() -> i32;

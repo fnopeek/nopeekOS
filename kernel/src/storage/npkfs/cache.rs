@@ -156,6 +156,15 @@ impl BlockCache {
     }
 
     /// Remove a block from cache (used after freeing blocks).
+    /// Write back every dirty block, then forget all of them.
+    pub fn drop_all(&mut self) -> Result<(), FsError> {
+        self.flush()?;
+        for m in self.meta.iter_mut() {
+            m.valid = false;
+        }
+        Ok(())
+    }
+
     pub fn invalidate(&mut self, block: u64) {
         if let Some(slot) = self.find_slot(block) {
             self.meta[slot].valid = false;
