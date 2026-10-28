@@ -286,6 +286,10 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
     let segs = parse_path(path)?;
     if segs.is_empty() { return Err(PathError::InvalidPath); }
 
+    if data.len() > super::fs::STREAMING_CHUNK_SIZE {
+        return store_chunked(root, path, data);
+    }
+
     // Stream-hash the would-be Blob's content address (no alloc, no
     // encode) so we can skip `data.to_vec() + encode_and_hash() +
     // storage::put` entirely when the blob already exists.
@@ -311,6 +315,34 @@ pub fn store(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathE
         flags: TreeEntry::FLAG_BLOB,
     };
     insert_entry_at(root, &segs, entry, /* allow_replace */ true)
+}
+
+/// `store` for data above one chunk: the chunks a streaming write would
+/// make, each its own object, encoded, hashed and encrypted in parallel,
+/// then the manifest.
+fn store_chunked(root: &[u8; 32], path: &str, data: &[u8]) -> Result<[u8; 32], PathError> {
+    let pieces: Vec<&[u8]> = data.chunks(super::fs::STREAMING_CHUNK_SIZE).collect();
+    let hashes: Vec<spin::Mutex<[u8; 32]>> = pieces.iter().map(|_| spin::Mutex::new([0; 32])).collect();
+    let failed: spin::Mutex<Option<PathError>> = spin::Mutex::new(None);
+    crate::smp::par::for_each(pieces.len(), &|i| {
+        let r = Object::Blob(pieces[i].to_vec()).encode_and_hash()
+            .map_err(|_| PathError::Corrupt)
+            .and_then(|(bytes, hash)| Ok((storage::put(&hash, &bytes)?, hash)));
+        match r {
+            Ok(((), hash)) => *hashes[i].lock() = hash,
+            Err(e) => { failed.lock().get_or_insert(e); }
+        }
+    });
+    if let Some(e) = failed.into_inner() {
+        return Err(e);
+    }
+    let manifest = Object::Chunked {
+        total_size: data.len() as u64,
+        chunks: hashes.into_iter().map(|h| h.into_inner()).collect(),
+    };
+    let (encoded, manifest_hash) = manifest.encode_and_hash().map_err(|_| PathError::Corrupt)?;
+    storage::put(&manifest_hash, &encoded)?;
+    install_chunked_file(root, path, manifest_hash, data.len() as u64)
 }
 
 /// Publish a pre-built `Object::Chunked` manifest as a File at

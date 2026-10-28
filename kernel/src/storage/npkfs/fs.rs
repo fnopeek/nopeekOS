@@ -753,23 +753,46 @@ fn chunk_at(chunks: &[[u8; 32]], starts: &mut Vec<u64>, total: u64, pos: u64) ->
 /// whether it was stored as a single `Blob` or as a chunked blob.
 fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathError> {
     let total = usize::try_from(total_size).map_err(|_| PathError::Corrupt)?;
-    let mut out = Vec::new();
-    out.try_reserve_exact(total).map_err(|_| Error::Storage(FsError::OutOfMemory))?;
+    let mut lens = Vec::with_capacity(chunks.len());
+    let mut sum = 0usize;
     for h in chunks {
-        let bytes = storage::get(h)
-            .map_err(Error::Storage)?
-            .ok_or(PathError::Corrupt)?;
-        let chunk = super::object::decode_blob_inplace(bytes)
-            .map_err(|_| PathError::Corrupt)?;
-        out.extend_from_slice(&chunk);
-        if out.len() > total {
-            return Err(PathError::Corrupt);
-        }
+        let len = usize::try_from(chunk_len(h)?).map_err(|_| PathError::Corrupt)?;
+        sum = sum.checked_add(len).ok_or(PathError::Corrupt)?;
+        lens.push(len);
     }
-    if out.len() != total {
+    if sum != total {
         return Err(PathError::Corrupt);
     }
-    Ok(out)
+    let mut out = Vec::new();
+    out.try_reserve_exact(total).map_err(|_| Error::Storage(FsError::OutOfMemory))?;
+    out.resize(total, 0);
+
+    // Every chunk is its own object: read and decrypted on whichever core
+    // takes it, straight into its place in `out`.
+    let mut parts: Vec<Mutex<&mut [u8]>> = Vec::with_capacity(chunks.len());
+    let mut rest: &mut [u8] = &mut out;
+    for &len in &lens {
+        let (part, tail) = rest.split_at_mut(len);
+        parts.push(Mutex::new(part));
+        rest = tail;
+    }
+    let failed: Mutex<Option<PathError>> = Mutex::new(None);
+    crate::smp::par::for_each(chunks.len(), &|i| {
+        let r = read_chunk(&chunks[i]).and_then(|c| {
+            let mut part = parts[i].lock();
+            if c.len() != part.len() { return Err(PathError::Corrupt); }
+            part.copy_from_slice(&c);
+            Ok(())
+        });
+        if let Err(e) = r {
+            failed.lock().get_or_insert(e);
+        }
+    });
+    drop(parts);
+    match failed.into_inner() {
+        Some(e) => Err(e),
+        None => Ok(out),
+    }
 }
 
 /// Length and storage hash of the last zero chunk asked for.
