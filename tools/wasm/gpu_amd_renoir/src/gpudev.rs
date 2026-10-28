@@ -578,8 +578,8 @@ fn linear_pixels(adev: &amdgpu_device, l: &mut Line, b: &bo, g: &compose::gem) {
     }
 }
 
-/// Every 600 scenes, the pixels of each guest frame being composed: of a
-/// tiled frame those its import wrote.
+/// Every 600 scenes with `log.drivers`, the pixels of each guest frame
+/// being composed: of a tiled frame those its import wrote.
 fn log_guest_pixels(adev: &amdgpu_device, svc: &service) {
     for (id, o) in &svc.guest_bos {
         let Some(b) = svc.dyn_bos.iter().find(|b| b.id == *id) else { continue };
@@ -626,7 +626,7 @@ fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::
                 l.s(", DCC at ").dec(s.meta_offset).s(" (").dec(s.meta_size as u64).s(" bytes, aligned ")
                     .dec(s.pipe_aligned as u64).s(")");
             }
-            l.s(": through the texture unit into a linear buffer").say();
+            l.s(": through the texture unit into a linear buffer").dbg();
             Some(s)
         }
         Err(e) => {
@@ -639,7 +639,7 @@ fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::
             if let crate::import::refusal::bounds(_) = e {
                 l.s(" past the object");
             }
-            l.say();
+            l.dbg();
             None
         }
     }
@@ -675,7 +675,7 @@ fn map_tiled(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, surf: &crat
     let desc = crate::import::descriptor(surf, b.width, b.height, va);
     Line::new().s("gpudev: bo ").dec(b.id as u64).s(" object at 0x").hexw((va >> 32) as u32, 8).hexw(va as u32, 8)
         .s("+0x").hexu(size as u32).s(", linear at 0x").hexw((g.va >> 32) as u32, 8).hexw(g.va as u32, 8).s("+0x")
-        .hexu(bytes as u32).say();
+        .hexu(bytes as u32).dbg();
     b.import = Some(compose::frame_import { desc, dst: g.va, dst_pitch_px: pitch_px, width: b.width,
                                             height: b.height });
     b.linear = Some(g);
@@ -685,9 +685,12 @@ fn map_tiled(adev: &mut amdgpu_device, c: &mut composer, b: &mut bo, surf: &crat
     Ok(())
 }
 
-/// The lines for a buffer added: how it is reached and, for a guest object,
+/// With `log.drivers`, the lines for a buffer added: how it is reached and, for a guest object,
 /// its tiling, the pixels at its start and centre, and its UMD metadata.
 fn log_bo_add(adev: &amdgpu_device, id: u32, b: &bo, pages: &[u64], offsets: Option<&[u64]>, own: Option<usize>) {
+    if !crate::linux::debug_enabled() {
+        return;
+    }
     let mut l = Line::new();
     l.s("gpudev: bo ").dec(id as u64).s(" ").dec(b.width as u64).s("x").dec(b.height as u64).s(" pitch ")
         .dec(b.pitch as u64).s(" offset ").dec(b.offset as u64).s(", ").dec(pages.len() as u64).s(" pages");
@@ -785,7 +788,7 @@ fn poll_scene(adev: &mut amdgpu_device, svc: &mut service) -> bool {
     let Some(r) = compose::poll_scene(adev, s) else { return false };
     let (seq, target, t0, _) = svc.scene.take().unwrap();
     svc.scenes += 1;
-    if svc.scenes % 600 == 0 {
+    if svc.scenes % 600 == 0 && crate::linux::debug_enabled() {
         log_guest_pixels(adev, svc);
     }
     match &r {
