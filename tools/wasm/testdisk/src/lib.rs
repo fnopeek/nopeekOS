@@ -155,9 +155,14 @@ fn breakdown(names: &[&str], before: &[u64], after: &[u64], ticks: u64) -> Strin
         let pct = if ticks == 0 { 0 } else { d * 100 / ticks };
         if pct > 0 { s.push_str(&format!("{} {}%  ", name, pct)); }
     }
-    let rest = ticks.saturating_sub(inside);
-    let pct = if ticks == 0 { 0 } else { rest * 100 / ticks };
-    s.push_str(&format!("other {}%", pct));
+    if inside > ticks {
+        // Stages ran on several cores at once: core time per wall time.
+        s.push_str("(core time, several cores)");
+    } else {
+        let rest = ticks - inside;
+        let pct = if ticks == 0 { 0 } else { rest * 100 / ticks };
+        s.push_str(&format!("other {}%", pct));
+    }
     s
 }
 

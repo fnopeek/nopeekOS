@@ -217,7 +217,35 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
 }
 
 pub fn allocate_frame() -> Option<u64> {
-    ALLOCATOR.lock().allocate()
+    with_reclaim(1, || ALLOCATOR.lock().allocate())
+}
+
+/// What gives memory back when an allocation finds none: called with the
+/// frames wanted, returns the frames it freed (Linux `struct shrinker`).
+/// A shrinker must not allocate, and must not wait for a lock its caller
+/// may hold.
+pub type Shrinker = fn(usize) -> usize;
+
+static SHRINKERS: spin::Mutex<alloc::vec::Vec<Shrinker>> = spin::Mutex::new(alloc::vec::Vec::new());
+
+pub fn register_shrinker(s: Shrinker) {
+    SHRINKERS.lock().push(s);
+}
+
+/// Ask the shrinkers for `want` frames; returns how many they freed.
+pub fn reclaim(want: usize) -> usize {
+    let Some(list) = SHRINKERS.try_lock() else { return 0 };
+    let mut freed = 0;
+    for s in list.iter() {
+        if freed >= want { break; }
+        freed += s(want - freed);
+    }
+    freed
+}
+
+/// `alloc`, and once more after the shrinkers freed something.
+fn with_reclaim<T>(want: usize, alloc: impl Fn() -> Option<T>) -> Option<T> {
+    alloc().or_else(|| if reclaim(want) > 0 { alloc() } else { None })
 }
 
 #[allow(dead_code)]
@@ -228,6 +256,10 @@ pub fn deallocate_frame(addr: u64) {
 /// Allocate contiguous frames below a physical address limit.
 /// `limit_bytes` = 0 means no limit (use all memory).
 pub fn allocate_contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> {
+    with_reclaim(count, || contiguous_below(count, limit_bytes))
+}
+
+fn contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> {
     if count == 0 { return None; }
     let mut alloc = ALLOCATOR.lock();
     let top = if limit_bytes > 0 {
@@ -272,6 +304,10 @@ pub fn allocate_contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> 
 /// buddy allocator gives a `GFP_DMA32` request of a power-of-two size, for
 /// hardware that wants its tables naturally aligned under 4 GiB.
 pub fn allocate_contiguous_aligned_below(count: usize, align: usize, limit_bytes: u64) -> Option<u64> {
+    with_reclaim(count, || contiguous_aligned_below(count, align, limit_bytes))
+}
+
+fn contiguous_aligned_below(count: usize, align: usize, limit_bytes: u64) -> Option<u64> {
     if count == 0 || align == 0 || !align.is_power_of_two() {
         return None;
     }
@@ -306,6 +342,10 @@ pub fn allocate_contiguous(count: usize) -> Option<u64> {
 /// both are multiples of 8, so every candidate is whole bitmap bytes and is
 /// free iff those bytes are zero.
 pub fn allocate_contiguous_aligned(count: usize, align: usize) -> Option<u64> {
+    with_reclaim(count, || contiguous_aligned(count, align))
+}
+
+fn contiguous_aligned(count: usize, align: usize) -> Option<u64> {
     if count == 0 || count % 8 != 0 || align < 8 || !align.is_power_of_two() {
         return None;
     }

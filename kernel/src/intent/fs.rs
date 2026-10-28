@@ -386,6 +386,9 @@ pub fn intent_fsinfo() {
             kprintln!("  Generation:  {}", generation);
             kprintln!("  Hash:        BLAKE3");
             kprintln!("  TRIM:        {}", if crate::blkdev::has_discard() { "active" } else { "unavailable" });
+            if let Some((held, dirty)) = crate::storage::npkfs::storage::cache_held() {
+                kprintln!("  Cache:       {} blocks ({} MB), {} dirty", held, held * 4 / 1024, dirty);
+            }
             kprintln!();
         }
         None => kprintln!("[npk] Filesystem not mounted"),

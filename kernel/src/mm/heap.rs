@@ -329,6 +329,10 @@ impl Heap {
         // independent of the heap lock we're holding. No kprintln here:
         // we're inside GlobalAlloc::alloc, and kprintln can allocate.
         loop {
+            let free = crate::memory::stats().0;
+            if free < frames + reserve {
+                crate::memory::reclaim(frames + reserve - free);
+            }
             if crate::memory::stats().0 >= frames + reserve {
                 if let Some(base) = crate::memory::allocate_contiguous(frames) {
                     self.c.grows += 1;
@@ -408,7 +412,7 @@ static HEAP: LockedHeap = LockedHeap::new();
 
 /// Frames the heap leaves to page tables, DMA and stacks: Linux's
 /// `calculate_min_free_kbytes`, sqrt(16 * RAM in KiB), 128 KiB to 256 MiB.
-fn min_free_frames() -> usize {
+pub fn min_free_frames() -> usize {
     let kbytes = crate::memory::usable_bytes() / 1024;
     let min_kbytes = isqrt(kbytes * 16).clamp(128, 262_144);
     (min_kbytes / 4) as usize

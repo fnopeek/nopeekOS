@@ -220,12 +220,29 @@ pub fn mount() -> Result<(), FsError> {
         cache, sb, bitmap: bmap, journal: jrnl, generation,
         pending_old_blocks: Vec::new(),
     });
+    static SHRINKER: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !SHRINKER.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        crate::memory::register_shrinker(shrink_cache);
+    }
 
     kprintln!(
         "[npk] npkfs: mounted (gen={}, {} objects, {} free blocks)",
         generation, sb.object_count, sb.free_blocks,
     );
     Ok(())
+}
+
+/// Blocks the metadata cache holds, and how many are dirty.
+pub fn cache_held() -> Option<(usize, usize)> {
+    FS.lock().as_ref().map(|fs| fs.cache.held())
+}
+
+/// The block cache's shrinker: clean blocks back to memory. Skips when
+/// the store is busy, since the allocation that asks may come from under
+/// its lock.
+fn shrink_cache(want: usize) -> usize {
+    let Some(mut lock) = FS.try_lock() else { return 0 };
+    lock.as_mut().map_or(0, |fs| fs.cache.shrink(want))
 }
 
 /// Drop in-memory state. Used by the self-test to simulate a remount.
