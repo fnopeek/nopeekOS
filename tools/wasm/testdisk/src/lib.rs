@@ -267,8 +267,13 @@ fn file_run(size: usize, count: u32, label: &str, wbuf: &mut [u8], rbuf: &mut [u
     let before = counters();
     let t0 = host::tsc_now();
     for i in 0..count {
+        // Every 4 KiB block differs from every earlier run's, so no chunk of
+        // a large file deduplicates against the last run.
         *seq += 1;
-        wbuf[..8].copy_from_slice(&seq.to_le_bytes());
+        for block in wbuf[..size].chunks_mut(4096) {
+            let n = block.len().min(8);
+            block[..n].copy_from_slice(&seq.to_le_bytes()[..n]);
+        }
         if !host::store(&name(i), &wbuf[..size]) {
             print(&format!("     WARN: store {} failed\n", name(i)));
             run.failures += 1;

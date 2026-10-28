@@ -705,6 +705,21 @@ impl RangeReader {
                 let mut n = 0usize;
                 while pos < end {
                     let i = chunk_at(chunks, starts, total, pos)?;
+                    // Whole chunks inside the range: in parallel, straight
+                    // into `dst`.
+                    if pos == starts[i] && starts[i + 1] <= end {
+                        let mut j = i + 1;
+                        while j < chunks.len() && starts[j] < end {
+                            chunk_at(chunks, starts, total, starts[j])?;
+                            if starts[j + 1] > end { break; }
+                            j += 1;
+                        }
+                        let span = (starts[j] - starts[i]) as usize;
+                        read_chunks_into(&chunks[i..j], &starts[i..=j], &mut dst[n..n + span], budget, false)?;
+                        n += span;
+                        pos += span as u64;
+                        continue;
+                    }
                     let len = starts[i + 1] - starts[i];
                     if !cur.as_ref().is_some_and(|(c, _)| *c == i) {
                         if len > budget as u64 {
@@ -753,45 +768,83 @@ fn chunk_at(chunks: &[[u8; 32]], starts: &mut Vec<u64>, total: u64, pos: u64) ->
 /// whether it was stored as a single `Blob` or as a chunked blob.
 fn stitch_chunked(total_size: u64, chunks: &[[u8; 32]]) -> Result<Vec<u8>, PathError> {
     let total = usize::try_from(total_size).map_err(|_| PathError::Corrupt)?;
-    let mut lens = Vec::with_capacity(chunks.len());
-    let mut sum = 0usize;
+    let mut starts = Vec::with_capacity(chunks.len() + 1);
+    starts.push(0u64);
     for h in chunks {
-        let len = usize::try_from(chunk_len(h)?).map_err(|_| PathError::Corrupt)?;
-        sum = sum.checked_add(len).ok_or(PathError::Corrupt)?;
-        lens.push(len);
+        let next = starts[starts.len() - 1].checked_add(chunk_len(h)?).ok_or(PathError::Corrupt)?;
+        starts.push(next);
     }
-    if sum != total {
+    if starts[chunks.len()] != total_size {
         return Err(PathError::Corrupt);
     }
     let mut out = Vec::new();
     out.try_reserve_exact(total).map_err(|_| Error::Storage(FsError::OutOfMemory))?;
     out.resize(total, 0);
+    read_chunks_into(chunks, &starts, &mut out, usize::MAX, true)?;
+    Ok(out)
+}
 
-    // Every chunk is its own object: read and decrypted on whichever core
-    // takes it, straight into its place in `out`.
-    let mut parts: Vec<Mutex<&mut [u8]>> = Vec::with_capacity(chunks.len());
-    let mut rest: &mut [u8] = &mut out;
-    for &len in &lens {
-        let (part, tail) = rest.split_at_mut(len);
-        parts.push(Mutex::new(part));
-        rest = tail;
+/// Read `chunks`, which start at `starts` relative to `starts[0]` and end
+/// at the last of `starts`, into `dst`. Every chunk is its own object, so
+/// each is fetched and decrypted on whichever core takes it. With `shared`
+/// (kernel memory) each lands in its place in `dst` from there; otherwise
+/// `dst` may be a module's memory, which only this core touches, so the
+/// chunks wait in kernel memory, a window at a time, and are copied here.
+/// A chunk longer than `budget` is refused before anything is read.
+fn read_chunks_into(chunks: &[[u8; 32]], starts: &[u64], dst: &mut [u8], budget: usize, shared: bool)
+    -> Result<(), Error>
+{
+    let base = starts[0];
+    if (starts[chunks.len()] - base) as usize != dst.len() {
+        return Err(PathError::Corrupt);
+    }
+    if starts.windows(2).any(|w| w[1] - w[0] > budget as u64) {
+        return Err(over_budget());
     }
     let failed: Mutex<Option<PathError>> = Mutex::new(None);
-    crate::smp::par::for_each(chunks.len(), &|i| {
-        let r = read_chunk(&chunks[i]).and_then(|c| {
-            let mut part = parts[i].lock();
-            if c.len() != part.len() { return Err(PathError::Corrupt); }
-            part.copy_from_slice(&c);
-            Ok(())
-        });
-        if let Err(e) = r {
-            failed.lock().get_or_insert(e);
+    let fail = |e| { failed.lock().get_or_insert(e); };
+    if shared {
+        let mut parts: Vec<Mutex<&mut [u8]>> = Vec::with_capacity(chunks.len());
+        let mut rest: &mut [u8] = dst;
+        for w in starts.windows(2) {
+            let (part, tail) = rest.split_at_mut((w[1] - w[0]) as usize);
+            parts.push(Mutex::new(part));
+            rest = tail;
         }
-    });
-    drop(parts);
+        crate::smp::par::for_each(chunks.len(), &|i| {
+            let r = read_chunk(&chunks[i]).and_then(|c| {
+                let mut part = parts[i].lock();
+                if c.len() != part.len() { return Err(PathError::Corrupt); }
+                part.copy_from_slice(&c);
+                Ok(())
+            });
+            if let Err(e) = r { fail(e); }
+        });
+    } else {
+        let window = 2 * (crate::smp::scheduler::worker_count() + 1);
+        let mut first = 0;
+        while first < chunks.len() && failed.lock().is_none() {
+            let last = (first + window).min(chunks.len());
+            let got: Vec<Mutex<Option<Vec<u8>>>> = (first..last).map(|_| Mutex::new(None)).collect();
+            crate::smp::par::for_each(last - first, &|k| match read_chunk(&chunks[first + k]) {
+                Ok(c) => *got[k].lock() = Some(c),
+                Err(e) => fail(e),
+            });
+            for (k, slot) in got.into_iter().enumerate() {
+                let Some(c) = slot.into_inner() else { break };
+                let (at, to) = ((starts[first + k] - base) as usize, (starts[first + k + 1] - base) as usize);
+                if c.len() != to - at {
+                    fail(PathError::Corrupt);
+                    break;
+                }
+                dst[at..to].copy_from_slice(&c);
+            }
+            first = last;
+        }
+    }
     match failed.into_inner() {
         Some(e) => Err(e),
-        None => Ok(out),
+        None => Ok(()),
     }
 }
 
