@@ -89,10 +89,13 @@ pub fn create_window(title: &str, x: u32, y: u32, w: u32, h: u32) -> Option<Wind
     with_compositor(|comp| comp.create_window(title, x, y, w, h)).flatten()
 }
 
-/// Close and remove a window.
-#[allow(dead_code)]
+/// Close and remove a window, and show the desktop without it on the next
+/// Core-0 poll: the callers close it outside an input event, which is what
+/// otherwise renders.
 pub fn close_window(id: WindowId) {
-    with_compositor(|comp| comp.close_window(id));
+    if with_compositor(|comp| comp.close_window(id)).is_some() {
+        request_render();
+    }
 }
 
 /// Create a Surface-kind window (microvm framebuffer tile). Returns
