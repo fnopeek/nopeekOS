@@ -1424,14 +1424,11 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         kprintln!("[npk] WASM: npk_pci_bind DENIED {:04x}:{:04x}", vid, did);
         return -2;
     }
-    if !take_device(ctx.pid, a) {
+    if !take_binding(ctx, a) {
         kprintln!("[npk] WASM: npk_pci_bind {:04x}:{:04x} refused, owned by {:?}", vid, did, pci::owner(a));
         return -3;
     }
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
-    // A new binding replaces the old one: release it, or its buffers and
-    // vector stay taken for the rest of the boot.
-    if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
     ctx.hw = Some(HwDriverState {
         is_pci: true,
         pci_addr: dev.addr,
@@ -1455,6 +1452,20 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
 /// by the kernel driver that had it. The GPU is the only kernel-driven
 /// device that hands over (`gpu::yield_to_module`); every other kernel
 /// owner, and any other module, keeps it.
+/// Bind `addr` to this module in place of its previous binding, whose
+/// buffers and vector are released. Binding the same device again releases
+/// the old state first: releasing it afterwards would give the device away.
+fn take_binding(ctx: &mut HostState, addr: pci::PciAddr) -> bool {
+    if ctx.hw.as_ref().is_some_and(|h| h.is_pci && h.pci_addr == addr) {
+        if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
+    }
+    if !take_device(ctx.pid, addr) {
+        return false;
+    }
+    if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
+    true
+}
+
 fn take_device(pid: u32, addr: pci::PciAddr) -> bool {
     // pid 0 is the shared identity of the inline paths, not an owner.
     if pid == 0 { return false; }
@@ -1493,16 +1504,13 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         kprintln!("[npk] WASM: npk_pci_bind_class DENIED {:02x}:{:02x}", cls, sub);
         return -2;
     }
-    if !take_device(ctx.pid, a) {
+    if !take_binding(ctx, a) {
         kprintln!("[npk] WASM: npk_pci_bind_class {:02x}:{:02x} refused, owned by {:?}", cls, sub, pci::owner(a));
         return -3;
     }
     crate::kdebug!("[npk] WASM driver bound to {:02x}:{:02x}.{} [{:04x}:{:04x}]",
         a.bus, a.device, a.function, dev.vendor_id, dev.device_id);
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
-    // A new binding replaces the old one: release it, or its buffers and
-    // vector stay taken for the rest of the boot.
-    if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
     ctx.hw = Some(HwDriverState {
         is_pci: true,
         pci_addr: dev.addr,

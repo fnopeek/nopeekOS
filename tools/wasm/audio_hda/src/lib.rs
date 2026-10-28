@@ -420,22 +420,32 @@ pub extern "C" fn _start() {
     // here, not in the kernel.
     let mut chosen: Option<Hda> = None;
     let mut fb: Option<(u8, u32)> = None;        // first usable one, but digital
+    // That controller as it came up, while it is still the one bound.
+    let mut fb_hda: Option<Hda> = None;
     'outer: for &sub in [0x03u8, 0x01u8].iter() {
         for i in 0..MAX_HDA {
             if pci_bind_class_n(0x04, sub, i) != 0 { break; }
+            fb_hda = None;
             match bring_up() {
                 Some(h) if h.analog => { chosen = Some(h); break 'outer; }
-                Some(_) => { if fb.is_none() { fb = Some((sub, i)); } }
+                Some(h) => {
+                    if fb.is_none() {
+                        fb = Some((sub, i));
+                        fb_hda = Some(h);
+                    }
+                }
                 None => {}
             }
         }
     }
     if chosen.is_none() {
         // None has an analog output — take the first that came up, so an
-        // HDMI-only machine still gets sound.
+        // HDMI-only machine still gets sound. Still bound, it is used as
+        // it is; otherwise it is bound and brought up again.
         if let Some((sub, i)) = fb {
             log("[audio_hda] no analog output anywhere — using the first controller that worked\n");
-            if pci_bind_class_n(0x04, sub, i) == 0 {
+            chosen = fb_hda.take();
+            if chosen.is_none() && pci_bind_class_n(0x04, sub, i) == 0 {
                 chosen = bring_up();
             }
         }
