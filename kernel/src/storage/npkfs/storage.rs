@@ -1293,8 +1293,11 @@ fn rollback_alloc(fs: &mut State, extents: &[Extent], indirect_block: u64) {
 // ── 4-phase commit (journal → bitmap+sb → finalize → free) ────────────
 
 fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
+    use crate::interrupts::rdtsc;
+    let t0 = rdtsc();
     // Phase 1: write journal entries with committed=0 (safe to crash).
     fs.journal.prepare(&mut fs.cache)?;
+    let t_journal = rdtsc();
     // Snapshot head+seq after prepare advanced them: prepare wrote this
     // commit's entries at [old_head, head) and bumped `head` past them.
     // The SB must record the post-prepare head so `replay` scans backwards
@@ -1312,12 +1315,16 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     // stale/garbage blocks — or blocks the bitmap still calls free — i.e.
     // block double-alloc on remount. `blkdev::flush()` forces the order.
     fs.bitmap.sync(&mut fs.cache)?;
+    let t_bitmap = rdtsc();
     fs.cache.flush()?;        // journal(committed=0) + bitmap + new btree → controller
+    let t_meta = rdtsc();
     crate::blkdev::flush()?;  // ▷ BARRIER: those + data extents now on stable media
+    let t_flush = rdtsc();
     // SB written durably (FUA, straight to disk, bypassing the cache) so it
     // lands strictly after the barrier. One FLUSH + one FUA per commit — the
     // minimum that preserves the ordering invariant.
     sb_io::write_next_durable(&mut fs.cache, &mut fs.sb)?;
+    let t_sb = rdtsc();
 
     // Phase 3: mark journal committed. The SB is durable now, so committed=1
     // can never reach media before it. We deliberately do not force a barrier
@@ -1326,6 +1333,7 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     // gc-reclaimable space leak, never corruption.
     fs.journal.finalize(&mut fs.cache)?;
     fs.cache.flush()?;
+    super::bench::COMMIT.add(0, &[t0, t_journal, t_bitmap, t_meta, t_flush, t_sb, rdtsc()]);
 
     // Phase 4: actually free the old B-tree blocks (data extents are
     // freed by the caller — they have scope to invalidate cache too).

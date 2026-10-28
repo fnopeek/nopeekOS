@@ -41,6 +41,13 @@ pub static GET: Stages<5> = Stages::new();
 /// device write, B-tree insert.
 pub static PUT: Stages<6> = Stages::new();
 
+/// `fs::write`: the path lock, storing the blob and the trees along the
+/// path, the commit.
+pub static WRITE: Stages<3> = Stages::new();
+/// `storage::commit`: journal, bitmap, cached metadata to the device,
+/// device flush, superblock, journal finalize.
+pub static COMMIT: Stages<6> = Stages::new();
+
 /// A fast generator for bench data; content must not repeat, but needs no
 /// secrecy (xorshift64*).
 pub struct Fill(u64);

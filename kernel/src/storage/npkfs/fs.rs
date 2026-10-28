@@ -160,6 +160,7 @@ pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
     let t_store = rdtsc();
     let result = commit(new);
     let t_commit = rdtsc();
+    super::bench::WRITE.add(data.len() as u64, &[t0, t_lock, t_store, t_commit]);
     if result.is_ok() {
         crate::notify::path_changed(path);
     }

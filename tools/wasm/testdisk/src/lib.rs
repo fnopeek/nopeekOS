@@ -129,20 +129,26 @@ struct Counters {
     get: [u64; 7],
     put: [u64; 8],
     cmd_blocks: u64,
+    write: [u64; 5],
+    commit: [u64; 8],
 }
 
 fn counters() -> Option<Counters> {
-    let mut out = [0u64; 32];
+    let mut out = [0u64; 48];
     let v = host::disk_bench(COUNTERS, 0, 0, &mut out)?;
-    if v.len() < 17 { return None; }
+    if v.len() < 30 { return None; }
     let mut c = Counters { hz: v[0], cmd_blocks: v[16], ..Default::default() };
     c.get.copy_from_slice(&v[1..8]);
     c.put.copy_from_slice(&v[8..16]);
+    c.write.copy_from_slice(&v[17..22]);
+    c.commit.copy_from_slice(&v[22..30]);
     Some(c)
 }
 
 const GET_STAGES: [&str; 5] = ["lock", "lookup", "buffer", "device", "decrypt"];
 const PUT_STAGES: [&str; 6] = ["dedup", "hash", "encrypt", "allocate", "device", "tree"];
+const WRITE_STAGES: [&str; 3] = ["path lock", "store", "commit"];
+const COMMIT_STAGES: [&str; 6] = ["journal", "bitmap", "metadata", "device flush", "superblock", "finalize"];
 
 /// Where the time of `ticks` went: each stage's share between two counter
 /// readings, the rest outside the object layer (path layer, copies).
@@ -261,6 +267,7 @@ fn objects(hz: u64) -> bool {
 
 // ── Layer 4: npkFS through the module ABI ─────────────────────────────
 
+#[derive(Clone)]
 struct FileRun {
     write: u64,
     cold: u64,
@@ -345,6 +352,7 @@ fn files(hz: u64) -> u32 {
     let mut seq = host::tsc_now();
     let mut failures = 0;
     let mut last_big: Option<FileRun> = None;
+    let mut first_small: Option<(FileRun, u32, &str)> = None;
     for &(size, count, label) in PLAN {
         let runs: Vec<FileRun> = (0..RUNS)
             .map(|_| file_run(size, count, label, &mut wbuf, &mut rbuf, &mut seq, hz))
@@ -355,7 +363,23 @@ fn files(hz: u64) -> u32 {
             spread(runs.iter().map(|r| r.write).collect()),
             spread(runs.iter().map(|r| r.cold).collect()),
             pad(&format!("{}", median(runs.iter().map(|r| r.warm).collect())), 6)));
-        last_big = runs.into_iter().last();
+        let last = runs.into_iter().last();
+        if first_small.is_none() {
+            first_small = last.as_ref().map(|r| (r.clone(), count, label));
+        }
+        last_big = last;
+    }
+    if let Some((r, files, label)) = first_small {
+        if let Some((b, a, t)) = r.put {
+            let objects = a.put[0].saturating_sub(b.put[0]);
+            let commits = a.commit[0].saturating_sub(b.commit[0]);
+            print(&format!("     {} files: {} us each, {} objects and {} commit(s) per file\n",
+                label, t * 1_000_000 / hz / files.max(1) as u64,
+                objects / files.max(1) as u64, commits / files.max(1) as u64));
+            print(&format!("       write: {}\n", breakdown(&WRITE_STAGES, &b.write, &a.write, t)));
+            print(&format!("       objects: {}\n", breakdown(&PUT_STAGES, &b.put, &a.put, t)));
+            print(&format!("       commits: {}\n", breakdown(&COMMIT_STAGES, &b.commit, &a.commit, t)));
+        }
     }
     if let Some(r) = last_big {
         if let Some((b, a, t)) = r.put {
