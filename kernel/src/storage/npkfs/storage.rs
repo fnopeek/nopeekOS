@@ -1135,66 +1135,99 @@ pub fn has(hash: &[u8; 32]) -> bool {
     btree::lookup(&mut fs.cache, fs.sb.btree_root, hash).ok().flatten().is_some()
 }
 
-/// Drop the entry for `hash` and free its extents (deferred via journal).
-pub fn remove(hash: &[u8; 32]) -> Result<(), FsError> {
-    let mut lock = FS.lock();
-    let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+/// Journal ranges one `remove_many` batch collects before it commits.
+const REMOVE_BATCH_FREES: usize = 16 * super::types::MAX_JOURNAL_ENTRIES;
 
-    let entry = btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?
-        .ok_or(FsError::ObjectNotFound)?;
-
-    let root = fs.sb.btree_root;
-    let (new_root, old_blocks) = btree::delete(&mut fs.cache, &mut fs.bitmap, root, hash)?;
-
-    for b in &old_blocks {
-        fs.journal.record_free(*b, 1);
+/// Drop the entries for `hashes` and free their extents: `(removed,
+/// failed)`. One commit covers a batch of objects; nothing is freed in
+/// the bitmap before the commit that stops referencing it, so a later
+/// delete in the same batch never reuses a block the on-disk tree still
+/// points at. A hash that is not stored is skipped; one that cannot be
+/// read (a corrupt entry) is logged and counted in `failed`. The store
+/// lock is released between batches so reads are not held up for the
+/// whole sweep.
+pub fn remove_many(hashes: &[[u8; 32]]) -> Result<(usize, usize), FsError> {
+    let mut removed = 0;
+    let mut failed = 0;
+    let mut old_blocks: Vec<u64> = Vec::new();
+    let mut freed: Vec<Extent> = Vec::new();
+    let mut rest = hashes.iter();
+    loop {
+        let mut lock = FS.lock();
+        let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
+        let mut more = false;
+        for hash in rest.by_ref() {
+            match unlink(fs, hash, &mut old_blocks, &mut freed) {
+                Ok(true) => removed += 1,
+                Ok(false) => {}
+                Err(e) => {
+                    kprintln!("[npk] npkfs: cannot remove {:02x}{:02x}.. ({:?}), skipping",
+                        hash[0], hash[1], e);
+                    failed += 1;
+                }
+            }
+            if fs.journal.pending() >= REMOVE_BATCH_FREES {
+                more = true;
+                break;
+            }
+        }
+        commit_removals(fs, &mut old_blocks, &mut freed)?;
+        if !more { return Ok((removed, failed)); }
     }
-    let direct_count = (entry.extent_count as usize).min(DIRECT_EXTENTS);
-    for i in 0..direct_count {
-        fs.journal.record_free(entry.extents[i].start_block, entry.extents[i].block_count);
-    }
-    let (indirect_extents, indirect_chain_blocks) = if entry.indirect_block != 0 {
-        read_indirect_chain(&mut fs.cache, entry.indirect_block).unwrap_or_default()
+}
+
+/// Take `hash` out of the B-tree and journal its blocks as freed. The
+/// extents go to `freed` and the replaced B-tree blocks to `old_blocks`,
+/// for `commit_removals` to release. `Ok(false)`: not stored.
+fn unlink(
+    fs: &mut State, hash: &[u8; 32], old_blocks: &mut Vec<u64>, freed: &mut Vec<Extent>,
+) -> Result<bool, FsError> {
+    let Some(entry) = btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)? else {
+        return Ok(false);
+    };
+    let (indirect_extents, chain_blocks) = if entry.indirect_block != 0 {
+        read_indirect_chain(&mut fs.cache, entry.indirect_block)?
     } else {
         (Vec::new(), Vec::new())
     };
-    for ext in &indirect_extents {
-        fs.journal.record_free(ext.start_block, ext.block_count);
-    }
-    for &cb in &indirect_chain_blocks {
-        fs.journal.record_free(cb, 1);
-    }
-
-    fs.generation += 1;
+    let root = fs.sb.btree_root;
+    let (new_root, old) = btree::delete(&mut fs.cache, &mut fs.bitmap, root, hash)?;
     fs.sb.btree_root = new_root;
     fs.sb.object_count = fs.sb.object_count.saturating_sub(1);
+
+    let direct = (entry.extent_count as usize).min(DIRECT_EXTENTS);
+    let chain = chain_blocks.iter().map(|&b| Extent { start_block: b, block_count: 1 });
+    for ext in entry.extents[..direct].iter().copied().chain(indirect_extents).chain(chain) {
+        fs.journal.record_free(ext.start_block, ext.block_count);
+        freed.push(ext);
+    }
+    for &b in &old {
+        fs.journal.record_free(b, 1);
+    }
+    old_blocks.extend(old);
+    Ok(true)
+}
+
+/// Commit the removals `unlink` collected, then free their blocks.
+fn commit_removals(
+    fs: &mut State, old_blocks: &mut Vec<u64>, freed: &mut Vec<Extent>,
+) -> Result<(), FsError> {
+    if old_blocks.is_empty() && freed.is_empty() { return Ok(()); }
+    fs.generation += 1;
     fs.sb.free_blocks = fs.bitmap.free_count();
     fs.sb.generation = fs.generation;
     // journal_head is set inside commit(), after prepare() advances it.
+    commit(fs, old_blocks)?;
+    old_blocks.clear();
 
-    commit(fs, &old_blocks)?;
-
-    // Phase 4: free + invalidate cache for direct, indirect-data, and
-    // indirect-chain blocks.
-    for i in 0..direct_count {
-        let ext = &entry.extents[i];
+    // Phase 4 for the data extents: free and drop them from the cache.
+    for ext in freed.drain(..) {
         fs.bitmap.free(ext.start_block, ext.block_count);
         for b in 0..ext.block_count {
             fs.cache.invalidate(ext.start_block + b);
         }
     }
-    for ext in &indirect_extents {
-        fs.bitmap.free(ext.start_block, ext.block_count);
-        for b in 0..ext.block_count {
-            fs.cache.invalidate(ext.start_block + b);
-        }
-    }
-    for &cb in &indirect_chain_blocks {
-        fs.bitmap.free(cb, 1);
-        fs.cache.invalidate(cb);
-    }
-    // TRIM deferred — see commit() below for why.
-
+    // TRIM deferred, see commit().
     Ok(())
 }
 

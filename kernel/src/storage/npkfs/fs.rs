@@ -385,9 +385,8 @@ fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]
 /// anything reachable from any of them is preserved.
 ///
 /// Concurrency: holds ROOT_MUTEX so no path-layer mutation runs during
-/// GC. Sweep deletes use the regular `storage::remove` path so each
-/// goes through the journal + 4-phase commit; safe but slow on large
-/// orphan sets.
+/// GC. The sweep removes the orphans in batches, one journaled 4-phase
+/// commit per batch.
 pub fn gc() -> Result<GcStats, Error> {
     use hashbrown::HashSet;
 
@@ -488,26 +487,8 @@ pub fn gc() -> Result<GcStats, Error> {
         return Ok(GcStats { kept: reachable.len(), removed: 0, skipped: true });
     }
 
-    let mut removed = 0usize;
-    let mut failed = 0usize;
-    for h in all {
-        if reachable.contains(&h) { continue; }
-        // remove returns ObjectNotFound only if the entry vanished
-        // between our enumeration and the delete — impossible under
-        // ROOT_MUTEX, but tolerate it defensively.
-        match storage::remove(&h) {
-            Ok(()) => removed += 1,
-            Err(super::types::FsError::ObjectNotFound) => {}
-            // A corrupt extent / indirect pointer can make remove fail
-            // (out-of-range read). Log + skip so the remaining orphans
-            // still get reclaimed instead of one bad object wedging GC.
-            Err(e) => {
-                crate::kprintln!("[npk] gc: failed to remove {:02x}{:02x}.. ({:?}) — skipping",
-                    h[0], h[1], e);
-                failed += 1;
-            }
-        }
-    }
+    let orphans: alloc::vec::Vec<[u8; 32]> = all.into_iter().filter(|h| !reachable.contains(h)).collect();
+    let (removed, failed) = storage::remove_many(&orphans).map_err(Error::Storage)?;
     if failed > 0 {
         crate::kprintln!("[npk] gc: {} orphan(s) could not be removed (corrupt) — left in place", failed);
     }

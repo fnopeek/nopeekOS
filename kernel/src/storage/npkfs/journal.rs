@@ -28,6 +28,8 @@ impl Journal {
 
     pub fn head(&self) -> u64 { self.head }
     pub fn seq(&self) -> u64 { self.seq }
+    /// Free ranges recorded since the last `prepare`.
+    pub fn pending(&self) -> usize { self.pending_frees.len() }
 
     /// Record blocks to be freed after next commit.
     pub fn record_free(&mut self, start: u64, count: u64) {
