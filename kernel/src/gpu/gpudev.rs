@@ -781,6 +781,11 @@ pub fn module_gone(dev: PciAddr) {
     }
 }
 
+/// Wake the display driver's service loop for a request that is not a job.
+pub fn wake_display_driver() {
+    wake_module();
+}
+
 fn wake_module() {
     let w = WAKER.load(Ordering::Acquire);
     if w != NO_WAKER {

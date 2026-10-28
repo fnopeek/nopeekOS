@@ -446,16 +446,94 @@ pub const DISPLAY_AUDIO_PORTS: usize = 9;
 /// `MAX_ELD_BYTES`.
 pub const ELD_MAX: usize = 128;
 
-/// What Linux' audio component carries from i915 to snd-hda: the ELD each
-/// port's sink has (`get_eld`), and a count that moves whenever one changes
-/// (`pin_eld_notify`).
+/// What Linux' audio component carries between i915 and snd-hda: the ELD
+/// each port's sink has (`get_eld`), a count that moves whenever one
+/// changes (`pin_eld_notify`), and the audio driver's power and codec-wake
+/// requests (`get_power`, `put_power`, `codec_wake_override`), which the
+/// display driver carries out and acknowledges.
 struct DisplayAudio {
     generation: u32,
     eld: [([u8; ELD_MAX], usize); DISPLAY_AUDIO_PORTS],
+    /// The display driver serves requests (the component is bound).
+    bound: bool,
+    /// `DISPLAY_AUDIO_POWER` | `DISPLAY_AUDIO_WAKE` the audio driver wants.
+    want: u32,
+    /// Moves with every request; `done` is the last one carried out.
+    want_seq: u32,
+    done_seq: u32,
+    /// The module that asked, whose end takes its requests back.
+    requester: Option<u32>,
 }
 
-static DISPLAY_AUDIO: Mutex<DisplayAudio> =
-    Mutex::new(DisplayAudio { generation: 0, eld: [([0; ELD_MAX], 0); DISPLAY_AUDIO_PORTS] });
+static DISPLAY_AUDIO: Mutex<DisplayAudio> = Mutex::new(DisplayAudio {
+    generation: 0,
+    eld: [([0; ELD_MAX], 0); DISPLAY_AUDIO_PORTS],
+    bound: false,
+    want: 0,
+    want_seq: 0,
+    done_seq: 0,
+    requester: None,
+});
+
+/// The display's audio power is held (`get_power`).
+pub const DISPLAY_AUDIO_POWER: u32 = 1;
+/// The codec wake signal is forced on (`codec_wake_override`).
+pub const DISPLAY_AUDIO_WAKE: u32 = 2;
+/// Request numbers fit beside the two bits in a positive i32.
+const DISPLAY_AUDIO_SEQ_MASK: u32 = 0x1FFF_FFFF;
+
+/// The audio driver `pid` wants `want`: the request's number, or None
+/// while no display driver serves requests.
+pub fn display_audio_request(pid: u32, want: u32) -> Option<u32> {
+    let seq = {
+        let mut d = DISPLAY_AUDIO.lock();
+        if !d.bound {
+            return None;
+        }
+        d.want = want & (DISPLAY_AUDIO_POWER | DISPLAY_AUDIO_WAKE);
+        d.want_seq = (d.want_seq.wrapping_add(1) & DISPLAY_AUDIO_SEQ_MASK).max(1);
+        d.requester = Some(pid);
+        d.want_seq
+    };
+    crate::gpu::gpudev::wake_display_driver();
+    Some(seq)
+}
+
+/// The last request the display driver carried out, or None while none
+/// serves requests.
+pub fn display_audio_done() -> Option<u32> {
+    let d = DISPLAY_AUDIO.lock();
+    d.bound.then_some(d.done_seq)
+}
+
+/// A request waits for the display driver.
+pub fn display_audio_pending() -> bool {
+    let d = DISPLAY_AUDIO.lock();
+    d.bound && d.want_seq != d.done_seq
+}
+
+/// The display driver serves requests and has carried out `done`; returns
+/// what is wanted now, `(number << 2) | bits`.
+pub fn display_audio_serve(done: u32) -> u32 {
+    let mut d = DISPLAY_AUDIO.lock();
+    d.bound = true;
+    d.done_seq = done & DISPLAY_AUDIO_SEQ_MASK;
+    (d.want_seq << 2) | d.want
+}
+
+/// Module `pid` has ended: what it asked for is given back.
+pub fn display_audio_release(pid: u32) {
+    {
+        let mut d = DISPLAY_AUDIO.lock();
+        if d.requester != Some(pid) {
+            return;
+        }
+        d.requester = None;
+        d.want = 0;
+        d.want_seq = (d.want_seq.wrapping_add(1) & DISPLAY_AUDIO_SEQ_MASK).max(1);
+    }
+    crate::gpu::gpudev::wake_display_driver();
+}
 
 /// The display driver says what sink `port` has: its ELD, empty for none.
 pub fn display_audio_set(port: usize, eld: &[u8]) -> bool {
@@ -489,11 +567,23 @@ pub fn display_audio_generation() -> u32 {
     DISPLAY_AUDIO.lock().generation
 }
 
-/// The display driver is gone: no port has a sink any more.
+/// The display driver is gone: no port has a sink any more, and nothing
+/// it carried out holds. A later display driver carries out what is still
+/// wanted.
 pub fn display_audio_clear() {
     let mut d = DISPLAY_AUDIO.lock();
     for slot in d.eld.iter_mut() {
         *slot = ([0; ELD_MAX], 0);
     }
     d.generation = d.generation.wrapping_add(1).max(1);
+    d.bound = false;
+    d.done_seq = 0;
+}
+
+/// An Intel display device is on the bus (`i915_gfx_present`): only then
+/// can an audio driver expect the component to bind.
+pub fn intel_display_present() -> bool {
+    [0x00u8, 0x80].iter().any(|&sub| {
+        (0..).map_while(|i| crate::drivers::pci::find_by_class_n(0x03, sub, i)).any(|d| d.vendor_id == 0x8086)
+    })
 }

@@ -212,11 +212,74 @@ struct Hda {
     out: Output,
 }
 
+// ── display audio component ──────────────────────────────────────────────
+
+/// Bits of a request to the display driver (docs/spec/AUDIO.md).
+const DISPLAY_POWER: i32 = 1;
+const DISPLAY_WAKE: i32 = 2;
+
+/// `snd_hdac_i915_init`'s wait for the display driver to bind, in ms.
+const COMPONENT_BIND_MS: i64 = 60_000;
+/// How long the display driver may take to carry out a request, in ms.
+const COMPONENT_REQUEST_MS: i64 = 1000;
+
+/// Whether the audio component bound; None until first asked.
+static COMPONENT: npk_sys::cell::Single<Option<bool>> = npk_sys::cell::Single::new(None);
+
+/// Ask the display driver for `bits` instead of what was asked before and
+/// wait until it is carried out (`snd_hdac_display_power`,
+/// `snd_hdac_set_codec_wakeup`). The first request waits for the component
+/// to bind as `snd_hdac_i915_init` does. False when it does not bind, no
+/// Intel display is there, or the request is not carried out.
+fn display_request(bits: i32) -> bool {
+    if COMPONENT.with(|c| *c) == Some(false) {
+        return false;
+    }
+    let t0 = npk_sys::ticks();
+    let n = loop {
+        match npk_sys::display_audio_request(bits) {
+            n if n > 0 => break n,
+            -2 if COMPONENT.with(|c| c.is_none()) && npk_sys::ticks() - t0 < COMPONENT_BIND_MS => sleep_ms(10),
+            rc => {
+                if rc != -3 {
+                    log("[audio_hda] couldn't bind with audio component\n");
+                }
+                COMPONENT.with(|c| *c = Some(false));
+                return false;
+            }
+        }
+    };
+    if COMPONENT.with(|c| c.replace(true)).is_none() {
+        log("[audio_hda] display audio component bound after ");
+        logdec((npk_sys::ticks() - t0) as u32);
+        log(" ms\n");
+    }
+    let t1 = npk_sys::ticks();
+    while npk_sys::display_audio_done() != n {
+        if npk_sys::ticks() - t1 > COMPONENT_REQUEST_MS {
+            log("[audio_hda] the display driver did not carry out a request\n");
+            return false;
+        }
+        sleep_ms(1);
+    }
+    true
+}
+
+/// Bring the bound controller up as [`bring_up_controller`]; a controller
+/// that is not used gives back the display power it took.
+fn bring_up() -> Option<Hda> {
+    let hda = bring_up_controller();
+    if hda.is_none() && COMPONENT.with(|c| *c) == Some(true) {
+        display_request(0);
+    }
+    hda
+}
+
 /// The binding is in place: bring the controller up, probe every codec on
 /// the link and set up the best output: the first codec with an analog
 /// output, else the first with any. `None` if this controller is unusable
 /// and the caller should try the next one.
-fn bring_up() -> Option<Hda> {
+fn bring_up_controller() -> Option<Hda> {
     pci_enable_bus_master();
     // Intel quirk: clear TCSEL (PCI 0x44) traffic-class bits so DMA uses TC0.
     let tcsel = pci_read_config(0x44);
@@ -224,7 +287,18 @@ fn bring_up() -> Option<Hda> {
 
     let mmio = mmio_map_bar(0, 16);
     if mmio < 0 { log("[audio_hda] BAR0 map failed\n"); return None; }
-    if !reset_controller(mmio) { log("[audio_hda] controller reset timeout\n"); return None; }
+
+    // An Intel controller's display codec is powered and woken by the
+    // display driver (`azx_probe_continue`: the i915 component and display
+    // power), with the wake signal forced on around the reset
+    // (`hda_intel_init_chip`), so it reports itself in STATESTS.
+    let display = pci_read_config(0x00) & 0xFFFF == 0x8086 && display_request(DISPLAY_POWER | DISPLAY_WAKE);
+    let reset = reset_controller(mmio);
+    let statests = mmio_r16(mmio, STATESTS) as u32;
+    if display {
+        display_request(DISPLAY_POWER);
+    }
+    if !reset { log("[audio_hda] controller reset timeout\n"); return None; }
 
     let gcap = mmio_r16(mmio, GCAP) as u32;
     let iss = (gcap >> 8) & 0xF; // input streams (output streams follow them)
@@ -232,7 +306,6 @@ fn bring_up() -> Option<Hda> {
     dbghexln("[audio_hda] controller up, gcap=0x", gcap);
     if oss == 0 { log("[audio_hda] no output streams\n"); return None; }
 
-    let statests = mmio_r16(mmio, STATESTS) as u32;
     loghex("[audio_hda] codecs present (STATESTS) 0x", statests);
     log("\n");
     if statests == 0 { log("[audio_hda] no codec detected\n"); return None; }

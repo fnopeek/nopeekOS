@@ -169,6 +169,9 @@ unsafe extern "C" {
     fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
     fn npk_display_audio_get(port: i32, ptr: i32, max: i32) -> i32;
     fn npk_display_audio_generation() -> i32;
+    fn npk_display_audio_serve(done: i32) -> i32;
+    fn npk_display_audio_request(bits: i32) -> i32;
+    fn npk_display_audio_done() -> i32;
     fn npk_locale(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_list_modules(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_app_meta(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
@@ -192,6 +195,15 @@ plain! {
     /// 0 until the display driver reported its sinks once, then a count
     /// that moves with every report.
     fn display_audio_generation = npk_display_audio_generation() -> i32;
+    /// Display driver: request `done` is carried out; returns
+    /// `(number << 2) | bits` of what the audio driver wants now.
+    fn display_audio_serve = npk_display_audio_serve(done: i32) -> i32;
+    /// Audio driver: ask for the display's audio power (bit 0) and the
+    /// codec wake signal (bit 1). The request's number; -2 while no display
+    /// driver is bound, -3 when none will be.
+    fn display_audio_request = npk_display_audio_request(bits: i32) -> i32;
+    /// Audio driver: the last request carried out, -2 while none is bound.
+    fn display_audio_done = npk_display_audio_done() -> i32;
     fn sleep = npk_sleep(ms: i32) -> i32;
     fn wait = npk_wait(mask: i32, timeout_ms: i32) -> i32;
     /// Milliseconds since boot.

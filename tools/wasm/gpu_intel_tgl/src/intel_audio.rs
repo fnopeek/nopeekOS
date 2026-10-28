@@ -32,6 +32,9 @@ impl Default for intel_audio_state {
 pub struct intel_audio {
     pub freq_cntrl: u32,
     pub power_refcount: i32,
+    /// The audio driver's last request carried out, and what it holds.
+    pub component_done: u32,
+    pub component_bits: u32,
     pub state: [intel_audio_state; I915_MAX_TRANSCODERS as usize],
 }
 
@@ -78,6 +81,40 @@ pub fn intel_audio_component_codec_wake_override(i915: &mut drm_i915_private, en
     }
 
     intel_audio_component_put_power(i915);
+}
+
+/// Bits of an audio driver's request (docs/spec/AUDIO.md).
+const COMPONENT_POWER: u32 = 1;
+const COMPONENT_WAKE: u32 = 2;
+
+/// The audio component's ops as the audio driver calls them: what it wants
+/// now becomes `get_power` / `put_power` and `codec_wake_override`, then the
+/// request is reported done. Called on every pass of the service loop; the
+/// first call binds the component.
+pub fn intel_audio_component_serve(i915: &mut drm_i915_private) {
+    let want = npk_sys::display_audio_serve(i915.display.audio.component_done as i32);
+    if want < 0 {
+        return;
+    }
+    let (n, bits) = (want as u32 >> 2, want as u32 & (COMPONENT_POWER | COMPONENT_WAKE));
+    if n == i915.display.audio.component_done {
+        return;
+    }
+    let had = i915.display.audio.component_bits;
+    if bits & COMPONENT_POWER != 0 && had & COMPONENT_POWER == 0 {
+        intel_audio_component_get_power(i915);
+    }
+    if (bits ^ had) & COMPONENT_WAKE != 0 {
+        intel_audio_component_codec_wake_override(i915, bits & COMPONENT_WAKE != 0);
+    }
+    if bits & COMPONENT_POWER == 0 && had & COMPONENT_POWER != 0 {
+        intel_audio_component_put_power(i915);
+    }
+    i915.display.audio.component_bits = bits;
+    i915.display.audio.component_done = n;
+    npk_sys::display_audio_serve(n as i32);
+    Line::new().s("audio: component request ").dec(n as u64).s(", power ").dec((bits & COMPONENT_POWER) as u64)
+        .s(", codec wake ").dec((bits & COMPONENT_WAKE != 0) as u64).dbg();
 }
 
 /// `intel_audio_component_get_cdclk_freq`, in kHz.

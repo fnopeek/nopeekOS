@@ -872,7 +872,8 @@ const WAIT_WIFI_EVENT: i32 = 16;
 /// RENDER-gated like the calls that read them (`npk_bar_state`).
 const WAIT_STATE: i32 = 32;
 /// Driver registered as the GPU service: the compositor queued a job
-/// (`npk_gpudev_poll`).
+/// (`npk_gpudev_poll`), or the audio driver a display audio request
+/// (`npk_display_audio_serve`).
 const WAIT_GPU_CMD: i32 = 64;
 
 /// Which of `mask`'s conditions hold right now. Bits the caller may not
@@ -899,7 +900,10 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
         if mask & WAIT_WIFI_CMD != 0 && hw.registered_as_netdev && crate::wifi::cmd_pending() {
             r |= WAIT_WIFI_CMD;
         }
-        if mask & WAIT_GPU_CMD != 0 && hw.is_pci && crate::gpu::gpudev::pending(hw.pci_addr) {
+        if mask & WAIT_GPU_CMD != 0 && hw.is_pci
+            && (crate::gpu::gpudev::pending(hw.pci_addr)
+                || owned_pci_class(ctx) == Some(0x03) && crate::audio::display_audio_pending())
+        {
             r |= WAIT_GPU_CMD;
         }
     }
@@ -3520,6 +3524,44 @@ pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
         return -1;
     }
     crate::audio::display_audio_generation() as i32
+}
+
+/// The display driver binds the audio component, says request `done` is
+/// carried out, and learns what is wanted now: `(number << 2) | bits`.
+pub(crate) fn npk_display_audio_serve(ctx: &mut HostState, done: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+        || owned_pci_class(ctx) != Some(0x03)
+    {
+        return -1;
+    }
+    crate::audio::display_audio_serve(done as u32) as i32
+}
+
+/// The audio driver asks for the display's audio power and the codec wake
+/// signal (`bits`): the request's number, -2 while no display driver is
+/// bound, -3 when none will be.
+pub(crate) fn npk_display_audio_request(ctx: &mut HostState, bits: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+        || owned_pci_class(ctx) != Some(0x04)
+        || bits < 0
+    {
+        return -1;
+    }
+    match crate::audio::display_audio_request(ctx.pid, bits as u32) {
+        Some(n) => n as i32,
+        None if crate::audio::intel_display_present() => -2,
+        None => -3,
+    }
+}
+
+/// The last request the display driver carried out, -2 while none is bound.
+pub(crate) fn npk_display_audio_done(ctx: &mut HostState) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+        || owned_pci_class(ctx) != Some(0x04)
+    {
+        return -1;
+    }
+    crate::audio::display_audio_done().map_or(-2, |n| n as i32)
 }
 
 pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {

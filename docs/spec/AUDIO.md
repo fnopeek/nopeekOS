@@ -38,3 +38,25 @@ the first codec with an analog output, else the first with any output
 (Intel display codecs through `intelhdmi.rs`). The device format is the
 best the chosen converters take: 48 kHz if supported, 16 bits if
 supported, stereo unless the converter is mono.
+
+## Display audio (component)
+
+What Linux' audio component carries between the display driver and the
+audio driver. Every call needs `Rights::HARDWARE`; the display side is the
+driver of a PCI class 03 device, the audio side of a class 04 device.
+
+| Call | Side | Contract |
+|---|---|---|
+| `npk_display_audio_set(port, ptr, len) -> 0 / -1` | display | The ELD of `port`'s sink, `len` 0 for none (`pin_eld_notify`). |
+| `npk_display_audio_get(port, ptr, max) -> len` | audio | The ELD of `port`, 0 for no sink, `-(needed + 2)` for a short buffer (`get_eld`). |
+| `npk_display_audio_generation() -> n` | both | 0 until the display side reported once, then a count that moves with every report. |
+| `npk_display_audio_serve(done) -> want` | display | Binds the component and says request `done` is carried out; returns `(number << 2) \| bits` of what is wanted now. Bit 0: hold the display's audio power (`get_power` / `put_power`). Bit 1: force the codec wake signal (`codec_wake_override`). The display driver calls it on every pass of its service loop, and again after carrying out a new number. |
+| `npk_display_audio_request(bits) -> number` | audio | Asks for `bits` (as above) instead of what was asked before, and wakes the display driver. -2 while no display driver is bound, -3 when the bus has no Intel display device, so none will bind (`i915_gfx_present`); -1 refused. |
+| `npk_display_audio_done() -> number` | audio | The last request carried out; -2 while no display driver is bound. |
+
+What an audio module asked for is given back when it ends. When the
+display driver ends, nothing it carried out holds; a new one carries out
+what is still wanted. `audio_hda` waits up to 60 s for the component to
+bind, as `snd_hdac_i915_init` does, then holds the power and forces the
+codec wake signal around the controller reset (`hda_intel_init_chip`), so
+the display codec is present on the link however the boot went.

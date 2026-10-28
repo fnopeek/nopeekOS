@@ -821,6 +821,7 @@ pub fn gpudev_serve(i915: &mut drm_i915_private, gt: &mut intel_gt, ggtt: &mut i
             }
             None => timeout,
         };
+        crate::intel_audio::intel_audio_component_serve(i915);
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout);
         let pass_us = linux::now_us();
         service_interrupts(i915, gt);

@@ -855,6 +855,13 @@ host_imports! {
     mem fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
     mem fn npk_display_audio_get(port: i32, ptr: i32, max: i32) -> i32;
     ctx fn npk_display_audio_generation() -> i32;
+    // npk_display_audio_serve(done) -> (number << 2) | bits (display driver);
+    // npk_display_audio_request(bits) -> number, -2 unbound, -3 no Intel
+    // display, -1 refused; npk_display_audio_done() -> number or -2 (audio
+    // driver). docs/spec/AUDIO.md.
+    ctx fn npk_display_audio_serve(done: i32) -> i32;
+    ctx fn npk_display_audio_request(bits: i32) -> i32;
+    ctx fn npk_display_audio_done() -> i32;
 
     // npk_audio_set_volume(pct) -> 0; npk_audio_get_volume() -> 0..=100.
     ctx fn npk_audio_set_volume(pct: i32) -> i32;

@@ -1128,6 +1128,7 @@ fn cleanup_instance_state(state: &mut HostState) {
     // old content, and the chunks already stored go to the next GC.
     state.files.clear();
     crate::audio::release_owner(state.pid);
+    crate::audio::display_audio_release(state.pid);
     if let Some(hw) = state.hw.take() {
         release_hw(hw);
     }
