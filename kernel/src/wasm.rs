@@ -346,11 +346,14 @@ fn ensure_bench() -> BenchCache {
 fn fsck_sys_info() -> i64 {
     match crate::storage::npkfs::storage::self_check() {
         Ok(r) => {
-            let problems = r.double_alloc + r.out_of_range + r.free_but_referenced;
+            let problems = r.double_alloc + r.out_of_range + r.free_but_referenced + r.bad_nodes;
             crate::kprintln!(
-                "[npk] fsck: objects={} nodes={} refd={}/{} | double_alloc={} oor={} free_but_refd={}",
+                "[npk] fsck: objects={} nodes={} refd={}/{} | double_alloc={} oor={} free_but_refd={} bad_nodes={}",
                 r.objects, r.btree_nodes, r.referenced, r.total_blocks,
-                r.double_alloc, r.out_of_range, r.free_but_referenced);
+                r.double_alloc, r.out_of_range, r.free_but_referenced, r.bad_nodes);
+            if let Some((b, why)) = r.first_bad_node {
+                crate::kprintln!("[npk] fsck: B-tree node {} {}", b, why);
+            }
             if problems == 0 {
                 crate::kprintln!("[npk] fsck: CLEAN");
             } else {

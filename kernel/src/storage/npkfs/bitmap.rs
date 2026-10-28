@@ -219,19 +219,25 @@ impl Bitmap {
         Ok(())
     }
 
-    /// Issue batched TRIM for all freed blocks, then clear pending list.
+    /// Issue batched TRIM for the freed blocks, then clear the pending
+    /// list. A block freed and handed out again since holds live data, so
+    /// only the parts of each range still free are discarded, as ext4
+    /// discards only blocks no new allocation has taken.
     pub fn flush_trims(&mut self) {
-        // Merge adjacent ranges
         self.trim_pending.sort_by_key(|&(s, _)| s);
         let mut merged: Vec<(u64, u64)> = Vec::new();
         for &(start, count) in &self.trim_pending {
-            if let Some(last) = merged.last_mut() {
-                if last.0 + last.1 == start {
-                    last.1 += count;
-                    continue;
+            let end = (start + count).min(self.total_blocks);
+            let mut b = start;
+            while b < end {
+                if !is_free(&self.data, b) { b += 1; continue; }
+                let run = b;
+                while b < end && is_free(&self.data, b) { b += 1; }
+                match merged.last_mut() {
+                    Some(last) if last.0 + last.1 >= run => last.1 = last.1.max(b - last.0),
+                    _ => merged.push((run, b - run)),
                 }
             }
-            merged.push((start, count));
         }
         for (start, count) in &merged {
             if let Err(e) = crate::blkdev::discard_blocks(*start, *count) {

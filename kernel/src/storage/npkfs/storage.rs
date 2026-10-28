@@ -553,6 +553,10 @@ pub struct FsckReport {
     pub free_but_referenced: u64,
     pub first_dup_block: u64,
     pub first_oor_ptr: u64,
+    /// B-tree nodes that could not be walked: their entries are missing.
+    pub bad_nodes: u64,
+    /// The first of them and why.
+    pub first_bad_node: Option<(u64, &'static str)>,
 }
 
 fn fsck_mark(seen: &mut [u64], dup: &mut [u64], rep: &mut FsckReport, block: u64) {
@@ -595,14 +599,17 @@ pub fn self_check() -> Result<FsckReport, FsError> {
     let mut rep = FsckReport {
         total_blocks: total, objects: 0, btree_nodes: 0, referenced: 0,
         double_alloc: 0, out_of_range: 0, free_but_referenced: 0,
-        first_dup_block: 0, first_oor_ptr: 0,
+        first_dup_block: 0, first_oor_ptr: 0, bad_nodes: 0, first_bad_node: None,
     };
 
     // Phase A — collect the tree structure (node blocks) + all leaf entries.
     let root = fs.sb.btree_root;
     let mut nodes: Vec<u64> = Vec::new();
     let mut entries: Vec<super::format::BTreeEntryRaw> = Vec::new();
-    btree::collect_for_fsck(&mut fs.cache, root, &mut nodes, &mut entries)?;
+    let mut bad = Vec::new();
+    btree::collect_for_fsck(&mut fs.cache, root, &mut nodes, &mut entries, &mut bad)?;
+    rep.bad_nodes = bad.len() as u64;
+    rep.first_bad_node = bad.first().copied();
     rep.btree_nodes = nodes.len() as u64;
     rep.objects = entries.len() as u64;
 

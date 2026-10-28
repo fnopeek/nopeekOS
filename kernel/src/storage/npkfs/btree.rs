@@ -315,28 +315,22 @@ pub fn iter_all<F: FnMut(&BTreeEntryRaw)>(
 
 /// fsck enumeration: collect every B-tree node block id (root + every child
 /// pointer — including ones that turn out unreadable, so a node overwritten by
-/// data is still counted and surfaces as a double-alloc) into `nodes`, and
-/// every leaf entry into `entries`. Corruption-tolerant like `iter_all`: a bad
-/// node is skipped, never fatal. Read-only.
+/// data is still counted and surfaces as a double-alloc) into `nodes`, every
+/// leaf entry into `entries`, and every node that could not be walked with
+/// the reason into `bad`. Corruption-tolerant like `iter_all`. Read-only.
 pub fn collect_for_fsck(
     cache: &mut BlockCache, root: u64,
     nodes: &mut alloc::vec::Vec<u64>, entries: &mut alloc::vec::Vec<BTreeEntryRaw>,
+    bad: &mut alloc::vec::Vec<(u64, &'static str)>,
 ) -> Result<(), FsError> {
     if root == 0 { return Ok(()); }
     nodes.push(root);
-    fsck_subtree(cache, root, 0, nodes, entries);
-    Ok(())
-}
-
-fn fsck_subtree(
-    cache: &mut BlockCache, block: u64, depth: u32,
-    nodes: &mut alloc::vec::Vec<u64>, entries: &mut alloc::vec::Vec<BTreeEntryRaw>,
-) {
-    walk(cache, block, depth, |w| match w {
+    walk(cache, root, 0, |w| match w {
         Walk::Entry(e) => entries.push(e),
         Walk::Child(c) => nodes.push(c),
-        Walk::Skip(..) => {}
+        Walk::Skip(b, why) => bad.push((b, why)),
     });
+    Ok(())
 }
 
 /// Best-effort traversal used only by `iter_all` (GC enumeration):
