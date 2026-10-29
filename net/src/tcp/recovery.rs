@@ -1693,7 +1693,8 @@ fn xmit_recovery<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, rexmit: Rexmi
 /// `snd_nxt`. `has_data`: the segment carries data or a FIN.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], data_offset: usize,
-                                   ack: u32, ack_seq: u32, nwin: u32, has_data: bool) {
+                                   ack: u32, ack_seq: u32, nwin: u32, has_data: bool,
+                                   tsval: Option<u32>, now_s: u64) {
     let now = io.ticks();
     let now_us = io.env.uptime_us();
     let ts_now = io.ts_now_ms();
@@ -1729,6 +1730,7 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
         flag |= FLAG_SND_UNA_ADVANCED;
         c.retries = 0;
     }
+    c.replace_ts_recent(ack_seq, tsval, now_s);
     let prior_fack = if c.sack_ok { highest_sack_seq(c) } else { prior_una };
     if has_data { flag |= FLAG_DATA; }
     flag |= ack_update_window(c, ack, ack_seq, nwin, now);

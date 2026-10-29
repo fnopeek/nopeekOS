@@ -19,6 +19,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 mod ack;
 mod cubic;
 mod recovery;
+mod timewait;
 
 /// What the stack needs from the machine it runs on.
 pub trait Env {
@@ -190,6 +191,11 @@ const MAX_TCP_WINDOW: u32 = 65535;
 /// challenge ACK per connection in this time for segments that are not
 /// data (`tcp_oow_rate_limited`, RFC 5961 §7).
 const TCP_INVALID_RATELIMIT: u64 = 50;
+/// `TCP_PAWS_WINDOW`: TSvals this much older still pass.
+const TCP_PAWS_WINDOW: i32 = 1;
+/// `TCP_PAWS_WRAP`: a `ts_recent` older than this (s) says nothing, the
+/// peer's millisecond clock may have wrapped.
+const TCP_PAWS_WRAP: u64 = i32::MAX as u64 / 1000;
 /// `sysctl_tcp_retries2`: unanswered window probes before giving up.
 const TCP_RETRIES2: u8 = 15;
 /// `TCP_MSS_DESIRED`: above it the MSS is bounded by half the largest window.
@@ -663,11 +669,12 @@ struct TcpConn {
     high_seq: u32,
 
     // TCP Timestamps (RFC 7323). `ts_ok` once both SYNs carried the option;
-    // `ts_recent` = the peer's most recent in-order TSval, echoed as our TSecr
-    // so the sender measures RTT per-segment (robust to our ACK jitter) →
-    // accurate RTO → no spurious retransmits.
+    // `ts_recent` = the peer's TSval we echo as TSecr and check PAWS
+    // against (RFC 7323 §4.3, §5), `ts_recent_stamp` when it was taken, in
+    // seconds.
     ts_ok: bool,
     ts_recent: u32,
+    ts_recent_stamp: u64,
 
     // Selective ACK (RFC 2018). `sack_ok` once both SYNs carried SACK-permitted.
     // As the receiver we then tell the sender which out-of-order ranges we
@@ -797,6 +804,7 @@ impl TcpConn {
             high_seq: 0,
             ts_ok: false,
             ts_recent: 0,
+            ts_recent_stamp: 0,
             sack_ok: false,
             local_ip: [0; 4],
             released: false,
@@ -815,6 +823,53 @@ impl TcpConn {
     fn init_rcv_mss(&mut self) {
         let hint = self.advmss.min(self.mss_cache).min((self.rcv_wnd.get() / 2) as u16).min(TCP_MSS_DEFAULT);
         self.rcv_mss = hint.max(TCP_MIN_MSS);
+    }
+
+    /// `tcp_paws_check`: `tsval` is not older than `ts_recent` by more than
+    /// `win`, or `ts_recent` is too old (24 days) or unset to judge by.
+    fn paws_check(&self, tsval: u32, now_s: u64, win: i32) -> bool {
+        (self.ts_recent.wrapping_sub(tsval) as i32) <= win
+            || now_s >= self.ts_recent_stamp + TCP_PAWS_WRAP
+            || self.ts_recent == 0
+    }
+
+    /// `tcp_store_ts_recent`.
+    fn store_ts_recent(&mut self, tsval: u32, now_s: u64) {
+        self.ts_recent = tsval;
+        self.ts_recent_stamp = now_s;
+    }
+
+    /// `tcp_replace_ts_recent` (RFC 7323 §4.3): only from a segment that
+    /// starts at or before what we last acknowledged, so a delayed ACK
+    /// echoes the earliest unacknowledged TSval.
+    fn replace_ts_recent(&mut self, seq: u32, tsval: Option<u32>, now_s: u64) {
+        let Some(v) = tsval.filter(|_| self.ts_ok) else { return };
+        if (seq.wrapping_sub(self.rcv_wup.get()) as i32) <= 0 && self.paws_check(v, now_s, 0) {
+            self.store_ts_recent(v, now_s);
+        }
+    }
+
+    /// `tcp_disordered_ack_check`: a pure duplicate ACK that changes
+    /// nothing may pass PAWS within a replay window of about an RTO. `None`
+    /// passes, `Some(true)` is an old ACK to drop silently, `Some(false)`
+    /// one to answer.
+    fn disordered_ack_check(&self, flags: u8, seq: u32, end_seq: u32, ack: u32, nwin: u32,
+                            tsval: u32) -> Option<bool> {
+        if flags & ACK == 0 || seq != end_seq { return Some(false); }
+        if seq != self.rcv_nxt { return Some((seq.wrapping_sub(self.rcv_nxt) as i32) < 0); }
+        if ack != self.snd_una { return Some(false); }
+        // tcp_may_update_window
+        if (ack.wrapping_sub(self.snd_una) as i32) > 0
+            || (seq.wrapping_sub(self.snd_wl1) as i32) > 0
+            || (seq == self.snd_wl1 && (nwin > self.snd_wnd || nwin == 0))
+        {
+            return Some(false);
+        }
+        // tcp_tsval_replay: the RTO at the 1200 Hz some peers use.
+        if (self.ts_recent.wrapping_sub(tsval) as i32) as i64 > (self.rto * 12) as i64 {
+            return Some(false);
+        }
+        None
     }
 
     /// `__tcp_oow_rate_limited`: whether an answer to a segment we did not
@@ -1016,11 +1071,14 @@ struct Table {
     free: Vec<u32>,
     ehash: BTreeMap<Tuple, u32>,
     lhash: BTreeMap<u16, u32>,
+    /// Connections in TIME-WAIT or orphaned FIN-WAIT-2, by 4-tuple: the
+    /// `inet_timewait_sock`s of the established hash.
+    tw: BTreeMap<Tuple, timewait::Tw>,
 }
 
 impl Table {
     fn new() -> Self {
-        Table { entries: Vec::new(), free: Vec::new(), ehash: BTreeMap::new(), lhash: BTreeMap::new() }
+        Table { entries: Vec::new(), free: Vec::new(), ehash: BTreeMap::new(), lhash: BTreeMap::new(), tw: BTreeMap::new() }
     }
 
     fn index_of(&self, h: Handle) -> Option<usize> {
@@ -1107,6 +1165,7 @@ impl Table {
     fn port_in_use(&self, port: u16) -> bool {
         self.lhash.contains_key(&port)
             || self.ehash.range((port, [0; 4], 0)..=(port, [255; 4], u16::MAX)).next().is_some()
+            || self.tw.range((port, [0; 4], 0)..=(port, [255; 4], u16::MAX)).next().is_some()
     }
 
     fn iter(&self) -> impl Iterator<Item = &TcpConn> {
@@ -1474,11 +1533,42 @@ impl Stack {
         let handle = match found {
             Some(h) => h,
             None => {
+                // tcp_v4_rcv: a 4-tuple in TIME-WAIT answers for itself.
+                let key = (dst_port, src_ip, src_port);
+                let has_listener = conns.listener(dst_port).is_some();
+                let mut tw_isn = None;
+                if let Some(tw) = conns.tw.get_mut(&key) {
+                    let end_seq = seq.wrapping_add(payload.len() as u32)
+                        .wrapping_add((flags & SYN != 0) as u32).wrapping_add((flags & FIN != 0) as u32);
+                    let tsval = parse_ts(data, data_offset);
+                    let now_s = io.env.uptime_us() / 1_000_000;
+                    match timewait::state_process(tw, flags, seq, end_seq, !payload.is_empty(), tsval,
+                                                  io.ticks(), now_s) {
+                        timewait::Verdict::Success => return,
+                        timewait::Verdict::Kill => {
+                            conns.tw.remove(&key);
+                            return;
+                        }
+                        timewait::Verdict::Rst => {
+                            conns.tw.remove(&key);
+                            // tcp_v4_send_reset, below.
+                        }
+                        timewait::Verdict::Syn(isn) if has_listener => {
+                            conns.tw.remove(&key);
+                            tw_isn = Some(isn);
+                        }
+                        timewait::Verdict::Ack | timewait::Verdict::Syn(_) => {
+                            timewait::send_ack(&mut io, tw, key);
+                            return;
+                        }
+                    }
+                }
                 // Check for a listener on this port
                 if flags & SYN != 0 {
                     if let Some(li) = conns.listener(dst_port) {
                         // Accept the SYN on the listening socket
-                        let iss = generate_isn(secret, io.env.uptime_us(), io.env.our_ip(), src_ip, dst_port, src_port);
+                        let iss = tw_isn.unwrap_or_else(|| generate_isn(secret, io.env.uptime_us(),
+                            io.env.our_ip(), src_ip, dst_port, src_port));
                         let peer_ws = parse_wscale(data, data_offset);
                         let peer_mss = parse_mss(data, data_offset);
                         let now = io.ticks();
@@ -1540,7 +1630,6 @@ impl Stack {
         };
 
         let Some(conn) = conns.get_mut(handle) else { return };
-        let was_time_wait = conn.state == State::TimeWait;
 
         // RST (RFC 9293 §3.10.7, RFC 5961 §3). In SYN-SENT it must acknowledge
         // our SYN. Elsewhere it resets only at exactly rcv_nxt; anywhere else in
@@ -1569,6 +1658,40 @@ impl Stack {
 
         let synchronized = matches!(conn.state, State::SynReceived | State::Established | State::FinWait1
             | State::FinWait2 | State::CloseWait | State::Closing | State::LastAck | State::TimeWait);
+
+        // tcp_validate_incoming, RFC 7323 §5.3: PAWS first. A segment whose
+        // TSval is older than `ts_recent` is a wrapped or old duplicate. A
+        // SYN goes on to its challenge ACK below.
+        let now_s = io.env.uptime_us() / 1_000_000;
+        let tsval = if conn.ts_ok { parse_ts(data, data_offset) } else { None };
+        if matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2 | State::CloseWait
+                | State::Closing | State::LastAck)
+            && flags & SYN == 0
+            && let Some(v) = tsval
+            && !conn.paws_check(v, now_s, TCP_PAWS_WINDOW)
+        {
+            let end_seq = seq.wrapping_add(payload.len() as u32).wrapping_add((flags & FIN != 0) as u32);
+            let nwin = (adv_window as u32) << conn.snd_wscale;
+            match conn.disordered_ack_check(flags, seq, end_seq, ack, nwin, v) {
+                None => {}
+                // An old ACK, common: no answer.
+                Some(true) => return,
+                Some(false) => {
+                    if !conn.oow_limited(io.ticks()) {
+                        // tcp_send_dupack
+                        if !payload.is_empty() && (seq.wrapping_sub(conn.rcv_nxt) as i32) < 0 {
+                            ack::enter_quickack_mode(conn, ack::TCP_MAX_QUICKACKS);
+                            if conn.sack_ok {
+                                let e = if (end_seq.wrapping_sub(conn.rcv_nxt) as i32) > 0 { conn.rcv_nxt } else { end_seq };
+                                conn.dsack = Some((seq, e));
+                            }
+                        }
+                        ack::send_ack(conn, &mut io);
+                    }
+                    return;
+                }
+            }
+        }
         // A segment answered only because it is out of window or old, if it
         // is no data: such answers are rate-limited (tcp_oow_rate_limited).
         let no_data = payload.is_empty() || flags & SYN != 0;
@@ -1643,6 +1766,7 @@ impl Stack {
             State::SynReceived => {
                 // Waiting for ACK of our SYN-ACK
                 if flags & ACK != 0 && ack == conn.snd_nxt {
+                    conn.replace_ts_recent(seq, tsval, now_s);
                     conn.snd_una = ack;
                     conn.state = State::Established;
                     conn.established = true;
@@ -1670,6 +1794,18 @@ impl Stack {
                     send_segment(&mut io, src_ip, dst_port, src_port, ack, 0, RST, 0, &[], 0);
                     return;
                 }
+                // PAWS for the SYN-ACK: its echo must lie between our first
+                // SYN and now, or it answers another connection.
+                if flags & SYN != 0 && flags & ACK != 0
+                    && let Some(tsecr) = parse_tsecr(data, data_offset).filter(|&t| t != 0)
+                {
+                    let first = conn.retrans_stamp.unwrap_or((conn.syn_sent_us / 1000) as u32);
+                    let now_ms = io.ts_now_ms();
+                    if tsecr.wrapping_sub(first) > now_ms.wrapping_sub(first) {
+                        send_segment(&mut io, src_ip, dst_port, src_port, ack, 0, RST, 0, &[], 0);
+                        return;
+                    }
+                }
                 // A SYN without ACK: both sides opened at once. Ours is
                 // answered as a SYN-ACK and the connection waits in SYN_RCVD
                 // (RFC 9293 §3.5, MUST-10).
@@ -1684,7 +1820,7 @@ impl Stack {
                     }
                     if let Some(ts) = parse_ts(data, data_offset) {
                         conn.ts_ok = true;
-                        conn.ts_recent = ts;
+                        conn.store_ts_recent(ts, now_s);
                     }
                     conn.sack_ok = parse_sack_permitted(data, data_offset);
                     if let Some(m) = parse_mss(data, data_offset) { conn.mss_clamp = m; }
@@ -1725,7 +1861,7 @@ impl Stack {
                     // already carries a valid TSecr.
                     if let Some(ts) = parse_ts(data, data_offset) {
                         conn.ts_ok = true;
-                        conn.ts_recent = ts;
+                        conn.store_ts_recent(ts, now_s);
                     }
                     // SACK active iff the SYN-ACK also carried SACK-permitted.
                     conn.sack_ok = parse_sack_permitted(data, data_offset);
@@ -1764,7 +1900,7 @@ impl Stack {
                     // segment except the SYN itself (RFC 7323 §2.2).
                     let nwin = (adv_window as u32) << conn.snd_wscale;
                     let has_data = !payload.is_empty() || flags & FIN != 0;
-                    recovery::ack(conn, &mut io, data, data_offset, ack, seq, nwin, has_data);
+                    recovery::ack(conn, &mut io, data, data_offset, ack, seq, nwin, has_data, tsval, now_s);
                 }
 
                 if flags & ACK != 0 && conn.sends() {
@@ -1830,13 +1966,6 @@ impl Stack {
                 // Data processing
                 if !payload.is_empty() && matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2) {
                     if seq == conn.rcv_nxt {
-                        // RFC 7323: advance ts_recent to this in-order segment's
-                        // TSval so our echoed TSecr gives the sender a fresh RTT.
-                        if conn.ts_ok {
-                            if let Some(ts) = parse_ts(data, data_offset) {
-                                conn.ts_recent = ts;
-                            }
-                        }
                         let space = RECV_BUF_SIZE - conn.recv_buf.len();
                         let mut copy = payload.len().min(space);
                         if !mem_charge(&io, copy) { copy = 0; }
@@ -2028,20 +2157,30 @@ impl Stack {
             _ => {}
         }
 
+        // tcp_time_wait: what waits only for stray segments moves to the
+        // TIME-WAIT table; past `max_tw_buckets` (`inet_twsk_alloc` finds
+        // no room) the connection simply closes. An orphaned FIN-WAIT-2
+        // waits there for the peer's FIN.
+        let sub = match conn.state {
+            State::TimeWait => Some(timewait::Sub::TimeWait),
+            State::FinWait2 if conn.released => Some(timewait::Sub::FinWait2),
+            _ => None,
+        };
+        let mut new_tw = None;
+        if let Some(sub) = sub {
+            let tw = timewait::from_conn(conn, sub, timewait::fin_time(conn), io.ticks());
+            new_tw = Some(((conn.local_port, conn.remote_ip, conn.remote_port), tw));
+            conn.state = State::Closed;
+            conn.last_send_tick = io.ticks();
+        }
         // A connection its owner let go of is gone once it closes (tcp_done).
-        if conn.state == State::Closed && conn.released {
-            conns.remove(handle);
-            return;
+        let gone = conn.state == State::Closed && conn.released;
+        if let Some((key, tw)) = new_tw
+            && conns.tw.len() < self.max_tw_buckets
+        {
+            conns.tw.insert(key, tw);
         }
-
-        // `inet_twsk_alloc` finds no room past `max_tw_buckets`, and
-        // `tcp_time_wait` then closes the connection outright.
-        if !was_time_wait && conn.state == State::TimeWait {
-            let tw = conns.iter().filter(|c| c.state == State::TimeWait).count();
-            if tw - 1 >= self.max_tw_buckets {
-                if let Some(c) = conns.get_mut(handle) { c.state = State::Closed; }
-            }
-        }
+        if gone { conns.remove(handle); }
     }
 
     /// `tcp_v4_err`: an ICMP error about a segment we sent.
@@ -2257,11 +2396,6 @@ impl Stack {
                     }
                 }
 
-                // TimeWait cleanup (2 seconds)
-                if slot.state == State::TimeWait && now - slot.last_send_tick > 200 {
-                    slot.state = State::Closed;
-                }
-
                 // Half-closed with a peer that never answers. `close`
                 // leaves FinWait1 behind on purpose and nothing else frees it —
                 // without this the slot is pinned for the rest of the boot.
@@ -2280,6 +2414,8 @@ impl Stack {
                     conns.remove(h);
                 }
             }
+            // The TIME-WAIT timer (`tw_timer_handler`).
+            conns.tw.retain(|_, tw| tw.expires > now);
         }
 
         pending
@@ -2304,7 +2440,7 @@ impl Stack {
     /// must keep coming back while this holds. As in Linux, an idle established
     /// connection has none: only data in flight or unsent, or an ACK held back.
     pub fn has_timers(&self) -> bool {
-        self.conns.iter().any(|c| match c.state {
+        !self.conns.tw.is_empty() || self.conns.iter().any(|c| match c.state {
             State::Closed | State::Listen => false,
             State::Established | State::CloseWait => c.ack.pending != 0 || !c.send_buf.is_empty(),
             _ => true,
@@ -2314,7 +2450,13 @@ impl Stack {
     pub fn list_connections(&self) -> Vec<(u16, [u8; 4], u16, &'static str)> {
         self.conns.iter()
             .map(|c| (c.local_port, c.remote_ip, c.remote_port, c.state.name()))
+            .chain(self.conns.tw.iter().map(|(&(lp, rip, rp), tw)| (lp, rip, rp, timewait::name(tw))))
             .collect()
+    }
+
+    /// The state of a 4-tuple in the TIME-WAIT table, if it is there.
+    pub fn time_wait_state(&self, local_port: u16, remote_ip: [u8; 4], remote_port: u16) -> Option<&'static str> {
+        self.conns.tw.get(&(local_port, remote_ip, remote_port)).map(timewait::name)
     }
 }
 

@@ -1,0 +1,19 @@
+// #63: TIME-WAIT lasts 60 s (TCP_TIMEWAIT_LEN, 2 MSL); a FIN sent again
+// because our ACK was lost restarts it (tcp_timewait_state_process). An
+// orphaned FIN-WAIT-2 waits in the same table for the peer's FIN.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0     close
++0     > F. 1:1(0) ack 1 win 65535
++0.01  < . 1:1(0) ack 2 win 4000
++0     state FIN_WAIT_2
++1     < F. 1:1(0) ack 2 win 4000
++0     > . 2:2(0) ack 2 win 65535
++0     state TIME_WAIT
++30    < F. 1:1(0) ack 2 win 4000
++0     > . 2:2(0) ack 2 win 65535
++59.99 state TIME_WAIT
++0.01  state GONE

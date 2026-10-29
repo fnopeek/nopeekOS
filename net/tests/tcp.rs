@@ -438,7 +438,10 @@ impl Run {
                 Ok(())
             }
             "state" => {
-                let got = self.stack.state_name(self.handle()?).unwrap_or("GONE");
+                // A connection in TIME-WAIT lives on by its 4-tuple.
+                let got = self.stack.state_name(self.handle()?)
+                    .or_else(|| self.stack.time_wait_state(self.local_port, self.peer.0, self.peer.1))
+                    .unwrap_or("GONE");
                 if got != rest { Err(format!("state {got}, want {rest}")) } else { Ok(()) }
             }
             "status" => {
