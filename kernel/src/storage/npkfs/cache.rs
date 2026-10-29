@@ -20,6 +20,9 @@ struct Slot {
     /// The frame holding the block's bytes (identity mapped).
     frame: u64,
     dirty: bool,
+    /// The bytes passed a caller's check (`read_checked`) or came from a
+    /// caller that vouched for them (`write_checked`).
+    checked: bool,
     /// Neighbours in the LRU list: `prev` towards the most recent end.
     prev: u32,
     next: u32,
@@ -104,7 +107,7 @@ impl BlockCache {
             match self.spare.pop() {
                 Some(s) => { self.slots[s as usize].frame = frame; s }
                 None => {
-                    self.slots.push(Slot { block: 0, frame, dirty: false, prev: NIL, next: NIL });
+                    self.slots.push(Slot { block: 0, frame, dirty: false, checked: false, prev: NIL, next: NIL });
                     // Room for every slot in `spare`, so `shrink` never
                     // allocates.
                     let room = self.slots.len() - self.spare.len();
@@ -123,6 +126,7 @@ impl BlockCache {
         };
         self.slots[s as usize].block = block;
         self.slots[s as usize].dirty = false;
+        self.slots[s as usize].checked = false;
         self.map.insert(block, s);
         self.push_front(s);
         Ok(s)
@@ -151,12 +155,37 @@ impl BlockCache {
         Ok(())
     }
 
+    /// `read` that runs `check` over the bytes once, when they first come
+    /// from the device or from a plain `write`; later hits skip it. False
+    /// if the check fails.
+    pub fn read_checked(
+        &mut self, block: u64, buf: &mut [u8; BLOCK_SIZE], check: fn(&[u8; BLOCK_SIZE]) -> bool,
+    ) -> Result<bool, FsError> {
+        self.read(block, buf)?;
+        let slot = self.map.get(&block).copied();
+        if slot.is_some_and(|s| self.slots[s as usize].checked) { return Ok(true); }
+        if !check(buf) { return Ok(false); }
+        if let Some(s) = slot { self.slots[s as usize].checked = true; }
+        Ok(true)
+    }
+
     /// Write a block (goes to cache, flushed later).
     pub fn write(&mut self, block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
+        self.write_as(block, buf, false)
+    }
+
+    /// `write` of bytes that pass the check a `read_checked` of this block
+    /// would run.
+    pub fn write_checked(&mut self, block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), FsError> {
+        self.write_as(block, buf, true)
+    }
+
+    fn write_as(&mut self, block: u64, buf: &[u8; BLOCK_SIZE], checked: bool) -> Result<(), FsError> {
         let s = match self.map.get(&block) {
             Some(&s) => { self.touch(s); s }
             None => self.take(block)?,
         };
+        self.slots[s as usize].checked = checked;
         self.bytes_mut(s).copy_from_slice(buf);
         if !self.slots[s as usize].dirty {
             self.slots[s as usize].dirty = true;

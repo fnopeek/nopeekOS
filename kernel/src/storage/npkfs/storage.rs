@@ -870,14 +870,6 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
     let mut lock = FS.lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
-    // Race-check: someone else could have inserted the same hash while
-    // we did the encrypt without holding the lock. ROOT_MUTEX in
-    // fs::write serialises all path-layer mutations, so this is
-    // defensive in single-threaded operation but cheap.
-    if btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some() {
-        return Ok(());
-    }
-
     // Allocate extents (contiguous-first, halve on failure, indirect for overflow)
     let blocks_needed = ((write_data.len() as u64 + BLOCK_SIZE as u64 - 1) / BLOCK_SIZE as u64).max(1);
 
@@ -986,11 +978,8 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
         };
 
     if !was_new {
-        // Defensive: the fast-path lookup above should have caught this
-        // and short-circuited before any allocation. The btree itself is
-        // also idempotent on duplicate hashes, so reaching here means a
-        // racy state that the spinlock ought to prevent. Roll back the
-        // wasted allocation cleanly anyway.
+        // Another put of the same content inserted it since the dedup
+        // lookup: the insert is idempotent, so give this copy's blocks back.
         rollback_alloc(fs, &all_extents, indirect_block);
         return Ok(());
     }

@@ -115,8 +115,7 @@ fn set_leaf_entry(buf: &mut [u8; BLOCK_SIZE], idx: usize, entry: &BTreeEntryRaw)
 // ── Disk I/O wrappers (with checksum verify on read, write on write) ──
 
 fn read_node(cache: &mut BlockCache, block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
-    cache.read(block, buf)?;
-    if !verify_node_checksum(buf) {
+    if !cache.read_checked(block, buf, verify_node_checksum)? {
         return Err(FsError::Corrupt);
     }
     Ok(())
@@ -124,7 +123,7 @@ fn read_node(cache: &mut BlockCache, block: u64, buf: &mut [u8; BLOCK_SIZE]) -> 
 
 fn write_node(cache: &mut BlockCache, block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
     write_node_checksum(buf);
-    cache.write(block, buf)?;
+    cache.write_checked(block, buf)?;
     Ok(())
 }
 
