@@ -32,6 +32,18 @@ pub use super::paths::PathError as Error;
 /// FS lock per `put`, so this isn't reentrant against itself.
 static ROOT_MUTEX: Mutex<()> = Mutex::new(());
 
+/// `ROOT_MUTEX`, waited for as a fiber should: gc holds it for its whole
+/// mark and sweep, and a fiber spinning meanwhile keeps the drivers pinned
+/// to its core from running.
+fn root_lock() -> spin::MutexGuard<'static, ()> {
+    loop {
+        if let Some(g) = ROOT_MUTEX.try_lock() {
+            return g;
+        }
+        crate::smp::fiber::spin_or_yield();
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StatResult {
     pub kind:  EntryKind,
@@ -153,7 +165,7 @@ pub fn list(path: &str) -> Result<Option<Vec<TreeEntry>>, Error> {
 pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
-    let _g = ROOT_MUTEX.lock();
+    let _g = root_lock();
     let t_lock = rdtsc();
     let cur = current_root()?;
     let new = paths::store(&cur, path, data)?;
@@ -181,7 +193,7 @@ pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
 /// Create an empty directory at `path`. Parent must exist; `path` must
 /// not.
 pub fn mkdir(path: &str) -> Result<(), Error> {
-    let _g = ROOT_MUTEX.lock();
+    let _g = root_lock();
     let cur = current_root()?;
     let new = paths::mkdir(&cur, path)?;
     commit(new)
@@ -191,7 +203,7 @@ pub fn mkdir(path: &str) -> Result<(), Error> {
 /// errors with AlreadyExists only if it's a File. Useful for installer
 /// + setup paths that may run more than once.
 pub fn ensure_dir(path: &str) -> Result<(), Error> {
-    let _g = ROOT_MUTEX.lock();
+    let _g = root_lock();
     let cur = current_root()?;
     match paths::walk(&cur, path) {
         Ok(WalkOk { kind: EntryKind::Dir, .. }) => return Ok(()),
@@ -206,7 +218,7 @@ pub fn ensure_dir(path: &str) -> Result<(), Error> {
 /// Remove `path`. Files: dropped unconditionally. Dirs: must be empty.
 /// Idempotent on missing — `Ok(())` if `path` already absent.
 pub fn delete(path: &str) -> Result<(), Error> {
-    let _g = ROOT_MUTEX.lock();
+    let _g = root_lock();
     let cur = current_root()?;
     match paths::delete(&cur, path) {
         Ok(new) => {
@@ -221,7 +233,7 @@ pub fn delete(path: &str) -> Result<(), Error> {
 
 /// Move `old` to `new`. Cross-parent supported. `new` must not exist.
 pub fn rename(old: &str, new: &str) -> Result<(), Error> {
-    let _g = ROOT_MUTEX.lock();
+    let _g = root_lock();
     let cur = current_root()?;
     let new_root = paths::rename(&cur, old, new)?;
     let r = commit(new_root);
@@ -235,7 +247,7 @@ pub fn rename(old: &str, new: &str) -> Result<(), Error> {
 /// Copy `old` to `new`. Content-addressed alias (see `paths::copy`), so
 /// even a whole directory is an O(1) subtree share. `new` must not exist.
 pub fn copy(old: &str, new: &str) -> Result<(), Error> {
-    let _g = ROOT_MUTEX.lock();
+    let _g = root_lock();
     let cur = current_root()?;
     let new_root = paths::copy(&cur, old, new)?;
     let r = commit(new_root);
@@ -327,7 +339,8 @@ pub fn gc_pressure() -> usize {
 /// `Ok(None)` for a dangling hash or a hash that isn't a Tree (skip),
 /// `Err(())` after logging an unreadable/out-of-range object (skip).
 fn read_tree_for_gc(hash: &[u8; 32]) -> Result<Option<Vec<TreeEntry>>, ()> {
-    let bytes = match storage::get(hash) {
+    let cached = super::tree_cache::get(hash);
+    let bytes = match cached.map_or_else(|| storage::get(hash), |b| Ok(Some(b))) {
         Ok(Some(b)) => b,
         Ok(None) => return Ok(None),
         Err(e) => {
@@ -385,13 +398,13 @@ fn mark_file_object(hash: &[u8; 32], reachable: &mut hashbrown::HashSet<[u8; 32]
 /// rotating slots give us "last 8 commits" snapshots automatically —
 /// anything reachable from any of them is preserved.
 ///
-/// Concurrency: holds ROOT_MUTEX so no path-layer mutation runs during
-/// GC. The sweep removes the orphans in batches, one journaled 4-phase
-/// commit per batch.
+/// Concurrency: holds ROOT_MUTEX through mark and sweep so no path-layer
+/// mutation runs meanwhile; the TRIM after it runs without. The sweep
+/// removes the orphans in batches, one journaled 4-phase commit per batch.
 pub fn gc() -> Result<GcStats, Error> {
     use hashbrown::HashSet;
 
-    let _g = ROOT_MUTEX.lock();
+    let guard = root_lock();
 
     // Locked: every read would fail, and the walk proves nothing.
     if !crate::crypto::disk_unlocked() {
@@ -498,7 +511,9 @@ pub fn gc() -> Result<GcStats, Error> {
     // Drain accumulated TRIM-pending ranges in one batch. Removed from
     // the per-commit hot path for IOPS reasons; piggy-backing on `gc`
     // means the SSD's FTL gets the free-space update at the same time
-    // we'd typically be running maintenance anyway.
+    // we'd typically be running maintenance anyway. Writers may go on
+    // meanwhile: `trim` discards only blocks that are still free.
+    drop(guard);
     storage::trim().map_err(Error::Storage)?;
 
     // Reset pressure — this sweep covered everything orphaned so far.
@@ -980,7 +995,7 @@ impl StreamingWriter {
             storage::put(&manifest_hash, &encoded)?;
         }
 
-        let _g = ROOT_MUTEX.lock();
+        let _g = root_lock();
         let cur = current_root()?;
         let new_root = paths::install_chunked_file(&cur, &self.path, manifest_hash, total_size)?;
         commit(new_root)?;
@@ -1007,7 +1022,7 @@ pub fn open_streaming_write(path: &str) -> StreamingWriter {
     // the non-reentrant spin lock is safe. Released at once; the writer itself
     // does not hold it.
     {
-        let _g = ROOT_MUTEX.lock();
+        let _g = root_lock();
         stream_begin();
     }
     StreamingWriter {
