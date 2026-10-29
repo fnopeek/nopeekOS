@@ -117,11 +117,26 @@ pub fn iface() -> net_core::ip::Iface {
     net_core::ip::Iface { ip: arp::our_ip(), mask: *SUBNET.lock() }
 }
 
-/// Fragments dropped for want of reassembly (Linux MIB `ReasmFails`, #36).
-static REASM_FAILS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// The reassembly queues.
+static DEFRAG: Mutex<net_core::frag::Defrag> = Mutex::new(net_core::frag::Defrag::new());
 
-pub fn reasm_fails() -> u64 {
-    REASM_FAILS.load(core::sync::atomic::Ordering::Relaxed)
+/// Datagrams reassembled, and reassemblies that failed or timed out (Linux
+/// MIB `ReasmOKs`, `ReasmFails`, `ReasmTimeout`).
+pub fn reasm_stats() -> (u64, u64, u64) {
+    let d = DEFRAG.lock();
+    (d.oks, d.fails, d.timeouts)
+}
+
+/// `ip_expire`: incomplete datagrams past 30 s go, and whoever sent one to
+/// our address whose fragment 0 came learns so (RFC 1122 §3.3.2 MUST).
+pub fn tick() {
+    let firsts = DEFRAG.lock().expire(crate::interrupts::ticks());
+    let our = arp::our_ip();
+    for f in firsts {
+        if f[16..20] == our {
+            icmp_send(&f, net_core::ip::ICMP_TIME_EXCEEDED, 1, 0);
+        }
+    }
 }
 
 pub fn set_gateway(ip: [u8; 4]) { *GATEWAY.lock() = ip; }
@@ -161,14 +176,6 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     // ip_rcv_core: a header whose checksum does not hold is dropped.
     if super::csum::fold(super::csum::sum(&data[..ihl])) != 0xFFFF { return; }
 
-    // No reassembly yet (#36): a fragment parsed as a whole datagram hands
-    // payload bytes to L4 as headers, unchecked. Dropped before anything,
-    // the microvm tap included.
-    if u16::from_be_bytes([data[6], data[7]]) & 0x3FFF != 0 {
-        REASM_FAILS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        return;
-    }
-
     let protocol = data[9];
     let src_ip = <[u8; 4]>::try_from(&data[12..16]).unwrap();
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
@@ -188,6 +195,17 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     }
     if let Err(d) = net_core::ip::early(l2, src_ip, dst_ip) {
         drop_in(d);
+        return;
+    }
+
+    // ip_defrag, before the microVM's masquerade and before local delivery
+    // (`ipv4_conntrack_defrag`, `ip_local_deliver`): a fragment waits for
+    // the rest, and the whole datagram goes on from here.
+    if u16::from_be_bytes([data[6], data[7]]) & 0x3FFF != 0 {
+        let r = DEFRAG.lock().input(&data[..total_len], crate::interrupts::ticks());
+        if let net_core::frag::Defragged::Complete(whole) = r {
+            handle_ipv4(&whole, false, l2);
+        }
         return;
     }
 

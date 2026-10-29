@@ -253,9 +253,9 @@ fn bridge_report() {
     let (nic_frames, nic_skipped) = crate::net::nic_drain_stats();
     kprintln!("  host nic      {} frames pulled   {} passes lost the drain guard",
         nic_frames, nic_skipped);
-    let frags = crate::net::ipv4::reasm_fails();
-    if frags > 0 {
-        kprintln!("  ip fragments  {} dropped, no reassembly yet", frags);
+    let (oks, fails, timeouts) = crate::net::ipv4::reasm_stats();
+    if oks > 0 || fails > 0 {
+        kprintln!("  ip fragments  {} reassembled  {} failed ({} timed out)", oks, fails, timeouts);
     }
     let (no_link, by_driver) = crate::netdev::tx_reject_stats();
     if no_link > 0 || by_driver > 0 {

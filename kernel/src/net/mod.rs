@@ -89,6 +89,7 @@ pub fn poll() {
         }
         tcp::tick_connections();
         arp::tick();
+        ipv4::tick();
         POLLING.store(false, Ordering::Release);
     } else if !skip_nic_drain {
         NIC_SKIPPED.fetch_add(1, Ordering::Relaxed);
@@ -161,6 +162,7 @@ pub fn poll_rx_only() {
         if prev != now {
             tcp::tick_connections();
             arp::tick();
+            ipv4::tick();
         }
     }
     // Same reason as in poll(): this spin owns a worker core, and a driver fiber

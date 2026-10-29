@@ -633,6 +633,7 @@ fn worker_entry(_arg: u64) {
             phase(PH_TICK);
             crate::net::tcp::tick_connections();
             crate::net::arp::tick();
+            crate::net::ipv4::tick();
             last_tick = now;
         }
 
