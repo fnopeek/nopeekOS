@@ -10,6 +10,7 @@
 //! The connection table is a [`Stack`]; everything it needs from the
 //! machine comes through an [`Env`], and its counters live in a [`Stats`].
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use alloc::collections::VecDeque;
 use alloc::collections::BTreeMap;
@@ -52,16 +53,17 @@ pub struct Stats {
     /// limit; the shape of throughput over several windows can: if it rises
     /// with the window, we were the limit; if only the RTT grows, the air is.
     pub rcv_wnd_force: AtomicU32,
-    /// Received bytes all connections hold together (in order and in
-    /// reassembly), and the ceiling on it. The per-connection caps allow
-    /// over a gigabyte across the table; a peer that ignores flow control,
-    /// or a module that opens many connections and never reads, would
-    /// otherwise fill the kernel heap. Raised on every admission, recomputed
-    /// exactly on each tick, so it cannot drift.
-    pub rx_held: AtomicUsize,
-    pub rx_budget: AtomicUsize,
-    /// Segments dropped because the budget was full (diagnostic).
-    pub rx_budget_drops: AtomicU32,
+    /// Buffer bytes all connections hold together (received in order and
+    /// in reassembly, sent and not yet acknowledged), and `tcp_mem[2]`, the
+    /// ceiling on it. The per-connection caps allow over a gigabyte across
+    /// the table; a peer that ignores flow control, or a module that opens
+    /// many connections and never reads, would otherwise fill the kernel
+    /// heap. Raised on every charge, recomputed exactly on each tick, so it
+    /// cannot drift.
+    pub mem_held: AtomicUsize,
+    pub mem_limit: AtomicUsize,
+    /// Segments dropped because `tcp_mem` was full (diagnostic).
+    pub mem_drops: AtomicU32,
     /// Out-of-order receive counters (diagnostic). `ooo_ahead` = a segment
     /// past rcv_nxt (a gap → the sender will have to retransmit);
     /// `ooo_behind` = a duplicate at/below rcv_nxt (a retransmit we already
@@ -110,8 +112,8 @@ impl Stats {
         Stats {
             wnd_last: AtomicU32::new(0), wnd_srtt: AtomicU32::new(0), wnd_cap: AtomicU32::new(0),
             rcv_wnd_force: AtomicU32::new(0),
-            rx_held: AtomicUsize::new(0), rx_budget: AtomicUsize::new(0),
-            rx_budget_drops: AtomicU32::new(0),
+            mem_held: AtomicUsize::new(0), mem_limit: AtomicUsize::new(0),
+            mem_drops: AtomicU32::new(0),
             ooo_ahead: AtomicU32::new(0), ooo_behind: AtomicU32::new(0),
             max_rxbuf: AtomicUsize::new(0), tx_segs: AtomicU32::new(0),
             ack_gen: AtomicU64::new(0),
@@ -166,9 +168,6 @@ fn generate_isn(secret: &[u8; 32], ticks: u64, saddr: [u8; 4], daddr: [u8; 4], s
     hash_part.wrapping_add(timer)
 }
 
-// A single browser page load opens 20+ parallel TLS connections (CDNs,
-// telemetry, OCSP, …). 128 matches the NAT session table.
-const MAX_CONNECTIONS: usize = 128;
 const MSS: u16 = 1460; // standard Ethernet MSS
 // The SYN/SYN-ACK window is never scaled (RFC 7323), so it's capped at 16-bit.
 const INITIAL_WINDOW: u16 = 65535;
@@ -419,28 +418,30 @@ const ACK_COALESCE: u16 = 8;
 // can't blow up the heap.
 const OOO_MAX_BYTES: usize = 2 * 1024 * 1024;
 
-const RX_BUDGET_MAX: usize = 256 * 1024 * 1024;
-const RX_BUDGET_MIN: usize = 16 * 1024 * 1024;
-
-/// 256 MiB, or an eighth of the memory free when first asked if that is less.
-fn rx_budget<E: Env + ?Sized>(io: &Io<E>) -> usize {
-    let b = io.st.rx_budget.load(Ordering::Relaxed);
+/// `sysctl_tcp_mem[2]` in bytes, from the memory free when first asked:
+/// tcp.c `tcp_init_mem`, `limit = nr_free_buffer_pages() / 16` (at least
+/// 128 pages), `tcp_mem[0] = limit / 4 * 3`, `tcp_mem[2] = tcp_mem[0] * 2`.
+/// Above it Linux refuses to charge more buffer memory to any socket.
+fn tcp_mem_limit<E: Env + ?Sized>(io: &Io<E>) -> usize {
+    let b = io.st.mem_limit.load(Ordering::Relaxed);
     if b != 0 { return b; }
-    let free_mib = io.env.free_mib();
-    let b = (free_mib * 1024 * 1024 / 8).clamp(RX_BUDGET_MIN, RX_BUDGET_MAX);
-    io.st.rx_budget.store(b, Ordering::Relaxed);
+    let free_pages = io.env.free_mib() * 256;
+    let limit = (free_pages / 16).max(128);
+    let b = limit / 4 * 3 * 2 * 4096;
+    io.st.mem_limit.store(b, Ordering::Relaxed);
     b
 }
 
-/// Take `n` received bytes in, if the budget allows. A refused segment is
-/// dropped like one that does not fit the buffer; the peer sends it again.
-fn rx_admit<E: Env + ?Sized>(io: &Io<E>, n: usize) -> bool {
+/// Charge `n` buffer bytes, if `tcp_mem` allows (`__sk_mem_raise_allocated`
+/// past the hard limit). A refused segment is dropped like one that does
+/// not fit the buffer; the peer sends it again.
+fn mem_charge<E: Env + ?Sized>(io: &Io<E>, n: usize) -> bool {
     if n == 0 { return true; }
-    if io.st.rx_held.load(Ordering::Relaxed) + n > rx_budget(io) {
-        io.st.rx_budget_drops.fetch_add(1, Ordering::Relaxed);
+    if io.st.mem_held.load(Ordering::Relaxed) + n > tcp_mem_limit(io) {
+        io.st.mem_drops.fetch_add(1, Ordering::Relaxed);
         return false;
     }
-    io.st.rx_held.fetch_add(n, Ordering::Relaxed);
+    io.st.mem_held.fetch_add(n, Ordering::Relaxed);
     true
 }
 
@@ -647,9 +648,6 @@ struct TcpConn {
 pub type Owner = u32;
 pub const KERNEL: Owner = 0;
 
-/// Slots only the kernel's own connections may take, so the update path can
-/// still connect while modules hold the rest.
-const KERNEL_RESERVE: usize = 16;
 /// Connections one module may hold at once (Linux bounds a process's
 /// sockets by `RLIMIT_NOFILE`).
 pub const PER_OWNER_MAX: usize = 32;
@@ -728,20 +726,164 @@ pub struct ConnDebug {
     pub retries: u8,
 }
 
+/// A connection's place in the table: `(generation << 32) | index`. The
+/// generation moves on when the place is freed, so a handle kept past its
+/// connection never reaches the next one in the same place.
+pub type Handle = usize;
+
+const _: () = assert!(usize::BITS == 64);
+
+/// What a connection is found by: our port, the peer's address and port.
+type Tuple = (u16, [u8; 4], u16);
+
+struct Entry {
+    generation: u32,
+    conn: Option<Box<TcpConn>>,
+}
+
+/// The connections, as Linux keeps sockets: objects found by their 4-tuple
+/// (`tcp_hashinfo.ehash`) or, while listening, by their port (`lhash2`).
+/// It grows with the connections; what bounds it is memory (`tcp_mem`),
+/// the orphan and TIME-WAIT limits, and per module `PER_OWNER_MAX`.
+/// Ordered maps rather than hash tables: the peer chooses half of every
+/// key, and a tree has no bucket to flood.
+struct Table {
+    entries: Vec<Entry>,
+    free: Vec<u32>,
+    ehash: BTreeMap<Tuple, u32>,
+    lhash: BTreeMap<u16, u32>,
+}
+
+impl Table {
+    fn new() -> Self {
+        Table { entries: Vec::new(), free: Vec::new(), ehash: BTreeMap::new(), lhash: BTreeMap::new() }
+    }
+
+    fn index_of(&self, h: Handle) -> Option<usize> {
+        let (i, generation) = (h & 0xffff_ffff, (h >> 32) as u32);
+        let e = self.entries.get(i)?;
+        (e.generation == generation && e.conn.is_some()).then_some(i)
+    }
+
+    fn handle_at(&self, i: usize) -> Handle {
+        ((self.entries[i].generation as usize) << 32) | i
+    }
+
+    fn get(&self, h: Handle) -> Option<&TcpConn> {
+        self.entries[self.index_of(h)?].conn.as_deref()
+    }
+
+    fn get_mut(&mut self, h: Handle) -> Option<&mut TcpConn> {
+        let i = self.index_of(h)?;
+        self.entries[i].conn.as_deref_mut()
+    }
+
+    fn link(&mut self, i: usize) {
+        let Some(c) = self.entries[i].conn.as_deref() else { return };
+        if c.state == State::Listen {
+            self.lhash.insert(c.local_port, i as u32);
+        } else {
+            self.ehash.insert((c.local_port, c.remote_ip, c.remote_port), i as u32);
+        }
+    }
+
+    fn unlink(&mut self, i: usize) {
+        let Some(c) = self.entries[i].conn.as_deref() else { return };
+        if c.state == State::Listen {
+            if self.lhash.get(&c.local_port) == Some(&(i as u32)) {
+                self.lhash.remove(&c.local_port);
+            }
+        } else {
+            let t = (c.local_port, c.remote_ip, c.remote_port);
+            if self.ehash.get(&t) == Some(&(i as u32)) {
+                self.ehash.remove(&t);
+            }
+        }
+    }
+
+    fn insert(&mut self, conn: TcpConn) -> Handle {
+        let i = match self.free.pop() {
+            Some(i) => i as usize,
+            None => {
+                self.entries.push(Entry { generation: 0, conn: None });
+                self.entries.len() - 1
+            }
+        };
+        self.entries[i].conn = Some(Box::new(conn));
+        self.link(i);
+        self.handle_at(i)
+    }
+
+    /// Free the connection at `h`; its place takes the next generation.
+    fn remove(&mut self, h: Handle) {
+        let Some(i) = self.index_of(h) else { return };
+        self.unlink(i);
+        let e = &mut self.entries[i];
+        e.conn = None;
+        e.generation = e.generation.wrapping_add(1);
+        self.free.push(i as u32);
+    }
+
+    /// Change what the connection at `h` is found by.
+    fn relink(&mut self, h: Handle, f: impl FnOnce(&mut TcpConn)) {
+        let Some(i) = self.index_of(h) else { return };
+        self.unlink(i);
+        if let Some(c) = self.entries[i].conn.as_deref_mut() { f(c); }
+        self.link(i);
+    }
+
+    fn find(&self, t: Tuple) -> Option<Handle> {
+        self.ehash.get(&t).map(|&i| self.handle_at(i as usize))
+    }
+
+    fn listener(&self, port: u16) -> Option<Handle> {
+        self.lhash.get(&port).map(|&i| self.handle_at(i as usize))
+    }
+
+    fn port_in_use(&self, port: u16) -> bool {
+        self.lhash.contains_key(&port)
+            || self.ehash.range((port, [0; 4], 0)..=(port, [255; 4], u16::MAX)).next().is_some()
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &TcpConn> {
+        self.entries.iter().filter_map(|e| e.conn.as_deref())
+    }
+
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut TcpConn> {
+        self.entries.iter_mut().filter_map(|e| e.conn.as_deref_mut())
+    }
+
+    fn handles(&self) -> Vec<Handle> {
+        (0..self.entries.len()).filter(|&i| self.entries[i].conn.is_some()).map(|i| self.handle_at(i)).collect()
+    }
+}
+
+/// tcp.c `tcp_init`: the established hash gets one bucket per 128 KiB of
+/// memory (`alloc_large_system_hash` at scale 17), rounded up to a power of
+/// two, and orphans and TIME-WAIT sockets may each fill half of it.
+fn ehash_entries(ram_bytes: u64) -> usize {
+    ((ram_bytes >> 17) as usize).max(1).next_power_of_two()
+}
+
 /// The connection table and everything that runs on it.
 pub struct Stack {
-    conns: Vec<Option<TcpConn>>,
+    conns: Table,
     isn_secret: [u8; 32],
     st: &'static Stats,
+    /// `sysctl_tcp_max_orphans`: connections closed by their owner still
+    /// finishing their FIN exchange.
+    max_orphans: usize,
+    /// `sysctl_max_tw_buckets`: connections in TIME-WAIT.
+    max_tw_buckets: usize,
 }
 
 impl Stack {
     /// An empty table. `isn_secret` keys the initial sequence numbers and
-    /// must be secret and fresh per boot (RFC 6528).
-    pub fn new(isn_secret: [u8; 32], st: &'static Stats) -> Self {
-        let mut conns = Vec::with_capacity(MAX_CONNECTIONS);
-        conns.resize_with(MAX_CONNECTIONS, || None);
-        Stack { conns, isn_secret, st }
+    /// must be secret and fresh per boot (RFC 6528); `ram_bytes` sizes the
+    /// limits as Linux does.
+    pub fn new(isn_secret: [u8; 32], st: &'static Stats, ram_bytes: u64) -> Self {
+        let cnt = ehash_entries(ram_bytes);
+        Stack { conns: Table::new(), isn_secret, st, max_orphans: cnt / 2, max_tw_buckets: cnt / 2 }
     }
 
     pub fn stats(&self) -> &'static Stats {
@@ -755,7 +897,7 @@ impl Stack {
         let mut port = 0;
         for _ in 0..64 {
             port = 49152 + (env.random_u64() % 16384) as u16;
-            if !self.conns.iter().flatten().any(|c| c.local_port == port) {
+            if !self.conns.port_in_use(port) {
                 break;
             }
         }
@@ -770,12 +912,10 @@ impl Stack {
     /// the answer. Sending it to broadcast meanwhile is what most gateways
     /// drop.
     ///
-    /// On behalf of `owner`. A module's handle is only an index, so its slot
-    /// is never reused until the module released it (`close`, or its exit),
-    /// and one module cannot take the table.
+    /// On behalf of `owner`: a module holds at most `PER_OWNER_MAX`.
     pub fn connect_start<E: Env + ?Sized>(
         &mut self, env: &mut E, owner: Owner, remote_ip: [u8; 4], remote_port: u16,
-    ) -> Result<usize, TcpError> {
+    ) -> Result<Handle, TcpError> {
         let local_port = self.alloc_port(env);
         let iss = generate_isn(&self.isn_secret, env.ticks(), env.our_ip(), remote_ip, local_port, remote_port);
 
@@ -794,34 +934,15 @@ impl Stack {
         conn.arp_pending = arp_pending;
         conn.arp_tries = 1;
 
-        // Find free slot.
-        //
-        // Reclaim free OR fully-Closed slots. Without the Closed clause a
-        // Closed conn pins its slot forever (`tick` only moves TimeWait→
-        // Closed, never frees it) — under browser churn every slot ends up a
-        // Closed corpse and connect() starves.
-        //
-        // A Closed slot the owner still holds (reset, retransmits exhausted)
-        // is not reused at once: the owner's next `close` or `recv` would hit
-        // the new connection. Only after FIN_TIMEOUT_TICKS of silence, so an
-        // owner that never closes cannot starve the table.
-        //
-        // A module's handle carries no generation, so its unreleased slot is
-        // never reclaimed: a stale index must not reach the next connection.
-        let now = env.ticks();
-        let reusable = |c: &Option<TcpConn>| c.as_ref().is_none_or(|x| reusable_conn(x, now));
-        if owner != KERNEL {
-            let held = self.conns.iter().flatten().filter(|c| c.owner == owner && !reusable_conn(c, now)).count();
-            let room = self.conns.iter().filter(|c| reusable(c)).count();
-            if held >= PER_OWNER_MAX || room <= KERNEL_RESERVE {
-                return Err(TcpError::TooManyConnections);
-            }
+        // A connection the owner still holds counts against it until the
+        // owner lets go, even once it is Closed (reset, retransmits
+        // exhausted).
+        if owner != KERNEL
+            && self.conns.iter().filter(|c| c.owner == owner).count() >= PER_OWNER_MAX
+        {
+            return Err(TcpError::TooManyConnections);
         }
-        let handle = self.conns.iter()
-            .position(|c| c.is_none())
-            .or_else(|| self.conns.iter().position(|c| c.is_some() && reusable(c)))
-            .ok_or(TcpError::TooManyConnections)?;
-        self.conns[handle] = Some(conn);
+        let handle = self.conns.insert(conn);
 
         // Only when the next hop is known. Otherwise `tick` releases it.
         if !arp_pending { self.send_syn(env, handle)?; }
@@ -836,24 +957,23 @@ impl Stack {
     /// The two negatives are worth separating: "the far end closed" and "the
     /// link went dead under us" look identical to a caller that only sees
     /// failure, and they are opposite faults.
-    pub fn connect_status(&self, handle: usize) -> i32 {
-        if handle >= MAX_CONNECTIONS { return -1; }
-        match self.conns[handle] {
-            Some(ref c) if c.error => -2,
-            Some(ref c) if c.closed || c.state == State::Closed => -1,
+    pub fn connect_status(&self, handle: Handle) -> i32 {
+        match self.conns.get(handle) {
+            Some(c) if c.error => -2,
+            Some(c) if c.closed || c.state == State::Closed => -1,
             // Same predicate as `conn_healthy`: a peer FIN moves us to
             // CloseWait and sets `closed`, so a module polling this learns the
             // far end hung up. `recv` never tells it — it just returns 0 bytes
             // forever.
-            Some(ref c) if c.established && c.state == State::Established => 1,
+            Some(c) if c.established && c.state == State::Established => 1,
             Some(_) => 0,
             None => -1,
         }
     }
 
     /// How far the connection at `handle` got.
-    pub fn conn_debug(&self, handle: usize) -> Option<ConnDebug> {
-        self.conns[handle].as_ref().map(|c| ConnDebug {
+    pub fn conn_debug(&self, handle: Handle) -> Option<ConnDebug> {
+        self.conns.get(handle).map(|c| ConnDebug {
             state: c.state.name(),
             arp_pending: c.arp_pending,
             arp_tries: c.arp_tries,
@@ -862,60 +982,56 @@ impl Stack {
     }
 
     /// Listen on a local port. Returns handle.
-    pub fn listen(&mut self, port: u16) -> Result<usize, TcpError> {
-        let slot = self.conns.iter().position(|c| c.is_none())
-            .ok_or(TcpError::TooManyConnections)?;
-        self.conns[slot] = Some(TcpConn::blank(State::Listen, port, KERNEL));
-        Ok(slot)
+    pub fn listen(&mut self, port: u16) -> Result<Handle, TcpError> {
+        Ok(self.conns.insert(TcpConn::blank(State::Listen, port, KERNEL)))
     }
 
     /// Where a listening handle stands: `Ok(true)` once a connection is
     /// established on it, `Ok(false)` while it waits.
-    pub fn accept_status(&self, handle: usize) -> Result<bool, TcpError> {
-        match self.conns[handle] {
-            Some(ref c) if c.established => Ok(true),
-            Some(ref c) if c.error || c.closed => Err(TcpError::ConnectionFailed),
+    pub fn accept_status(&self, handle: Handle) -> Result<bool, TcpError> {
+        match self.conns.get(handle) {
+            Some(c) if c.established => Ok(true),
+            Some(c) if c.error || c.closed => Err(TcpError::ConnectionFailed),
             Some(_) => Ok(false),
             None => Err(TcpError::NotConnected),
         }
     }
 
     /// Check if a listening handle has an established connection.
-    pub fn is_established(&self, handle: usize) -> bool {
-        self.conns[handle].as_ref().map_or(false, |c| c.established)
+    pub fn is_established(&self, handle: Handle) -> bool {
+        self.conns.get(handle).map_or(false, |c| c.established)
     }
 
     /// Reset a connection back to Listen state (for accepting next client).
-    pub fn reset_to_listen(&mut self, handle: usize) -> Result<(), TcpError> {
-        let conn = self.conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
-        let port = conn.local_port;
-        *conn = TcpConn::blank(State::Listen, port, KERNEL);
+    pub fn reset_to_listen(&mut self, handle: Handle) -> Result<(), TcpError> {
+        let port = self.conns.get(handle).ok_or(TcpError::NotConnected)?.local_port;
+        self.conns.relink(handle, |c| *c = TcpConn::blank(State::Listen, port, KERNEL));
         Ok(())
     }
 
     /// How far the send buffer has grown (with `snd_wnd_of`, what the peer
     /// last offered). Diagnostics: shows whether `tcp_sndbuf_expand` took
     /// effect.
-    pub fn snd_limit_of(&self, handle: usize) -> usize {
-        self.conns[handle].as_ref().map_or(0, |c| c.snd_buf_limit)
+    pub fn snd_limit_of(&self, handle: Handle) -> usize {
+        self.conns.get(handle).map_or(0, |c| c.snd_buf_limit)
     }
 
     /// Bytes currently unacknowledged in the send buffer.
-    pub fn snd_unacked_of(&self, handle: usize) -> usize {
-        self.conns[handle].as_ref().map_or(0, |c| c.send_buf.len())
+    pub fn snd_unacked_of(&self, handle: Handle) -> usize {
+        self.conns.get(handle).map_or(0, |c| c.send_buf.len())
     }
 
     /// (cwnd in packets, ssthresh, duplicate ACKs, in recovery)
-    pub fn cwnd_of(&self, handle: usize) -> (u32, u32, u32, bool) {
-        self.conns[handle].as_ref().map_or((0, 0, 0, false), |c| {
+    pub fn cwnd_of(&self, handle: Handle) -> (u32, u32, u32, bool) {
+        self.conns.get(handle).map_or((0, 0, 0, false), |c| {
             (c.snd_cwnd,
              if c.snd_ssthresh == u32::MAX { 0 } else { c.snd_ssthresh },
              c.dupacks, c.in_recovery)
         })
     }
 
-    pub fn snd_wnd_of(&self, handle: usize) -> usize {
-        self.conns[handle].as_ref().map_or(0, |c| c.snd_wnd as usize)
+    pub fn snd_wnd_of(&self, handle: Handle) -> usize {
+        self.conns.get(handle).map_or(0, |c| c.snd_wnd as usize)
     }
 
     /// Send data on a connection. Buffers and sends immediately (no Nagle).
@@ -923,15 +1039,15 @@ impl Stack {
     /// The bytes are also kept in `send_buf` until the peer acknowledges
     /// them, so `tick` can retransmit. Returns `WouldBlock` when too much is
     /// already unacknowledged — that is real backpressure, not an error.
-    pub fn send<E: Env + ?Sized>(&mut self, env: &mut E, handle: usize, data: &[u8]) -> Result<(), TcpError> {
+    pub fn send<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle, data: &[u8]) -> Result<(), TcpError> {
         let mut io = Io { env, st: self.st };
-        let conn = self.conns.get_mut(handle).and_then(|c| c.as_mut()).ok_or(TcpError::NotConnected)?;
+        let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
         if conn.state != State::Established { return Err(TcpError::NotConnected); }
         // An empty buffer always accepts. Otherwise a call larger than the
         // limit could never get through, and a refusal that waiting cannot
         // change is a deadlock.
         if !conn.send_buf.is_empty()
-            && conn.send_buf.len() + data.len() > snd_allowed(conn)
+            && (conn.send_buf.len() + data.len() > snd_allowed(conn) || !mem_charge(&io, data.len()))
         {
             return Err(TcpError::WouldBlock);
         }
@@ -955,9 +1071,9 @@ impl Stack {
     /// Receive data. Returns available data (may be empty if nothing
     /// received yet). Sends a window update ACK if significant buffer space
     /// was freed.
-    pub fn recv<E: Env + ?Sized>(&mut self, env: &mut E, handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
+    pub fn recv<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle, buf: &mut [u8]) -> Result<Handle, TcpError> {
         let mut io = Io { env, st: self.st };
-        let conn = self.conns.get_mut(handle).and_then(|c| c.as_mut()).ok_or(TcpError::NotConnected)?;
+        let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
 
         let pre_len = conn.recv_buf.len();
         let available = pre_len.min(buf.len());
@@ -1008,9 +1124,9 @@ impl Stack {
 
     /// Whether a connection has nothing more to deliver: `Ok(true)` once
     /// the peer closed or the connection failed.
-    pub fn recv_done(&self, handle: usize) -> Result<bool, TcpError> {
-        match self.conns[handle] {
-            Some(ref c) => Ok(c.closed || c.error),
+    pub fn recv_done(&self, handle: Handle) -> Result<bool, TcpError> {
+        match self.conns.get(handle) {
+            Some(c) => Ok(c.closed || c.error),
             None => Err(TcpError::NotConnected),
         }
     }
@@ -1020,18 +1136,15 @@ impl Stack {
     /// peer FIN moves the state out of `Established` (→ CloseWait) and sets
     /// `closed`, so a server that dropped an idle keep-alive connection
     /// reads as unhealthy here and the caller reconnects instead of hanging.
-    pub fn conn_healthy(&self, handle: usize) -> bool {
-        matches!(self.conns.get(handle), Some(Some(c))
+    pub fn conn_healthy(&self, handle: Handle) -> bool {
+        matches!(self.conns.get(handle), Some(c)
             if c.state == State::Established && !c.closed && !c.error)
     }
 
     /// Where this connection goes. For connection coalescing: two names may
     /// share a connection only if they lead to the same address.
-    pub fn peer(&self, handle: usize) -> Option<([u8; 4], u16)> {
-        match self.conns.get(handle) {
-            Some(Some(c)) => Some((c.remote_ip, c.remote_port)),
-            _ => None,
-        }
+    pub fn peer(&self, handle: Handle) -> Option<([u8; 4], u16)> {
+        self.conns.get(handle).map(|c| (c.remote_ip, c.remote_port))
     }
 
     /// Close a connection gracefully (sends FIN) and return at once.
@@ -1041,27 +1154,39 @@ impl Stack {
     ///
     /// The FIN goes out, the slot stays in FinWait1, and `tick` carries it
     /// to TimeWait or reaps it if the peer never answers.
-    pub fn close<E: Env + ?Sized>(&mut self, env: &mut E, handle: usize) -> Result<(), TcpError> {
-        if handle >= MAX_CONNECTIONS { return Err(TcpError::NotConnected); }
+    ///
+    /// With more orphans than `tcp_max_orphans` the connection is reset
+    /// instead, as `tcp_close` does when `tcp_check_oom` says so.
+    pub fn close<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle) -> Result<(), TcpError> {
         let mut io = Io { env, st: self.st };
-        let conn = self.conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
-        if conn.state == State::Established {
-            let seq = conn.snd_nxt;
-            conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-            conn.state = State::FinWait1;
-            conn.released = true;
-            conn.last_send_tick = io.ticks();
-            send_seg(conn, &mut io, seq, conn.rcv_nxt, FIN | ACK, 0, &[]);
-        } else {
+        let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
+        if conn.state != State::Established {
             // Never established, or already shutting down — nothing to say.
-            self.conns[handle] = None;
+            self.conns.remove(handle);
+            return Ok(());
+        }
+        let seq = conn.snd_nxt;
+        conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+        conn.state = State::FinWait1;
+        conn.released = true;
+        conn.last_send_tick = io.ticks();
+        send_seg(conn, &mut io, seq, conn.rcv_nxt, FIN | ACK, 0, &[]);
+
+        let orphans = self.conns.iter()
+            .filter(|c| c.released && matches!(c.state, State::FinWait1 | State::FinWait2 | State::LastAck))
+            .count();
+        if orphans > self.max_orphans {
+            if let Some(conn) = self.conns.get(handle) {
+                send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, RST | ACK, 0, &[]);
+            }
+            self.conns.remove(handle);
         }
         Ok(())
     }
 
     /// Drop the connection at `handle` without a word to the peer.
-    pub fn remove(&mut self, handle: usize) {
-        self.conns[handle] = None;
+    pub fn remove(&mut self, handle: Handle) {
+        self.conns.remove(handle);
     }
 
     /// Handle an incoming TCP segment from `src_ip` (called from ipv4).
@@ -1083,40 +1208,30 @@ impl Stack {
 
         let conns = &mut self.conns;
 
-        // Find matching connection
-        let idx = conns.iter().position(|c| {
-            c.as_ref().map_or(false, |c|
-                c.local_port == dst_port && c.remote_port == src_port && c.remote_ip == src_ip
-            )
-        });
-
-        let idx = match idx {
-            Some(i) => i,
+        let handle = match conns.find((dst_port, src_ip, src_port)) {
+            Some(h) => h,
             None => {
                 // Check for a listener on this port
                 if flags & SYN != 0 {
-                    let listen_idx = conns.iter().position(|c| {
-                        c.as_ref().map_or(false, |c|
-                            c.local_port == dst_port && c.state == State::Listen
-                        )
-                    });
-                    if let Some(li) = listen_idx {
+                    if let Some(li) = conns.listener(dst_port) {
                         // Accept the SYN on the listening socket
                         let iss = generate_isn(secret, io.ticks(), io.env.our_ip(), src_ip, dst_port, src_port);
                         let peer_ws = parse_wscale(data, data_offset);
-                        let conn = conns[li].as_mut().unwrap();
-                        conn.state = State::SynReceived;
-                        conn.remote_ip = src_ip;
-                        conn.remote_port = src_port;
-                        conn.rcv_off = 0;
-                        conn.rcv_nxt = seq.wrapping_add(1);
-                        conn.snd_iss = iss;
-                        conn.snd_nxt = iss.wrapping_add(1);
-                        conn.snd_una = iss;
-                        conn.last_send_tick = io.ticks();
-                        // Scaling is active only if the peer offered it too.
-                        conn.wscale_ok = peer_ws.is_some();
-                        conn.snd_wscale = peer_ws.unwrap_or(0);
+                        let now = io.ticks();
+                        conns.relink(li, |conn| {
+                            conn.state = State::SynReceived;
+                            conn.remote_ip = src_ip;
+                            conn.remote_port = src_port;
+                            conn.rcv_off = 0;
+                            conn.rcv_nxt = seq.wrapping_add(1);
+                            conn.snd_iss = iss;
+                            conn.snd_nxt = iss.wrapping_add(1);
+                            conn.snd_una = iss;
+                            conn.last_send_tick = now;
+                            // Scaling is active only if the peer offered it too.
+                            conn.wscale_ok = peer_ws.is_some();
+                            conn.snd_wscale = peer_ws.unwrap_or(0);
+                        });
 
                         // SYN-ACK: MSS, and Window Scale only if the peer asked for it.
                         let opts: &[u8] = if peer_ws.is_some() {
@@ -1139,7 +1254,8 @@ impl Stack {
             }
         };
 
-        let conn = conns[idx].as_mut().unwrap();
+        let Some(conn) = conns.get_mut(handle) else { return };
+        let was_time_wait = conn.state == State::TimeWait;
 
         // RST (RFC 9293 §3.10.7, RFC 5961 §3). In SYN-SENT it must acknowledge
         // our SYN. Elsewhere it resets only at exactly rcv_nxt; anywhere else in
@@ -1359,7 +1475,7 @@ impl Stack {
                         }
                         let space = RECV_BUF_SIZE - conn.recv_buf.len();
                         let mut copy = payload.len().min(space);
-                        if !rx_admit(&io, copy) { copy = 0; }
+                        if !mem_charge(&io, copy) { copy = 0; }
                         // Bulk append, not byte-by-byte push_back: extend reserves
                         // once and copies.
                         conn.recv_buf.extend(payload[..copy].iter().copied());
@@ -1454,7 +1570,7 @@ impl Stack {
                                 && in_window
                                 && !conn.ooo.contains_key(&off)
                                 && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
-                                && rx_admit(&io, payload.len())
+                                && mem_charge(&io, payload.len())
                             {
                                 conn.ooo_bytes += payload.len();
                                 conn.ooo.insert(off, payload.to_vec());
@@ -1541,6 +1657,15 @@ impl Stack {
 
             _ => {}
         }
+
+        // `inet_twsk_alloc` finds no room past `max_tw_buckets`, and
+        // `tcp_time_wait` then closes the connection outright.
+        if !was_time_wait && conn.state == State::TimeWait {
+            let tw = conns.iter().filter(|c| c.state == State::TimeWait).count();
+            if tw - 1 >= self.max_tw_buckets {
+                if let Some(c) = conns.get_mut(handle) { c.state = State::Closed; }
+            }
+        }
     }
 
     /// Periodic tick: retransmit, delayed ACKs, timeouts. Returns the segments
@@ -1561,11 +1686,11 @@ impl Stack {
         // send them from the send buffer like any other segment.
         {
             let conns = &mut self.conns;
-            let held: usize = conns.iter().flatten()
-                .map(|c| c.recv_buf.len() + c.ooo_bytes)
+            let held: usize = conns.iter()
+                .map(|c| c.recv_buf.len() + c.ooo_bytes + c.send_buf.len())
                 .sum();
-            io.st.rx_held.store(held, Ordering::Relaxed);
-            for slot in conns.iter_mut().flatten() {
+            io.st.mem_held.store(held, Ordering::Relaxed);
+            for slot in conns.iter_mut() {
                 // Send what the driver queue refused earlier. Otherwise it would
                 // wait for the caller's next `send`, while the caller waits for
                 // an ACK for bytes that never went out.
@@ -1691,14 +1816,22 @@ impl Stack {
                     slot.state = State::Closed;
                 }
             }
+            // A Closed connection its owner let go of is gone; one the kernel
+            // still holds after FIN_TIMEOUT_TICKS of silence too, so a
+            // forgotten handle cannot pin it.
+            for h in conns.handles() {
+                if conns.get(h).is_some_and(|c| reusable_conn(c, now)) {
+                    conns.remove(h);
+                }
+            }
         }
 
         (pending, arp_probes)
     }
 
-    fn send_syn<E: Env + ?Sized>(&mut self, env: &mut E, handle: usize) -> Result<(), TcpError> {
+    fn send_syn<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle) -> Result<(), TcpError> {
         let mut io = Io { env, st: self.st };
-        let conn = self.conns[handle].as_mut().ok_or(TcpError::NotConnected)?;
+        let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
         conn.last_send_tick = io.ticks();
 
         let mut opts = [0u8; 40];
@@ -1715,7 +1848,7 @@ impl Stack {
     /// must keep coming back while this holds. As in Linux, an idle established
     /// connection has none: only data in flight or unsent, or an ACK held back.
     pub fn has_timers(&self) -> bool {
-        self.conns.iter().flatten().any(|c| match c.state {
+        self.conns.iter().any(|c| match c.state {
             State::Closed | State::Listen => false,
             State::Established | State::CloseWait => c.ack_pending || !c.send_buf.is_empty(),
             _ => true,
@@ -1723,7 +1856,7 @@ impl Stack {
     }
 
     pub fn list_connections(&self) -> Vec<(u16, [u8; 4], u16, &'static str)> {
-        self.conns.iter().flatten()
+        self.conns.iter()
             .map(|c| (c.local_port, c.remote_ip, c.remote_port, c.state.name()))
             .collect()
     }
@@ -2156,7 +2289,8 @@ fn ack_in_range(una: u32, ack: u32, nxt: u32) -> bool {
     diff_una > 0 && diff_una <= diff_nxt
 }
 
-/// Whether a held slot could be taken by the next connect.
+/// Whether a Closed connection can be freed: its owner let go, or the
+/// kernel left it alone for FIN_TIMEOUT_TICKS.
 fn reusable_conn(c: &TcpConn, now: u64) -> bool {
     c.state == State::Closed && (c.released
         || (c.owner == KERNEL && now.saturating_sub(c.last_send_tick) > FIN_TIMEOUT_TICKS))

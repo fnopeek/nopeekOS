@@ -227,7 +227,7 @@ struct Run {
 impl Run {
     fn new() -> Self {
         Run {
-            stack: Stack::new([7; 32], Box::leak(Box::new(Stats::new()))),
+            stack: Stack::new([7; 32], Box::leak(Box::new(Stats::new())), 4 << 30),
             env: TestEnv { now_us: 0, rng: 0x9e37_79b9_7f4a_7c15, sent: VecDeque::new() },
             handle: None,
             peer: ([192, 0, 2, 2], 0),

@@ -16,7 +16,8 @@ static STACK: Once<Mutex<Stack>> = Once::new();
 
 /// The table, created at first use with a per-boot ISN secret (RFC 6528).
 fn stack() -> MutexGuard<'static, Stack> {
-    STACK.call_once(|| Mutex::new(Stack::new(crate::csprng::random_256(), &STATS))).lock()
+    STACK.call_once(|| Mutex::new(Stack::new(
+        crate::csprng::random_256(), &STATS, crate::memory::usable_bytes()))).lock()
 }
 
 /// The machine under the stack.
@@ -64,9 +65,9 @@ pub fn rcv_window_force() -> u32 {
     STATS.rcv_wnd_force.load(Ordering::Relaxed)
 }
 
-/// Segments refused for the global receive budget since the last call.
-pub fn take_rx_budget_drops() -> u32 {
-    STATS.rx_budget_drops.swap(0, Ordering::Relaxed)
+/// Segments refused for `tcp_mem` since the last call.
+pub fn take_mem_drops() -> u32 {
+    STATS.mem_drops.swap(0, Ordering::Relaxed)
 }
 
 /// (ahead, behind) out-of-order segment counts since the last call; resets both.

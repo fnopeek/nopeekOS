@@ -172,10 +172,10 @@ pub(crate) struct HostState {
     /// program see a filesystem" is decided once, here, by whoever
     /// spawned it — not by what the program chooses to import.
     pub(crate) wasi: Option<alloc::boxed::Box<crate::wasi::WasiCtx>>,
-    /// Raw TCP connections this module opened. The connection table is
-    /// shared with the kernel's own clients, so a handle is honoured only
-    /// if it is listed here; all of them close when the module ends.
-    pub(crate) tcp_handles: Vec<usize>,
+    /// Raw TCP connections this module opened, as a process's descriptor
+    /// table: the module sees the index, the slot holds the kernel's handle.
+    /// All of them close when the module ends.
+    pub(crate) tcp_handles: Vec<Option<usize>>,
     /// Files this module holds open (`npk_file_*`); the slot is the handle.
     pub(crate) files: Vec<Option<host_core::OpenFile>>,
 }
@@ -1123,7 +1123,7 @@ fn cleanup_instance_state(state: &mut HostState) {
     // Otherwise an app closed mid-load holds its fetch slots and reserved
     // buffers until the next boot.
     crate::intent::fetch::release_owner(state.pid);
-    for h in state.tcp_handles.drain(..) {
+    for h in state.tcp_handles.drain(..).flatten() {
         let _ = crate::net::tcp::close(h);
     }
     crate::wasm::host_core::tls_release_owner(state.pid);

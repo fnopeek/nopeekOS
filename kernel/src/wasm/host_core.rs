@@ -1371,16 +1371,18 @@ pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) ->
     // `debug` the local network is the point (it logs to `nc -lk`).
     // The TLS path above is used by beak on behalf of a page and does apply
     // it.
-    match crate::net::tcp::connect_start_as(tcp_owner(ctx), ip, port as u16) {
-        Ok(h) => { ctx.tcp_handles.push(h); h as i32 }
-        Err(_) => -1,
-    }
+    let Ok(h) = crate::net::tcp::connect_start_as(tcp_owner(ctx), ip, port as u16) else { return -1 };
+    // The lowest free descriptor, as `open` hands out file descriptors.
+    let fd = match ctx.tcp_handles.iter().position(Option::is_none) {
+        Some(fd) => { ctx.tcp_handles[fd] = Some(h); fd }
+        None => { ctx.tcp_handles.push(Some(h)); ctx.tcp_handles.len() - 1 }
+    };
+    fd as i32
 }
 
-/// A raw TCP handle this module opened itself, or `None`.
-fn own_tcp(ctx: &HostState, handle: i32) -> Option<usize> {
-    let h = usize::try_from(handle).ok()?;
-    ctx.tcp_handles.contains(&h).then_some(h)
+/// The kernel handle behind descriptor `fd` of this module, or `None`.
+fn own_tcp(ctx: &HostState, fd: i32) -> Option<usize> {
+    *ctx.tcp_handles.get(usize::try_from(fd).ok()?)?
 }
 
 pub(crate) fn npk_tcp_status(ctx: &mut HostState, handle: i32) -> i32 {
@@ -1392,7 +1394,7 @@ pub(crate) fn npk_tcp_status(ctx: &mut HostState, handle: i32) -> i32 {
 pub(crate) fn npk_tcp_close(ctx: &mut HostState, handle: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     if let Some(h) = own_tcp(ctx, handle) {
-        ctx.tcp_handles.retain(|&x| x != h);
+        ctx.tcp_handles[handle as usize] = None;
         let _ = crate::net::tcp::close(h);
     }
     0
