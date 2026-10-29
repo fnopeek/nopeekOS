@@ -179,6 +179,16 @@ fn generate_isn(secret: &[u8; 32], ticks: u64, saddr: [u8; 4], daddr: [u8; 4], s
 const TCP_MSS_DEFAULT: u16 = 536;
 /// `TCP_MIN_SND_MSS` (`sysctl_tcp_min_snd_mss`).
 const TCP_MIN_SND_MSS: u16 = 48;
+/// `TCP_MAX_WSCALE` (RFC 7323 §2.3).
+const TCP_MAX_WSCALE: u8 = 14;
+/// `TCP_RTO_MAX`, in ticks: the longest the probe timer backs off to.
+const TCP_RTO_MAX: u64 = 120 * 100;
+/// `TCP_MIN_MSS`: the least `rcv_mss` is taken as.
+const TCP_MIN_MSS: u16 = 88;
+/// `MAX_TCP_WINDOW`: what an unscaled window field holds.
+const MAX_TCP_WINDOW: u32 = 65535;
+/// `sysctl_tcp_retries2`: unanswered window probes before giving up.
+const TCP_RETRIES2: u8 = 15;
 /// `TCP_MSS_DESIRED`: above it the MSS is bounded by half the largest window.
 const TCP_MSS_DESIRED: u32 = 1220;
 /// IPv4 and TCP header without options.
@@ -301,34 +311,73 @@ fn snd_space_adjust(conn: &mut TcpConn, now: u64) {
 /// How much may be in flight: bounded by our buffer and by the peer's
 /// window.
 fn snd_allowed(conn: &TcpConn) -> usize {
-    let peer = if conn.snd_wnd == 0 {
-        // Unknown before the first ACK. A zero window after the handshake
-        // is real and correctly stops us.
-        SND_BUF_INIT
-    } else {
-        conn.snd_wnd as usize
-    };
-    conn.snd_buf_limit.min(peer).max(eff_mss(conn))
+    conn.snd_buf_limit.min(conn.snd_wnd as usize).max(eff_mss(conn))
 }
 
-fn recv_window(conn: &TcpConn, st: &Stats) -> u16 {
+/// The receive buffer DRS allows (`sk_rcvbuf`, Linux's `tcp_full_space`),
+/// or the manual cap while one is set.
+fn full_space(conn: &TcpConn, st: &Stats) -> usize {
     let forced = st.rcv_wnd_force.load(Ordering::Relaxed);
     // Without a manual cap DRS decides; with one, `net window` measures what
     // DRS should have found.
-    let cap = if forced > 0 {
+    if forced > 0 {
         (forced as usize).min(RCV_WND_MAX)
     } else {
         (conn.drs_win as usize).clamp(RCV_WND_MIN, RCV_WND_MAX)
-    };
-    let free = RECV_BUF_SIZE.saturating_sub(conn.recv_buf.len()).min(cap);
-    st.wnd_last.store(free as u32, Ordering::Relaxed);
-    st.wnd_srtt.store(conn.srtt_ms, Ordering::Relaxed);
-    st.wnd_cap.store(cap as u32, Ordering::Relaxed);
-    if conn.wscale_ok {
-        (free >> OUR_WSCALE).min(65535) as u16
-    } else {
-        free.min(65535) as u16
     }
+}
+
+/// `__tcp_select_window`: the window the buffer allows now, in bytes. It
+/// moves to zero rather than offer a sliver below an MSS or a sixteenth of
+/// the buffer, and without window scaling keeps to multiples of the
+/// peer's MSS: the receiver half of silly window avoidance (RFC 9293
+/// §3.8.6.2.2).
+fn select_window_raw(conn: &TcpConn, st: &Stats) -> u32 {
+    let allowed = full_space(conn, st) as i64;
+    let full = allowed;
+    let mut free = (allowed - (conn.recv_buf.len() + conn.ooo_bytes) as i64).max(0);
+    let wscale = if conn.wscale_ok { OUR_WSCALE } else { 0 };
+    let mut mss = conn.rcv_mss as i64;
+    if mss > full {
+        mss = full;
+        if mss <= 0 { return 0; }
+    }
+    if free < full >> 1 {
+        free &= !((1i64 << wscale) - 1);
+        if free < allowed >> 4 || free < mss { return 0; }
+    }
+    if wscale != 0 {
+        let a = 1i64 << wscale;
+        ((free + a - 1) & !(a - 1)) as u32
+    } else {
+        let mut window = conn.rcv_wnd.get() as i64;
+        if window <= free - mss || window > free {
+            window = free / mss * mss;
+        } else if mss == full && free > window + (full >> 1) {
+            window = free;
+        }
+        window as u32
+    }
+}
+
+/// `tcp_select_window`: the window field of a segment we send. The offered
+/// window never shrinks (RFC 9293 §3.8.6.2.2 SHOULD NOT): what we already
+/// offered is kept until the data fills it.
+fn recv_window(conn: &TcpConn, st: &Stats) -> u16 {
+    let wscale = if conn.wscale_ok { OUR_WSCALE } else { 0 };
+    let cur = conn.receive_window();
+    let mut new = select_window_raw(conn, st);
+    if new < cur {
+        let a = 1u32 << wscale;
+        new = cur.div_ceil(a) * a;
+    }
+    conn.rcv_wnd.set(new);
+    conn.rcv_wup.set(conn.rcv_nxt);
+    st.wnd_last.store(new, Ordering::Relaxed);
+    st.wnd_srtt.store(conn.srtt_ms, Ordering::Relaxed);
+    st.wnd_cap.store(full_space(conn, st) as u32, Ordering::Relaxed);
+    let new = new.min(MAX_TCP_WINDOW << wscale);
+    (new >> wscale) as u16
 }
 
 /// Merge [s,e) into the coalesced out-of-order run set (stream offsets).
@@ -586,9 +635,25 @@ struct TcpConn {
     ack_tick: u64,
     // In-order segments received since our last ACK (ACK-coalescing counter).
     acks_held: u16,
-    // Bytes drained since our last recv()-side window-update ACK. Rate-limits
-    // those ACKs so a bulk download doesn't emit one per recv() call (~70k/s).
-    freed_since_winupd: u32,
+
+    // ── Windows (RFC 9293 §3.8.6, Linux `tcp_ack_update_window`,
+    //    `tcp_select_window`) ───────────────────────────────────────────
+    /// `snd_wl1`: the sequence number of the segment that last set
+    /// `snd_wnd`.
+    snd_wl1: u32,
+    /// `rcv_wnd`, `rcv_wup`: the window we last advertised, and `rcv_nxt`
+    /// when we did. Set while a segment is built, so in a `Cell`.
+    rcv_wnd: core::cell::Cell<u32>,
+    rcv_wup: core::cell::Cell<u32>,
+    /// `icsk_ack.rcv_mss`: the peer's segment size as we see it.
+    rcv_mss: u16,
+    /// The persist timer (`ICSK_TIME_PROBE0`): when it fires (0: off),
+    /// the probes sent unanswered, and the backoff.
+    probe_at: u64,
+    probes_out: u8,
+    backoff: u8,
+    /// `rcv_tstamp`: when the last ACK came.
+    last_ack_rx: u64,
 
     /// The owner closed: a FIN follows the last byte of `send_buf`
     /// (`tcp_send_fin`), and `fin_sent` once it went out at that position.
@@ -744,7 +809,14 @@ impl TcpConn {
             ack_pending: false,
             ack_tick: 0,
             acks_held: 0,
-            freed_since_winupd: 0,
+            snd_wl1: 0,
+            rcv_wnd: core::cell::Cell::new(INITIAL_WINDOW as u32),
+            rcv_wup: core::cell::Cell::new(0),
+            rcv_mss: TCP_MSS_DEFAULT,
+            probe_at: 0,
+            probes_out: 0,
+            backoff: 0,
+            last_ack_rx: 0,
             fin_queued: false,
             fin_sent: false,
             established: false,
@@ -779,6 +851,34 @@ impl TcpConn {
             inet_id: core::cell::Cell::new(0),
             sock_err: None,
         }
+    }
+
+    /// `tcp_initialize_rcv_mss`: a first guess at the peer's segment size.
+    fn init_rcv_mss(&mut self) {
+        let hint = self.advmss.min(self.mss_cache).min((self.rcv_wnd.get() / 2) as u16).min(TCP_MSS_DEFAULT);
+        self.rcv_mss = hint.max(TCP_MIN_MSS);
+    }
+
+    /// `tcp_receive_window`: what is left of the window we advertised.
+    fn receive_window(&self) -> u32 {
+        let w = self.rcv_wup.get().wrapping_add(self.rcv_wnd.get()).wrapping_sub(self.rcv_nxt) as i32;
+        w.max(0) as u32
+    }
+
+    /// `tcp_probe0_when`: the persist timer's interval at the current
+    /// backoff.
+    fn probe0_when(&self) -> u64 {
+        // ilog2(TCP_RTO_MAX / TCP_RTO_MIN) + 1
+        let shift = self.backoff.min(10);
+        (RTO_TICKS_BASE << shift).min(TCP_RTO_MAX)
+    }
+
+    /// Unsent bytes wait for a window that does not take the next segment,
+    /// and nothing is in flight to bring an ACK (`tcp_check_probe_timer`).
+    fn window_blocked(&self) -> bool {
+        let sent = self.snd_nxt.wrapping_sub(self.snd_una) as usize;
+        let unsent = self.send_buf.len().saturating_sub(sent);
+        sent == 0 && unsent > 0 && (unsent.min(eff_mss(self))) > self.snd_wnd as usize
     }
 
     /// A state in which we still send data or our FIN.
@@ -1185,8 +1285,7 @@ impl Stack {
         let mut io = Io { env, st: self.st };
         let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
 
-        let pre_len = conn.recv_buf.len();
-        let available = pre_len.min(buf.len());
+        let available = conn.recv_buf.len().min(buf.len());
         // Bulk copy out of the ring buffer instead of byte-by-byte pop_front.
         // The VecDeque exposes its contents as up to two contiguous slices;
         // memcpy each, then drain in one shot.
@@ -1204,29 +1303,20 @@ impl Stack {
         conn.copied_total = conn.copied_total.saturating_add(available as u64);
         rcv_space_adjust(conn, io.env.uptime_us());
 
-        // Window-update ACK, rate-limited.
-        //
-        // We must re-advertise the window the consumer just reopened so a
-        // trickle / zero-window sender resumes (e.g. a TLS sender that bursts
-        // then goes quiet, leaving the window stuck small). But a bulk
-        // plain-http download calls recv() once per packet, so ACKing on
-        // every drain would flood the TX path and defeat the `input` ACK
-        // coalescing.
-        //
-        // So: ACK immediately only when the window was actually constrained
-        // (buffer >1/4 full → window shrinking, the trickle/zero-window
-        // case), otherwise at most once per ~64 KiB freed. `input`'s
-        // coalesced data-ACKs carry the (wide-open) window the rest of the
-        // time.
-        conn.freed_since_winupd = conn.freed_since_winupd.saturating_add(available as u32);
-        let constrained = pre_len > RECV_BUF_SIZE / 4;
-        if available > 0 && conn.state == State::Established
-            && (constrained || conn.freed_since_winupd >= 64 * 1024) {
-            let w = recv_window(conn, io.st);
-            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
-            conn.freed_since_winupd = 0;
-            conn.ack_pending = false;
-            conn.acks_held = 0;
+        // tcp_cleanup_rbuf: a read that at least doubles the window the
+        // peer may use is worth an ACK now; anything less waits for the
+        // next ACK we send anyway.
+        if available > 0 && matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2) {
+            let now_win = conn.receive_window();
+            if 2 * now_win as usize <= full_space(conn, io.st) {
+                let new = select_window_raw(conn, io.st);
+                if new != 0 && new >= 2 * now_win {
+                    let w = recv_window(conn, io.st);
+                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                    conn.ack_pending = false;
+                    conn.acks_held = 0;
+                }
+            }
         }
 
         Ok(available)
@@ -1356,6 +1446,7 @@ impl Stack {
                             conn.remote_port = src_port;
                             conn.rcv_off = 0;
                             conn.rcv_nxt = seq.wrapping_add(1);
+                            conn.rcv_wup.set(conn.rcv_nxt);
                             conn.snd_iss = iss;
                             conn.snd_nxt = iss.wrapping_add(1);
                             conn.snd_una = iss;
@@ -1419,6 +1510,24 @@ impl Stack {
             return;
         }
 
+        // tcp_sequence: a segment that ends before what we last advertised
+        // from is old; it gets a duplicate ACK, with a D-SACK for its data
+        // (tcp_send_dupack), and nothing else of it is looked at.
+        let end_seq = seq.wrapping_add(payload.len() as u32)
+            .wrapping_add((flags & SYN != 0) as u32).wrapping_add((flags & FIN != 0) as u32);
+        if matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2 | State::CloseWait
+                | State::Closing | State::LastAck | State::TimeWait)
+            && (end_seq.wrapping_sub(conn.rcv_wup.get()) as i32) < 0
+        {
+            if !payload.is_empty() {
+                conn.dsack = Some((seq, seq.wrapping_add(payload.len() as u32)));
+            }
+            let w = recv_window(conn, io.st);
+            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+            conn.dsack = None;
+            return;
+        }
+
         // A synchronized connection takes a segment only if it starts inside
         // the receive window (RFC 9293 §3.10.7.4). Old retransmissions (behind
         // rcv_nxt) keep going to the D-SACK path below, which only ACKs; one
@@ -1451,6 +1560,14 @@ impl Stack {
                     conn.snd_una = ack;
                     conn.state = State::Established;
                     conn.established = true;
+                    // tcp_create_openreq_child: the window of the ACK that
+                    // completes the handshake.
+                    conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
+                    conn.snd_wl1 = seq;
+                    conn.max_window = conn.snd_wnd;
+                    conn.last_ack_rx = io.ticks();
+                    conn.sync_mss();
+                    conn.init_rcv_mss();
                 }
             }
 
@@ -1462,6 +1579,8 @@ impl Stack {
                     // SYN-ACK received
                     conn.rcv_off = 0;
                     conn.rcv_nxt = seq.wrapping_add(1);
+                    // The window our SYN offered starts here.
+                    conn.rcv_wup.set(conn.rcv_nxt);
                     conn.snd_una = ack;
                     conn.state = State::Established;
                     conn.established = true;
@@ -1485,7 +1604,15 @@ impl Stack {
                     // The peer's MSS, or the default; then the MSS for the
                     // options now negotiated.
                     if let Some(m) = parse_mss(data, data_offset) { conn.mss_clamp = m; }
+                    // The SYN-ACK's window is never scaled (RFC 7323 §2.2);
+                    // it sets the send window, and this segment is the one
+                    // that did (tcp_init_wl).
+                    conn.snd_wnd = adv_window as u32;
+                    conn.snd_wl1 = seq;
+                    conn.max_window = conn.snd_wnd;
+                    conn.last_ack_rx = io.ticks();
                     conn.sync_mss();
+                    conn.init_rcv_mss();
 
                     // Send ACK with full window
                     let w = recv_window(conn, io.st);
@@ -1501,13 +1628,29 @@ impl Stack {
                     // scale is the SYN-ACK's (`snd_wscale`) and applies to every
                     // segment except the SYN itself (RFC 7323 §2.2).
                     let vorheriges_fenster = conn.snd_wnd;
-                    conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
-                    // tcp_ack_update_window: a larger window may lift the
-                    // half-window bound on the MSS.
-                    if conn.snd_wnd > conn.max_window {
-                        conn.max_window = conn.snd_wnd;
-                        conn.sync_mss();
+                    // tcp_ack_update_window: only a newer segment may set the
+                    // window, or the same one growing it (tcp_may_update_window,
+                    // RFC 9293 §3.10.7.4 SND.WL1/WL2), so a reordered older ACK
+                    // cannot shrink it.
+                    let nwin = (adv_window as u32) << conn.snd_wscale;
+                    let newer_ack = (ack.wrapping_sub(conn.snd_una) as i32) > 0;
+                    let newer_seq = (seq.wrapping_sub(conn.snd_wl1) as i32) > 0;
+                    if newer_ack || newer_seq || (seq == conn.snd_wl1 && (nwin > conn.snd_wnd || nwin == 0)) {
+                        conn.snd_wl1 = seq;
+                        if conn.snd_wnd != nwin {
+                            conn.snd_wnd = nwin;
+                            // A larger window may lift the half-window bound on
+                            // the MSS.
+                            if nwin > conn.max_window {
+                                conn.max_window = nwin;
+                                conn.sync_mss();
+                            }
+                        }
                     }
+                    // Every ACK answers our probes (RFC 1122 §4.2.2.17: stay
+                    // open while the peer responds).
+                    conn.probes_out = 0;
+                    conn.last_ack_rx = io.ticks();
                     // Every ACK wakes the sender, not only one that clears data:
                     // a pure window update carries `ack == snd_una`, and the
                     // sender must notice the reopened window. The wakeup does not
@@ -1613,6 +1756,21 @@ impl Stack {
                     }
                 }
 
+                if flags & ACK != 0 && conn.sends() {
+                    // tcp_ack_probe: a window that takes the next segment ends
+                    // the probing, else the probe timer restarts from now.
+                    if conn.probe_at != 0 {
+                        if conn.window_blocked() {
+                            conn.probe_at = io.ticks() + conn.probe0_when();
+                        } else {
+                            conn.backoff = 0;
+                            conn.probe_at = 0;
+                        }
+                    }
+                    // tcp_data_snd_check: whatever the window now lets out.
+                    write_xmit(conn, &mut io);
+                }
+
                 // Our FIN acknowledged (everything up to it is).
                 if conn.fin_sent && conn.snd_una == conn.snd_nxt {
                     match conn.state {
@@ -1655,6 +1813,10 @@ impl Stack {
                             if let Some(ts) = parse_ts(data, data_offset) {
                                 conn.ts_recent = ts;
                             }
+                        }
+                        // tcp_measure_rcv_mss
+                        if payload.len() >= conn.rcv_mss as usize {
+                            conn.rcv_mss = (payload.len() as u16).min(conn.advmss);
                         }
                         let space = RECV_BUF_SIZE - conn.recv_buf.len();
                         let mut copy = payload.len().min(space);
@@ -2005,11 +2167,17 @@ impl Stack {
                 if slot.sends() && slot.snd_una != slot.snd_nxt {
                     let rto = RTO_TICKS_BASE << slot.retries.min(5);
                     if now.saturating_sub(slot.rto_tick) > rto {
-                        if slot.retries >= MAX_DATA_RETRIES {
+                        // tcp_retransmit_timer: into a zero window the
+                        // retransmits are probes, and the connection lives
+                        // while the peer still answers (tcp_rtx_probe0_timed_out:
+                        // twice TCP_RTO_MAX without an ACK).
+                        let zero_window = slot.snd_wnd == 0
+                            && now.saturating_sub(slot.last_ack_rx) <= 2 * TCP_RTO_MAX;
+                        if slot.retries >= MAX_DATA_RETRIES && !zero_window {
                             slot.error = true;
                             slot.state = State::Closed;
                         } else {
-                            slot.retries += 1;
+                            slot.retries = slot.retries.saturating_add(1).min(MAX_DATA_RETRIES);
                             slot.rto_tick = now;
                             slot.last_send_tick = now;
                             // ── `tcp_enter_loss` ───────────────────────
@@ -2035,6 +2203,27 @@ impl Stack {
                             io.st.rto_fired.fetch_add(1, Ordering::Relaxed);
                             retransmit_head(slot, &mut io);
                         }
+                    }
+                }
+
+                // tcp_probe_timer
+                if slot.probe_at != 0 && now >= slot.probe_at {
+                    if !slot.sends() || !slot.window_blocked() {
+                        slot.probe_at = 0;
+                        slot.probes_out = 0;
+                    } else if slot.probes_out >= TCP_RETRIES2 {
+                        slot.error = true;
+                        slot.state = State::Closed;
+                        slot.probe_at = 0;
+                    } else {
+                        // tcp_write_wakeup, tcp_xmit_probe_skb: a sequence
+                        // number already acknowledged makes the peer answer
+                        // with its window.
+                        let w = recv_window(slot, io.st);
+                        send_seg(slot, &mut io, slot.snd_una.wrapping_sub(1), slot.rcv_nxt, ACK, w, &[]);
+                        slot.probes_out += 1;
+                        if slot.backoff < TCP_RETRIES2 { slot.backoff += 1; }
+                        slot.probe_at = now + slot.probe0_when();
                     }
                 }
 
@@ -2138,7 +2327,11 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
         // ── Gate 2: the peer's window
         //           (tcp_output.c:2295 `tcp_snd_wnd_test`)
         let n = (conn.send_buf.len() - sent).min(mss);
-        if sent + n > conn.snd_wnd as usize && conn.snd_wnd != 0 {
+        if sent + n > conn.snd_wnd as usize {
+            // tcp_check_probe_timer: nothing in flight to bring an ACK.
+            if sent == 0 && conn.probe_at == 0 {
+                conn.probe_at = io.ticks() + conn.probe0_when();
+            }
             return;
         }
         chunk[..n].copy_from_slice(&conn.send_buf[sent..sent + n]);
@@ -2409,7 +2602,8 @@ fn parse_wscale(seg: &[u8], data_offset: usize) -> Option<u8> {
                 let len = seg[i + 1] as usize;
                 if len < 2 { break; } // malformed
                 if kind == 3 && len == 3 && i + 2 < end {
-                    return Some(seg[i + 2]);
+                    // RFC 7323 §2.3: a shift above 14 MUST be taken as 14.
+                    return Some(seg[i + 2].min(TCP_MAX_WSCALE));
                 }
                 i += len;
             }

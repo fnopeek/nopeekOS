@@ -1,0 +1,21 @@
+// #56: a window scale above 14 counts as 14 (RFC 7323 §2.3 MUST): a window
+// of 1 is 16384 bytes, eleven full segments.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,nop,wscale 20>
++0     > . 1:1(0) ack 1 win 1024
+
++0.01  < . 1:1(0) ack 1 win 1
++0     send 20000
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0     > P. 4381:5841(1460) ack 1
++0     > P. 5841:7301(1460) ack 1
++0     > P. 7301:8761(1460) ack 1
++0     > P. 8761:10221(1460) ack 1
++0     > P. 10221:11681(1460) ack 1
++0     > P. 11681:13141(1460) ack 1
++0     > P. 13141:14601(1460) ack 1
++0     > P. 14601:16061(1460) ack 1
++0     state ESTABLISHED

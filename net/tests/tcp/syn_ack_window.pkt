@@ -1,0 +1,13 @@
+// #54: the SYN-ACK's window (unscaled) bounds the first flight
+// (tcp_rcv_synsent_state_process: snd_wnd from the SYN-ACK, tcp_init_wl).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 3000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0     send 6000
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0.01  < . 1:1(0) ack 2921 win 3000
++0     > P. 2921:4381(1460) ack 1
++0     > P. 4381:5841(1460) ack 1

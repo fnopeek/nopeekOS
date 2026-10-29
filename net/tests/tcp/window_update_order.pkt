@@ -1,0 +1,21 @@
+// #55: a segment wholly below what we acknowledged is not acceptable and gets
+// a duplicate ACK (tcp_sequence, tcp_send_dupack); an ACK with the same
+// sequence number may only grow the window (tcp_may_update_window).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0.1   < P. 1:101(100) ack 1 win 4000
++0.04  > . 1:1(0) ack 101
++0     recv 100
+// Reordered: older than what we acknowledged, with a smaller window.
++0.01  < . 1:1(0) ack 1 win 1000
++0     > . 1:1(0) ack 101
+// Same sequence number, smaller window: not taken.
++0.01  < . 101:101(0) ack 1 win 4000
++0.01  < . 101:101(0) ack 1 win 1000
++0     send 3000
++0     > P. 1:1461(1460) ack 101
++0     > P. 1461:2921(1460) ack 101
++0     > P. 2921:3001(80) ack 101

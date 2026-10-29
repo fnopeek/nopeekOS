@@ -1,0 +1,16 @@
+// #53: a zero window stops us; window probes (seq snd_una - 1) go out on the
+// persist timer with backoff, and data flows once the window opens
+// (tcp_probe_timer, tcp_send_probe0, tcp_write_wakeup, tcp_ack_probe).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0.01  < . 1:1(0) ack 1 win 0
++0     send 1000
++0.2   > . 0:0(0) ack 1
++0.01  < . 1:1(0) ack 1 win 0
++0.4   > . 0:0(0) ack 1
++0.01  < . 1:1(0) ack 1 win 4000
++0     > P. 1:1001(1000) ack 1
++0     status 1
