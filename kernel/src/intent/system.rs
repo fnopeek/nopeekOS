@@ -1115,13 +1115,6 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16, extra: &[u64]) {
                 return;
             }
             off = end;
-            // Pace ~10 ms per KB; otherwise the close overtakes data still
-            // queued.
-            let t = crate::interrupts::rdtsc();
-            let d = t + crate::interrupts::tsc_freq() / 100;
-            while crate::interrupts::rdtsc() < d {
-                idle_until(d);
-            }
         }
     }
 

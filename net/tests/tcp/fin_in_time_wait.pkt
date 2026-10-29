@@ -1,0 +1,15 @@
+// #62: in TIME_WAIT the peer's FIN, sent again because our ACK was lost, gets
+// its ACK again.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0     close
++0     > F. 1:1(0) ack 1 win 65535
++0.01  < F. 1:1(0) ack 2 win 4000
++0     > . 2:2(0) ack 2 win 65535
++0     state TIME_WAIT
++0.5   < F. 1:1(0) ack 2 win 4000
++0     > . 2:2(0) ack 2 win 65535
++0     state TIME_WAIT

@@ -1,0 +1,20 @@
+// #60: close() queues the FIN behind data the window held back (RFC 9293
+// §3.10.4); it rides on the last segment (tcp_send_fin) when that goes out.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
+// The window from a pure ACK (the SYN-ACK's is #54): three full segments.
++0.01  < . 1:1(0) ack 1 win 4380
++0     send 6000
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0     close
++0     state FIN_WAIT_1
++0.01  < . 1:1(0) ack 4381 win 4380
++0     > P. 4381:5841(1460) ack 1
++0     > FP. 5841:6001(160) ack 1 win 65535
++0.01  < . 1:1(0) ack 6002 win 4380
++0     state FIN_WAIT_2

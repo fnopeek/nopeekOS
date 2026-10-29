@@ -1,0 +1,12 @@
+// #60: a lost FIN goes out again on the retransmit timer (tcp_retransmit_timer
+// covers FIN_WAIT_1 like ESTABLISHED).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0     close
++0     > F. 1:1(0) ack 1 win 65535
++0.21  > F. 1:1(0) ack 1 win 65535
++0.01  < . 1:1(0) ack 2 win 4000
++0     state FIN_WAIT_2

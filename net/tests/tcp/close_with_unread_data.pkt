@@ -1,0 +1,12 @@
+// #78: close() with data the application never read resets instead of a FIN
+// (__tcp_close: data_was_unread → tcp_send_active_reset).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0.1   < P. 1:101(100) ack 1 win 4000
++0.04  > . 1:1(0) ack 101 win 65535
++0     close
++0     > R. 1:1(0) ack 101
++0     state GONE

@@ -1,0 +1,14 @@
+// #64: both sides close at once: the peer's FIN comes before the ACK of ours,
+// so CLOSING, then TIME_WAIT on that ACK (RFC 9293 §3.10.7.4).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0     close
++0     > F. 1:1(0) ack 1 win 65535
++0.01  < F. 1:1(0) ack 1 win 4000
++0     > . 2:2(0) ack 2 win 65535
++0     state CLOSING
++0.01  < . 2:2(0) ack 2 win 4000
++0     state TIME_WAIT

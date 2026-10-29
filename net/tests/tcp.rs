@@ -8,6 +8,7 @@
 //! +0     > . 1:1(0) ack 1                                    segment out
 //! +0     connect 192.0.2.2:80 | listen 80 | send 100 | recv 100 | close
 //! +0     status 1                                            connect_status
+//! +0     state FIN_WAIT_1                         the state, or GONE when freed
 //! +0     < icmp 3 4 mtu 1000 seq 1    ICMP error quoting our segment at seq 1
 //! ```
 //!
@@ -420,6 +421,10 @@ impl Run {
             "close" => {
                 let h = self.handle()?;
                 self.stack.close(&mut self.env, h).map_err(|e| format!("close: {e}"))
+            }
+            "state" => {
+                let got = self.stack.state_name(self.handle()?).unwrap_or("GONE");
+                if got != rest { Err(format!("state {got}, want {rest}")) } else { Ok(()) }
             }
             "status" => {
                 let want: i32 = parse_num(rest)?;

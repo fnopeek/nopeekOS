@@ -479,6 +479,7 @@ enum State {
     FinWait1,
     FinWait2,
     CloseWait,
+    Closing,
     LastAck,
     TimeWait,
 }
@@ -494,6 +495,7 @@ impl State {
             State::FinWait1 => "FIN_WAIT_1",
             State::FinWait2 => "FIN_WAIT_2",
             State::CloseWait => "CLOSE_WAIT",
+            State::Closing => "CLOSING",
             State::LastAck => "LAST_ACK",
             State::TimeWait => "TIME_WAIT",
         }
@@ -587,6 +589,11 @@ struct TcpConn {
     // Bytes drained since our last recv()-side window-update ACK. Rate-limits
     // those ACKs so a bulk download doesn't emit one per recv() call (~70k/s).
     freed_since_winupd: u32,
+
+    /// The owner closed: a FIN follows the last byte of `send_buf`
+    /// (`tcp_send_fin`), and `fin_sent` once it went out at that position.
+    fin_queued: bool,
+    fin_sent: bool,
 
     // Connection complete flag
     established: bool,
@@ -738,6 +745,8 @@ impl TcpConn {
             ack_tick: 0,
             acks_held: 0,
             freed_since_winupd: 0,
+            fin_queued: false,
+            fin_sent: false,
             established: false,
             closed: false,
             error: false,
@@ -770,6 +779,11 @@ impl TcpConn {
             inet_id: core::cell::Cell::new(0),
             sock_err: None,
         }
+    }
+
+    /// A state in which we still send data or our FIN.
+    fn sends(&self) -> bool {
+        matches!(self.state, State::Established | State::CloseWait | State::FinWait1 | State::Closing | State::LastAck)
     }
 
     /// `ip_select_ident_segs` for a connected socket.
@@ -1059,6 +1073,11 @@ impl Stack {
         }
     }
 
+    /// The state of the connection at `handle` (`netstat`'s names).
+    pub fn state_name(&self, handle: Handle) -> Option<&'static str> {
+        self.conns.get(handle).map(|c| c.state.name())
+    }
+
     /// How far the connection at `handle` got.
     pub fn conn_debug(&self, handle: Handle) -> Option<ConnDebug> {
         self.conns.get(handle).map(|c| ConnDebug {
@@ -1130,7 +1149,10 @@ impl Stack {
     pub fn send<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle, data: &[u8]) -> Result<(), TcpError> {
         let mut io = Io { env, st: self.st };
         let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
-        if conn.state != State::Established { return Err(TcpError::NotConnected); }
+        // The peer's FIN closes only its direction: we may go on sending.
+        if !matches!(conn.state, State::Established | State::CloseWait) || conn.fin_queued {
+            return Err(TcpError::NotConnected);
+        }
         // An empty buffer always accepts. Otherwise a call larger than the
         // limit could never get through, and a refusal that waiting cannot
         // change is a deadlock.
@@ -1248,20 +1270,38 @@ impl Stack {
     pub fn close<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle) -> Result<(), TcpError> {
         let mut io = Io { env, st: self.st };
         let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
-        if conn.state != State::Established {
-            // Never established, or already shutting down — nothing to say.
+        // tcp_close_state: who has a FIN to send, and the state it leads to.
+        let next = match conn.state {
+            State::Established | State::SynReceived => State::FinWait1,
+            State::CloseWait => State::LastAck,
+            // Never established, or already shutting down: nothing to say.
+            _ => {
+                self.conns.remove(handle);
+                return Ok(());
+            }
+        };
+        conn.released = true;
+        // __tcp_close: data the owner never read means it did not want the
+        // rest either; the peer learns so by a reset (RFC 2525 §2.17).
+        if !conn.recv_buf.is_empty() || !conn.ooo.is_empty() {
+            let w = recv_window(conn, io.st);
+            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, RST | ACK, w, &[]);
             self.conns.remove(handle);
             return Ok(());
         }
-        let seq = conn.snd_nxt;
-        conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-        conn.state = State::FinWait1;
-        conn.released = true;
+        conn.state = next;
+        conn.fin_queued = true;
         conn.last_send_tick = io.ticks();
-        send_seg(conn, &mut io, seq, conn.rcv_nxt, FIN | ACK, 0, &[]);
+        if conn.snd_una == conn.snd_nxt {
+            // The FIN is the oldest unacknowledged byte: its clock starts now.
+            conn.rto_tick = io.ticks();
+            conn.retries = 0;
+        }
+        // The FIN goes after everything still queued (RFC 9293 §3.10.4).
+        write_xmit(conn, &mut io);
 
         let orphans = self.conns.iter()
-            .filter(|c| c.released && matches!(c.state, State::FinWait1 | State::FinWait2 | State::LastAck))
+            .filter(|c| c.released && matches!(c.state, State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck))
             .count();
         if orphans > self.max_orphans {
             if let Some(conn) = self.conns.get(handle) {
@@ -1384,7 +1424,8 @@ impl Stack {
         // rcv_nxt) keep going to the D-SACK path below, which only ACKs; one
         // beyond the window gets an ACK and nothing else — no window update, no
         // ACK processing, no FIN.
-        if matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2 | State::CloseWait)
+        if matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2 | State::CloseWait
+                | State::Closing | State::LastAck | State::TimeWait)
             && (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0
             && !seq_in_window(conn, seq)
         {
@@ -1452,9 +1493,10 @@ impl Stack {
                 }
             }
 
-            State::Established => {
+            State::Established | State::CloseWait | State::FinWait1 | State::FinWait2
+            | State::Closing | State::LastAck | State::TimeWait => {
                 // ACK processing
-                if flags & ACK != 0 {
+                if flags & ACK != 0 && conn.state != State::TimeWait {
                     // The peer's window: flow control per RFC 9293 §3.8.6. The
                     // scale is the SYN-ACK's (`snd_wscale`) and applies to every
                     // segment except the SYN itself (RFC 7323 §2.2).
@@ -1571,8 +1613,41 @@ impl Stack {
                     }
                 }
 
+                // Our FIN acknowledged (everything up to it is).
+                if conn.fin_sent && conn.snd_una == conn.snd_nxt {
+                    match conn.state {
+                        State::FinWait1 => conn.state = State::FinWait2,
+                        State::Closing => {
+                            conn.state = State::TimeWait;
+                            conn.last_send_tick = io.ticks();
+                        }
+                        State::LastAck => conn.state = State::Closed,
+                        _ => {}
+                    }
+                }
+
+                // Data once a side has closed its direction resets the
+                // connection: RFC 1122 §4.2.2.13 MUST, Linux
+                // tcp_rcv_state_process (TCPAbortOnData).
+                let shut = conn.released
+                    || matches!(conn.state, State::CloseWait | State::Closing | State::LastAck | State::TimeWait);
+                if shut && !payload.is_empty()
+                    && (seq.wrapping_add(payload.len() as u32).wrapping_sub(conn.rcv_nxt) as i32) > 0
+                {
+                    // tcp_v4_send_reset answering this segment.
+                    if flags & ACK != 0 {
+                        send_segment(&mut io, src_ip, dst_port, src_port, ack, 0, RST, 0, &[], 0);
+                    } else {
+                        send_segment(&mut io, src_ip, dst_port, src_port, 0,
+                            seq.wrapping_add(payload.len() as u32), RST | ACK, 0, &[], 0);
+                    }
+                    conn.error = true;
+                    conn.state = State::Closed;
+                    conn.last_send_tick = io.ticks();
+                }
+
                 // Data processing
-                if !payload.is_empty() {
+                if !payload.is_empty() && matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2) {
                     if seq == conn.rcv_nxt {
                         // RFC 7323: advance ts_recent to this in-order segment's
                         // TSval so our echoed TSecr gives the sender a fresh RTT.
@@ -1718,52 +1793,42 @@ impl Stack {
                     }
                 }
 
-                // FIN from remote: it counts only where it sits in the stream,
-                // right after this segment's data, once that data is in. A FIN
-                // ahead of a gap is dropped; the peer resends it.
-                if flags & FIN != 0 && seq.wrapping_add(payload.len() as u32) == conn.rcv_nxt {
+                // FIN from remote (tcp_fin): it counts only where it sits in
+                // the stream, right after this segment's data, once that data
+                // is in. A FIN ahead of a gap is dropped; the peer resends it.
+                let end = seq.wrapping_add(payload.len() as u32);
+                if flags & FIN != 0 && end == conn.rcv_nxt
+                    && matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2)
+                {
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
-                    conn.state = State::CloseWait;
                     conn.closed = true;
-                    // ACK the FIN
-                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
-                }
-
-            }
-
-            // Data the peer still sends after our FIN is not delivered (the
-            // owner has closed), but its FIN is placed after it: the window
-            // check above has already admitted `seq`.
-            State::FinWait1 => {
-                if flags & ACK != 0 && ack_in_range(conn.snd_una, ack, conn.snd_nxt) {
-                    conn.snd_una = ack;
-                    // Our FIN is acknowledged only when everything up to it is.
-                    let fin_acked = ack == conn.snd_nxt;
-                    if flags & FIN != 0 && fin_acked {
-                        conn.rcv_nxt = seq.wrapping_add(payload.len() as u32).wrapping_add(1);
-                        conn.state = State::TimeWait;
-                        send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
-                    } else if fin_acked {
-                        conn.state = State::FinWait2;
-                    }
-                }
-            }
-
-            State::FinWait2 => {
-                if flags & FIN != 0 {
-                    conn.rcv_nxt = seq.wrapping_add(payload.len() as u32).wrapping_add(1);
-                    conn.state = State::TimeWait;
-                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, 0, &[]);
-                }
-            }
-
-            State::LastAck => {
-                if flags & ACK != 0 {
-                    conn.state = State::Closed;
+                    conn.state = match conn.state {
+                        State::Established => State::CloseWait,
+                        // Ours not yet acknowledged: both closed at once.
+                        State::FinWait1 => State::Closing,
+                        _ => State::TimeWait,
+                    };
+                    if conn.state == State::TimeWait { conn.last_send_tick = io.ticks(); }
+                    let w = recv_window(conn, io.st);
+                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                } else if flags & FIN != 0 && end.wrapping_add(1) == conn.rcv_nxt
+                    && matches!(conn.state, State::CloseWait | State::Closing | State::LastAck | State::TimeWait)
+                {
+                    // The peer sent its FIN again: our ACK was lost. In
+                    // TIME-WAIT that restarts the wait (RFC 9293 §3.10.7.4).
+                    if conn.state == State::TimeWait { conn.last_send_tick = io.ticks(); }
+                    let w = recv_window(conn, io.st);
+                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
                 }
             }
 
             _ => {}
+        }
+
+        // A connection its owner let go of is gone once it closes (tcp_done).
+        if conn.state == State::Closed && conn.released {
+            conns.remove(handle);
+            return;
         }
 
         // `inet_twsk_alloc` finds no room past `max_tw_buckets`, and
@@ -1863,8 +1928,9 @@ impl Stack {
                 // Send what the driver queue refused earlier. Otherwise it would
                 // wait for the caller's next `send`, while the caller waits for
                 // an ACK for bytes that never went out.
-                if slot.state == State::Established
-                    && slot.snd_nxt != slot.snd_una.wrapping_add(slot.send_buf.len() as u32)
+                if slot.sends()
+                    && (slot.snd_nxt != slot.snd_una.wrapping_add(slot.send_buf.len() as u32)
+                        || (slot.fin_queued && !slot.fin_sent))
                 {
                     write_xmit(slot, &mut io);
                 }
@@ -1934,8 +2000,9 @@ impl Stack {
                 }
 
                 // Data retransmit. `send_buf` starts at snd_una, so the head of
-                // it is exactly the segment the peer is missing.
-                if slot.state == State::Established && !slot.send_buf.is_empty() {
+                // it is exactly the segment the peer is missing; the FIN counts
+                // too (tcp_retransmit_timer in every state that sends).
+                if slot.sends() && slot.snd_una != slot.snd_nxt {
                     let rto = RTO_TICKS_BASE << slot.retries.min(5);
                     if now.saturating_sub(slot.rto_tick) > rto {
                         if slot.retries >= MAX_DATA_RETRIES {
@@ -1980,7 +2047,7 @@ impl Stack {
                 // leaves FinWait1 behind on purpose and nothing else frees it —
                 // without this the slot is pinned for the rest of the boot.
                 // 60 s = Linux's tcp_fin_timeout.
-                if matches!(slot.state, State::FinWait1 | State::FinWait2 | State::LastAck)
+                if matches!(slot.state, State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck)
                     && now.saturating_sub(slot.last_send_tick) > FIN_TIMEOUT_TICKS
                 {
                     slot.state = State::Closed;
@@ -2046,7 +2113,18 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
     let mut chunk = [0u8; 1460];
     loop {
         let sent = conn.snd_nxt.wrapping_sub(conn.snd_una) as usize;
-        if sent >= conn.send_buf.len() {
+        if conn.fin_sent || sent >= conn.send_buf.len() {
+            // Everything queued is out; the FIN alone if it still waits.
+            if conn.fin_queued && !conn.fin_sent && sent == conn.send_buf.len() {
+                let w = recv_window(conn, io.st);
+                if send_seg(conn, io, conn.snd_nxt, conn.rcv_nxt, FIN | ACK, w, &[]) {
+                    conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
+                    conn.fin_sent = true;
+                    conn.last_send_tick = io.ticks();
+                } else {
+                    io.st.send_refused.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             return;
         }
         // ── Gate 1: the congestion window (tcp_output.c:2238 `tcp_cwnd_test`)
@@ -2066,13 +2144,17 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
         chunk[..n].copy_from_slice(&conn.send_buf[sent..sent + n]);
         let seq = conn.snd_nxt;
         let w = recv_window(conn, io.st);
-        if !send_seg(conn, io, seq, conn.rcv_nxt, ACK | PSH, w, &chunk[..n]) {
+        // The FIN rides on the last byte queued (tcp_send_fin).
+        let fin = conn.fin_queued && sent + n == conn.send_buf.len();
+        let flags = if fin { FIN | ACK | PSH } else { ACK | PSH };
+        if !send_seg(conn, io, seq, conn.rcv_nxt, flags, w, &chunk[..n]) {
             // Full. Nothing lost, just not sent yet.
             io.st.send_refused.fetch_add(1, Ordering::Relaxed);
             return;
         }
         io.st.send_segs.fetch_add(1, Ordering::Relaxed);
-        conn.snd_nxt = conn.snd_nxt.wrapping_add(n as u32);
+        conn.snd_nxt = conn.snd_nxt.wrapping_add(n as u32 + fin as u32);
+        if fin { conn.fin_sent = true; }
         conn.last_send_tick = io.ticks();
     }
 }
@@ -2103,7 +2185,7 @@ fn cong_avoid(conn: &mut TcpConn, acked_pkts: u32) {
 /// on the head of the retransmit queue. `snd_nxt` stays put; what lies
 /// beyond it is in flight.
 fn retransmit_head<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
-    if conn.send_buf.is_empty() {
+    if conn.send_buf.is_empty() && !conn.fin_sent {
         return;
     }
     let mss = eff_mss(conn).min(1460);
@@ -2111,7 +2193,13 @@ fn retransmit_head<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
     let mut chunk = [0u8; 1460];
     chunk[..n].copy_from_slice(&conn.send_buf[..n]);
     let w = recv_window(conn, io.st);
-    if send_seg(conn, io, conn.snd_una, conn.rcv_nxt, ACK | PSH, w, &chunk[..n]) {
+    // The FIN, alone or on the last data, as it went out first.
+    let flags = if conn.fin_sent && n == conn.send_buf.len() {
+        if n == 0 { FIN | ACK } else { FIN | ACK | PSH }
+    } else {
+        ACK | PSH
+    };
+    if send_seg(conn, io, conn.snd_una, conn.rcv_nxt, flags, w, &chunk[..n]) {
         conn.last_send_tick = io.ticks();
     } else {
         io.st.send_refused.fetch_add(1, Ordering::Relaxed);
@@ -2130,11 +2218,17 @@ fn retransmit_all<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
         let n = (in_flight - off).min(mss);
         chunk[..n].copy_from_slice(&conn.send_buf[off..off + n]);
         let w = recv_window(conn, io.st);
-        if !send_seg(conn, io, conn.snd_una.wrapping_add(off as u32), conn.rcv_nxt, ACK | PSH, w, &chunk[..n]) {
+        let fin = conn.fin_sent && off + n == conn.send_buf.len();
+        let flags = if fin { FIN | ACK | PSH } else { ACK | PSH };
+        if !send_seg(conn, io, conn.snd_una.wrapping_add(off as u32), conn.rcv_nxt, flags, w, &chunk[..n]) {
             io.st.send_refused.fetch_add(1, Ordering::Relaxed);
             return;
         }
         off += n;
+    }
+    if in_flight == 0 && conn.fin_sent {
+        let w = recv_window(conn, io.st);
+        send_seg(conn, io, conn.snd_una, conn.rcv_nxt, FIN | ACK, w, &[]);
     }
     conn.last_send_tick = io.ticks();
 }
