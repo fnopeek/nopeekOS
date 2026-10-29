@@ -109,6 +109,8 @@ pub fn is_running() -> bool {
 pub fn forget() {
     *EXCHANGE.lock() = None;
     no_lease();
+    arp::flush();
+    super::dns::flush();
 }
 
 /// Begin a lease. Returns at once.

@@ -13,7 +13,7 @@ pub fn handle_frame(frame: &[u8], csum_ok: bool) {
     let ethertype = u16::from_be_bytes([frame[12], frame[13]]);
 
     match ethertype {
-        ETHERTYPE_ARP => super::arp::handle_arp(&frame[HEADER_LEN..]),
+        ETHERTYPE_ARP => super::arp::handle_arp(frame),
         ETHERTYPE_IPV4 => super::ipv4::handle_ipv4(&frame[HEADER_LEN..], csum_ok),
         _ => {} // ignore unknown
     }

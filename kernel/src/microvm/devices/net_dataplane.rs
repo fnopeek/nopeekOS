@@ -632,6 +632,7 @@ fn worker_entry(_arg: u64) {
         if now != last_tick {
             phase(PH_TICK);
             crate::net::tcp::tick_connections();
+            crate::net::arp::tick();
             last_tick = now;
         }
 

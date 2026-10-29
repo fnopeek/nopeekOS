@@ -118,9 +118,8 @@ fn l4_checksum_holds(protocol: u8, src: [u8; 4], dst: [u8; 4], payload: &[u8]) -
     }
 }
 
-/// Send an IPv4 packet. Returns false if the next hop's MAC was unknown and the
-/// frame went to L2 broadcast — most gateways drop that, so for the masquerade
-/// it is a silent loss and the caller wants to count it.
+/// Send an IPv4 packet. Returns false if the next hop's MAC was unknown: the
+/// packet then waits for its ARP answer (`arp::output`).
 pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
     send_with_ttl(dst_ip, protocol, payload, 64)
 }
@@ -139,9 +138,10 @@ pub struct Forwarded {
     pub df: bool,
 }
 
-/// `send` that reports a refused frame instead of dropping it: `Ok(resolved)`
-/// once the card took it, `Err(QueueFull)` when its ring is full and the
-/// caller should keep the packet and retry.
+/// `send` that reports a refused frame instead of dropping it: `Ok(true)`
+/// once the card took it, `Ok(false)` while it waits for its next hop's
+/// address, `Err(QueueFull)` when the ring is full and the caller should keep
+/// the packet and retry.
 pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
@@ -168,8 +168,8 @@ enum Tx {
     TryPartial,
 }
 
-/// Build and hand over one packet. Returns whether the next hop's MAC was
-/// known, and the card's verdict.
+/// Build and hand over one packet. Returns whether it went to the card (or
+/// waits for its next hop's address), and the card's verdict.
 fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
             head: Forwarded)
     -> (bool, Result<(), crate::virtio_net::NetError>)
@@ -196,37 +196,28 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
     // Payload
     pkt[HEADER_LEN..].copy_from_slice(payload);
 
-    // Resolve next-hop MAC. On cache miss we fire an ARP request so the
-    // gateway responds and `super::poll` populates the cache before the
-    // caller's next retry — without it, every fresh-boot first packet
-    // (TCP SYN, DNS query, etc.) gets sent to L2 broadcast and silently
-    // dropped by most gateways. Active resolution is left to callers
-    // that can poll without holding network locks (see `arp::resolve`,
-    // used by `tcp::connect`).
-    let mut resolved = true;
-    let arp_target = arp_target_for(dst_ip);
-    let dst_mac = if arp_target == [255, 255, 255, 255] {
+    let mode = match tx {
+        Tx::Wait => arp::Mode::Wait,
+        Tx::Try => arp::Mode::Try,
+        Tx::TryPartial => arp::Mode::Partial { tcp: protocol == PROTO_TCP },
+    };
+    let hop = arp_target_for(dst_ip);
+    if hop == [255, 255, 255, 255] {
         // A broadcast destination is the broadcast MAC; asking ARP who owns
         // 255.255.255.255 can only ever get no answer.
-        eth::BROADCAST
-    } else {
-        match arp::lookup(arp_target) {
-            Some(mac) => mac,
-            None => {
-                arp::request(arp_target);
-                resolved = false;
-                eth::BROADCAST
-            }
-        }
-    };
-
-    let sent = match tx {
-        Tx::Wait => eth::send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt),
-        Tx::Try => eth::try_send_frame(&dst_mac, eth::ETHERTYPE_IPV4, &pkt),
-        Tx::TryPartial => eth::try_send_frame_csum(&dst_mac, eth::ETHERTYPE_IPV4, &pkt,
-            HEADER_LEN, protocol == PROTO_TCP),
-    };
-    (resolved, sent)
+        let sent = match mode {
+            arp::Mode::Wait => eth::send_frame(&eth::BROADCAST, eth::ETHERTYPE_IPV4, &pkt),
+            _ => eth::try_send_frame(&eth::BROADCAST, eth::ETHERTYPE_IPV4, &pkt),
+        };
+        return (true, sent);
+    }
+    // A unicast datagram never goes to the link-layer broadcast address
+    // (RFC 1122 §3.3.6): with the next hop unknown it waits in the
+    // neighbour's queue until ARP answers.
+    match arp::output(hop, arp::Pkt { ip: pkt, mode }) {
+        Ok(sent) => (sent, Ok(())),
+        Err(e) => (true, Err(e)),
+    }
 }
 
 fn ipv4_checksum(header: &[u8]) -> u16 {

@@ -32,7 +32,7 @@ pub fn intent_ping(args: &str) {
     // Resolve the next hop before the first echo so it is not lost to ARP.
     let hop = crate::net::ipv4::arp_target_for(ip);
     if crate::net::arp::resolve(hop, 50).is_none() {
-        kprintln!("[npk] ping: {}.{}.{}.{} did not answer ARP - sending anyway",
+        kprintln!("[npk] ping: {}.{}.{}.{} did not answer ARP yet - the echoes wait for it",
             hop[0], hop[1], hop[2], hop[3]);
     }
 
@@ -700,11 +700,12 @@ pub fn intent_net_info() {
     if table.is_empty() {
         kprintln!("  (none learned yet)");
     }
-    for (nip, nmac, age) in table {
-        kprintln!("  {}.{}.{}.{}{}  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {} s ago",
+    for (nip, nmac, state, age) in table {
+        kprintln!("  {}.{}.{}.{}{}  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}  {:<10}  {} s",
             nip[0], nip[1], nip[2], nip[3],
             if nip == gw { " (gateway)" } else { "" },
-            nmac[0], nmac[1], nmac[2], nmac[3], nmac[4], nmac[5], age);
+            nmac[0], nmac[1], nmac[2], nmac[3], nmac[4], nmac[5], state, age);
     }
+    kprintln!("  Dropped unresolved: {}", crate::net::arp::unresolved());
     kprintln!();
 }

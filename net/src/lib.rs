@@ -1,6 +1,6 @@
 //! net_core — the network stack's protocol logic.
 //!
-//! Pure state machines over an [`tcp::Env`] the kernel provides (clock,
+//! Pure state machines over an `Env` the kernel provides (clock,
 //! randomness, our address, the next hop, the IP send path), so the same
 //! code runs in the kernel and under `cargo test` on a virtual clock.
 
@@ -8,4 +8,5 @@
 
 extern crate alloc;
 
+pub mod neigh;
 pub mod tcp;

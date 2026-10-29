@@ -72,7 +72,19 @@ pub enum Cached {
     Unknown,
 }
 
-pub fn set_server(ip: [u8; 4]) { *DNS_SERVER.lock() = ip; }
+/// A different server answers for a different network: what the old one said
+/// goes (split-horizon names, its SERVFAILs).
+pub fn set_server(ip: [u8; 4]) {
+    let old = core::mem::replace(&mut *DNS_SERVER.lock(), ip);
+    if old != ip {
+        flush();
+    }
+}
+
+/// Forget every cached answer.
+pub fn flush() {
+    for e in CACHE.lock().iter_mut() { *e = None; }
+}
 pub fn server() -> [u8; 4] { *DNS_SERVER.lock() }
 
 /// Cache-only lookup. Never sends, never waits.
