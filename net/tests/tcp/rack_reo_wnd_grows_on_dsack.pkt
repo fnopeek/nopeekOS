@@ -1,0 +1,41 @@
+// #57: once reordering was seen, a D-SACK showing a retransmission needless
+// doubles RACK's reordering window from min_rtt/4 (tcp_rack_update_reo_wnd,
+// RFC 8985 §6.2), so the next hole waits longer before it counts as lost.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.1   < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK>
++0     > . 1:1(0) ack 1
++0     send 14600
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0     > P. 4381:5841(1460) ack 1
++0     > P. 5841:7301(1460) ack 1
++0     > P. 7301:8761(1460) ack 1
++0     > P. 8761:10221(1460) ack 1
++0     > P. 10221:11681(1460) ack 1
++0     > P. 11681:13141(1460) ack 1
++0     > P. 13141:14601(1460) ack 1
+// Segments 2 and 3 arrive after 4: reordering. Segment 1 waits 25 ms.
++0.1   < . 1:1(0) ack 1 win 65535 <sack 4381:5841>
++0     < . 1:1(0) ack 1 win 65535 <sack 2921:5841>
++0     < . 1:1(0) ack 1 win 65535 <sack 1461:5841>
++0.03  > P. 1:1461(1460) ack 1
+// It was only late: the D-SACK for the retransmission.
++0.01  < . 1:1(0) ack 14601 win 65535 <sack 1:1461>
++0     send 14600
++0     > P. 14601:16061(1460) ack 1
++0     > P. 16061:17521(1460) ack 1
++0     > P. 17521:18981(1460) ack 1
++0     > P. 18981:20441(1460) ack 1
++0     > P. 20441:21901(1460) ack 1
++0     > P. 21901:23361(1460) ack 1
++0     > P. 23361:24821(1460) ack 1
++0     > P. 24821:26281(1460) ack 1
++0     > P. 26281:27741(1460) ack 1
++0     > P. 27741:29201(1460) ack 1
+// The next hole waits 50 ms.
++0.1   < . 1:1(0) ack 14601 win 65535 <sack 16061:17521>
++0.06  > P. 14601:16061(1460) ack 1
++0.01  < . 1:1(0) ack 29201 win 65535
++0.5   status 1

@@ -1,0 +1,25 @@
+// #57: the last two segments of a burst are lost. No ACK would ever tell,
+// so a loss probe resends the last one after two RTTs instead of waiting
+// for the RTO (TLP, RFC 8985 §7); its SACK lets RACK find the other.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK>
++0     > . 1:1(0) ack 1
++0     send 14600
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0     > P. 4381:5841(1460) ack 1
++0     > P. 5841:7301(1460) ack 1
++0     > P. 7301:8761(1460) ack 1
++0     > P. 8761:10221(1460) ack 1
++0     > P. 10221:11681(1460) ack 1
++0     > P. 11681:13141(1460) ack 1
++0     > P. 13141:14601(1460) ack 1
++0.01  < . 1:1(0) ack 11681 win 65535
+// 2 * SRTT + 2 ms, rounded up to the tick.
++0.03  > P. 13141:14601(1460) ack 1
++0.01  < . 1:1(0) ack 11681 win 65535 <sack 13141:14601>
++0     > P. 11681:13141(1460) ack 1
++0.01  < . 1:1(0) ack 14601 win 65535
++0.5   status 1

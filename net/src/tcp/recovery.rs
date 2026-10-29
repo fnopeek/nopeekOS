@@ -13,9 +13,13 @@
 //! for every retransmission, by an echoed timestamp older than the first
 //! one, or by F-RTO after a timeout (RFC 5682).
 //!
-//! Every segment is one skb with `tcp_skb_pcount` 1. Not here: tail loss
-//! probes, the RACK reordering window's growth on D-SACK, and the
-//! delayed-ACK guard of the minimum RTT filter.
+//! A tail loss shows itself by a probe two RTTs after the last send
+//! (TLP, RFC 8985 §7) instead of the RTO.
+//!
+//! Each ACK also yields a delivery rate sample (`tcp_rate.c`), from which
+//! RACK widens its reordering window after D-SACKs.
+//!
+//! Every segment is one skb with `tcp_skb_pcount` 1.
 
 use super::*;
 use super::cubic;
@@ -39,6 +43,8 @@ const FLAG_DSACKING_ACK: u32 = 0x800;
 const FLAG_SET_XMIT_TIMER: u32 = 0x1000;
 const FLAG_ORIG_SACK_ACKED: u32 = 0x200;
 const FLAG_SACK_RENEGING: u32 = 0x2000;
+const FLAG_ACK_MAYBE_DELAYED: u32 = 0x10000;
+const FLAG_DSACK_TLP: u32 = 0x20000;
 const FLAG_ACKED: u32 = FLAG_DATA_ACKED;
 const FLAG_NOT_DUP: u32 = FLAG_DATA | FLAG_WIN_UPDATE | FLAG_ACKED;
 const FLAG_CA_ALERT: u32 = FLAG_DATA_SACKED | FLAG_DSACKING_ACK;
@@ -51,6 +57,10 @@ const TCP_MAX_REORDERING: u32 = 300;
 const TCP_NUM_SACKS: usize = 4;
 /// `TCP_TIMEOUT_MIN_US`.
 const TCP_TIMEOUT_MIN_US: u64 = 2000;
+/// `TCP_RTO_MIN` in µs.
+const TCP_RTO_MIN_US: u64 = 200_000;
+/// `TCP_RACK_RECOVERY_THRESH`.
+const TCP_RACK_RECOVERY_THRESH: u32 = 16;
 /// `sysctl_tcp_min_rtt_wlen`: 300 s, in ticks.
 const MIN_RTT_WLEN: u32 = 300 * 100;
 
@@ -61,6 +71,7 @@ fn after(a: u32, b: u32) -> bool { before(b, a) }
 fn us_to_ticks(us: u64) -> u64 { us.div_ceil(TICK_US) }
 
 /// One segment in flight: an skb of the retransmit queue.
+#[derive(Clone, Copy)]
 pub(super) struct TxSeg {
     seq: u32,
     /// Past the FIN when it carries one.
@@ -70,6 +81,12 @@ pub(super) struct TxSeg {
     sacked: u8,
     /// `skb_mstamp`: when it last went out, in µs.
     sent_us: u64,
+    /// `tx`: the connection's delivery state when it went out
+    /// (`tcp_rate_skb_sent`); `delivered_mstamp` 0 once counted.
+    tx_delivered: u32,
+    tx_delivered_mstamp: u64,
+    tx_first_tx_mstamp: u64,
+    tx_app_limited: bool,
 }
 
 impl TxSeg {
@@ -131,6 +148,11 @@ struct Rack {
     rtt_us: u64,
     advanced: bool,
     reo_wnd_steps: u32,
+    /// `tp->delivered` when the window last grew; a D-SACK is waiting; the
+    /// recoveries the grown window still holds for.
+    last_delivered: u32,
+    dsack_seen: bool,
+    reo_wnd_persist: u32,
 }
 
 /// The sender's `tcp_sock` fields recovery keeps.
@@ -159,9 +181,23 @@ pub(super) struct Tx {
     cwnd_usage_seq: u32,
     rack: Rack,
     rtt_min: MinMax,
-    /// `ICSK_TIME_REO_TIMEOUT`: the tick RACK's timer fires, 0 when off.
-    /// It holds the retransmit timer's slot while armed.
-    pub(super) reo_at: u64,
+    /// `tcp_rate.c`: when the current sending window began, the last
+    /// delivery, the `delivered` count that ends an application-limited
+    /// stretch (0: none), and the last rate sample kept.
+    first_tx_mstamp: u64,
+    delivered_mstamp: u64,
+    app_limited: u32,
+    pub(super) rate_delivered: u32,
+    pub(super) rate_interval_us: u64,
+    rate_app_limited: bool,
+    /// `is_sack_reneg`: the receiver dropped SACKed data, until Open.
+    is_sack_reneg: bool,
+    /// `icsk_pending`: what the retransmit timer (`rtx_at`) is armed for.
+    pub(super) pending: Pending,
+    /// `tlp_high_seq`: `snd_nxt` when the loss probe went out; `tlp_retrans`:
+    /// the probe was a retransmission.
+    tlp_high_seq: Option<u32>,
+    tlp_retrans: bool,
     /// `SOCK_NOSPACE`: a send found the buffer full.
     pub(super) nospace: bool,
     /// `undo_marker`: `snd_una` when the reduction began that may still be
@@ -194,9 +230,21 @@ impl Tx {
             highest_sack: 0,
             prior_cwnd: 0, prr_delivered: 0, prr_out: 0,
             is_cwnd_limited: false, max_packets_out: 0, cwnd_usage_seq: 0,
-            rack: Rack { mstamp: 0, end_seq: 0, rtt_us: 0, advanced: false, reo_wnd_steps: 1 },
+            rack: Rack {
+                mstamp: 0, end_seq: 0, rtt_us: 0, advanced: false, reo_wnd_steps: 1,
+                last_delivered: 0, dsack_seen: false, reo_wnd_persist: 0,
+            },
+            first_tx_mstamp: 0,
+            delivered_mstamp: 0,
+            app_limited: u32::MAX,
+            rate_delivered: 0,
+            rate_interval_us: 0,
+            rate_app_limited: true,
+            is_sack_reneg: false,
             rtt_min: MinMax { s: [(0, u32::MAX); 3] },
-            reo_at: 0,
+            pending: Pending::Retrans,
+            tlp_high_seq: None,
+            tlp_retrans: false,
             nospace: false,
             undo_marker: None,
             undo_retrans: -1,
@@ -218,9 +266,21 @@ impl Tx {
     fn min_rtt(&self) -> u32 { self.rtt_min.s[0].1 }
 }
 
+/// The kinds of the retransmit timer (`ICSK_TIME_RETRANS`,
+/// `ICSK_TIME_REO_TIMEOUT`, `ICSK_TIME_LOSS_PROBE`). One slot: arming one
+/// replaces the other.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Pending { Retrans, Reo, LossProbe }
+
+/// `tcp_reset_xmit_timer`.
+fn reset_xmit_timer(c: &mut TcpConn, what: Pending, when: u64, now: u64) {
+    c.tx.pending = what;
+    c.rtx_at = now + when.min(TCP_RTO_MAX);
+}
+
 fn is_reno(c: &TcpConn) -> bool { !c.sack_ok }
 
-fn in_cwnd_reduction(c: &TcpConn) -> bool { c.ca_state == CaState::Recovery }
+fn in_cwnd_reduction(c: &TcpConn) -> bool { matches!(c.ca_state, CaState::Cwr | CaState::Recovery) }
 
 /// `tcp_highest_sack_seq`.
 fn highest_sack_seq(c: &TcpConn) -> u32 {
@@ -254,7 +314,7 @@ fn mark_skb_lost(c: &mut TcpConn, i: usize) {
 fn fragment(c: &mut TcpConn, i: usize, len: usize) {
     let s = &mut c.tx.queue[i];
     let split = s.seq.wrapping_add(len as u32);
-    let rest = TxSeg { seq: split, end: s.end, fin: s.fin, sacked: s.sacked, sent_us: s.sent_us };
+    let rest = TxSeg { seq: split, end: s.end, fin: s.fin, ..*s };
     s.end = split;
     s.fin = false;
     let sacked = rest.sacked;
@@ -269,27 +329,119 @@ fn fragment(c: &mut TcpConn, i: usize, len: usize) {
 /// `tcp_event_new_data_sent`: a new segment left.
 pub(super) fn new_data_sent(c: &mut TcpConn, seq: u32, end: u32, fin: bool, now: u64, now_us: u64) {
     let prior_packets = c.tx.packets_out;
-    c.tx.queue.push_back(TxSeg { seq, end, fin, sacked: 0, sent_us: now_us });
+    c.tx.queue.push_back(TxSeg {
+        seq, end, fin, sacked: 0, sent_us: now_us,
+        tx_delivered: 0, tx_delivered_mstamp: 0, tx_first_tx_mstamp: 0, tx_app_limited: false,
+    });
+    let i = c.tx.queue.len() - 1;
+    rate_skb_sent(c, i, prior_packets);
     c.tx.packets_out += 1;
-    if prior_packets == 0 { rearm_rto(c, now, now_us); }
+    if prior_packets == 0 || c.tx.pending == Pending::LossProbe { rearm_rto(c, now, now_us); }
 }
 
 /// `tcp_rearm_rto`.
 fn rearm_rto(c: &mut TcpConn, now: u64, now_us: u64) {
     if c.tx.packets_out == 0 {
-        c.tx.reo_at = 0;
+        c.tx.pending = Pending::Retrans;
         return;
     }
-    let rto = if c.tx.reo_at != 0 {
-        // tcp_rto_delta_us: the RTO counts from the head's last send.
-        let head = c.tx.queue.front().map_or(now_us, |s| s.sent_us);
-        let delta = (head + c.rto * TICK_US).saturating_sub(now_us);
-        us_to_ticks(delta.max(1))
+    let rto = if c.tx.pending != Pending::Retrans {
+        // Offset the time since the regular RTO was installed.
+        us_to_ticks(rto_delta_us(c, now_us).max(1) as u64)
     } else {
         c.rto
     };
-    c.tx.reo_at = 0;
-    c.rtx_at = now + rto;
+    reset_xmit_timer(c, Pending::Retrans, rto, now);
+}
+
+/// `tcp_rto_delta_us`: how far in the future the RTO is, counted from the
+/// head's last send.
+fn rto_delta_us(c: &TcpConn, now_us: u64) -> i64 {
+    let head = c.tx.queue.front().map_or(now_us, |s| s.sent_us);
+    (head + c.rto * TICK_US) as i64 - now_us as i64
+}
+
+/// `tcp_schedule_loss_probe`: in two RTTs, for a SACK connection not in
+/// loss recovery.
+fn schedule_loss_probe(c: &mut TcpConn, advancing_rto: bool, now: u64, now_us: u64) -> bool {
+    if c.tx.packets_out == 0 || is_reno(c) || !matches!(c.ca_state, CaState::Open | CaState::Cwr) {
+        return false;
+    }
+    // Plus the minimum RTO for a delayed ACK when one packet is out.
+    let mut timeout = if c.srtt_us != 0 {
+        let mut t = (c.srtt_us >> 2) as u64;
+        t += if c.tx.packets_out == 1 { TCP_RTO_MIN_US } else { TCP_TIMEOUT_MIN_US };
+        us_to_ticks(t)
+    } else {
+        TCP_TIMEOUT_INIT
+    };
+    // An earlier RTO wins.
+    let rto_delta = if advancing_rto { (c.rto * TICK_US) as i64 } else { rto_delta_us(c, now_us) };
+    if rto_delta > 0 { timeout = timeout.min(us_to_ticks(rto_delta as u64)); }
+    reset_xmit_timer(c, Pending::LossProbe, timeout, now);
+    true
+}
+
+/// `tcp_set_xmit_timer`: a loss probe if it may, else the RTO.
+fn set_xmit_timer(c: &mut TcpConn, now: u64, now_us: u64) {
+    if !schedule_loss_probe(c, true, now, now_us) { rearm_rto(c, now, now_us); }
+}
+
+/// What `tcp_write_xmit` adds after sending; `push_one == 2` is a loss
+/// probe, which schedules no further one.
+pub(super) fn xmit_scheduled(c: &mut TcpConn, sent_pkts: u32, push_one: u8, now: u64, now_us: u64) {
+    if sent_pkts > 0 && push_one != 2 { schedule_loss_probe(c, false, now, now_us); }
+}
+
+/// `tcp_send_loss_probe`: new data if the window takes it, else the last
+/// segment again.
+pub(super) fn send_loss_probe<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>) {
+    let now = io.ticks();
+    let now_us = io.env.uptime_us();
+    if c.tx.tlp_high_seq.is_none() {
+        c.tx.tlp_retrans = false;
+        let sent = c.snd_nxt.wrapping_sub(c.snd_una) as usize;
+        let unsent = c.send_buf.len().saturating_sub(sent);
+        let mut probed = false;
+        if unsent > 0 && sent + unsent.min(eff_mss(c)) <= c.snd_wnd as usize {
+            let prior = c.tx.packets_out;
+            write_xmit_one(c, io, 2);
+            if c.tx.packets_out > prior { probed = true; }
+        } else if let Some(i) = c.tx.queue.len().checked_sub(1)
+            && retransmit_skb_raw(c, io, i)
+        {
+            c.tx.tlp_retrans = true;
+            probed = true;
+        }
+        if probed {
+            c.tx.tlp_high_seq = Some(c.snd_nxt);
+            // rearm_rto restarts the RTO from now.
+            c.tx.pending = Pending::Retrans;
+        }
+    }
+    rearm_rto(c, now, now_us);
+}
+
+/// `tcp_process_tlp_ack`: an ACK during a loss probe episode.
+fn process_tlp_ack(c: &mut TcpConn, ack: u32, flag: u32, now: u64) {
+    let Some(high) = c.tx.tlp_high_seq else { return };
+    if before(ack, high) { return; }
+    if !c.tx.tlp_retrans {
+        // The probe was new data, and it was acknowledged.
+        c.tx.tlp_high_seq = None;
+    } else if flag & FLAG_DSACK_TLP != 0 {
+        // Original and probe both arrived: no loss.
+        c.tx.tlp_high_seq = None;
+    } else if after(ack, high) {
+        // The probe repaired a loss: reduce once.
+        init_cwnd_reduction(c);
+        c.ca_state = CaState::Cwr;
+        end_cwnd_reduction(c, now);
+        try_keep_open(c);
+    } else if flag & (FLAG_SND_UNA_ADVANCED | FLAG_NOT_DUP | FLAG_DATA_SACKED) == 0 {
+        // A pure duplicate: original and probe both arrived.
+        c.tx.tlp_high_seq = None;
+    }
 }
 
 /// `tcp_cwnd_validate` (RFC 7661): track how much of the window is used;
@@ -366,7 +518,8 @@ pub(super) fn init_congestion_control(c: &mut TcpConn, now: u64, now_us: u64) {
     cubic::init(c, now_us);
 }
 
-/// What `tcp_write_xmit` adds once it sent `sent_pkts` new segments.
+/// What `tcp_write_xmit` adds to the window once it sent `sent_pkts` new
+/// segments.
 pub(super) fn xmit_done(c: &mut TcpConn, sent_pkts: u32, mut is_cwnd_limited: bool, now: u64) {
     is_cwnd_limited |= c.tx.in_flight() >= c.snd_cwnd;
     if sent_pkts > 0 || is_cwnd_limited { cwnd_validate(c, is_cwnd_limited, now); }
@@ -423,6 +576,7 @@ fn sndbuf_expand(c: &mut TcpConn) {
 /// `tcp_init_cwnd_reduction`.
 fn init_cwnd_reduction(c: &mut TcpConn) {
     c.high_seq = c.snd_nxt;
+    c.tx.tlp_high_seq = None;
     c.snd_cwnd_cnt = 0;
     c.tx.prior_cwnd = c.snd_cwnd;
     c.tx.prr_delivered = 0;
@@ -452,7 +606,7 @@ fn cwnd_reduction(c: &mut TcpConn, newly_acked_sacked: u32, newly_lost: u32, fla
 
 /// `tcp_end_cwnd_reduction`.
 fn end_cwnd_reduction(c: &mut TcpConn, now: u64) {
-    if c.snd_ssthresh != u32::MAX && c.tx.undo_marker.is_some() {
+    if c.snd_ssthresh != u32::MAX && (c.ca_state == CaState::Cwr || c.tx.undo_marker.is_some()) {
         c.snd_cwnd = c.snd_ssthresh;
         c.tx.snd_cwnd_stamp = now;
     }
@@ -464,6 +618,7 @@ fn init_undo(c: &mut TcpConn) {
     // Retransmissions still in flight may bring D-SACKs later; 0 would mean
     // "undo now".
     c.tx.undo_retrans = c.tx.retrans_out as i32;
+    if c.tx.tlp_high_seq.is_some() && c.tx.tlp_retrans { c.tx.undo_retrans += 1; }
     if c.tx.undo_retrans == 0 { c.tx.undo_retrans = -1; }
 }
 
@@ -526,6 +681,7 @@ fn is_non_sack_preventing_reopen(c: &mut TcpConn) -> bool {
 /// `tcp_try_undo_dsack`: D-SACKs covered every retransmission.
 fn try_undo_dsack(c: &mut TcpConn, now: u64) -> bool {
     if c.tx.undo_marker.is_some() && c.tx.undo_retrans == 0 {
+        c.tx.rack.reo_wnd_persist = (c.tx.rack.reo_wnd_persist + 1).min(TCP_RACK_RECOVERY_THRESH);
         undo_cwnd_reduction(c, false, now);
         return true;
     }
@@ -538,7 +694,10 @@ fn try_undo_loss(c: &mut TcpConn, frto_undo: bool, now: u64) -> bool {
         undo_cwnd_reduction(c, true, now);
         c.retries = 0;
         if is_non_sack_preventing_reopen(c) { return true; }
-        if frto_undo || !is_reno(c) { c.ca_state = CaState::Open; }
+        if frto_undo || !is_reno(c) {
+            c.ca_state = CaState::Open;
+            c.tx.is_sack_reneg = false;
+        }
         return true;
     }
     false
@@ -579,9 +738,14 @@ fn try_to_open(c: &mut TcpConn) {
 /// `tcp_try_undo_recovery`: recovery is over; take the reduction back if
 /// it was needless.
 fn try_undo_recovery(c: &mut TcpConn, now: u64) -> bool {
-    if may_undo(c) { undo_cwnd_reduction(c, false, now); }
+    if may_undo(c) {
+        undo_cwnd_reduction(c, false, now);
+    } else if c.tx.rack.reo_wnd_persist != 0 {
+        c.tx.rack.reo_wnd_persist -= 1;
+    }
     if is_non_sack_preventing_reopen(c) { return true; }
     c.ca_state = CaState::Open;
+    c.tx.is_sack_reneg = false;
     false
 }
 
@@ -635,6 +799,111 @@ fn check_sack_reordering(c: &mut TcpConn, low_seq: u32) {
         c.tx.reordering = metric.div_ceil(mss).min(TCP_MAX_REORDERING);
     }
     c.tx.reord_seen += 1;
+}
+
+// ── Delivery rate (tcp_rate.c) ───────────────────────────────────────
+
+/// `struct rate_sample`.
+#[derive(Default)]
+struct RateSample {
+    prior_mstamp: u64,
+    prior_delivered: u32,
+    delivered: i32,
+    interval_us: i64,
+    last_end_seq: u32,
+    is_app_limited: bool,
+    is_retrans: bool,
+}
+
+/// `tcp_rate_skb_sent`: what segment `i` takes along for its sample.
+fn rate_skb_sent(c: &mut TcpConn, i: usize, packets_out: u32) {
+    let sent_us = c.tx.queue[i].sent_us;
+    if packets_out == 0 {
+        c.tx.first_tx_mstamp = sent_us;
+        c.tx.delivered_mstamp = sent_us;
+    }
+    let (first, dmst, del, app) = (c.tx.first_tx_mstamp, c.tx.delivered_mstamp, c.tx.delivered,
+                                   c.tx.app_limited != 0);
+    let s = &mut c.tx.queue[i];
+    s.tx_first_tx_mstamp = first;
+    s.tx_delivered_mstamp = dmst;
+    s.tx_delivered = del;
+    s.tx_app_limited = app;
+}
+
+/// `tcp_rate_skb_delivered`: the sample is taken from the most recently
+/// sent of the segments an ACK delivers.
+fn rate_skb_delivered(c: &mut TcpConn, s: &TxSeg, rs: &mut RateSample) {
+    if s.tx_delivered_mstamp == 0 { return; }
+    if rs.prior_delivered == 0
+        || sent_after(s.sent_us, c.tx.first_tx_mstamp, s.end, rs.last_end_seq)
+    {
+        rs.prior_delivered = s.tx_delivered;
+        rs.prior_mstamp = s.tx_delivered_mstamp;
+        rs.is_app_limited = s.tx_app_limited;
+        rs.is_retrans = s.sacked & RETRANS != 0;
+        rs.last_end_seq = s.end;
+        c.tx.first_tx_mstamp = s.sent_us;
+        // The send phase of this window.
+        rs.interval_us = s.sent_us as i64 - s.tx_first_tx_mstamp as i64;
+    }
+}
+
+/// `tcp_rate_gen`.
+fn rate_gen(c: &mut TcpConn, delivered: u32, rs: &mut RateSample, is_sack_reneg: bool, now_us: u64) {
+    if c.tx.app_limited != 0 && after(c.tx.delivered, c.tx.app_limited) { c.tx.app_limited = 0; }
+    if delivered != 0 { c.tx.delivered_mstamp = now_us; }
+    if rs.prior_mstamp == 0 || is_sack_reneg {
+        rs.delivered = -1;
+        rs.interval_us = -1;
+        return;
+    }
+    rs.delivered = c.tx.delivered.wrapping_sub(rs.prior_delivered) as i32;
+    // Sending and ACKing as two pipeline phases: the slower decides.
+    let snd_us = rs.interval_us;
+    let ack_us = now_us as i64 - rs.prior_mstamp as i64;
+    rs.interval_us = snd_us.max(ack_us);
+    if rs.interval_us < c.tx.min_rtt() as i64 {
+        rs.interval_us = -1;
+        return;
+    }
+    // The last sample not limited by the application, or the fastest.
+    if !rs.is_app_limited
+        || rs.delivered as u64 * c.tx.rate_interval_us >= c.tx.rate_delivered as u64 * rs.interval_us as u64
+    {
+        c.tx.rate_delivered = rs.delivered as u32;
+        c.tx.rate_interval_us = rs.interval_us as u64;
+        c.tx.rate_app_limited = rs.is_app_limited;
+    }
+}
+
+/// `tcp_rate_check_app_limited`: the application gives less than the
+/// window takes, so samples now say little about the path.
+pub(super) fn rate_check_app_limited(c: &mut TcpConn) {
+    let unsent = c.send_buf.len().saturating_sub(c.snd_nxt.wrapping_sub(c.snd_una) as usize);
+    if unsent < c.mss_cache as usize
+        && c.tx.in_flight() < c.snd_cwnd
+        && c.tx.lost_out <= c.tx.retrans_out
+    {
+        let v = c.tx.delivered.wrapping_add(c.tx.in_flight());
+        c.tx.app_limited = if v == 0 { 1 } else { v };
+    }
+}
+
+/// `tcp_rack_update_reo_wnd`: after a D-SACK the reordering window grows
+/// by min_rtt/4, at most once per round, and holds for 16 recoveries.
+fn rack_update_reo_wnd(c: &mut TcpConn, rs: &RateSample) {
+    if rs.prior_delivered == 0 { return; }
+    // A D-SACK from before the last growth says nothing new.
+    if before(rs.prior_delivered, c.tx.rack.last_delivered) { c.tx.rack.dsack_seen = false; }
+    if c.tx.rack.dsack_seen {
+        c.tx.rack.reo_wnd_steps = (c.tx.rack.reo_wnd_steps + 1).min(0xff);
+        c.tx.rack.dsack_seen = false;
+        c.tx.rack.last_delivered = c.tx.delivered;
+        c.tx.rack.reo_wnd_persist = TCP_RACK_RECOVERY_THRESH;
+    } else if c.tx.rack.reo_wnd_persist == 0 {
+        c.tx.rack.reo_wnd_steps = 1;
+    }
 }
 
 // ── RACK (tcp_recovery.c) ────────────────────────────────────────────
@@ -701,7 +970,8 @@ fn rack_mark_lost(c: &mut TcpConn, now: u64, now_us: u64) -> bool {
     c.tx.rack.advanced = false;
     let timeout = rack_detect_loss(c, now_us);
     if timeout != 0 {
-        c.tx.reo_at = now + us_to_ticks(timeout + TCP_TIMEOUT_MIN_US).min(c.rto);
+        let when = us_to_ticks(timeout + TCP_TIMEOUT_MIN_US).min(c.rto);
+        reset_xmit_timer(c, Pending::Reo, when, now);
     }
     timeout != 0
 }
@@ -720,7 +990,7 @@ pub(super) fn rack_reo_timeout<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>)
         }
         xmit_retransmit_queue(c, io);
     }
-    if c.tx.reo_at != 0 { rearm_rto(c, now, now_us); }
+    if c.tx.pending != Pending::Retrans { rearm_rto(c, now, now_us); }
 }
 
 /// `tcp_newreno_mark_lost` (RFC 6582).
@@ -800,8 +1070,7 @@ fn fastretrans_alert(c: &mut TcpConn, prior_una: u32, num_dupack: u32, flag: &mu
     // the scoreboard.
     if *flag & FLAG_SACK_RENEGING != 0 && *flag & FLAG_SND_UNA_ADVANCED != 0 {
         let delay = us_to_ticks((c.srtt_us >> 4) as u64).max(1);
-        c.tx.reo_at = 0;
-        c.rtx_at = now + delay.min(TCP_RTO_MAX);
+        reset_xmit_timer(c, Pending::Retrans, delay, now);
         *flag &= !FLAG_SET_XMIT_TIMER;
         return;
     }
@@ -809,6 +1078,12 @@ fn fastretrans_alert(c: &mut TcpConn, prior_una: u32, num_dupack: u32, flag: &mu
     // D. State exit: `high_seq` acknowledged.
     if c.ca_state == CaState::Open {
         c.retrans_stamp = None;
+    } else if !before(c.snd_una, c.high_seq) && c.ca_state == CaState::Cwr {
+        // Held until something above `high_seq` is acknowledged.
+        if c.snd_una != c.high_seq {
+            end_cwnd_reduction(c, now);
+            c.ca_state = CaState::Open;
+        }
     } else if !before(c.snd_una, c.high_seq) && c.ca_state == CaState::Recovery {
         if is_reno(c) { c.tx.sacked_out = 0; }
         if try_undo_recovery(c, now) { return; }
@@ -838,7 +1113,7 @@ fn fastretrans_alert(c: &mut TcpConn, prior_una: u32, num_dupack: u32, flag: &mu
             if !(c.ca_state == CaState::Open || *flag & FLAG_LOST_RETRANS != 0) { return; }
             open_path = true;
         }
-        CaState::Open | CaState::Disorder => open_path = true,
+        CaState::Open | CaState::Disorder | CaState::Cwr => open_path = true,
     }
     if open_path {
         if is_reno(c) {
@@ -882,6 +1157,7 @@ pub(super) fn enter_loss(c: &mut TcpConn, now_us: u64) {
     if head_sacked || is_reno(c) {
         c.tx.sacked_out = 0;
     }
+    if head_sacked { c.tx.is_sack_reneg = true; }
     for i in 0..c.tx.queue.len() {
         if head_sacked {
             c.tx.queue[i].sacked &= !SACKED_ACKED;
@@ -911,6 +1187,7 @@ pub(super) fn enter_loss(c: &mut TcpConn, now_us: u64) {
     c.ca_state = CaState::Loss;
     cubic::enter_loss(c, now_us);
     c.high_seq = c.snd_nxt;
+    c.tx.tlp_high_seq = None;
     // F-RTO (RFC 5682 §3.1 step 1) unless recovery was already under way,
     // except for repeated timeouts of the same data (§3.2).
     c.tx.frto = new_recovery || c.retries != 0;
@@ -964,9 +1241,9 @@ fn retrans_try_collapse(c: &mut TcpConn, i: usize, space: usize) {
     }
 }
 
-/// `tcp_retransmit_skb`: resend segment `i`, cut to the MSS and to the
+/// `__tcp_retransmit_skb`: resend segment `i`, cut to the MSS and to the
 /// peer's window.
-pub(super) fn retransmit_skb<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i: usize) -> bool {
+fn retransmit_skb_raw<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i: usize) -> bool {
     let cur_mss = eff_mss(c).min(1460);
     let seq = c.tx.queue[i].seq;
     let wnd_end = c.snd_una.wrapping_add(c.snd_wnd);
@@ -1007,16 +1284,26 @@ pub(super) fn retransmit_skb<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i
         if n > 0 { event_data_sent(c, io.ticks()); }
         ok = send_seg(c, io, seq, c.rcv_nxt, flags, w, &chunk[..n]);
         if ok {
-            let now_us = io.env.uptime_us();
-            let s = &mut c.tx.queue[i];
-            s.sent_us = now_us;
-            s.sacked |= RETRANS;
-            c.tx.retrans_out += 1;
+            c.tx.queue[i].sent_us = io.env.uptime_us();
+            let packets_out = c.tx.packets_out;
+            rate_skb_sent(c, i, packets_out);
             c.tx.total_retrans = c.tx.total_retrans.wrapping_add(1);
             c.last_send_tick = io.ticks();
         } else {
             io.st.send_refused.fetch_add(1, Ordering::Relaxed);
         }
+        // Even when it failed: no RTT sample from a send that did not happen.
+        c.tx.queue[i].sacked |= EVER_RETRANS;
+    }
+    ok
+}
+
+/// `tcp_retransmit_skb`: a retransmission that counts in `retrans_out`.
+pub(super) fn retransmit_skb<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i: usize) -> bool {
+    let ok = retransmit_skb_raw(c, io, i);
+    if ok {
+        c.tx.queue[i].sacked |= RETRANS;
+        c.tx.retrans_out += 1;
     }
     // The stamp of the first (attempted) retransmission.
     if c.retrans_stamp.is_none() {
@@ -1044,17 +1331,19 @@ pub(super) fn xmit_retransmit_queue<E: Env + ?Sized>(c: &mut TcpConn, io: &mut I
         if !retransmit_skb(c, io, i) { break; }
         if c.ca_state != CaState::Loss { io.st.fast_retrans.fetch_add(1, Ordering::Relaxed); }
         if in_cwnd_reduction(c) { c.tx.prr_out += 1; }
-        if i == 0 && c.tx.reo_at == 0 { rearm = true; }
+        if i == 0 && c.tx.pending != Pending::Reo { rearm = true; }
         i += 1;
     }
     if rearm {
-        c.rtx_at = io.ticks() + c.rto;
+        let rto = c.rto;
+        reset_xmit_timer(c, Pending::Retrans, rto, io.ticks());
     }
 }
 
 // ── The ACK (tcp_ack) ────────────────────────────────────────────────
 
 struct SackState {
+    rate: RateSample,
     flag: u32,
     reord: u32,
     first_sackt: u64,
@@ -1113,10 +1402,18 @@ fn check_dsack(c: &mut TcpConn, ack: u32, sp: &[(u32, u32)], prior_una: u32, st:
     let seq_len = e0.wrapping_sub(s0);
     if seq_len > c.max_window { return false; }
     let mss = (c.mss_cache as u32).max(1);
-    let dup_segs = if seq_len > mss { seq_len.div_ceil(mss) } else { 1 };
+    let dup_segs = if seq_len > mss {
+        seq_len.div_ceil(mss)
+    } else {
+        if c.tx.tlp_high_seq == Some(e0) { st.flag |= FLAG_DSACK_TLP; }
+        1
+    };
     c.tx.dsack_dups = c.tx.dsack_dups.wrapping_add(dup_segs);
     // Not what we retransmitted: dubious.
     if c.tx.dsack_dups > c.tx.total_retrans { return false; }
+    // A D-SACK after reordering was seen, not one for a loss probe: maybe
+    // reordering beyond RACK's window made a retransmission needless.
+    if c.tx.reord_seen != 0 && st.flag & FLAG_DSACK_TLP == 0 { c.tx.rack.dsack_seen = true; }
     st.flag |= FLAG_DSACKING_ACK;
     st.sack_delivered += dup_segs;
     // A D-SACK for data already forgotten: count it against the
@@ -1213,6 +1510,9 @@ fn sacktag_write_queue(c: &mut TcpConn, ack: u32, blocks: &[(u32, u32)], prior_u
             // tcp_match_skb_to_sack with one packet per skb: wholly inside.
             if !after(start, s.seq) && !before(end, s.end) {
                 sacktag_one(c, st, i, dup, now_us);
+                let seg = c.tx.queue[i];
+                rate_skb_delivered(c, &seg, &mut st.rate);
+                if seg.sacked & SACKED_ACKED != 0 { c.tx.queue[i].tx_delivered_mstamp = 0; }
                 let s = &c.tx.queue[i];
                 if s.sacked & SACKED_ACKED != 0 && !before(s.seq, highest_sack_seq(c)) {
                     c.tx.highest_sack = s.end;
@@ -1271,7 +1571,11 @@ fn update_rtt(c: &mut TcpConn, flag: u32, seq_rtt: Option<u64>, sack_rtt: Option
         }
     }
     let Some(m) = seq_rtt else { return (false, ca_rtt) };
-    rtt_min_sample(c, ca_rtt.unwrap_or(m), now);
+    // tcp_update_rtt_min: a suspected delayed ACK would raise the minimum.
+    let ca = ca_rtt.unwrap_or(m);
+    if !(flag & FLAG_ACK_MAYBE_DELAYED != 0 && ca > c.tx.min_rtt() as u64) {
+        rtt_min_sample(c, ca, now);
+    }
     c.ack_update_rtt(m.max(1));
     (true, ca_rtt)
 }
@@ -1284,8 +1588,9 @@ pub(super) fn rtt_min_sample(c: &mut TcpConn, rtt_us: u64, now: u64) {
 
 /// `tcp_clean_rtx_queue`: drop what the ACK covers.
 #[allow(clippy::too_many_arguments)]
-fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: Option<u32>,
-                   ts_now_ms: u32, now: u64, now_us: u64) -> u32 {
+fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, prior_una: u32, st: &mut SackState,
+                   tsecr: Option<u32>, ts_now_ms: u32, now: u64, now_us: u64) -> u32 {
+    let prior_sacked = c.tx.sacked_out;
     let mut flag = 0;
     let mut reord = c.snd_nxt;
     let mut first_ackt = 0u64;
@@ -1316,6 +1621,7 @@ fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: 
         if sacked & LOST != 0 { c.tx.lost_out -= 1; }
         c.tx.packets_out -= 1;
         pkts_acked += 1;
+        rate_skb_delivered(c, &s, &mut st.rate);
         flag |= FLAG_DATA_ACKED;
     }
     // A segment acknowledged in part keeps only what is left (what
@@ -1331,6 +1637,15 @@ fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: 
     if first_ackt != 0 && flag & FLAG_RETRANS_DATA_ACKED == 0 {
         seq_rtt = Some(now_us.saturating_sub(first_ackt));
         ca_rtt = Some(now_us.saturating_sub(last_ackt));
+        // A lone runt over the round trip to a receiver without
+        // out-of-order data: likely a delayed ACK.
+        if pkts_acked == 1 && prior_sacked == 0
+            && c.snd_una.wrapping_sub(prior_una) < c.mss_cache as u32
+            && st.rate.prior_delivered.wrapping_add(1) == c.tx.delivered
+            && flag & FLAG_CA_ALERT == 0
+        {
+            flag |= FLAG_ACK_MAYBE_DELAYED;
+        }
     }
     if st.first_sackt != 0 {
         sack_rtt = Some(now_us.saturating_sub(st.first_sackt));
@@ -1389,7 +1704,10 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
     let mut rexmit = Rexmit::None;
     let mut num_dupack = 0;
     c.tx.rcv_tsecr = if c.ts_ok { parse_tsecr(seg, data_offset) } else { None };
-    let mut st = SackState { flag: 0, reord: c.snd_nxt, first_sackt: 0, last_sackt: 0, sack_delivered: 0 };
+    let mut st = SackState {
+        rate: RateSample::default(), flag: 0, reord: c.snd_nxt, first_sackt: 0, last_sackt: 0, sack_delivered: 0,
+    };
+    let is_sack_reneg = c.tx.is_sack_reneg;
     let mut blocks = [(0u32, 0u32); TCP_NUM_SACKS];
     let nblocks = if c.sack_ok { parse_sack(seg, data_offset, &mut blocks) } else { 0 };
     let blocks = &blocks[..nblocks];
@@ -1428,11 +1746,14 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
         if flag & FLAG_DSACKING_ACK != 0 {
             fastretrans_alert(c, prior_una, num_dupack, &mut flag, &mut rexmit, now, now_us);
         }
+        process_tlp_ack(c, ack, flag, now);
         return;
     }
 
     let tsecr = parse_tsecr(seg, data_offset);
-    flag |= clean_rtx_queue(c, prior_fack, &mut st, tsecr, ts_now, now, now_us);
+    flag |= clean_rtx_queue(c, prior_fack, prior_una, &mut st, tsecr, ts_now, now, now_us);
+    rack_update_reo_wnd(c, &st.rate);
+    process_tlp_ack(c, ack, flag, now);
 
     // tcp_ack_is_dubious
     if flag & FLAG_NOT_DUP == 0 || flag & FLAG_CA_ALERT != 0 || c.ca_state != CaState::Open {
@@ -1442,10 +1763,11 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
         }
         fastretrans_alert(c, prior_una, num_dupack, &mut flag, &mut rexmit, now, now_us);
     }
-    if flag & FLAG_SET_XMIT_TIMER != 0 { rearm_rto(c, now, now_us); }
+    if flag & FLAG_SET_XMIT_TIMER != 0 { set_xmit_timer(c, now, now_us); }
 
     let delivered = c.tx.delivered.wrapping_sub(delivered0);
     let lost = c.tx.lost.wrapping_sub(lost0);
+    rate_gen(c, delivered, &mut st.rate, is_sack_reneg, now_us);
     cong_control(c, delivered, lost, flag, now);
     xmit_recovery(c, io, rexmit);
 

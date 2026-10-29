@@ -17,7 +17,8 @@
 //! are relative to the sender's ISN, as in packetdrill. Flags: `S` SYN, `F`
 //! FIN, `R` RST, `P` PSH, `.` ACK. On an outbound line `win` and the option
 //! list are checked only when given, and `?` matches any value. Every
-//! segment the stack sends must be expected by a `>` line, in order.
+//! segment the stack sends must be expected by a `>` line, in order and at
+//! the time the line names.
 //!
 //! Scripts under `tests/tcp/` must pass; scripts under `tests/tcp/open/`
 //! describe the behaviour an open issue asks for and fail until it is fixed.
@@ -35,7 +36,8 @@ const PEER_ISN: u32 = 1_000_000;
 struct TestEnv {
     now_us: u64,
     rng: u64,
-    sent: VecDeque<([u8; 4], Vec<u8>)>,
+    /// Segments sent, with when.
+    sent: VecDeque<([u8; 4], Vec<u8>, u64)>,
     pmtu: u32,
 }
 
@@ -59,7 +61,7 @@ impl Env for TestEnv {
         self.pmtu = self.pmtu.min(mtu);
     }
     fn ip_send(&mut self, dst: [u8; 4], segment: &[u8], _id: u16) -> bool {
-        self.sent.push_back((dst, segment.to_vec()));
+        self.sent.push_back((dst, segment.to_vec(), self.now_us));
         true
     }
 }
@@ -338,8 +340,12 @@ impl Run {
     }
 
     fn outbound(&mut self, want: &Seg) -> Result<(), String> {
-        let (dst, seg) = self.env.sent.pop_front()
+        let (dst, seg, when) = self.env.sent.pop_front()
             .ok_or("expected a segment, the stack sent none")?;
+        if when != self.env.now_us {
+            return Err(format!("sent at {:.3} s, expected at {:.3} s",
+                when as f64 / 1e6, self.env.now_us as f64 / 1e6));
+        }
         let flags = seg[13];
         let seq = u32::from_be_bytes(seg[4..8].try_into().unwrap());
         if flags & SYN != 0 && self.local_isn.is_none() {
@@ -380,7 +386,7 @@ impl Run {
             ">" => return self.outbound(&parse_seg(rest)?),
             _ => {}
         }
-        if let Some((dst, seg)) = self.env.sent.front() {
+        if let Some((dst, seg, _)) = self.env.sent.front() {
             return Err(format!("unexpected segment to {dst:?}: flags {}", flags_str(seg[13])));
         }
         match cmd {
@@ -394,7 +400,7 @@ impl Run {
                     .map_err(|e| format!("connect: {e}"))?;
                 self.handle = Some(h);
                 self.local_port = self.env.sent.front()
-                    .map_or(0, |(_, s)| u16::from_be_bytes([s[0], s[1]]));
+                    .map_or(0, |(_, s, _)| u16::from_be_bytes([s[0], s[1]]));
                 Ok(())
             }
             "listen" => {
@@ -459,7 +465,7 @@ fn run_script(path: &Path) -> Result<(), String> {
         run.advance(t_us);
         run.event(ev.trim()).map_err(at)?;
     }
-    if let Some((dst, seg)) = run.env.sent.front() {
+    if let Some((dst, seg, _)) = run.env.sent.front() {
         return Err(format!("{}: at the end: unexpected segment to {dst:?}: flags {}",
             path.display(), flags_str(seg[13])));
     }

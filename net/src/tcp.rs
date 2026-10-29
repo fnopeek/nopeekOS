@@ -419,6 +419,9 @@ enum CaState {
     Open,
     /// `TCP_CA_Disorder`: SACKs or duplicate ACKs, nothing lost yet.
     Disorder,
+    /// `TCP_CA_CWR`: the window is reduced without a loss to repair (after
+    /// a loss probe repaired one).
+    Cwr,
     /// `TCP_CA_Recovery`: fast retransmit sent, until `high_seq` is
     /// acknowledged (RFC 6582).
     Recovery,
@@ -1350,7 +1353,8 @@ impl Stack {
         }
 
         if conn.send_buf.is_empty() { conn.retries = 0; conn.retrans_stamp = None; }
-        // tcp_skb_entail
+        // tcp_sendmsg_locked, tcp_skb_entail
+        recovery::rate_check_app_limited(conn);
         recovery::slow_start_after_idle_check(conn, io.ticks());
         conn.send_buf.extend(data);
 
@@ -2260,14 +2264,16 @@ impl Stack {
                     }
                 }
 
-                // RACK's reordering timer holds the retransmit timer's slot.
-                if slot.tx.reo_at != 0 && now >= slot.tx.reo_at {
+                // tcp_write_timer_handler: RACK's reordering timer and the
+                // loss probe share the retransmit timer's slot.
+                let due = slot.sends() && slot.tx.packets_out != 0 && now >= slot.rtx_at;
+                if due && slot.tx.pending == recovery::Pending::Reo {
                     recovery::rack_reo_timeout(slot, &mut io);
-                }
-
-                // tcp_retransmit_timer, in every state that sends: the head
-                // of the retransmit queue, the FIN included.
-                if slot.sends() && slot.tx.packets_out != 0 && slot.tx.reo_at == 0 && now >= slot.rtx_at {
+                } else if due && slot.tx.pending == recovery::Pending::LossProbe {
+                    recovery::send_loss_probe(slot, &mut io);
+                } else if due {
+                    // tcp_retransmit_timer: the head of the retransmit
+                    // queue, the FIN included.
                     // Into a zero window the retransmits are probes, and the
                     // connection lives while the peer still answers
                     // (tcp_rtx_probe0_timed_out: twice TCP_RTO_MAX without
@@ -2396,6 +2402,12 @@ impl Stack {
 /// dropped ones; otherwise recovery would hinge on the RTO resending one
 /// MSS per round.
 fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
+    write_xmit_one(conn, io, 0);
+}
+
+/// `tcp_write_xmit` with `push_one`: 1 sends at most one segment, 2 one
+/// loss probe, past the congestion window.
+fn write_xmit_one<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>, push_one: u8) {
     let mss = eff_mss(conn).min(1460);
     let mut chunk = [0u8; 1460];
     let mut sent_pkts = 0;
@@ -2406,7 +2418,7 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
             break;
         }
         // ── Gate 1: the congestion window (`tcp_cwnd_test`)
-        if conn.tx.in_flight() >= conn.snd_cwnd {
+        if conn.tx.in_flight() >= conn.snd_cwnd && push_one != 2 {
             is_cwnd_limited = true;
             break;
         }
@@ -2448,8 +2460,10 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
         recovery::new_data_sent(conn, seq, conn.snd_nxt, conn.fin_sent, now, io.env.uptime_us());
         conn.last_send_tick = now;
         sent_pkts += 1;
+        if push_one != 0 { break; }
     }
     recovery::xmit_done(conn, sent_pkts, is_cwnd_limited, io.ticks());
+    recovery::xmit_scheduled(conn, sent_pkts, push_one, io.ticks(), io.env.uptime_us());
 }
 
 /// Copy `out.len()` bytes from offset `off` of the send buffer.
