@@ -560,8 +560,9 @@ struct TcpConn {
     rtt_seq: u32,
     /// `icsk_rto`, in ticks.
     rto: u64,
-    /// `retrans_stamp`: when the data first retransmitted went out.
-    retrans_stamp: Option<u64>,
+    /// `retrans_stamp`: when the first retransmission of this loss went
+    /// out, on the timestamp clock (ms), so echoed timestamps compare.
+    retrans_stamp: Option<u32>,
     /// When our SYN or SYN-ACK went out, in µs.
     syn_sent_us: u64,
     /// `icsk_user_timeout` (`TCP_USER_TIMEOUT`), in ticks; 0: none.
@@ -907,7 +908,7 @@ impl TcpConn {
     /// `retransmits_timed_out`: whether the retransmissions since
     /// `retrans_stamp` took longer than `boundary` of them would from
     /// `rto_base` (`tcp_model_timeout`), or than the user timeout.
-    fn retransmits_timed_out(&self, now: u64, boundary: u8, rto_base: u64, user_timeout: u64) -> bool {
+    fn retransmits_timed_out(&self, now_ms: u32, boundary: u8, rto_base: u64, user_timeout: u64) -> bool {
         if self.retries == 0 { return false; }
         let timeout = if user_timeout != 0 {
             user_timeout
@@ -920,7 +921,8 @@ impl TcpConn {
                 ((2 << thresh) - 1) * rto_base + (boundary - thresh) * TCP_RTO_MAX
             }
         };
-        self.retrans_stamp.is_some_and(|t| now.saturating_sub(t) >= timeout)
+        let timeout_ms = timeout * (TICK_US / 1000);
+        self.retrans_stamp.is_some_and(|t| now_ms.wrapping_sub(t) as u64 >= timeout_ms)
     }
 
     /// The handshake's RTT sample (`tcp_synack_rtt_meas`, `tcp_ack` on the
@@ -947,10 +949,12 @@ impl TcpConn {
 
     /// `tcp_clamp_rto_to_user_timeout`: the timer never runs past the user
     /// timeout.
-    fn rto_clamped(&self, now: u64) -> u64 {
+    fn rto_clamped(&self, now_ms: u32) -> u64 {
         let Some(stamp) = self.retrans_stamp.filter(|_| self.user_timeout != 0) else { return self.rto };
-        let elapsed = now.saturating_sub(stamp);
-        self.rto.min(self.user_timeout.saturating_sub(elapsed).max(1))
+        let elapsed = now_ms.wrapping_sub(stamp) as u64;
+        let remaining = (self.user_timeout * (TICK_US / 1000)).saturating_sub(elapsed);
+        if remaining == 0 { return 1; }
+        self.rto.min(remaining.div_ceil(TICK_US / 1000))
     }
 
     /// Unsent bytes wait for a window that does not take the next segment,
@@ -2231,12 +2235,13 @@ impl Stack {
                     } else if now.saturating_sub(slot.last_send_tick) >= slot.rto {
                         // tcp_retransmit_timer, tcp_write_timeout: SYN
                         // retries model 1 s doubling, about 127 s for six.
-                        if slot.retransmits_timed_out(now, TCP_SYN_RETRIES, TCP_TIMEOUT_INIT, 0) {
+                        if slot.retransmits_timed_out(io.ts_now_ms(), TCP_SYN_RETRIES, TCP_TIMEOUT_INIT, 0) {
                             slot.error = true;
                             slot.state = State::Closed;
                             slot.last_send_tick = now;
                         } else {
-                            slot.retrans_stamp.get_or_insert(slot.last_send_tick);
+                            // tcp_connect stamps the first SYN.
+                            slot.retrans_stamp.get_or_insert((slot.syn_sent_us / 1000) as u32);
                             slot.retries += 1;
                             slot.rto = (slot.rto << 1).min(TCP_RTO_MAX);
                             send_syn_now = true;
@@ -2279,7 +2284,7 @@ impl Stack {
                         0
                     };
                     if !zero_window
-                        && slot.retransmits_timed_out(now, retry_until, TCP_RTO_MIN, slot.user_timeout)
+                        && slot.retransmits_timed_out(io.ts_now_ms(), retry_until, TCP_RTO_MIN, slot.user_timeout)
                     {
                         slot.error = true;
                         slot.state = State::Closed;
@@ -2293,7 +2298,7 @@ impl Stack {
                         recovery::retransmit_skb(slot, &mut io, 0);
                         slot.last_send_tick = now;
                         slot.rto = (slot.rto << 1).min(TCP_RTO_MAX);
-                        slot.rtx_at = now + slot.rto_clamped(now);
+                        slot.rtx_at = now + slot.rto_clamped(io.ts_now_ms());
                     }
                 }
 

@@ -9,10 +9,13 @@
 //! (`tcp_cwnd_restart`, `tcp_cwnd_application_limited`). The window itself
 //! grows and shrinks by CUBIC (`cubic.rs`).
 //!
-//! Every segment is one skb with `tcp_skb_pcount` 1. Not here: undo of a
-//! reduction (D-SACK, timestamps, F-RTO), tail loss probes, the RACK
-//! reordering window's growth on D-SACK, and the delayed-ACK guard of the
-//! minimum RTT filter.
+//! A reduction found needless is taken back (`tcp_try_undo_*`): by D-SACKs
+//! for every retransmission, by an echoed timestamp older than the first
+//! one, or by F-RTO after a timeout (RFC 5682).
+//!
+//! Every segment is one skb with `tcp_skb_pcount` 1. Not here: tail loss
+//! probes, the RACK reordering window's growth on D-SACK, and the
+//! delayed-ACK guard of the minimum RTT filter.
 
 use super::*;
 use super::cubic;
@@ -34,6 +37,7 @@ const FLAG_LOST_RETRANS: u32 = 0x80;
 const FLAG_SND_UNA_ADVANCED: u32 = 0x400;
 const FLAG_DSACKING_ACK: u32 = 0x800;
 const FLAG_SET_XMIT_TIMER: u32 = 0x1000;
+const FLAG_ORIG_SACK_ACKED: u32 = 0x200;
 const FLAG_SACK_RENEGING: u32 = 0x2000;
 const FLAG_ACKED: u32 = FLAG_DATA_ACKED;
 const FLAG_NOT_DUP: u32 = FLAG_DATA | FLAG_WIN_UPDATE | FLAG_ACKED;
@@ -160,9 +164,17 @@ pub(super) struct Tx {
     pub(super) reo_at: u64,
     /// `SOCK_NOSPACE`: a send found the buffer full.
     pub(super) nospace: bool,
-    /// `undo_marker != 0`: a reduction this connection may still take back.
-    /// Nothing undoes here yet, but its presence still decides.
-    undo_marker: bool,
+    /// `undo_marker`: `snd_una` when the reduction began that may still be
+    /// taken back; `undo_retrans` the retransmissions not yet shown needless
+    /// by a D-SACK (-1: none sent); `prior_ssthresh` what to go back to.
+    undo_marker: Option<u32>,
+    undo_retrans: i32,
+    prior_ssthresh: u32,
+    /// `tp->frto`: F-RTO runs for this timeout.
+    frto: bool,
+    /// The echoed timestamp of the ACK being processed (`rcv_tsecr` with
+    /// `saw_tstamp`).
+    rcv_tsecr: Option<u32>,
     /// `lsndtime`: the tick data last went out.
     pub(super) lsndtime: u64,
     /// `snd_cwnd_used`, `snd_cwnd_stamp`: the most in flight while the
@@ -186,7 +198,11 @@ impl Tx {
             rtt_min: MinMax { s: [(0, u32::MAX); 3] },
             reo_at: 0,
             nospace: false,
-            undo_marker: false,
+            undo_marker: None,
+            undo_retrans: -1,
+            prior_ssthresh: 0,
+            frto: false,
+            rcv_tsecr: None,
             lsndtime: 0,
             snd_cwnd_used: 0,
             snd_cwnd_stamp: 0,
@@ -436,18 +452,109 @@ fn cwnd_reduction(c: &mut TcpConn, newly_acked_sacked: u32, newly_lost: u32, fla
 
 /// `tcp_end_cwnd_reduction`.
 fn end_cwnd_reduction(c: &mut TcpConn, now: u64) {
-    if c.snd_ssthresh != u32::MAX && c.tx.undo_marker {
+    if c.snd_ssthresh != u32::MAX && c.tx.undo_marker.is_some() {
         c.snd_cwnd = c.snd_ssthresh;
         c.tx.snd_cwnd_stamp = now;
     }
 }
 
+/// `tcp_init_undo`.
+fn init_undo(c: &mut TcpConn) {
+    c.tx.undo_marker = Some(c.snd_una);
+    // Retransmissions still in flight may bring D-SACKs later; 0 would mean
+    // "undo now".
+    c.tx.undo_retrans = c.tx.retrans_out as i32;
+    if c.tx.undo_retrans == 0 { c.tx.undo_retrans = -1; }
+}
+
 /// `tcp_enter_recovery`.
 fn enter_recovery(c: &mut TcpConn) {
     if !any_retrans_done(c) { c.retrans_stamp = None; }
-    c.tx.undo_marker = true;
-    if !in_cwnd_reduction(c) { init_cwnd_reduction(c); }
+    c.tx.prior_ssthresh = 0;
+    init_undo(c);
+    if !in_cwnd_reduction(c) {
+        c.tx.prior_ssthresh = current_ssthresh(c);
+        init_cwnd_reduction(c);
+    }
     c.ca_state = CaState::Recovery;
+}
+
+/// `tcp_tsopt_ecr_before`.
+fn tsopt_ecr_before(c: &TcpConn, when: u32) -> bool {
+    c.tx.rcv_tsecr.is_some_and(|t| t != 0 && before(t, when))
+}
+
+/// `tcp_packet_delayed`: nothing was retransmitted, or the echo predates
+/// the first retransmission, so the original arrived.
+fn packet_delayed(c: &TcpConn) -> bool {
+    if let Some(stamp) = c.retrans_stamp { return tsopt_ecr_before(c, stamp); }
+    if is_reno(c) && !before(c.snd_una, c.high_seq) { return false; }
+    true
+}
+
+/// `tcp_may_undo`.
+fn may_undo(c: &TcpConn) -> bool {
+    c.tx.undo_marker.is_some() && (c.tx.undo_retrans == 0 || packet_delayed(c))
+}
+
+/// `tcp_undo_cwnd_reduction`.
+fn undo_cwnd_reduction(c: &mut TcpConn, unmark_loss: bool, now: u64) {
+    if unmark_loss {
+        for s in c.tx.queue.iter_mut() { s.sacked &= !LOST; }
+        c.tx.lost_out = 0;
+    }
+    if c.tx.prior_ssthresh != 0 {
+        // tcp_reno_undo_cwnd, which CUBIC uses.
+        c.snd_cwnd = c.snd_cwnd.max(c.tx.prior_cwnd);
+        if c.tx.prior_ssthresh > c.snd_ssthresh { c.snd_ssthresh = c.tx.prior_ssthresh; }
+    }
+    c.tx.snd_cwnd_stamp = now;
+    c.tx.undo_marker = None;
+    c.tx.rack.advanced = true;
+}
+
+/// `tcp_is_non_sack_preventing_reopen`: Reno holds the state until
+/// something above `high_seq` is acknowledged (RFC 6582 §3.2 step 5).
+fn is_non_sack_preventing_reopen(c: &mut TcpConn) -> bool {
+    if c.snd_una == c.high_seq && is_reno(c) {
+        if !any_retrans_done(c) { c.retrans_stamp = None; }
+        return true;
+    }
+    false
+}
+
+/// `tcp_try_undo_dsack`: D-SACKs covered every retransmission.
+fn try_undo_dsack(c: &mut TcpConn, now: u64) -> bool {
+    if c.tx.undo_marker.is_some() && c.tx.undo_retrans == 0 {
+        undo_cwnd_reduction(c, false, now);
+        return true;
+    }
+    false
+}
+
+/// `tcp_try_undo_loss`: after a timeout that was not needed.
+fn try_undo_loss(c: &mut TcpConn, frto_undo: bool, now: u64) -> bool {
+    if frto_undo || may_undo(c) {
+        undo_cwnd_reduction(c, true, now);
+        c.retries = 0;
+        if is_non_sack_preventing_reopen(c) { return true; }
+        if frto_undo || !is_reno(c) { c.ca_state = CaState::Open; }
+        return true;
+    }
+    false
+}
+
+/// `tcp_try_undo_partial`: a partial ACK the original transmission
+/// brought.
+fn try_undo_partial(c: &mut TcpConn, prior_una: u32, now: u64) -> bool {
+    if c.tx.undo_marker.is_some() && packet_delayed(c) {
+        check_sack_reordering(c, prior_una);
+        if c.tx.retrans_out != 0 { return true; }
+        if !any_retrans_done(c) { c.retrans_stamp = None; }
+        undo_cwnd_reduction(c, true, now);
+        try_keep_open(c);
+    }
+    false
 }
 
 /// `tcp_try_keep_open`.
@@ -469,14 +576,11 @@ fn try_to_open(c: &mut TcpConn) {
     try_keep_open(c);
 }
 
-/// `tcp_try_undo_recovery` with nothing to undo: Open, except that Reno
-/// holds the state until something above `high_seq` is acknowledged
-/// (`tcp_is_non_sack_preventing_reopen`, RFC 6582 §3.2 step 5).
-fn try_undo_recovery(c: &mut TcpConn) -> bool {
-    if c.snd_una == c.high_seq && is_reno(c) {
-        if !any_retrans_done(c) { c.retrans_stamp = None; }
-        return true;
-    }
+/// `tcp_try_undo_recovery`: recovery is over; take the reduction back if
+/// it was needless.
+fn try_undo_recovery(c: &mut TcpConn, now: u64) -> bool {
+    if may_undo(c) { undo_cwnd_reduction(c, false, now); }
+    if is_non_sack_preventing_reopen(c) { return true; }
     c.ca_state = CaState::Open;
     false
 }
@@ -644,11 +748,35 @@ fn identify_packet_loss(c: &mut TcpConn, flag: &mut u32, now: u64, now_us: u64) 
 
 // ── The state machine (tcp_fastretrans_alert) ────────────────────────
 
-/// `tcp_process_loss`, without undo and F-RTO.
-fn process_loss(c: &mut TcpConn, flag: u32, num_dupack: u32, rexmit: &mut bool) {
+/// What an ACK leads to sending (`REXMIT_*`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Rexmit { None, Lost, New }
+
+/// `tcp_process_loss`: Loss ends once `high_seq` is acknowledged, or as
+/// soon as the timeout shows itself spurious (F-RTO, RFC 5682 §3.1).
+fn process_loss(c: &mut TcpConn, flag: u32, num_dupack: u32, rexmit: &mut Rexmit, now: u64) {
     let recovered = !before(c.snd_una, c.high_seq);
+    if flag & FLAG_SND_UNA_ADVANCED != 0 && try_undo_loss(c, false, now) { return; }
+    if c.tx.frto {
+        // Step 3.b: never-retransmitted data was (S)ACKed, so not all was
+        // lost.
+        if flag & FLAG_ORIG_SACK_ACKED != 0 && try_undo_loss(c, true, now) { return; }
+        if after(c.snd_nxt, c.high_seq) {
+            // Step 3.a: the loss was real.
+            if flag & FLAG_DATA_SACKED != 0 || num_dupack != 0 { c.tx.frto = false; }
+        } else if flag & FLAG_SND_UNA_ADVANCED != 0 && !recovered {
+            c.high_seq = c.snd_nxt;
+            // Step 2.b: send new data and see what it brings.
+            let unsent = c.send_buf.len() > c.snd_nxt.wrapping_sub(c.snd_una) as usize;
+            if unsent && after(c.snd_una.wrapping_add(c.snd_wnd), c.snd_nxt) {
+                *rexmit = Rexmit::New;
+                return;
+            }
+            c.tx.frto = false;
+        }
+    }
     if recovered {
-        try_undo_recovery(c);
+        try_undo_recovery(c, now);
         return;
     }
     if is_reno(c) {
@@ -658,13 +786,13 @@ fn process_loss(c: &mut TcpConn, flag: u32, num_dupack: u32, rexmit: &mut bool) 
             c.tx.sacked_out = 0;
         }
     }
-    *rexmit = true;
+    *rexmit = Rexmit::Lost;
 }
 
 /// `tcp_fastretrans_alert`: loss and the congestion state. The window
 /// itself changes in `cong_control`.
-fn fastretrans_alert(c: &mut TcpConn, num_dupack: u32, flag: &mut u32, rexmit: &mut bool,
-                     now: u64, now_us: u64) {
+fn fastretrans_alert(c: &mut TcpConn, prior_una: u32, num_dupack: u32, flag: &mut u32,
+                     rexmit: &mut Rexmit, now: u64, now_us: u64) {
     if c.tx.packets_out == 0 && c.tx.sacked_out != 0 { c.tx.sacked_out = 0; }
 
     // B. tcp_check_sack_reneging: the receiver dropped data it had SACKed.
@@ -683,7 +811,7 @@ fn fastretrans_alert(c: &mut TcpConn, num_dupack: u32, flag: &mut u32, rexmit: &
         c.retrans_stamp = None;
     } else if !before(c.snd_una, c.high_seq) && c.ca_state == CaState::Recovery {
         if is_reno(c) { c.tx.sacked_out = 0; }
-        if try_undo_recovery(c) { return; }
+        if try_undo_recovery(c, now) { return; }
         end_cwnd_reduction(c, now);
     }
 
@@ -691,13 +819,21 @@ fn fastretrans_alert(c: &mut TcpConn, num_dupack: u32, flag: &mut u32, rexmit: &
     let mut open_path = false;
     match c.ca_state {
         CaState::Recovery => {
-            if *flag & FLAG_SND_UNA_ADVANCED == 0 && is_reno(c) {
-                add_reno_sack(c, num_dupack);
+            if *flag & FLAG_SND_UNA_ADVANCED == 0 {
+                if is_reno(c) { add_reno_sack(c, num_dupack); }
+            } else if try_undo_partial(c, prior_una, now) {
+                return;
             }
+            if try_undo_dsack(c, now) { try_to_open(c); }
             identify_packet_loss(c, flag, now, now_us);
+            if c.ca_state != CaState::Recovery {
+                // Undone; a loss still evident starts a new recovery.
+                if c.tx.lost_out == 0 { return; }
+                enter_recovery(c);
+            }
         }
         CaState::Loss => {
-            process_loss(c, *flag, num_dupack, rexmit);
+            process_loss(c, *flag, num_dupack, rexmit, now);
             identify_packet_loss(c, flag, now, now_us);
             if !(c.ca_state == CaState::Open || *flag & FLAG_LOST_RETRANS != 0) { return; }
             open_path = true;
@@ -709,6 +845,7 @@ fn fastretrans_alert(c: &mut TcpConn, num_dupack: u32, flag: &mut u32, rexmit: &
             if *flag & FLAG_SND_UNA_ADVANCED != 0 { c.tx.sacked_out = 0; }
             add_reno_sack(c, num_dupack);
         }
+        if c.ca_state <= CaState::Disorder { try_undo_dsack(c, now); }
         identify_packet_loss(c, flag, now, now_us);
         if c.tx.lost_out == 0 {
             try_to_open(c);
@@ -716,7 +853,7 @@ fn fastretrans_alert(c: &mut TcpConn, num_dupack: u32, flag: &mut u32, rexmit: &
         }
         enter_recovery(c);
     }
-    *rexmit = true;
+    *rexmit = Rexmit::Lost;
 }
 
 /// `tcp_cong_control`: PRR while recovering, else growth.
@@ -739,6 +876,7 @@ fn cong_control(c: &mut TcpConn, acked_sacked: u32, newly_lost: u32, flag: u32, 
 
 /// `tcp_enter_loss` with `tcp_timeout_mark_lost`: the RTO fired.
 pub(super) fn enter_loss(c: &mut TcpConn, now_us: u64) {
+    let new_recovery = c.ca_state < CaState::Recovery;
     let head_sacked = c.tx.queue.front().is_some_and(|s| s.sacked & SACKED_ACKED != 0);
     // A SACKed head means the receiver reneged: forget its SACKs.
     if head_sacked || is_reno(c) {
@@ -759,9 +897,10 @@ pub(super) fn enter_loss(c: &mut TcpConn, now_us: u64) {
         || !after(c.high_seq, c.snd_una)
         || (c.ca_state == CaState::Loss && c.retries == 0)
     {
+        c.tx.prior_ssthresh = current_ssthresh(c);
         c.tx.prior_cwnd = c.snd_cwnd;
         c.snd_ssthresh = cubic::recalc_ssthresh(c);
-        c.tx.undo_marker = true;
+        init_undo(c);
     }
     c.snd_cwnd = c.tx.in_flight() + 1;
     c.snd_cwnd_cnt = 0;
@@ -772,6 +911,9 @@ pub(super) fn enter_loss(c: &mut TcpConn, now_us: u64) {
     c.ca_state = CaState::Loss;
     cubic::enter_loss(c, now_us);
     c.high_seq = c.snd_nxt;
+    // F-RTO (RFC 5682 §3.1 step 1) unless recovery was already under way,
+    // except for repeated timeouts of the same data (§3.2).
+    c.tx.frto = new_recovery || c.retries != 0;
 }
 
 /// `tcp_simple_retransmit`: the path MTU fell, so every segment larger
@@ -787,7 +929,8 @@ pub(super) fn simple_retransmit<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>
     if c.ca_state != CaState::Loss {
         c.high_seq = c.snd_nxt;
         c.snd_ssthresh = current_ssthresh(c);
-        c.tx.undo_marker = false;
+        c.tx.prior_ssthresh = 0;
+        c.tx.undo_marker = None;
         c.ca_state = CaState::Loss;
         cubic::enter_loss(c, io.env.uptime_us());
     }
@@ -877,8 +1020,10 @@ pub(super) fn retransmit_skb<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i
     }
     // The stamp of the first (attempted) retransmission.
     if c.retrans_stamp.is_none() {
-        c.retrans_stamp = Some(c.tx.queue[i].sent_us / TICK_US);
+        c.retrans_stamp = Some((c.tx.queue[i].sent_us / 1000) as u32);
     }
+    if c.tx.undo_retrans < 0 { c.tx.undo_retrans = 0; }
+    c.tx.undo_retrans += 1;
     ok
 }
 
@@ -941,17 +1086,23 @@ fn parse_sack(seg: &[u8], data_offset: usize, out: &mut [(u32, u32); TCP_NUM_SAC
     n
 }
 
-/// `tcp_is_sackblock_valid`. D-SACK below `snd_una` only matters to undo,
-/// which is not here.
-fn is_sackblock_valid(c: &TcpConn, start: u32, end: u32) -> bool {
+/// `tcp_is_sackblock_valid`: inside what is outstanding; a D-SACK may
+/// also lie below `snd_una`, down to `undo_marker`.
+fn is_sackblock_valid(c: &TcpConn, is_dsack: bool, start: u32, end: u32) -> bool {
     if after(end, c.snd_nxt) || !before(start, end) { return false; }
     if !before(start, c.snd_nxt) { return false; }
-    after(start, c.snd_una)
+    if after(start, c.snd_una) { return true; }
+    let Some(marker) = c.tx.undo_marker.filter(|_| is_dsack) else { return false };
+    if after(end, c.snd_una) { return false; }
+    if !before(start, marker) { return true; }
+    if !after(end, marker) { return false; }
+    // Crossing the marker (overestimated).
+    !before(start, end.wrapping_sub(c.max_window))
 }
 
 /// `tcp_check_dsack` and `tcp_dsack_seen`: is the first block a D-SACK
 /// (RFC 2883)?
-fn check_dsack(c: &mut TcpConn, ack: u32, sp: &[(u32, u32)], st: &mut SackState) -> bool {
+fn check_dsack(c: &mut TcpConn, ack: u32, sp: &[(u32, u32)], prior_una: u32, st: &mut SackState) -> bool {
     let (s0, e0) = sp[0];
     if !before(s0, ack) {
         if sp.len() < 2 { return false; }
@@ -968,14 +1119,27 @@ fn check_dsack(c: &mut TcpConn, ack: u32, sp: &[(u32, u32)], st: &mut SackState)
     if c.tx.dsack_dups > c.tx.total_retrans { return false; }
     st.flag |= FLAG_DSACKING_ACK;
     st.sack_delivered += dup_segs;
+    // A D-SACK for data already forgotten: count it against the
+    // retransmissions.
+    if let Some(marker) = c.tx.undo_marker
+        && c.tx.undo_retrans > 0 && !after(e0, prior_una) && after(e0, marker)
+    {
+        c.tx.undo_retrans = (c.tx.undo_retrans - dup_segs as i32).max(0);
+    }
     true
 }
 
 /// `tcp_sacktag_one`.
 fn sacktag_one(c: &mut TcpConn, st: &mut SackState, i: usize, dup_sack: bool, now_us: u64) {
     let TxSeg { seq: start_seq, end: end_seq, sent_us, mut sacked, .. } = c.tx.queue[i];
-    if dup_sack && sacked & RETRANS != 0 && sacked & SACKED_ACKED != 0 && before(start_seq, st.reord) {
-        st.reord = start_seq;
+    // A D-SACK for a retransmission.
+    if dup_sack && sacked & RETRANS != 0 {
+        if let Some(marker) = c.tx.undo_marker
+            && c.tx.undo_retrans > 0 && after(end_seq, marker)
+        {
+            c.tx.undo_retrans = (c.tx.undo_retrans - 1).max(0);
+        }
+        if sacked & SACKED_ACKED != 0 && before(start_seq, st.reord) { st.reord = start_seq; }
     }
     // Acked already; about to be dropped.
     if !after(end_seq, c.snd_una) { return; }
@@ -995,6 +1159,7 @@ fn sacktag_one(c: &mut TcpConn, st: &mut SackState, i: usize, dup_sack: bool, no
                 if before(start_seq, highest_sack_seq(c)) && before(start_seq, st.reord) {
                     st.reord = start_seq;
                 }
+                if !after(end_seq, c.high_seq) { st.flag |= FLAG_ORIG_SACK_ACKED; }
                 if st.first_sackt == 0 { st.first_sackt = sent_us; }
                 st.last_sackt = sent_us;
             }
@@ -1021,7 +1186,7 @@ fn sacktag_write_queue(c: &mut TcpConn, ack: u32, blocks: &[(u32, u32)], prior_u
     st.flag = 0;
     st.reord = c.snd_nxt;
     if c.tx.sacked_out == 0 { c.tx.highest_sack = c.snd_una; }
-    let found_dup = check_dsack(c, ack, blocks, st);
+    let found_dup = check_dsack(c, ack, blocks, prior_una, st);
     if before(ack, prior_una.wrapping_sub(c.max_window)) {
         st.flag = 0;
         return;
@@ -1032,7 +1197,7 @@ fn sacktag_write_queue(c: &mut TcpConn, ack: u32, blocks: &[(u32, u32)], prior_u
     let mut used = 0;
     for (i, &(s, e)) in blocks.iter().enumerate() {
         let dup = i == 0 && found_dup;
-        if !is_sackblock_valid(c, s, e) { continue; }
+        if !is_sackblock_valid(c, dup, s, e) { continue; }
         if !after(e, prior_una) { continue; }
         sp[used] = (s, e, dup);
         used += 1;
@@ -1056,7 +1221,7 @@ fn sacktag_write_queue(c: &mut TcpConn, ack: u32, blocks: &[(u32, u32)], prior_u
             i += 1;
         }
     }
-    if c.ca_state != CaState::Loss || c.tx.undo_marker {
+    if c.ca_state != CaState::Loss || c.tx.undo_marker.is_some() {
         check_sack_reordering(c, st.reord);
     }
 }
@@ -1137,6 +1302,7 @@ fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: 
             last_ackt = s.sent_us;
             if first_ackt == 0 { first_ackt = last_ackt; }
             if before(s.seq, reord) { reord = s.seq; }
+            if !after(s.end, c.high_seq) { flag |= FLAG_ORIG_SACK_ACKED; }
         }
         if sacked & SACKED_ACKED != 0 {
             c.tx.sacked_out -= 1;
@@ -1176,6 +1342,9 @@ fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: 
         flag |= FLAG_SET_XMIT_TIMER;
         if is_reno(c) {
             remove_reno_sacks(c, pkts_acked);
+            // Without SACK bits an ACK covering a retransmission cannot
+            // tell which copy arrived.
+            if flag & FLAG_RETRANS_DATA_ACKED != 0 { flag &= !FLAG_ORIG_SACK_ACKED; }
         } else if before(reord, prior_fack) {
             // A hole filled by an original transmission: reordering.
             check_sack_reordering(c, reord);
@@ -1192,9 +1361,16 @@ fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: 
     flag
 }
 
-/// `tcp_xmit_recovery`.
-fn xmit_recovery<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, rexmit: bool) {
-    if rexmit { xmit_retransmit_queue(c, io); }
+/// `tcp_xmit_recovery`. F-RTO's new data first; retransmissions only if
+/// it could not go.
+fn xmit_recovery<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, rexmit: Rexmit) {
+    if rexmit == Rexmit::None { return; }
+    if rexmit == Rexmit::New {
+        write_xmit(c, io);
+        if after(c.snd_nxt, c.high_seq) { return; }
+        c.tx.frto = false;
+    }
+    xmit_retransmit_queue(c, io);
 }
 
 /// `tcp_ack` for an ACK in a synchronized state; `ack` is at most
@@ -1210,8 +1386,9 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
     let delivered0 = c.tx.delivered;
     let lost0 = c.tx.lost;
     let mut flag = 0;
-    let mut rexmit = false;
+    let mut rexmit = Rexmit::None;
     let mut num_dupack = 0;
+    c.tx.rcv_tsecr = if c.ts_ok { parse_tsecr(seg, data_offset) } else { None };
     let mut st = SackState { flag: 0, reord: c.snd_nxt, first_sackt: 0, last_sackt: 0, sack_delivered: 0 };
     let mut blocks = [(0u32, 0u32); TCP_NUM_SACKS];
     let nblocks = if c.sack_ok { parse_sack(seg, data_offset, &mut blocks) } else { 0 };
@@ -1223,7 +1400,7 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
             sacktag_write_queue(c, ack, blocks, prior_una, &mut st, now_us);
             flag |= st.flag;
             c.tx.delivered = c.tx.delivered.wrapping_add(st.sack_delivered);
-            fastretrans_alert(c, num_dupack, &mut flag, &mut rexmit, now, now_us);
+            fastretrans_alert(c, prior_una, num_dupack, &mut flag, &mut rexmit, now, now_us);
             xmit_recovery(c, io, rexmit);
         }
         return;
@@ -1249,7 +1426,7 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
     c.last_ack_rx = now;
     if prior_packets == 0 {
         if flag & FLAG_DSACKING_ACK != 0 {
-            fastretrans_alert(c, num_dupack, &mut flag, &mut rexmit, now, now_us);
+            fastretrans_alert(c, prior_una, num_dupack, &mut flag, &mut rexmit, now, now_us);
         }
         return;
     }
@@ -1263,7 +1440,7 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
             num_dupack = 1;
             io.st.dupacks_seen.fetch_add(1, Ordering::Relaxed);
         }
-        fastretrans_alert(c, num_dupack, &mut flag, &mut rexmit, now, now_us);
+        fastretrans_alert(c, prior_una, num_dupack, &mut flag, &mut rexmit, now, now_us);
     }
     if flag & FLAG_SET_XMIT_TIMER != 0 { rearm_rto(c, now, now_us); }
 

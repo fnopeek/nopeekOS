@@ -1,0 +1,41 @@
+// #57: an RTO that was spurious (the ACKs were only late) is detected by
+// F-RTO (RFC 5682): after the timeout new data goes out instead of
+// retransmissions, and an ACK for never-retransmitted data takes the
+// reduction back (tcp_process_loss, tcp_try_undo_loss).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460>
++0     > . 1:1(0) ack 1
++0     send 16060
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0     > P. 4381:5841(1460) ack 1
++0     > P. 5841:7301(1460) ack 1
++0     > P. 7301:8761(1460) ack 1
++0     > P. 8761:10221(1460) ack 1
++0     > P. 10221:11681(1460) ack 1
++0     > P. 11681:13141(1460) ack 1
++0     > P. 13141:14601(1460) ack 1
++0.21  > P. 1:1461(1460) ack 1
+// The late ACK of the first segment: F-RTO step 2.b sends new data.
++0.01  < . 1:1(0) ack 1461 win 65535
++0     > P. 14601:16061(1460) ack 1
+// Never-retransmitted data acknowledged: the timeout was spurious.
++0     < . 1:1(0) ack 4381 win 65535
++0     < . 1:1(0) ack 16061 win 65535
++0     state ESTABLISHED
+// The window is back where it was, not slow starting from one.
++0     send 14600
++0     > P. 16061:17521(1460) ack 1
++0     > P. 17521:18981(1460) ack 1
++0     > P. 18981:20441(1460) ack 1
++0     > P. 20441:21901(1460) ack 1
++0     > P. 21901:23361(1460) ack 1
++0     > P. 23361:24821(1460) ack 1
++0     > P. 24821:26281(1460) ack 1
++0     > P. 26281:27741(1460) ack 1
++0     > P. 27741:29201(1460) ack 1
++0     > P. 29201:30661(1460) ack 1
++0.01  < . 1:1(0) ack 30661 win 65535
++0.5   status 1
