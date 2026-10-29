@@ -1,0 +1,14 @@
+// #67, #73: a SYN in a synchronized state, here the SYN-ACK sent again
+// because our ACK was lost, gets a challenge ACK (RFC 5961 §4); a second
+// one within 500 ms does not (tcp_oow_rate_limited, tcp_invalid_ratelimit).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0.1   < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1
++0.1   < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0.5   < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1
++0     state ESTABLISHED

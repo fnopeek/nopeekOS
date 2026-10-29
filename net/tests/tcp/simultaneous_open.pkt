@@ -1,0 +1,10 @@
+// #75: both sides send a SYN: ours is answered with a SYN-ACK and the
+// connection goes through SYN_RCVD (RFC 9293 §3.5 MUST-10,
+// tcp_rcv_synsent_state_process).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S 0:0(0) win 4000 <mss 1460>
++0     > S. 0:0(0) ack 1 <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0     state SYN_RCVD
++0.01  < . 1:1(0) ack 1 win 4000
++0     status 1

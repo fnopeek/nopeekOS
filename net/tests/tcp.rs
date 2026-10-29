@@ -9,6 +9,7 @@
 //! +0     connect 192.0.2.2:80 | listen 80 | send 100 | recv 100 | close
 //! +0     status 1                                            connect_status
 //! +0     state FIN_WAIT_1                         the state, or GONE when freed
+//! +0     port 5555               segments to a port nobody uses (our ISN 0)
 //! +0     < icmp 3 4 mtu 1000 seq 1    ICMP error quoting our segment at seq 1
 //! ```
 //!
@@ -421,6 +422,12 @@ impl Run {
             "close" => {
                 let h = self.handle()?;
                 self.stack.close(&mut self.env, h).map_err(|e| format!("close: {e}"))
+            }
+            "port" => {
+                self.local_port = parse_num(rest)?;
+                self.peer.1 = 40000;
+                self.local_isn = Some(0);
+                Ok(())
             }
             "state" => {
                 let got = self.stack.state_name(self.handle()?).unwrap_or("GONE");

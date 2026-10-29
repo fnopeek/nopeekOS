@@ -1,0 +1,21 @@
+// #69: a segment that overlaps what we have delivers its new tail, in order
+// and out of order (tcp_data_queue "partial packet", tcp_ofo_queue).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1 win 65535
+
++0.1   < P. 1:101(100) ack 1 win 4000
++0.04  > . 1:1(0) ack 101
++0     < P. 51:201(150) ack 1 win 4000
++0.04  > . 1:1(0) ack 201
++0     recv 200
+
+// Out of order: 401:501 and 351:451 wait behind a hole, 201:401 fills it.
++0.01  < P. 401:501(100) ack 1 win 4000
++0     > . 1:1(0) ack 201
++0     < P. 351:451(100) ack 1 win 4000
++0     > . 1:1(0) ack 201
++0     < P. 201:401(200) ack 1 win 4000
++0     > . 1:1(0) ack 501
++0     recv 300

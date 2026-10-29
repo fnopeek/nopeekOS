@@ -187,6 +187,10 @@ const TCP_RTO_MAX: u64 = 120 * 100;
 const TCP_MIN_MSS: u16 = 88;
 /// `MAX_TCP_WINDOW`: what an unscaled window field holds.
 const MAX_TCP_WINDOW: u32 = 65535;
+/// `sysctl_tcp_invalid_ratelimit`, in ticks: at most one duplicate or
+/// challenge ACK per connection in this time for segments that are not
+/// data (`tcp_oow_rate_limited`, RFC 5961 §7).
+const TCP_INVALID_RATELIMIT: u64 = 50;
 /// `sysctl_tcp_retries2`: unanswered window probes before giving up.
 const TCP_RETRIES2: u8 = 15;
 /// `TCP_MSS_DESIRED`: above it the MSS is bounded by half the largest window.
@@ -654,6 +658,9 @@ struct TcpConn {
     backoff: u8,
     /// `rcv_tstamp`: when the last ACK came.
     last_ack_rx: u64,
+    /// `last_oow_ack_time`: when we last answered a segment we did not
+    /// take (0: never).
+    last_oow_ack: u64,
 
     /// The owner closed: a FIN follows the last byte of `send_buf`
     /// (`tcp_send_fin`), and `fin_sent` once it went out at that position.
@@ -817,6 +824,7 @@ impl TcpConn {
             probes_out: 0,
             backoff: 0,
             last_ack_rx: 0,
+            last_oow_ack: 0,
             fin_queued: false,
             fin_sent: false,
             established: false,
@@ -857,6 +865,16 @@ impl TcpConn {
     fn init_rcv_mss(&mut self) {
         let hint = self.advmss.min(self.mss_cache).min((self.rcv_wnd.get() / 2) as u16).min(TCP_MSS_DEFAULT);
         self.rcv_mss = hint.max(TCP_MIN_MSS);
+    }
+
+    /// `__tcp_oow_rate_limited`: whether an answer to a segment we did not
+    /// take must wait, counting this one if not.
+    fn oow_limited(&mut self, now: u64) -> bool {
+        if self.last_oow_ack != 0 && now.saturating_sub(self.last_oow_ack) < TCP_INVALID_RATELIMIT {
+            return true;
+        }
+        self.last_oow_ack = now.max(1);
+        false
     }
 
     /// `tcp_receive_window`: what is left of the window we advertised.
@@ -1418,7 +1436,9 @@ impl Stack {
         let seq = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let ack = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
         let data_offset = ((data[12] >> 4) as usize) * 4;
-        if data_offset < HEADER_LEN { return; }
+        // tcp_v4_rcv: a header shorter than 20 bytes or longer than the
+        // segment is no segment.
+        if data_offset < HEADER_LEN || data_offset > data.len() { return; }
         let flags = data[13];
         let adv_window = u16::from_be_bytes([data[14], data[15]]);
 
@@ -1426,7 +1446,9 @@ impl Stack {
 
         let conns = &mut self.conns;
 
-        let handle = match conns.find((dst_port, src_ip, src_port)) {
+        let found = conns.find((dst_port, src_ip, src_port))
+            .filter(|&h| conns.get(h).is_some_and(|c| c.state != State::Closed));
+        let handle = match found {
             Some(h) => h,
             None => {
                 // Check for a listener on this port
@@ -1475,9 +1497,16 @@ impl Stack {
                         return;
                     }
                 }
-                // No connection and no listener: send RST if not RST
+                // No connection and no listener: a reset, as RFC 9293
+                // §3.10.7.1 and tcp_v4_send_reset build it. Never to a reset.
                 if flags & RST == 0 {
-                    send_segment(&mut io, src_ip, dst_port, src_port, ack, seq.wrapping_add(1), RST | ACK, 0, &[], 0);
+                    if flags & ACK != 0 {
+                        send_segment(&mut io, src_ip, dst_port, src_port, ack, 0, RST, 0, &[], 0);
+                    } else {
+                        let ack_seq = seq.wrapping_add(payload.len() as u32)
+                            .wrapping_add((flags & SYN != 0) as u32).wrapping_add((flags & FIN != 0) as u32);
+                        send_segment(&mut io, src_ip, dst_port, src_port, 0, ack_seq, RST | ACK, 0, &[], 0);
+                    }
                 }
                 return;
             }
@@ -1503,10 +1532,33 @@ impl Stack {
                 conn.last_send_tick = io.ticks();
             } else if !matches!(conn.state, State::SynSent | State::Listen)
                 && seq_in_window(conn, seq)
+                && !conn.oow_limited(io.ticks())
             {
                 let w = recv_window(conn, io.st);
                 send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
             }
+            return;
+        }
+
+        let synchronized = matches!(conn.state, State::SynReceived | State::Established | State::FinWait1
+            | State::FinWait2 | State::CloseWait | State::Closing | State::LastAck | State::TimeWait);
+        // A segment answered only because it is out of window or old, if it
+        // is no data: such answers are rate-limited (tcp_oow_rate_limited).
+        let no_data = payload.is_empty() || flags & SYN != 0;
+
+        // RFC 5961 §4: a SYN in a synchronized state, whatever its sequence
+        // number, gets a challenge ACK and goes no further
+        // (tcp_validate_incoming, tcp_send_challenge_ack). A SYN-ACK sent
+        // again because our ACK was lost is answered so too.
+        if synchronized && flags & SYN != 0 {
+            if !conn.oow_limited(io.ticks()) {
+                let w = recv_window(conn, io.st);
+                send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+            }
+            return;
+        }
+        // RFC 9293 §3.10.7.4: "if the ACK bit is off drop the segment".
+        if synchronized && flags & ACK == 0 {
             return;
         }
 
@@ -1519,12 +1571,14 @@ impl Stack {
                 | State::Closing | State::LastAck | State::TimeWait)
             && (end_seq.wrapping_sub(conn.rcv_wup.get()) as i32) < 0
         {
-            if !payload.is_empty() {
-                conn.dsack = Some((seq, seq.wrapping_add(payload.len() as u32)));
+            if !(no_data && conn.oow_limited(io.ticks())) {
+                if !payload.is_empty() {
+                    conn.dsack = Some((seq, seq.wrapping_add(payload.len() as u32)));
+                }
+                let w = recv_window(conn, io.st);
+                send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                conn.dsack = None;
             }
-            let w = recv_window(conn, io.st);
-            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
-            conn.dsack = None;
             return;
         }
 
@@ -1538,8 +1592,10 @@ impl Stack {
             && (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0
             && !seq_in_window(conn, seq)
         {
-            let w = recv_window(conn, io.st);
-            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+            if !(no_data && conn.oow_limited(io.ticks())) {
+                let w = recv_window(conn, io.st);
+                send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+            }
             return;
         }
         // An ACK for data we never sent says nothing true: ACK it back and drop
@@ -1548,8 +1604,10 @@ impl Stack {
             && !matches!(conn.state, State::SynSent | State::Listen | State::SynReceived)
             && (ack.wrapping_sub(conn.snd_nxt) as i32) > 0
         {
-            let w = recv_window(conn, io.st);
-            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+            if !conn.oow_limited(io.ticks()) {
+                let w = recv_window(conn, io.st);
+                send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+            }
             return;
         }
 
@@ -1572,6 +1630,42 @@ impl Stack {
             }
 
             State::SynSent => {
+                // An ACK of anything but our SYN is answered with
+                // <SEQ=SEG.ACK><CTL=RST> (RFC 9293 §3.10.7.3,
+                // tcp_rcv_synsent_state_process: reset_and_undo).
+                if flags & ACK != 0 && ack != conn.snd_nxt {
+                    send_segment(&mut io, src_ip, dst_port, src_port, ack, 0, RST, 0, &[], 0);
+                    return;
+                }
+                // A SYN without ACK: both sides opened at once. Ours is
+                // answered as a SYN-ACK and the connection waits in SYN_RCVD
+                // (RFC 9293 §3.5, MUST-10).
+                if flags & SYN != 0 && flags & ACK == 0 {
+                    conn.rcv_off = 0;
+                    conn.rcv_nxt = seq.wrapping_add(1);
+                    conn.rcv_wup.set(conn.rcv_nxt);
+                    conn.state = State::SynReceived;
+                    if let Some(ws) = parse_wscale(data, data_offset) {
+                        conn.snd_wscale = ws;
+                        conn.wscale_ok = true;
+                    }
+                    if let Some(ts) = parse_ts(data, data_offset) {
+                        conn.ts_ok = true;
+                        conn.ts_recent = ts;
+                    }
+                    conn.sack_ok = parse_sack_permitted(data, data_offset);
+                    if let Some(m) = parse_mss(data, data_offset) { conn.mss_clamp = m; }
+                    conn.snd_wnd = adv_window as u32;
+                    conn.snd_wl1 = seq;
+                    conn.max_window = conn.snd_wnd;
+                    conn.last_send_tick = io.ticks();
+                    let mut opts = [0u8; 40];
+                    let len = syn_opts(&mut opts, io.ts_now_ms(), conn.advmss);
+                    if conn.ts_ok { opts[14..18].copy_from_slice(&conn.ts_recent.to_be_bytes()); }
+                    send_segment_with_opts(&mut io, src_ip, dst_port, src_port, conn.snd_iss, conn.rcv_nxt,
+                        SYN | ACK, INITIAL_WINDOW, &[], &opts[..len], conn.next_id());
+                    return;
+                }
                 // Only the answer to our SYN: it must acknowledge exactly our
                 // ISN + 1. Anything else would hand the connection a sequence
                 // space chosen by whoever sent it.
@@ -1804,6 +1898,20 @@ impl Stack {
                     conn.last_send_tick = io.ticks();
                 }
 
+                // tcp_data_queue, "partial packet": a segment that starts in
+                // what we have and ends past it brings its new tail; the old
+                // head is named in a D-SACK.
+                let (seq, payload) = if !payload.is_empty()
+                    && (seq.wrapping_sub(conn.rcv_nxt) as i32) < 0
+                    && (seq.wrapping_add(payload.len() as u32).wrapping_sub(conn.rcv_nxt) as i32) > 0
+                {
+                    if conn.sack_ok { conn.dsack = Some((seq, conn.rcv_nxt)); }
+                    let skip = conn.rcv_nxt.wrapping_sub(seq) as usize;
+                    (conn.rcv_nxt, &payload[skip..])
+                } else {
+                    (seq, payload)
+                };
+
                 // Data processing
                 if !payload.is_empty() && matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2) {
                     if seq == conn.rcv_nxt {
@@ -1842,13 +1950,17 @@ impl Stack {
                             if k + seglen as u64 <= want {
                                 conn.ooo.remove(&k); conn.ooo_bytes -= seglen; continue;
                             }
-                            if k != want { break; }                 // still a gap before it
-                            if conn.recv_buf.len() + seglen > RECV_BUF_SIZE { break; }
+                            if k > want { break; }                  // still a gap before it
+                            // tcp_ofo_queue: one that starts below what we
+                            // have delivers only its tail.
+                            let skip = (want - k) as usize;
+                            if conn.recv_buf.len() + seglen - skip > RECV_BUF_SIZE { break; }
                             let seg = conn.ooo.remove(&k).unwrap();
                             conn.ooo_bytes -= seg.len();
-                            conn.rcv_nxt = conn.rcv_nxt.wrapping_add(seg.len() as u32);
-                            conn.rcv_off += seg.len() as u64;
-                            conn.recv_buf.extend(seg.into_iter());
+                            let new = seg.len() - skip;
+                            conn.rcv_nxt = conn.rcv_nxt.wrapping_add(new as u32);
+                            conn.rcv_off += new as u64;
+                            conn.recv_buf.extend(seg[skip..].iter().copied());
                             filled = true;
                         }
                         io.st.max_rxbuf.fetch_max(conn.recv_buf.len(),
@@ -1877,9 +1989,11 @@ impl Stack {
                         }
                         // A filled gap must be ACKed immediately so the sender stops
                         // retransmitting and advances — don't let it sit in coalescing.
-                        if filled {
+                        // A D-SACK goes out at once, with the ACK it belongs to.
+                        if filled || conn.dsack.is_some() {
                             let w = recv_window(conn, io.st);
                             send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                            conn.dsack = None;
                             conn.acks_held = 0;
                             conn.ack_pending = false;
                         } else {
@@ -1911,19 +2025,34 @@ impl Stack {
                             // beyond it were never invited.
                             let in_window = off + payload.len() as u64
                                 <= conn.rcv_off + rcv_space(conn) as u64;
-                            if !payload.is_empty()
-                                && in_window
-                                && !conn.ooo.contains_key(&off)
+                            // tcp_data_queue_ofo: a segment we hold all of
+                            // is named in a D-SACK and dropped; the ones the
+                            // new segment covers whole make way for it.
+                            let end = off + payload.len() as u64;
+                            let covered = conn.ooo_runs.range(..=off).next_back()
+                                .is_some_and(|(_, &e)| e >= end);
+                            if covered {
+                                if conn.sack_ok {
+                                    conn.dsack = Some((seq, seq.wrapping_add(payload.len() as u32)));
+                                }
+                            } else if in_window
                                 && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
                                 && mem_charge(&io, payload.len())
                             {
+                                let inside: Vec<(u64, usize)> = conn.ooo.range(off..end)
+                                    .filter(|&(&k, v)| k + v.len() as u64 <= end)
+                                    .map(|(&k, v)| (k, v.len())).collect();
+                                for (k, n) in inside {
+                                    conn.ooo.remove(&k);
+                                    conn.ooo_bytes -= n;
+                                }
                                 conn.ooo_bytes += payload.len();
                                 conn.ooo.insert(off, payload.to_vec());
-                                ooo_runs_add(&mut conn.ooo_runs,
-                                    off, off + payload.len() as u64);
+                                ooo_runs_add(&mut conn.ooo_runs, off, end);
                             }
                             let w = recv_window(conn, io.st);
                             send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                            conn.dsack = None;
                             conn.ack_pending = false;
                         } else {
                             // BEHIND = we already have these bytes. Answer with a
