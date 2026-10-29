@@ -22,9 +22,10 @@ https://github.com/user-attachments/assets/474fe66d-89df-46f2-92ea-c1b92360587d
 ## The Idea
 
 Why does an operating system look the way it does? Mostly because of
-decisions made decades ago: processes because that's how 1969 hardware
-was shared, `chmod 755` because that's how 1984 multi-user Unix drew its
-lines, a filesystem tree because that's how you found things on a tape.
+decisions made decades ago: processes because that's how 1960s hardware
+was shared, `chmod 755` because that's how 1971 multi-user Unix drew its
+lines, a filesystem tree because that's how Multics organised a disk in
+1965.
 
 nopeekOS asks a different question: **what does an OS look like if you
 start over today?**
