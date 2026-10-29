@@ -1,0 +1,16 @@
+// #74: an unanswered SYN-ACK goes out again after 1 s, doubling, five
+// times (tcp_synack_retries, reqsk_timer_handler); then the request is
+// dropped and its late ACK reset. A SYN sent again is answered at once
+// and restarts the timer (tcp_check_req).
+0      listen 8080
++0.1   < S 0:0(0) win 65535 <mss 1460>
++0     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++0.3   < S 0:0(0) win 65535 <mss 1460>
++0     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++1     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++2     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++4     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++8     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++16    > S. 0:0(0) ack 1 win 65535 <mss 1460>
++32    < . 1:1(0) ack 1 win 1000
++0     > R 1:1(0)

@@ -1,0 +1,14 @@
+// #74: a SYN to a listener is answered with every option it offered
+// (tcp_conn_request, tcp_synack_options); data on the ACK that completes
+// the handshake is taken (tcp_check_req, tcp_child_process); accept hands
+// the connection over and the listener stays.
+0      listen 8080
++0.1   < S 0:0(0) win 65535 <mss 1400,sackOK,TS val 500 ecr 0,nop,wscale 6>
++0     > S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK,TS val ? ecr 500,nop,wscale 8>
++0.02  < P. 1:101(100) ack 1 win 1000 <nop,nop,TS val 520 ecr ?>
++0     > . 1:1(0) ack 101 <nop,nop,TS val ? ecr 520>
++0     accept
++0     state ESTABLISHED
++0     recv 100
++0     send 100
++0     > P. 1:101(100) ack 101 <nop,nop,TS val ? ecr 520>

@@ -18,6 +18,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 mod ack;
 mod cubic;
+mod listen;
 mod recovery;
 mod timewait;
 
@@ -682,6 +683,8 @@ struct TcpConn {
     // instead of everything past the cumulative ACK.
     sack_ok: bool,
 
+    /// A listener's queues; `None` for any other connection.
+    listen: Option<listen::Listener>,
     /// `inet_saddr`: our address when the connection began. Segments go
     /// out from it only while it is still ours.
     local_ip: [u8; 4],
@@ -807,6 +810,7 @@ impl TcpConn {
             ts_recent_stamp: 0,
             sack_ok: false,
             local_ip: [0; 4],
+            listen: None,
             released: false,
             owner,
             mss_clamp: TCP_MSS_DEFAULT,
@@ -1074,11 +1078,14 @@ struct Table {
     /// Connections in TIME-WAIT or orphaned FIN-WAIT-2, by 4-tuple: the
     /// `inet_timewait_sock`s of the established hash.
     tw: BTreeMap<Tuple, timewait::Tw>,
+    /// Request socks in SYN-RECEIVED, by 4-tuple.
+    reqs: BTreeMap<Tuple, listen::Req>,
 }
 
 impl Table {
     fn new() -> Self {
-        Table { entries: Vec::new(), free: Vec::new(), ehash: BTreeMap::new(), lhash: BTreeMap::new(), tw: BTreeMap::new() }
+        Table { entries: Vec::new(), free: Vec::new(), ehash: BTreeMap::new(), lhash: BTreeMap::new(), tw: BTreeMap::new(),
+                reqs: BTreeMap::new() }
     }
 
     fn index_of(&self, h: Handle) -> Option<usize> {
@@ -1146,14 +1153,6 @@ impl Table {
         self.free.push(i as u32);
     }
 
-    /// Change what the connection at `h` is found by.
-    fn relink(&mut self, h: Handle, f: impl FnOnce(&mut TcpConn)) {
-        let Some(i) = self.index_of(h) else { return };
-        self.unlink(i);
-        if let Some(c) = self.entries[i].conn.as_deref_mut() { f(c); }
-        self.link(i);
-    }
-
     fn find(&self, t: Tuple) -> Option<Handle> {
         self.ehash.get(&t).map(|&i| self.handle_at(i as usize))
     }
@@ -1166,6 +1165,7 @@ impl Table {
         self.lhash.contains_key(&port)
             || self.ehash.range((port, [0; 4], 0)..=(port, [255; 4], u16::MAX)).next().is_some()
             || self.tw.range((port, [0; 4], 0)..=(port, [255; 4], u16::MAX)).next().is_some()
+            || self.reqs.range((port, [0; 4], 0)..=(port, [255; 4], u16::MAX)).next().is_some()
     }
 
     fn iter(&self) -> impl Iterator<Item = &TcpConn> {
@@ -1299,31 +1299,18 @@ impl Stack {
     }
 
     /// Listen on a local port. Returns handle.
-    pub fn listen(&mut self, port: u16) -> Result<Handle, TcpError> {
-        Ok(self.conns.insert(TcpConn::blank(State::Listen, port, KERNEL)))
+    pub fn listen(&mut self, port: u16, backlog: u32) -> Result<Handle, TcpError> {
+        // inet_csk_get_port: the port must be free.
+        if self.conns.port_in_use(port) { return Err(TcpError::AddrInUse); }
+        let mut c = TcpConn::blank(State::Listen, port, KERNEL);
+        c.listen = Some(listen::listener(backlog));
+        Ok(self.conns.insert(c))
     }
 
-    /// Where a listening handle stands: `Ok(true)` once a connection is
-    /// established on it, `Ok(false)` while it waits.
-    pub fn accept_status(&self, handle: Handle) -> Result<bool, TcpError> {
-        match self.conns.get(handle) {
-            Some(c) if c.established => Ok(true),
-            Some(c) if c.error || c.closed => Err(TcpError::ConnectionFailed),
-            Some(_) => Ok(false),
-            None => Err(TcpError::NotConnected),
-        }
-    }
-
-    /// Check if a listening handle has an established connection.
-    pub fn is_established(&self, handle: Handle) -> bool {
-        self.conns.get(handle).map_or(false, |c| c.established)
-    }
-
-    /// Reset a connection back to Listen state (for accepting next client).
-    pub fn reset_to_listen(&mut self, handle: Handle) -> Result<(), TcpError> {
-        let port = self.conns.get(handle).ok_or(TcpError::NotConnected)?.local_port;
-        self.conns.relink(handle, |c| *c = TcpConn::blank(State::Listen, port, KERNEL));
-        Ok(())
+    /// `accept(2)` without blocking: the oldest connection the listener at
+    /// `handle` has established, if any.
+    pub fn accept(&mut self, handle: Handle) -> Result<Option<Handle>, TcpError> {
+        listen::accept(&mut self.conns, handle)
     }
 
     /// How far the send buffer has grown (with `snd_wnd_of`, what the peer
@@ -1467,6 +1454,7 @@ impl Stack {
             State::CloseWait => State::LastAck,
             // Never established, or already shutting down: nothing to say.
             _ => {
+                if conn.listen.is_some() { listen::listen_stop(&mut self.conns, &mut io, handle); }
                 self.conns.remove(handle);
                 return Ok(());
             }
@@ -1503,7 +1491,11 @@ impl Stack {
     }
 
     /// Drop the connection at `handle` without a word to the peer.
-    pub fn remove(&mut self, handle: Handle) {
+    pub fn remove<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle) {
+        if self.conns.get(handle).is_some_and(|c| c.listen.is_some()) {
+            let mut io = Io { env, st: self.st };
+            listen::listen_stop(&mut self.conns, &mut io, handle);
+        }
         self.conns.remove(handle);
     }
 
@@ -1532,14 +1524,24 @@ impl Stack {
             .filter(|&h| conns.get(h).is_some_and(|c| c.state != State::Closed));
         let handle = match found {
             Some(h) => h,
-            None => {
-                // tcp_v4_rcv: a 4-tuple in TIME-WAIT answers for itself.
+            None => 'lookup: {
                 let key = (dst_port, src_ip, src_port);
+                let end_seq = seq.wrapping_add(payload.len() as u32)
+                    .wrapping_add((flags & SYN != 0) as u32).wrapping_add((flags & FIN != 0) as u32);
+                // tcp_v4_rcv: a request sock in SYN-RECEIVED (tcp_check_req).
+                if conns.reqs.contains_key(&key) {
+                    match listen::check_req(conns, &mut io, key, data, data_offset, flags, seq, end_seq,
+                                            ack, adv_window) {
+                        listen::Checked::Drop => return,
+                        listen::Checked::Child(h) => break 'lookup h,
+                        // The listener answers it, below.
+                        listen::Checked::Listener => {}
+                    }
+                }
+                // A 4-tuple in TIME-WAIT answers for itself.
                 let has_listener = conns.listener(dst_port).is_some();
                 let mut tw_isn = None;
                 if let Some(tw) = conns.tw.get_mut(&key) {
-                    let end_seq = seq.wrapping_add(payload.len() as u32)
-                        .wrapping_add((flags & SYN != 0) as u32).wrapping_add((flags & FIN != 0) as u32);
                     let tsval = parse_ts(data, data_offset);
                     let now_s = io.env.uptime_us() / 1_000_000;
                     match timewait::state_process(tw, flags, seq, end_seq, !payload.is_empty(), tsval,
@@ -1563,56 +1565,23 @@ impl Stack {
                         }
                     }
                 }
-                // Check for a listener on this port
-                if flags & SYN != 0 {
-                    if let Some(li) = conns.listener(dst_port) {
-                        // Accept the SYN on the listening socket
-                        let iss = tw_isn.unwrap_or_else(|| generate_isn(secret, io.env.uptime_us(),
-                            io.env.our_ip(), src_ip, dst_port, src_port));
-                        let peer_ws = parse_wscale(data, data_offset);
-                        let peer_mss = parse_mss(data, data_offset);
-                        let now = io.ticks();
-                        let now_us = io.env.uptime_us();
-                        let new_id = io.env.random_u64() as u16;
-                        let env = &*io.env;
-                        let mut advmss = 0;
-                        let local_ip = io.env.our_ip();
-                        conns.relink(li, |conn| {
-                            conn.state = State::SynReceived;
-                            conn.local_ip = local_ip;
-                            conn.remote_ip = src_ip;
-                            conn.remote_port = src_port;
-                            conn.rcv_off = 0;
-                            conn.rcv_nxt = seq.wrapping_add(1);
-                            conn.rcv_wup.set(conn.rcv_nxt);
-                            conn.snd_iss = iss;
-                            conn.snd_nxt = iss.wrapping_add(1);
-                            conn.snd_una = iss;
-                            conn.last_send_tick = now;
-                            conn.syn_sent_us = now_us;
-                            // Scaling is active only if the peer offered it too.
-                            conn.wscale_ok = peer_ws.is_some();
-                            conn.snd_wscale = peer_ws.unwrap_or(0);
-                            conn.set_path(env);
-                            conn.inet_id.set(new_id);
-                            conn.mss_clamp = peer_mss.unwrap_or(TCP_MSS_DEFAULT);
-                            conn.sync_mss();
-                            advmss = conn.advmss;
-                        });
-
-                        // SYN-ACK: MSS, and Window Scale only if the peer asked for it.
-                        let m = advmss.to_be_bytes();
-                        let opts: &[u8] = if peer_ws.is_some() {
-                            &[2, 4, m[0], m[1], 1, 3, 3, OUR_WSCALE]
-                        } else {
-                            &[2, 4, m[0], m[1]]
-                        };
-                        send_segment_with_opts(
-                            &mut io, src_ip, dst_port, src_port,
-                            iss, seq.wrapping_add(1), SYN | ACK, INITIAL_WINDOW, &[], opts, 0,
-                        );
+                // tcp_rcv_state_process in LISTEN: a SYN is a connection
+                // request; an ACK may answer one of our SYN cookies, else it
+                // is reset; a RST is dropped.
+                if let Some(li) = conns.listener(dst_port) {
+                    if flags & ACK == 0 && flags & RST == 0 && flags & SYN != 0 {
+                        if flags & FIN == 0 {
+                            listen::conn_request(conns, &mut io, secret, li, key, data, data_offset, seq, tw_isn);
+                        }
                         return;
                     }
+                    if flags & ACK != 0
+                        && let Some(h) = listen::cookie_check(conns, &mut io, secret, li, key, data, data_offset,
+                                                             flags, seq, ack, adv_window)
+                    {
+                        break 'lookup h;
+                    }
+                    if flags & ACK == 0 { return; }
                 }
                 // No connection and no listener: a reset, as RFC 9293
                 // §3.10.7.1 and tcp_v4_send_reset build it. Never to a reset.
@@ -1620,9 +1589,7 @@ impl Stack {
                     if flags & ACK != 0 {
                         send_segment(&mut io, src_ip, dst_port, src_port, ack, 0, RST, 0, &[], 0);
                     } else {
-                        let ack_seq = seq.wrapping_add(payload.len() as u32)
-                            .wrapping_add((flags & SYN != 0) as u32).wrapping_add((flags & FIN != 0) as u32);
-                        send_segment(&mut io, src_ip, dst_port, src_port, 0, ack_seq, RST | ACK, 0, &[], 0);
+                        send_segment(&mut io, src_ip, dst_port, src_port, 0, end_seq, RST | ACK, 0, &[], 0);
                     }
                 }
                 return;
@@ -2416,6 +2383,7 @@ impl Stack {
             }
             // The TIME-WAIT timer (`tw_timer_handler`).
             conns.tw.retain(|_, tw| tw.expires > now);
+            listen::timers(conns, &mut io);
         }
 
         pending
@@ -2440,7 +2408,7 @@ impl Stack {
     /// must keep coming back while this holds. As in Linux, an idle established
     /// connection has none: only data in flight or unsent, or an ACK held back.
     pub fn has_timers(&self) -> bool {
-        !self.conns.tw.is_empty() || self.conns.iter().any(|c| match c.state {
+        !self.conns.tw.is_empty() || !self.conns.reqs.is_empty() || self.conns.iter().any(|c| match c.state {
             State::Closed | State::Listen => false,
             State::Established | State::CloseWait => c.ack.pending != 0 || !c.send_buf.is_empty(),
             _ => true,
@@ -2451,6 +2419,7 @@ impl Stack {
         self.conns.iter()
             .map(|c| (c.local_port, c.remote_ip, c.remote_port, c.state.name()))
             .chain(self.conns.tw.iter().map(|(&(lp, rip, rp), tw)| (lp, rip, rp, timewait::name(tw))))
+            .chain(self.conns.reqs.keys().map(|&(lp, rip, rp)| (lp, rip, rp, "SYN_RECV")))
             .collect()
     }
 
@@ -2907,6 +2876,8 @@ pub enum TcpError {
     WouldBlock,
     /// No route leads to the address, or only a broadcast or multicast one.
     Unreachable,
+    /// The port is taken (EADDRINUSE).
+    AddrInUse,
 }
 
 impl core::fmt::Display for TcpError {
@@ -2919,6 +2890,7 @@ impl core::fmt::Display for TcpError {
             TcpError::NotConnected => write!(f, "not connected"),
             TcpError::Timeout => write!(f, "connection timed out"),
             TcpError::Unreachable => write!(f, "network unreachable"),
+            TcpError::AddrInUse => write!(f, "address in use"),
         }
     }
 }

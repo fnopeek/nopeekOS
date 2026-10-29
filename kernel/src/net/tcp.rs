@@ -141,7 +141,7 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
                             c.state, c.retries);
                     }
                 }
-                stack().remove(handle);
+                stack().remove(&mut KernelEnv, handle);
                 return Err(match err {
                     Some(net_core::tcp::SockErr::Refused) => TcpError::ConnectionRefused,
                     Some(_) => TcpError::Unreachable,
@@ -149,7 +149,7 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
                 });
             }
             n if n < 0 => {
-                stack().remove(handle);
+                stack().remove(&mut KernelEnv, handle);
                 return Err(TcpError::ConnectionRefused);
             }
             _ => {}
@@ -163,7 +163,7 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
                     "[tcp] connect timeout: state {} syn_retries {}",
                     c.state, c.retries);
             }
-            stack().remove(handle);
+            stack().remove(&mut KernelEnv, handle);
             return Err(TcpError::Timeout);
         }
         core::hint::spin_loop();
@@ -172,22 +172,24 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
     Ok(handle)
 }
 
-/// Listen on a local port. Returns handle. Use accept() to wait for connection.
+/// Listen on a local port with room for `backlog` connections not yet
+/// accepted. Returns the listener's handle.
 #[allow(dead_code)]
-pub fn listen(port: u16) -> Result<usize, TcpError> {
-    stack().listen(port)
+pub fn listen(port: u16, backlog: u32) -> Result<usize, TcpError> {
+    stack().listen(port, backlog)
 }
 
-/// Wait for an incoming connection on a listening handle. Blocking.
+/// Wait for an incoming connection on a listener and return its handle.
+/// Blocking; `timeout_ticks` 0 waits forever.
 #[allow(dead_code)]
-pub fn accept(handle: usize, timeout_ticks: u64) -> Result<(), TcpError> {
+pub fn accept(handle: usize, timeout_ticks: u64) -> Result<usize, TcpError> {
     let t0 = crate::interrupts::ticks();
     loop {
         super::poll();
         tick_connections();
 
-        if stack().accept_status(handle)? {
-            return Ok(());
+        if let Some(child) = stack().accept(handle)? {
+            return Ok(child);
         }
 
         if timeout_ticks > 0 && crate::interrupts::ticks() - t0 > timeout_ticks {
@@ -195,18 +197,6 @@ pub fn accept(handle: usize, timeout_ticks: u64) -> Result<(), TcpError> {
         }
         core::hint::spin_loop();
     }
-}
-
-/// Check if a listening handle has an established connection (non-blocking).
-#[allow(dead_code)]
-pub fn is_established(handle: usize) -> bool {
-    stack().is_established(handle)
-}
-
-/// Reset a connection back to Listen state (for accepting next client).
-#[allow(dead_code)]
-pub fn reset_to_listen(handle: usize) -> Result<(), TcpError> {
-    stack().reset_to_listen(handle)
 }
 
 /// Send data on a connection. Buffers and sends immediately (no Nagle).

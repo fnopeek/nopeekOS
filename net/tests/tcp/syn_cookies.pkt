@@ -1,0 +1,16 @@
+// #74: with the SYN queue full a SYN is answered with a cookie in the ISN
+// and nothing is kept (syncookies.c); the ACK that returns it still opens
+// the connection, with the MSS rounded down to what the cookie can carry
+// (msstab: 1400 becomes 1300).
+0      listen 8080 0
++0.1   < S 0:0(0) win 65535 <mss 1460>
++0     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++0     from 40001
++0     < S 0:0(0) win 65535 <mss 1400>
++0     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++0.01  < . 1:1(0) ack 1 win 65535
++0     accept
++0     state ESTABLISHED
++0     send 1400
++0     > P. 1:1301(1300) ack 1
++0     > P. 1301:1401(100) ack 1

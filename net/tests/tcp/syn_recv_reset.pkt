@@ -1,0 +1,11 @@
+// #74: a reset in SYN-RECEIVED ends only that request; the listener stays
+// and takes the next SYN (RFC 9293 §3.10.7.4, MUST-11; tcp_check_req). An
+// ACK for something else than our SYN-ACK is reset.
+0      listen 8080
++0.1   < S 0:0(0) win 65535 <mss 1460>
++0     > S. 0:0(0) ack 1 win 65535 <mss 1460>
++0.01  < . 1:1(0) ack 5 win 1000
++0     > R 5:5(0)
++0.01  < R 1:1(0) win 0
++0.01  < S 1000:1000(0) win 65535 <mss 1460>
++0     > S. ?:?(0) ack 1001 win 65535 <mss 1460>

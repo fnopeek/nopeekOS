@@ -6,10 +6,11 @@
 //! ```text
 //! +0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,wscale 7>    segment in
 //! +0     > . 1:1(0) ack 1                                    segment out
-//! +0     connect 192.0.2.2:80 | listen 80 | send 100 | recv 100 | close
+//! +0     connect 192.0.2.2:80 | listen 80 [backlog] | accept | send 100 | recv 100 | close
 //! +0     status 1                                            connect_status
 //! +0     state FIN_WAIT_1                         the state, or GONE when freed
 //! +0     port 5555               segments to a port nobody uses (our ISN 0)
+//! +0     from 40001              the peer's next segments from this port
 //! +0     < icmp 3 4 mtu 1000 seq 1    ICMP error quoting our segment at seq 1
 //! ```
 //!
@@ -86,6 +87,7 @@ struct Seg {
     flags: u8,
     seq: u32,
     len: u32,
+    any_seq: bool,
     ack: Option<u32>,
     win: Option<u16>,
     opts: Option<Vec<Opt>>,
@@ -155,10 +157,12 @@ fn parse_seg(s: &str) -> Result<Seg, String> {
     let flags = parse_flags(w[0])?;
     let (range, len) = w[1].split_once('(').ok_or("START:END(LEN)")?;
     let (start, end) = range.split_once(':').ok_or("START:END(LEN)")?;
-    let (start, end): (u32, u32) = (parse_num(start)?, parse_num(end)?);
     let len: u32 = parse_num(len.strip_suffix(')').ok_or("START:END(LEN)")?)?;
+    // `?:?` matches any sequence number, as for a fresh ISN.
+    let any_seq = start == "?" && end == "?";
+    let (start, end): (u32, u32) = if any_seq { (0, len) } else { (parse_num(start)?, parse_num(end)?) };
     if end.wrapping_sub(start) != len { return Err(format!("{start}:{end} is not {len} bytes")); }
-    let mut seg = Seg { flags, seq: start, len, ack: None, win: None, opts };
+    let mut seg = Seg { flags, seq: start, len, any_seq, ack: None, win: None, opts };
     let mut i = 2;
     while i < w.len() {
         match (w[i], w.get(i + 1)) {
@@ -372,7 +376,7 @@ impl Run {
         if checksum(OUR_IP, dst, &{ let mut s = seg.clone(); s[16] = 0; s[17] = 0; s })
             != u16::from_be_bytes([seg[16], seg[17]]) { bad.push("checksum".into()); }
         if flags != want.flags { bad.push("flags".into()); }
-        if rel_seq != want.seq || len != want.len { bad.push("sequence".into()); }
+        if (!want.any_seq && rel_seq != want.seq) || len != want.len { bad.push("sequence".into()); }
         if let Some(a) = want.ack {
             if flags & ACK == 0 || rel_ack != a { bad.push("ack".into()); }
         }
@@ -406,10 +410,23 @@ impl Run {
                 Ok(())
             }
             "listen" => {
-                self.local_port = parse_num(rest)?;
+                let mut w = rest.split_whitespace();
+                self.local_port = parse_num(w.next().ok_or("listen PORT [BACKLOG]")?)?;
+                let backlog = w.next().map_or(Ok(128), parse_num)?;
                 self.peer.1 = 40000;
                 self.local_isn = None;
-                self.handle = Some(self.stack.listen(self.local_port).map_err(|e| format!("listen: {e}"))?);
+                self.handle = Some(self.stack.listen(self.local_port, backlog).map_err(|e| format!("listen: {e}"))?);
+                Ok(())
+            }
+            "from" => {
+                // A second peer connection: its own port, our ISN learned anew.
+                self.peer.1 = parse_num(rest)?;
+                self.local_isn = None;
+                Ok(())
+            }
+            "accept" => {
+                let h = self.stack.accept(self.handle()?).map_err(|e| format!("accept: {e}"))?;
+                self.handle = Some(h.ok_or("accept: no connection waiting")?);
                 Ok(())
             }
             "send" => {
