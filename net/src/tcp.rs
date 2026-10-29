@@ -35,6 +35,8 @@ pub trait Env {
     fn arp_request(&mut self, ip: [u8; 4]);
     /// Hand a TCP segment to IP. False when the driver queue refused it.
     fn ip_send(&mut self, dst: [u8; 4], segment: &[u8]) -> bool;
+    /// The path MTU to `dst`: the device's, or less once a router said so.
+    fn mtu(&self, dst: [u8; 4]) -> u32;
 }
 
 /// The stack's counters. Atomic, so diagnostics and `send_blocking` read
@@ -168,7 +170,15 @@ fn generate_isn(secret: &[u8; 32], ticks: u64, saddr: [u8; 4], daddr: [u8; 4], s
     hash_part.wrapping_add(timer)
 }
 
-const MSS: u16 = 1460; // standard Ethernet MSS
+/// `TCP_MSS_DEFAULT`: the send MSS when the peer names none (RFC 9293
+/// §3.7.1 MUST-15).
+const TCP_MSS_DEFAULT: u16 = 536;
+/// `TCP_MIN_SND_MSS` (`sysctl_tcp_min_snd_mss`).
+const TCP_MIN_SND_MSS: u16 = 48;
+/// `TCP_MSS_DESIRED`: above it the MSS is bounded by half the largest window.
+const TCP_MSS_DESIRED: u32 = 1220;
+/// IPv4 and TCP header without options.
+const HEADERS: u32 = 40;
 // The SYN/SYN-ACK window is never scaled (RFC 7323), so it's capped at 16-bit.
 const INITIAL_WINDOW: u16 = 65535;
 // TCP Window Scaling (RFC 7323). Without it the window is capped at 64 KiB and
@@ -642,6 +652,19 @@ struct TcpConn {
     released: bool,
     /// Who holds the handle: `KERNEL`, or a module's pid.
     owner: Owner,
+
+    // ── MSS (RFC 9293 §3.7.1, Linux `tcp_sync_mss`) ─────────────────────
+    /// `rx_opt.mss_clamp`: the MSS the peer announced, or 536.
+    mss_clamp: u16,
+    /// `mss_cache`: payload per segment, the options every segment carries
+    /// taken off.
+    mss_cache: u16,
+    /// `advmss`: what we announce, from the device MTU.
+    advmss: u16,
+    /// `icsk_pmtu_cookie`: the path MTU `mss_cache` was computed for.
+    pmtu: u32,
+    /// `max_window`: the largest window the peer offered.
+    max_window: u32,
 }
 
 /// Who holds a connection: the kernel itself, or a module by its pid.
@@ -678,7 +701,7 @@ impl TcpConn {
             // `tcp_init_buffer_space`: start from what a fresh connection offers
             // anyway, `TCP_INIT_CWND * advmss`. Without a start value
             // `rcvbuf_grow` divides by zero.
-            rcvq_space: 10 * MSS as u32,
+            rcvq_space: 10 * 1460,
             drs_win: RCV_WND_MIN as u32,
             send_buf: Vec::new(),
             retries: 0,
@@ -713,7 +736,34 @@ impl TcpConn {
             arp_tries: 0,
             released: false,
             owner,
+            mss_clamp: TCP_MSS_DEFAULT,
+            mss_cache: TCP_MSS_DEFAULT,
+            advmss: 1460,
+            pmtu: 1500,
+            max_window: 0,
         }
+    }
+
+    /// `ipv4_default_advmss` and `tcp_mtup_init`: what we announce and the
+    /// path MTU we start from.
+    fn set_path<E: Env + ?Sized>(&mut self, env: &E) {
+        self.pmtu = env.mtu(self.remote_ip);
+        self.advmss = (self.pmtu.saturating_sub(HEADERS).max(256)) as u16;
+        self.rcvq_space = 10 * self.advmss as u32;
+    }
+
+    /// `tcp_sync_mss`: `tcp_mtu_to_mss` for the path MTU, bounded by half
+    /// the largest window (`tcp_bound_to_half_wnd`).
+    fn sync_mss(&mut self) {
+        let opts = data_opts_len(self) as i32;
+        let mut mss = self.pmtu as i32 - HEADERS as i32;
+        mss = mss.min(self.mss_clamp as i32).max(TCP_MIN_SND_MSS as i32);
+        mss -= opts;
+        let cutoff = if self.max_window > TCP_MSS_DESIRED { self.max_window >> 1 } else { self.max_window };
+        if cutoff != 0 && mss as u32 > cutoff {
+            mss = (cutoff as i32).max(68 - (20 + opts));
+        }
+        self.mss_cache = mss.max(1) as u16;
     }
 }
 
@@ -933,6 +983,7 @@ impl Stack {
         conn.last_send_tick = env.ticks();
         conn.arp_pending = arp_pending;
         conn.arp_tries = 1;
+        conn.set_path(env);
 
         // A connection the owner still holds counts against it until the
         // owner lets go, even once it is Closed (reset, retransmits
@@ -1217,7 +1268,10 @@ impl Stack {
                         // Accept the SYN on the listening socket
                         let iss = generate_isn(secret, io.ticks(), io.env.our_ip(), src_ip, dst_port, src_port);
                         let peer_ws = parse_wscale(data, data_offset);
+                        let peer_mss = parse_mss(data, data_offset);
                         let now = io.ticks();
+                        let env = &*io.env;
+                        let mut advmss = 0;
                         conns.relink(li, |conn| {
                             conn.state = State::SynReceived;
                             conn.remote_ip = src_ip;
@@ -1231,13 +1285,18 @@ impl Stack {
                             // Scaling is active only if the peer offered it too.
                             conn.wscale_ok = peer_ws.is_some();
                             conn.snd_wscale = peer_ws.unwrap_or(0);
+                            conn.set_path(env);
+                            conn.mss_clamp = peer_mss.unwrap_or(TCP_MSS_DEFAULT);
+                            conn.sync_mss();
+                            advmss = conn.advmss;
                         });
 
                         // SYN-ACK: MSS, and Window Scale only if the peer asked for it.
+                        let m = advmss.to_be_bytes();
                         let opts: &[u8] = if peer_ws.is_some() {
-                            &[2, 4, (MSS >> 8) as u8, MSS as u8, 1, 3, 3, OUR_WSCALE]
+                            &[2, 4, m[0], m[1], 1, 3, 3, OUR_WSCALE]
                         } else {
-                            &[2, 4, (MSS >> 8) as u8, MSS as u8]
+                            &[2, 4, m[0], m[1]]
                         };
                         send_segment_with_opts(
                             &mut io, src_ip, dst_port, src_port,
@@ -1343,6 +1402,10 @@ impl Stack {
                     }
                     // SACK active iff the SYN-ACK also carried SACK-permitted.
                     conn.sack_ok = parse_sack_permitted(data, data_offset);
+                    // The peer's MSS, or the default; then the MSS for the
+                    // options now negotiated.
+                    if let Some(m) = parse_mss(data, data_offset) { conn.mss_clamp = m; }
+                    conn.sync_mss();
 
                     // Send ACK with full window
                     let w = recv_window(conn, io.st);
@@ -1358,6 +1421,12 @@ impl Stack {
                     // segment except the SYN itself (RFC 7323 §2.2).
                     let vorheriges_fenster = conn.snd_wnd;
                     conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
+                    // tcp_ack_update_window: a larger window may lift the
+                    // half-window bound on the MSS.
+                    if conn.snd_wnd > conn.max_window {
+                        conn.max_window = conn.snd_wnd;
+                        conn.sync_mss();
+                    }
                     // Every ACK wakes the sender, not only one that clears data:
                     // a pure window update carries `ack == snd_una`, and the
                     // sender must notice the reopened window. The wakeup does not
@@ -1716,7 +1785,7 @@ impl Stack {
                 // SYN retry
                 if slot.state == State::SynSent {
                     let mut opts = [0u8; 40];
-                    let opts_len = syn_opts(&mut opts, io.ts_now_ms());
+                    let opts_len = syn_opts(&mut opts, io.ts_now_ms(), slot.advmss);
                     let mut send_syn_now = false;
 
                     if slot.arp_pending {
@@ -1835,7 +1904,7 @@ impl Stack {
         conn.last_send_tick = io.ticks();
 
         let mut opts = [0u8; 40];
-        let len = syn_opts(&mut opts, io.ts_now_ms());
+        let len = syn_opts(&mut opts, io.ts_now_ms(), conn.advmss);
         send_segment_with_opts(
             &mut io, conn.remote_ip, conn.local_port, conn.remote_port,
             conn.snd_iss, 0, SYN, INITIAL_WINDOW, &[], &opts[..len],
@@ -1961,10 +2030,10 @@ fn reno_ssthresh(conn: &TcpConn) -> u32 {
 /// Shared by the first SYN and every retransmit: a retry with a bare SYN
 /// would bring the connection up without window scaling, SACK or timestamps,
 /// capped at a 64 KiB window for its whole life.
-fn syn_opts(opts: &mut [u8; 40], tsval: u32) -> usize {
+fn syn_opts(opts: &mut [u8; 40], tsval: u32, advmss: u16) -> usize {
     opts[0] = 2;  // MSS option kind
     opts[1] = 4;  // MSS option length
-    opts[2..4].copy_from_slice(&MSS.to_be_bytes());
+    opts[2..4].copy_from_slice(&advmss.to_be_bytes());
     opts[4] = 4;            // SACK-permitted kind
     opts[5] = 2;            // length
     opts[6] = 1;            // NOP
@@ -2048,6 +2117,30 @@ fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {
         sum = (sum & 0xFFFF) + (sum >> 16);
     }
     !(sum as u16)
+}
+
+/// The MSS option (kind 2, len 4) of a SYN; 0 counts as absent, as in
+/// `tcp_parse_options`.
+fn parse_mss(seg: &[u8], data_offset: usize) -> Option<u16> {
+    let end = data_offset.min(seg.len());
+    let mut i = HEADER_LEN;
+    while i < end {
+        match seg[i] {
+            0 => break,
+            1 => i += 1,
+            kind => {
+                if i + 1 >= end { break; }
+                let len = seg[i + 1] as usize;
+                if len < 2 || i + len > end { break; }
+                if kind == 2 && len == 4 {
+                    let m = u16::from_be_bytes([seg[i + 2], seg[i + 3]]);
+                    return (m != 0).then_some(m);
+                }
+                i += len;
+            }
+        }
+    }
+    None
 }
 
 /// Did the peer's options carry SACK-permitted (kind 4, len 2)?
@@ -2185,10 +2278,9 @@ fn data_opts_len(conn: &TcpConn) -> usize {
     if conn.ts_ok { 12 } else { 0 }
 }
 
-/// Payload per segment for this connection. `MSS` is the wire budget; what is
-/// left for data is that minus the options every segment carries.
+/// Payload per segment for this connection (`mss_cache`).
 fn eff_mss(conn: &TcpConn) -> usize {
-    (MSS as usize).saturating_sub(data_opts_len(conn)).max(1)
+    conn.mss_cache as usize
 }
 
 /// Build the TCP option list (Timestamp, then SACK blocks during a gap;

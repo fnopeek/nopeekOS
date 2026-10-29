@@ -1,0 +1,10 @@
+// The SYN-ACK's MSS bounds our segments (RFC 9293 §3.7.1); the timestamp
+// option comes out of it: 1400 - 12 = 1388 bytes of data.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1400,sackOK,TS val 100 ecr 0,nop,wscale 7>
++0     > . 1:1(0) ack 1
+
++0     send 2000
++0     > P. 1:1389(1388) ack 1
++0     > P. 1389:2001(612) ack 1

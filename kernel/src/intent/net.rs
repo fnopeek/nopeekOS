@@ -669,6 +669,7 @@ pub fn intent_net_info() {
                 kprintln!("    IPv4    (no lease)");
             } else {
                 kprintln!("    IPv4    {}.{}.{}.{}/{}", ip[0], ip[1], ip[2], ip[3], prefix);
+                kprintln!("    MTU     {}", crate::net::ipv4::mtu());
             }
         }
         // State reflects the real carrier (WiFi: associated + keyed; wired:
@@ -713,6 +714,9 @@ pub fn intent_net_info() {
     }
     if no_route > 0 {
         kprintln!("  Refused out (no route): {}", no_route);
+    }
+    if crate::net::ipv4::too_big() > 0 {
+        kprintln!("  Refused out (larger than the MTU): {}", crate::net::ipv4::too_big());
     }
     kprintln!();
 }

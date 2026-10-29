@@ -1,0 +1,9 @@
+// Without an MSS option the send MSS is 536 (RFC 9293 §3.7.1 MUST-15).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535
++0     > . 1:1(0) ack 1
+
++0     send 1000
++0     > P. 1:537(536) ack 1
++0     > P. 537:1001(464) ack 1

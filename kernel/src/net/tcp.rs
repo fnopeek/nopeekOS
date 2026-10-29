@@ -35,6 +35,7 @@ impl Env for KernelEnv {
     fn ip_send(&mut self, dst: [u8; 4], segment: &[u8]) -> bool {
         ipv4::send(dst, ipv4::PROTO_TCP, segment)
     }
+    fn mtu(&self, dst: [u8; 4]) -> u32 { ipv4::path_mtu(dst) }
 }
 
 /// Empty looks at `ack_gen` before yielding.

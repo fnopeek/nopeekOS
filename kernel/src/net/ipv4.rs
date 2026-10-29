@@ -33,6 +33,34 @@ pub fn drops() -> (alloc::vec::Vec<(&'static str, u64)>, u64) {
     (ins, OUT_NO_ROUTES.load(Relaxed))
 }
 
+/// The largest IPv4 datagram the Ethernet devices carry.
+pub const DEVICE_MTU: u32 = (crate::netdev::MTU - eth::HEADER_LEN) as u32;
+
+/// The interface MTU: the device's, or less when DHCP says so (option 26).
+static MTU: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(DEVICE_MTU);
+
+/// Datagrams larger than the MTU, refused: nothing fragments them (Linux
+/// MIB `FragFails`).
+static TOO_BIG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Set the interface MTU, within 68 (RFC 791) and what the device carries.
+pub fn set_mtu(mtu: u32) {
+    MTU.store(mtu.clamp(68, DEVICE_MTU), core::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn mtu() -> u32 {
+    MTU.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// The path MTU to `dst`.
+pub fn path_mtu(_dst: [u8; 4]) -> u32 {
+    mtu()
+}
+
+pub fn too_big() -> u64 {
+    TOO_BIG.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Our address and mask.
 pub fn iface() -> net_core::ip::Iface {
     net_core::ip::Iface { ip: arp::our_ip(), mask: *SUBNET.lock() }
@@ -219,6 +247,12 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
     // __mkroute_output: no loopback device, and 0/8 and 240/4 lead nowhere.
     if !iface().output_ok(dst_ip, false) {
         OUT_NO_ROUTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return (false, Ok(()));
+    }
+    // ip_finish_output: nothing larger than the path MTU goes out (RFC 1122
+    // §3.3.3 MMS_S); there is no local fragmentation.
+    if (HEADER_LEN + payload.len()) as u32 > path_mtu(dst_ip) {
+        TOO_BIG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return (false, Ok(()));
     }
     let src_ip = arp::our_ip();

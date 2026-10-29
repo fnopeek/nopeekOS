@@ -32,6 +32,7 @@ static LEASE_GW_MAC: spin::Mutex<[u8; 6]> = spin::Mutex::new([0; 6]);
 /// make the retry logic think a lease exists. Outside QEMU we leave 0.0.0.0,
 /// which is what the link-state tick keys its retry on.
 fn no_lease() {
+    super::ipv4::set_mtu(super::ipv4::DEVICE_MTU);
     *LEASE_MAC.lock() = [0; 6];
     *LEASE_GW_MAC.lock() = [0; 6];
     if crate::virtio_net::is_available() {
@@ -383,12 +384,13 @@ fn build_dhcp(mac: &[u8; 6], xid: u32, msg_type: u8, requested_ip: [u8; 4], serv
         pos += 6;
     }
 
-    // Option 55: Parameter Request List (router, DNS, subnet mask)
-    pkt[pos] = 55; pkt[pos + 1] = 3;
+    // Option 55: Parameter Request List (router, DNS, subnet mask, MTU)
+    pkt[pos] = 55; pkt[pos + 1] = 4;
     pkt[pos + 2] = 1;  // Subnet mask
     pkt[pos + 3] = 3;  // Router
     pkt[pos + 4] = 6;  // DNS
-    pos += 5;
+    pkt[pos + 5] = 26; // Interface MTU (RFC 2132 §5.1)
+    pos += 6;
 
     // End option
     pkt[pos] = 255;
@@ -419,6 +421,7 @@ fn parse_dhcp_reply(data: &[u8], xid: u32, mac: &[u8; 6], expected_type: u8)
     let mut router = [0u8; 4];
     let mut dns_ip = [0u8; 4];
     let mut subnet = [0u8; 4];
+    let mut mtu = None;
 
     while pos < data.len() {
         let opt = data[pos];
@@ -435,6 +438,7 @@ fn parse_dhcp_reply(data: &[u8], xid: u32, mac: &[u8; 6], expected_type: u8)
             3 if len >= 4 => router.copy_from_slice(&data[val_start..val_start + 4]),
             1 if len >= 4 => subnet.copy_from_slice(&data[val_start..val_start + 4]),
             6 if len >= 4 => dns_ip.copy_from_slice(&data[val_start..val_start + 4]),
+            26 if len >= 2 => mtu = Some(u16::from_be_bytes([data[val_start], data[val_start + 1]])),
             _ => {}
         }
 
@@ -453,6 +457,7 @@ fn parse_dhcp_reply(data: &[u8], xid: u32, mac: &[u8; 6], expected_type: u8)
     if dns_ip != [0; 4] {
         dns::set_server(dns_ip);
     }
+    super::ipv4::set_mtu(mtu.map_or(super::ipv4::DEVICE_MTU, u32::from));
 
     Some((your_ip, server_ip))
 }
