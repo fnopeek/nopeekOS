@@ -152,7 +152,7 @@ struct NvmeState {
 static NVME: Mutex<Option<NvmeState>> = Mutex::new(None);
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 
-// The Dataset Management range of `discard_blocks` (one 4 KB page).
+// The Dataset Management ranges of `discard_ranges` (one 4 KB page).
 static DMA_BUF: Mutex<Option<DmaRegion>> = Mutex::new(None);
 
 /// Pages one PRP list addresses (NVMe base spec 4.1.1: a 4 KB list holds
@@ -1122,41 +1122,50 @@ pub fn has_discard() -> bool {
     }
 }
 
-/// TRIM/Deallocate blocks via NVMe Dataset Management command.
-/// start = block number (4KB blocks), count = number of blocks.
-pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
-    if count == 0 { return Ok(()); }
+/// Ranges per Dataset Management command, Linux' `NVME_DSM_MAX_RANGES`:
+/// 16 bytes each, one 4 KiB page.
+const DSM_MAX_RANGES: usize = 256;
 
-    let mut nvme = NVME.lock();
-    let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+/// Deallocate `ranges` (first block, block count), as Linux'
+/// `nvme_setup_discard` up to 256 of them per Dataset Management command.
+/// The controller lock is let go between commands.
+pub fn discard_ranges(ranges: &[(u64, u64)]) -> Result<(), BlkError> {
+    let lbas = (BLOCK_SIZE / SECTOR_SIZE) as u64;
+    // A range's length is a 32-bit count of LBAs.
+    let max_blocks = u32::MAX as u64 / lbas;
+    let mut pieces = ranges.iter().filter(|r| r.1 > 0).flat_map(|&(start, count)| {
+        (0..count.div_ceil(max_blocks)).map(move |i| {
+            let s = start + i * max_blocks;
+            (s, max_blocks.min(start + count - s))
+        })
+    }).peekable();
 
-    if state.oncs & (1 << 2) == 0 {
-        return Ok(()); // No DSM support, silent no-op (same as virtio)
+    while pieces.peek().is_some() {
+        let mut nvme = NVME.lock();
+        let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
+        if state.oncs & (1 << 2) == 0 {
+            return Ok(()); // No DSM support, silent no-op (same as virtio)
+        }
+        let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
+
+        // Range entry: context attributes (4 bytes, unused for deallocate),
+        // length in LBAs (4), starting LBA (8).
+        let mut n = 0u64;
+        for (start, count) in pieces.by_ref().take(DSM_MAX_RANGES) {
+            dma.fill(n * 16, 0, 4);
+            dma.copy_in(n * 16 + 4, &((count * lbas) as u32).to_le_bytes());
+            dma.copy_in(n * 16 + 8, &(start * lbas).to_le_bytes());
+            n += 1;
+        }
+
+        let mut cmd = SqEntry::zeroed();
+        cmd.opcode = NVM_DSM;
+        cmd.nsid = 1;
+        cmd.prp1 = dma.phys();
+        cmd.cdw10 = (n - 1) as u32;  // Number of ranges - 1
+        cmd.cdw11 = 1 << 2;          // AD (Attribute Deallocate) bit
+        io_command(state, cmd)?;
     }
-
-    let dma = DMA_BUF.lock().ok_or(BlkError::NotInitialized)?;
-
-    // Build Dataset Management Range entry (16 bytes)
-    // Offset 0: Context Attributes (4 bytes) — unused for deallocate
-    // Offset 4: Length in LBAs (4 bytes)
-    // Offset 8: Starting LBA (8 bytes)
-    let start_lba = start * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-    let lba_count = count * (BLOCK_SIZE / SECTOR_SIZE) as u64;
-
-    dma.fill(0u64, 0, 16);
-    // Length in LBAs at offset 4
-    dma.copy_in(4u64, &(lba_count as u32).to_le_bytes());
-    // Starting LBA at offset 8
-    dma.copy_in(8u64, &start_lba.to_le_bytes());
-
-    let mut cmd = SqEntry::zeroed();
-    cmd.opcode = NVM_DSM;
-    cmd.nsid = 1;
-    cmd.prp1 = dma.phys();
-    cmd.cdw10 = 0;         // Number of ranges - 1 (0 = 1 range)
-    cmd.cdw11 = 1 << 2;   // AD (Attribute Deallocate) bit
-
-    io_command(state, cmd)?;
     Ok(())
 }
 

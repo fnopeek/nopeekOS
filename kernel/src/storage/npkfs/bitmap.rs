@@ -239,10 +239,8 @@ impl Bitmap {
                 }
             }
         }
-        for (start, count) in &merged {
-            if let Err(e) = crate::blkdev::discard_blocks(*start, *count) {
-                crate::kprintln!("[npk] TRIM failed at block {}: {}", start, e);
-            }
+        if let Err(e) = crate::blkdev::discard_ranges(&merged) {
+            crate::kprintln!("[npk] TRIM of {} range(s) failed: {}", merged.len(), e);
         }
         self.trim_pending.clear();
     }

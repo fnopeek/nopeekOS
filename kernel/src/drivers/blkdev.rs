@@ -258,14 +258,15 @@ pub fn has_discard() -> bool {
     }
 }
 
-pub fn discard_blocks(start: u64, count: u64) -> Result<(), BlkError> {
+pub fn discard_ranges(ranges: &[(u64, u64)]) -> Result<(), BlkError> {
     // Same partition_offset correction as read_block / write_block;
     // without it, TRIM would hit the ESP / GPT area in front of our
     // partition and destroy the bootloader and kernel.
-    let actual = start + PARTITION_OFFSET.load(Ordering::Acquire);
+    let off = PARTITION_OFFSET.load(Ordering::Acquire);
+    let actual: alloc::vec::Vec<(u64, u64)> = ranges.iter().map(|&(s, c)| (s + off, c)).collect();
     if nvme::is_available() {
-        nvme::discard_blocks(actual, count)
+        nvme::discard_ranges(&actual)
     } else {
-        virtio_blk::discard_blocks(actual, count)
+        actual.iter().try_for_each(|&(s, c)| virtio_blk::discard_blocks(s, c))
     }
 }
