@@ -466,6 +466,18 @@ const SND_BUF_MAX: usize = 256 * 1024;
 /// `tcp_add_reno_sack`, sender-side SACK, then PRR.
 const CONG_CONTROL: bool = false;
 
+/// `tcp_ca_state`: where the sender stands with loss.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaState {
+    /// `TCP_CA_Open`: nothing lost.
+    Open,
+    /// `TCP_CA_Recovery`: fast retransmit sent, until `high_seq` is
+    /// acknowledged (RFC 6582).
+    Recovery,
+    /// `TCP_CA_Loss`: the RTO fired, until `high_seq` is acknowledged.
+    Loss,
+}
+
 /// `TCP_INIT_CWND` — ten segments (RFC 6928).
 const TCP_INIT_CWND: u32 = 10;
 /// Default `tp->reordering`: three duplicate ACKs trigger fast retransmit
@@ -730,13 +742,15 @@ struct TcpConn {
     snd_ssthresh: u32,
     /// `snd_cwnd_cnt` — the fractional packets of `tcp_cong_avoid_ai`.
     snd_cwnd_cnt: u32,
-    /// Consecutive duplicate ACKs.
+    /// `sacked_out` without SACK (`tcp_add_reno_sack`): duplicate ACKs, each
+    /// a segment that left the network.
     dupacks: u32,
-    /// Whether we are in fast recovery (RFC 6582 "recover").
-    in_recovery: bool,
-    /// `snd_nxt` on entry; recovery ends only beyond it (RFC 6582 §3.2,
-    /// otherwise one loss event halves the window several times).
-    recovery_end: u32,
+    /// `icsk_ca_state`.
+    ca_state: CaState,
+    /// `high_seq`: `snd_nxt` when Recovery or Loss began; they end only
+    /// once it is acknowledged (RFC 6582 "recover"), so one loss event
+    /// reduces once and retransmits once.
+    high_seq: u32,
 
     // TCP Timestamps (RFC 7323). `ts_ok` once both SYNs carried the option;
     // `ts_recent` = the peer's most recent in-order TSval, echoed as our TSecr
@@ -879,8 +893,8 @@ impl TcpConn {
             snd_ssthresh: u32::MAX,
             snd_cwnd_cnt: 0,
             dupacks: 0,
-            in_recovery: false,
-            recovery_end: 0,
+            ca_state: CaState::Open,
+            high_seq: 0,
             ts_ok: false,
             ts_recent: 0,
             sack_ok: false,
@@ -1407,7 +1421,7 @@ impl Stack {
         self.conns.get(handle).map_or((0, 0, 0, false), |c| {
             (c.snd_cwnd,
              if c.snd_ssthresh == u32::MAX { 0 } else { c.snd_ssthresh },
-             c.dupacks, c.in_recovery)
+             c.dupacks, c.ca_state == CaState::Recovery)
         })
     }
 
@@ -1932,20 +1946,21 @@ impl Stack {
                     if ist_dup {
                         conn.dupacks += 1;
                         io.st.dupacks_seen.fetch_add(1, Ordering::Relaxed);
-                        if conn.dupacks == DUPACK_THRESH
-                            && (!conn.in_recovery || !CONG_CONTROL)
-                        {
-                            // Halve, enter recovery, and resend the missing
-                            // segment now instead of waiting for the RTO.
+                        // tcp_fastretrans_alert: the third enters Recovery,
+                        // once per loss event; in Recovery and Loss they only
+                        // count.
+                        if conn.dupacks >= DUPACK_THRESH && conn.ca_state == CaState::Open {
+                            // tcp_enter_recovery: halve, and resend the
+                            // missing segment now instead of waiting for the
+                            // RTO.
+                            conn.ca_state = CaState::Recovery;
+                            conn.high_seq = conn.snd_nxt;
                             if CONG_CONTROL {
                                 conn.snd_ssthresh = reno_ssthresh(conn);
                                 conn.snd_cwnd =
                                     conn.snd_ssthresh + DUPACK_THRESH;
-                                conn.in_recovery = true;
-                                conn.recovery_end = conn.snd_nxt;
                                 conn.snd_cwnd_cnt = 0;
                             }
-                            conn.dupacks = 0;
                             // Only the missing segment, not the whole window:
                             // everything behind it is in flight and may stay
                             // so. Go-back-N (`snd_nxt = snd_una`) would make
@@ -1953,7 +1968,7 @@ impl Stack {
                             // belongs to the RTO, where we really know nothing.
                             retransmit_head(conn, &mut io);
                             io.st.fast_retrans.fetch_add(1, Ordering::Relaxed);
-                        } else if conn.in_recovery {
+                        } else if conn.ca_state == CaState::Recovery && CONG_CONTROL {
                             // "Inflate": every further duplicate ACK means a
                             // segment has left the network.
                             conn.snd_cwnd += 1;
@@ -1986,20 +2001,31 @@ impl Stack {
                         // ── Update the congestion window ────────────────
                         let mss_now = eff_mss(conn).max(1);
                         let acked_pkts = (acked.div_ceil(mss_now) as u32).max(1);
-                        conn.dupacks = 0;
-                        if conn.in_recovery {
-                            // RFC 6582 §3.2: recovery ends only once everything
-                            // in flight at entry is acknowledged; otherwise one
-                            // loss event halves the window several times.
-                            let noch_offen = (conn.recovery_end
-                                .wrapping_sub(ack) as i32) > 0;
-                            if !noch_offen {
-                                conn.in_recovery = false;
-                                conn.snd_cwnd = conn.snd_ssthresh;
-                                conn.snd_cwnd_cnt = 0;
+                        let partial = (conn.high_seq.wrapping_sub(ack) as i32) > 0;
+                        match conn.ca_state {
+                            CaState::Recovery if partial => {
+                                // RFC 6582 §3.2 step 3, tcp_remove_reno_sacks
+                                // and tcp_mark_head_lost: the next hole is
+                                // the new head; resend it now.
+                                conn.dupacks = conn.dupacks.saturating_sub(acked_pkts - 1);
+                                retransmit_head(conn, &mut io);
+                                io.st.fast_retrans.fetch_add(1, Ordering::Relaxed);
                             }
-                        } else if CONG_CONTROL {
-                            cong_avoid(conn, acked_pkts);
+                            CaState::Loss if partial => conn.dupacks = 0,
+                            CaState::Recovery => {
+                                // tcp_end_cwnd_reduction
+                                conn.ca_state = CaState::Open;
+                                conn.dupacks = 0;
+                                if CONG_CONTROL {
+                                    conn.snd_cwnd = conn.snd_ssthresh;
+                                    conn.snd_cwnd_cnt = 0;
+                                }
+                            }
+                            CaState::Loss | CaState::Open => {
+                                conn.ca_state = CaState::Open;
+                                conn.dupacks = 0;
+                                if CONG_CONTROL { cong_avoid(conn, acked_pkts); }
+                            }
                         }
                         write_xmit(conn, &mut io);
                     }
@@ -2504,8 +2530,9 @@ impl Stack {
                                 slot.snd_ssthresh = reno_ssthresh(slot);
                                 slot.snd_cwnd = 1;
                                 slot.snd_cwnd_cnt = 0;
-                                slot.in_recovery = false;
                             }
+                            slot.ca_state = CaState::Loss;
+                            slot.high_seq = slot.snd_nxt;
                             slot.dupacks = 0;
                             io.st.rto_fired.fetch_add(1, Ordering::Relaxed);
                             retransmit_head(slot, &mut io);
