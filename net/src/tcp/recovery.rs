@@ -3,16 +3,19 @@
 //! queue and its scoreboard (`tcp_sacktag_write_queue`,
 //! `tcp_clean_rtx_queue`), RACK loss detection (RFC 8985), NewReno without
 //! SACK (RFC 6582), the congestion state machine (`tcp_fastretrans_alert`),
-//! Proportional Rate Reduction (RFC 6937, `tcp_cwnd_reduction`) and the
-//! retransmissions they lead to (`tcp_xmit_retransmit_queue`).
+//! Proportional Rate Reduction (RFC 6937, `tcp_cwnd_reduction`), the
+//! retransmissions they lead to (`tcp_xmit_retransmit_queue`), and the
+//! window after idle and while the application sends less
+//! (`tcp_cwnd_restart`, `tcp_cwnd_application_limited`). The window itself
+//! grows and shrinks by CUBIC (`cubic.rs`).
 //!
 //! Every segment is one skb with `tcp_skb_pcount` 1. Not here: undo of a
 //! reduction (D-SACK, timestamps, F-RTO), tail loss probes, the RACK
-//! reordering window's growth on D-SACK, the delayed-ACK guard of the
-//! minimum RTT filter, and the idle and application-limited cwnd decay
-//! (RFC 7661).
+//! reordering window's growth on D-SACK, and the delayed-ACK guard of the
+//! minimum RTT filter.
 
 use super::*;
+use super::cubic;
 
 /// `TCPCB_SACKED_ACKED`, `TCPCB_SACKED_RETRANS`, `TCPCB_LOST`,
 /// `TCPCB_EVER_RETRANS`.
@@ -160,6 +163,13 @@ pub(super) struct Tx {
     /// `undo_marker != 0`: a reduction this connection may still take back.
     /// Nothing undoes here yet, but its presence still decides.
     undo_marker: bool,
+    /// `lsndtime`: the tick data last went out.
+    pub(super) lsndtime: u64,
+    /// `snd_cwnd_used`, `snd_cwnd_stamp`: the most in flight while the
+    /// window was not filled, and when cwnd last changed or was full.
+    snd_cwnd_used: u32,
+    snd_cwnd_stamp: u64,
+    pub(super) cubic: cubic::Cubic,
 }
 
 impl Tx {
@@ -177,6 +187,10 @@ impl Tx {
             reo_at: 0,
             nospace: false,
             undo_marker: false,
+            lsndtime: 0,
+            snd_cwnd_used: 0,
+            snd_cwnd_stamp: 0,
+            cubic: cubic::Cubic::default(),
         }
     }
 
@@ -262,8 +276,9 @@ fn rearm_rto(c: &mut TcpConn, now: u64, now_us: u64) {
     c.rtx_at = now + rto;
 }
 
-/// `tcp_cwnd_validate`, without the decay of an unused window.
-pub(super) fn cwnd_validate(c: &mut TcpConn, is_cwnd_limited: bool) {
+/// `tcp_cwnd_validate` (RFC 7661): track how much of the window is used;
+/// a window unused for an RTO shrinks towards what was used.
+fn cwnd_validate(c: &mut TcpConn, is_cwnd_limited: bool, now: u64) {
     if !before(c.snd_una, c.tx.cwnd_usage_seq)
         || is_cwnd_limited
         || (!c.tx.is_cwnd_limited && c.tx.packets_out > c.tx.max_packets_out)
@@ -272,32 +287,94 @@ pub(super) fn cwnd_validate(c: &mut TcpConn, is_cwnd_limited: bool) {
         c.tx.max_packets_out = c.tx.packets_out;
         c.tx.cwnd_usage_seq = c.snd_nxt;
     }
+    if self::is_cwnd_limited(c) {
+        c.tx.snd_cwnd_used = 0;
+        c.tx.snd_cwnd_stamp = now;
+    } else {
+        if c.tx.packets_out > c.tx.snd_cwnd_used { c.tx.snd_cwnd_used = c.tx.packets_out; }
+        if now.saturating_sub(c.tx.snd_cwnd_stamp) >= c.rto {
+            cwnd_application_limited(c, now);
+        }
+    }
+}
+
+/// `tcp_cwnd_application_limited`: limited by the application or the
+/// receiver's window, not by the network.
+fn cwnd_application_limited(c: &mut TcpConn, now: u64) {
+    if c.ca_state == CaState::Open && !c.tx.nospace {
+        let win_used = c.tx.snd_cwnd_used.max(TCP_INIT_CWND);
+        if win_used < c.snd_cwnd {
+            c.snd_ssthresh = current_ssthresh(c);
+            c.snd_cwnd = (c.snd_cwnd + win_used) >> 1;
+        }
+        c.tx.snd_cwnd_used = 0;
+    }
+    c.tx.snd_cwnd_stamp = now;
+}
+
+/// `tcp_cwnd_restart`: after idle longer than an RTO the window falls back
+/// towards the initial one, halving per RTO idle.
+fn cwnd_restart(c: &mut TcpConn, delta: u64, now: u64) {
+    let restart_cwnd = TCP_INIT_CWND.min(c.snd_cwnd);
+    let mut cwnd = c.snd_cwnd;
+    c.snd_ssthresh = current_ssthresh(c);
+    let mut delta = delta as i64;
+    loop {
+        delta -= c.rto as i64;
+        if delta <= 0 || cwnd <= restart_cwnd { break; }
+        cwnd >>= 1;
+    }
+    c.snd_cwnd = cwnd.max(restart_cwnd);
+    c.tx.snd_cwnd_stamp = now;
+    c.tx.snd_cwnd_used = 0;
+}
+
+/// `tcp_slow_start_after_idle_check`.
+pub(super) fn slow_start_after_idle_check(c: &mut TcpConn, now: u64) {
+    if c.tx.packets_out != 0 { return; }
+    let delta = now.saturating_sub(c.tx.lsndtime);
+    if delta > c.rto { cwnd_restart(c, delta, now); }
+}
+
+/// `tcp_event_data_sent`: a segment with data leaves.
+pub(super) fn event_data_sent(c: &mut TcpConn, now: u64) {
+    if c.tx.in_flight() == 0 { cubic::tx_start(c, now); }
+    c.tx.lsndtime = now;
+}
+
+/// `tcp_init_congestion_control` and the stamps `tcp_init_transfer` sets,
+/// once the connection is established.
+pub(super) fn init_congestion_control(c: &mut TcpConn, now: u64, now_us: u64) {
+    c.tx.lsndtime = now;
+    c.tx.snd_cwnd_stamp = now;
+    cubic::init(c, now_us);
 }
 
 /// What `tcp_write_xmit` adds once it sent `sent_pkts` new segments.
-pub(super) fn xmit_done(c: &mut TcpConn, sent_pkts: u32, mut is_cwnd_limited: bool) {
+pub(super) fn xmit_done(c: &mut TcpConn, sent_pkts: u32, mut is_cwnd_limited: bool, now: u64) {
     is_cwnd_limited |= c.tx.in_flight() >= c.snd_cwnd;
-    if sent_pkts > 0 || is_cwnd_limited { cwnd_validate(c, is_cwnd_limited); }
+    if sent_pkts > 0 || is_cwnd_limited { cwnd_validate(c, is_cwnd_limited, now); }
     if sent_pkts > 0 && in_cwnd_reduction(c) { c.tx.prr_out += sent_pkts; }
 }
 
 /// `tcp_is_cwnd_limited`.
-fn is_cwnd_limited(c: &TcpConn) -> bool {
+pub(super) fn is_cwnd_limited(c: &TcpConn) -> bool {
     if c.tx.is_cwnd_limited { return true; }
     if c.snd_cwnd < c.snd_ssthresh { return c.snd_cwnd < 2 * c.tx.max_packets_out; }
     false
 }
 
-/// `tcp_reno_cong_avoid`: `tcp_slow_start`, then `tcp_cong_avoid_ai`.
-fn cong_avoid(c: &mut TcpConn, mut acked: u32) {
-    if !is_cwnd_limited(c) { return; }
-    if c.snd_cwnd < c.snd_ssthresh {
-        let cwnd = (c.snd_cwnd + acked).min(c.snd_ssthresh);
-        acked -= cwnd - c.snd_cwnd;
-        c.snd_cwnd = cwnd;
-        if acked == 0 { return; }
-    }
-    let w = c.snd_cwnd.max(1);
+/// `tcp_slow_start`: returns what is left of `acked` past ssthresh.
+pub(super) fn slow_start(c: &mut TcpConn, acked: u32) -> u32 {
+    let cwnd = (c.snd_cwnd + acked).min(c.snd_ssthresh);
+    let left = acked - (cwnd - c.snd_cwnd);
+    c.snd_cwnd = cwnd;
+    left
+}
+
+/// `tcp_cong_avoid_ai`: one packet more per `w` packets ACKed.
+pub(super) fn cong_avoid_ai(c: &mut TcpConn, w: u32, acked: u32) {
+    let w = w.max(1);
     if c.snd_cwnd_cnt >= w {
         c.snd_cwnd_cnt = 0;
         c.snd_cwnd += 1;
@@ -308,11 +385,6 @@ fn cong_avoid(c: &mut TcpConn, mut acked: u32) {
         c.snd_cwnd_cnt -= delta * w;
         c.snd_cwnd += delta;
     }
-}
-
-/// `tcp_reno_ssthresh`: half, at least two.
-fn reno_ssthresh(c: &TcpConn) -> u32 {
-    (c.snd_cwnd >> 1).max(2)
 }
 
 /// `tcp_current_ssthresh`.
@@ -339,7 +411,7 @@ fn init_cwnd_reduction(c: &mut TcpConn) {
     c.tx.prior_cwnd = c.snd_cwnd;
     c.tx.prr_delivered = 0;
     c.tx.prr_out = 0;
-    c.snd_ssthresh = reno_ssthresh(c);
+    c.snd_ssthresh = cubic::recalc_ssthresh(c);
 }
 
 /// `tcp_cwnd_reduction`: PRR (RFC 6937).
@@ -363,9 +435,10 @@ fn cwnd_reduction(c: &mut TcpConn, newly_acked_sacked: u32, newly_lost: u32, fla
 }
 
 /// `tcp_end_cwnd_reduction`.
-fn end_cwnd_reduction(c: &mut TcpConn) {
+fn end_cwnd_reduction(c: &mut TcpConn, now: u64) {
     if c.snd_ssthresh != u32::MAX && c.tx.undo_marker {
         c.snd_cwnd = c.snd_ssthresh;
+        c.tx.snd_cwnd_stamp = now;
     }
 }
 
@@ -611,7 +684,7 @@ fn fastretrans_alert(c: &mut TcpConn, num_dupack: u32, flag: &mut u32, rexmit: &
     } else if !before(c.snd_una, c.high_seq) && c.ca_state == CaState::Recovery {
         if is_reno(c) { c.tx.sacked_out = 0; }
         if try_undo_recovery(c) { return; }
-        end_cwnd_reduction(c);
+        end_cwnd_reduction(c, now);
     }
 
     // E. Process the state.
@@ -647,7 +720,7 @@ fn fastretrans_alert(c: &mut TcpConn, num_dupack: u32, flag: &mut u32, rexmit: &
 }
 
 /// `tcp_cong_control`: PRR while recovering, else growth.
-fn cong_control(c: &mut TcpConn, acked_sacked: u32, newly_lost: u32, flag: u32) {
+fn cong_control(c: &mut TcpConn, acked_sacked: u32, newly_lost: u32, flag: u32, now: u64) {
     if in_cwnd_reduction(c) {
         cwnd_reduction(c, acked_sacked, newly_lost, flag);
     } else {
@@ -657,7 +730,10 @@ fn cong_control(c: &mut TcpConn, acked_sacked: u32, newly_lost: u32, flag: u32) 
         } else {
             flag & FLAG_DATA_ACKED != 0
         };
-        if may_raise { cong_avoid(c, acked_sacked); }
+        if may_raise {
+            cubic::cong_avoid(c, acked_sacked, now);
+            c.tx.snd_cwnd_stamp = now;
+        }
     }
 }
 
@@ -684,15 +760,17 @@ pub(super) fn enter_loss(c: &mut TcpConn, now_us: u64) {
         || (c.ca_state == CaState::Loss && c.retries == 0)
     {
         c.tx.prior_cwnd = c.snd_cwnd;
-        c.snd_ssthresh = reno_ssthresh(c);
+        c.snd_ssthresh = cubic::recalc_ssthresh(c);
         c.tx.undo_marker = true;
     }
     c.snd_cwnd = c.tx.in_flight() + 1;
     c.snd_cwnd_cnt = 0;
+    c.tx.snd_cwnd_stamp = now_us / TICK_US;
     if c.ca_state <= CaState::Disorder && c.tx.sacked_out >= TCP_REORDERING {
         c.tx.reordering = c.tx.reordering.min(TCP_REORDERING);
     }
     c.ca_state = CaState::Loss;
+    cubic::enter_loss(c, now_us);
     c.high_seq = c.snd_nxt;
 }
 
@@ -711,6 +789,7 @@ pub(super) fn simple_retransmit<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>
         c.snd_ssthresh = current_ssthresh(c);
         c.tx.undo_marker = false;
         c.ca_state = CaState::Loss;
+        cubic::enter_loss(c, io.env.uptime_us());
     }
     xmit_retransmit_queue(c, io);
 }
@@ -782,6 +861,7 @@ pub(super) fn retransmit_skb<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i
             _ => ACK | PSH,
         };
         let w = recv_window(c, io.st);
+        if n > 0 { event_data_sent(c, io.ticks()); }
         ok = send_seg(c, io, seq, c.rcv_nxt, flags, w, &chunk[..n]);
         if ok {
             let now_us = io.env.uptime_us();
@@ -982,7 +1062,7 @@ fn sacktag_write_queue(c: &mut TcpConn, ack: u32, blocks: &[(u32, u32)], prior_u
 }
 
 /// `tcp_ack_update_window`, then `snd_una` moves.
-fn ack_update_window(c: &mut TcpConn, ack: u32, ack_seq: u32, nwin: u32) -> u32 {
+fn ack_update_window(c: &mut TcpConn, ack: u32, ack_seq: u32, nwin: u32, now: u64) -> u32 {
     let mut flag = 0;
     // tcp_may_update_window (RFC 9293 §3.10.7.4 SND.WL1/WL2).
     if after(ack, c.snd_una)
@@ -993,6 +1073,9 @@ fn ack_update_window(c: &mut TcpConn, ack: u32, ack_seq: u32, nwin: u32) -> u32 
         c.snd_wl1 = ack_seq;
         if c.snd_wnd != nwin {
             c.snd_wnd = nwin;
+            if c.send_buf.len() > c.snd_nxt.wrapping_sub(c.snd_una) as usize {
+                slow_start_after_idle_check(c, now);
+            }
             // A larger window may lift the half-window bound on the MSS.
             if nwin > c.max_window {
                 c.max_window = nwin;
@@ -1009,7 +1092,8 @@ fn ack_update_window(c: &mut TcpConn, ack: u32, ack_seq: u32, nwin: u32) -> u32 
 /// (Karn).
 #[allow(clippy::too_many_arguments)]
 fn update_rtt(c: &mut TcpConn, flag: u32, seq_rtt: Option<u64>, sack_rtt: Option<u64>,
-                  mut ca_rtt: Option<u64>, tsecr: Option<u32>, ts_now_ms: u32, now: u64) -> bool {
+                  mut ca_rtt: Option<u64>, tsecr: Option<u32>, ts_now_ms: u32, now: u64)
+                  -> (bool, Option<u64>) {
     let mut seq_rtt = seq_rtt.or(sack_rtt);
     if seq_rtt.is_none() && c.ts_ok && flag & FLAG_ACKED != 0
         && let Some(t) = tsecr.filter(|&t| t != 0)
@@ -1021,10 +1105,10 @@ fn update_rtt(c: &mut TcpConn, flag: u32, seq_rtt: Option<u64>, sack_rtt: Option
             ca_rtt = seq_rtt;
         }
     }
-    let Some(m) = seq_rtt else { return false };
+    let Some(m) = seq_rtt else { return (false, ca_rtt) };
     rtt_min_sample(c, ca_rtt.unwrap_or(m), now);
     c.ack_update_rtt(m.max(1));
-    true
+    (true, ca_rtt)
 }
 
 /// `tcp_update_rtt_min`.
@@ -1086,7 +1170,7 @@ fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: 
         sack_rtt = Some(now_us.saturating_sub(st.first_sackt));
         ca_rtt = Some(now_us.saturating_sub(st.last_sackt));
     }
-    let rtt_update = update_rtt(c, flag, seq_rtt, sack_rtt, ca_rtt, tsecr, ts_now_ms, now);
+    let (rtt_update, rs_rtt) = update_rtt(c, flag, seq_rtt, sack_rtt, ca_rtt, tsecr, ts_now_ms, now);
 
     if flag & FLAG_ACKED != 0 {
         flag |= FLAG_SET_XMIT_TIMER;
@@ -1103,6 +1187,8 @@ fn clean_rtx_queue(c: &mut TcpConn, prior_fack: u32, st: &mut SackState, tsecr: 
             flag |= FLAG_SET_XMIT_TIMER;
         }
     }
+    // pkts_acked
+    cubic::acked(c, rs_rtt, now, now_us);
     flag
 }
 
@@ -1149,7 +1235,7 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
     }
     let prior_fack = if c.sack_ok { highest_sack_seq(c) } else { prior_una };
     if has_data { flag |= FLAG_DATA; }
-    flag |= ack_update_window(c, ack, ack_seq, nwin);
+    flag |= ack_update_window(c, ack, ack_seq, nwin, now);
     // The send buffer starts at `snd_una`.
     let acked = (ack.wrapping_sub(prior_una) as usize).min(c.send_buf.len());
     c.send_buf.drain(..acked);
@@ -1183,12 +1269,15 @@ pub(super) fn ack<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, seg: &[u8], 
 
     let delivered = c.tx.delivered.wrapping_sub(delivered0);
     let lost = c.tx.lost.wrapping_sub(lost0);
-    cong_control(c, delivered, lost, flag);
+    cong_control(c, delivered, lost, flag, now);
     xmit_recovery(c, io, rexmit);
 
     // tcp_check_space -> tcp_new_space: room was made for a blocked writer.
     if flag & FLAG_SND_UNA_ADVANCED != 0 && c.tx.nospace {
         c.tx.nospace = false;
-        if c.tx.in_flight() < c.snd_cwnd { sndbuf_expand(c); }
+        if c.tx.in_flight() < c.snd_cwnd {
+            sndbuf_expand(c);
+            c.tx.snd_cwnd_stamp = now;
+        }
     }
 }

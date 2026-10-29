@@ -16,6 +16,7 @@ use alloc::collections::VecDeque;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+mod cubic;
 mod recovery;
 
 /// What the stack needs from the machine it runs on.
@@ -1345,6 +1346,8 @@ impl Stack {
         }
 
         if conn.send_buf.is_empty() { conn.retries = 0; conn.retrans_stamp = None; }
+        // tcp_skb_entail
+        recovery::slow_start_after_idle_check(conn, io.ticks());
         conn.send_buf.extend(data);
 
         // Send in effective-MSS chunks immediately (no Nagle). Effective, not
@@ -1681,6 +1684,7 @@ impl Stack {
                     conn.snd_una = ack;
                     conn.state = State::Established;
                     conn.established = true;
+                    recovery::init_congestion_control(conn, io.ticks(), io.env.uptime_us());
                     // tcp_create_openreq_child: the window of the ACK that
                     // completes the handshake.
                     conn.snd_wnd = (adv_window as u32) << conn.snd_wscale;
@@ -1745,6 +1749,7 @@ impl Stack {
                     conn.snd_una = ack;
                     conn.state = State::Established;
                     conn.established = true;
+                    recovery::init_congestion_control(conn, io.ticks(), io.env.uptime_us());
 
                     // We always offer WScale in our SYN, so scaling is active iff
                     // the SYN-ACK carries it. Set before the ACK so it advertises
@@ -2421,6 +2426,7 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
                 break;
             }
             copy_out(&conn.send_buf, sent, &mut chunk[..n]);
+            recovery::event_data_sent(conn, io.ticks());
             // The FIN rides on the last byte queued (tcp_send_fin).
             let fin = conn.fin_queued && sent + n == conn.send_buf.len();
             let flags = if fin { FIN | ACK | PSH } else { ACK | PSH };
@@ -2438,7 +2444,7 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
         conn.last_send_tick = now;
         sent_pkts += 1;
     }
-    recovery::xmit_done(conn, sent_pkts, is_cwnd_limited);
+    recovery::xmit_done(conn, sent_pkts, is_cwnd_limited, io.ticks());
 }
 
 /// Copy `out.len()` bytes from offset `off` of the send buffer.
