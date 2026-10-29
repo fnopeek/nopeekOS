@@ -27,7 +27,8 @@ pub fn handle_icmp(ip_packet: &[u8], data: &[u8]) {
     let src_ip = <[u8; 4]>::try_from(&ip_packet[12..16]).unwrap();
 
     match icmp_type {
-        ECHO_REQUEST => send_echo_reply(src_ip, data),
+        // Unconfigured, a reply would carry 0.0.0.0 as its source.
+        ECHO_REQUEST if super::arp::our_ip() != [0; 4] => send_echo_reply(src_ip, data),
         11 => {
             // Time Exceeded (TTL expired in transit) — used by traceroute
             *TTL_EXPIRED_FROM.lock() = Some(src_ip);

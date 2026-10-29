@@ -8,5 +8,6 @@
 
 extern crate alloc;
 
+pub mod ip;
 pub mod neigh;
 pub mod tcp;

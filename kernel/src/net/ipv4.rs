@@ -11,6 +11,33 @@ const HEADER_LEN: usize  = 20; // no options
 static GATEWAY: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 2]); // QEMU default
 static SUBNET:  Mutex<[u8; 4]> = Mutex::new([255, 255, 255, 0]);
 
+/// Datagrams dropped by the receive checks, by `net_core::ip::Drop`.
+static IN_DROPS: [core::sync::atomic::AtomicU64; net_core::ip::Drop::COUNT] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; net_core::ip::Drop::COUNT];
+
+/// Datagrams refused for want of a route (Linux MIB `OutNoRoutes`).
+static OUT_NO_ROUTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+fn drop_in(d: net_core::ip::Drop) {
+    IN_DROPS[d as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Every receive check that dropped something, with its count, and the
+/// datagrams refused on the way out.
+pub fn drops() -> (alloc::vec::Vec<(&'static str, u64)>, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let ins = net_core::ip::Drop::ALL.iter()
+        .map(|d| (d.name(), IN_DROPS[*d as usize].load(Relaxed)))
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    (ins, OUT_NO_ROUTES.load(Relaxed))
+}
+
+/// Our address and mask.
+pub fn iface() -> net_core::ip::Iface {
+    net_core::ip::Iface { ip: arp::our_ip(), mask: *SUBNET.lock() }
+}
+
 /// Fragments dropped for want of reassembly (Linux MIB `ReasmFails`, #36).
 static REASM_FAILS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
@@ -43,7 +70,7 @@ pub fn arp_target_for(dst_ip: [u8; 4]) -> [u8; 4] {
     if src_masked == dst_masked { dst_ip } else { *GATEWAY.lock() }
 }
 
-pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
+pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     if data.len() < HEADER_LEN { return; }
 
     let version = data[0] >> 4;
@@ -67,6 +94,14 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
     let src_ip = <[u8; 4]>::try_from(&data[12..16]).unwrap();
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
 
+    // ip_rcv_options, and the martian checks that hold whatever our address.
+    if let Err(d) = net_core::ip::options_ok(&data[HEADER_LEN..ihl])
+        .and_then(|()| net_core::ip::early(l2, src_ip, dst_ip))
+    {
+        drop_in(d);
+        return;
+    }
+
     // The microvm tap gets first refusal, before the filter below. A guest
     // flow is keyed on the address it went out with; filtering on our current
     // address first would drop its replies whenever that address moved (DHCP
@@ -76,20 +111,27 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool) {
         return;
     }
 
-    // Accept packets for our IP, broadcast, or during DHCP (IP = 0.0.0.0)
-    let our_ip = arp::our_ip();
-    if dst_ip != our_ip && dst_ip != [255, 255, 255, 255] && our_ip != [0, 0, 0, 0] { return; }
-
     let payload = &data[ihl..total_len];
+    let dhcp_reply = protocol == PROTO_UDP && payload.len() >= 4
+        && u16::from_be_bytes([payload[2], payload[3]]) == 68
+        && super::dhcp::is_running();
+    let dest = match iface().input_route(l2, src_ip, dst_ip, dhcp_reply) {
+        Ok(d) => d,
+        Err(d) => { drop_in(d); return; }
+    };
     // The L4 checksum, unless the card verified it (skb_checksum_init).
     if !csum_ok && !l4_checksum_holds(protocol, src_ip, dst_ip, payload) {
         return;
     }
 
+    // TCP takes only datagrams to our address (`tcp_v4_rcv`, RFC 1122
+    // §4.2.3.10); ICMP to a broadcast address is ignored, echo requests
+    // included (`icmp_echo_ignore_broadcasts`).
+    let local = dest == net_core::ip::Dest::Local;
     match protocol {
-        PROTO_ICMP => super::icmp::handle_icmp(data, payload),
+        PROTO_ICMP if local => super::icmp::handle_icmp(data, payload),
         PROTO_UDP => super::udp::handle_udp(data, payload),
-        PROTO_TCP => super::tcp::handle_tcp(data, payload),
+        PROTO_TCP if local => super::tcp::handle_tcp(data, payload),
         _ => {}
     }
 }
@@ -174,6 +216,11 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
             head: Forwarded)
     -> (bool, Result<(), crate::virtio_net::NetError>)
 {
+    // __mkroute_output: no loopback device, and 0/8 and 240/4 lead nowhere.
+    if !iface().output_ok(dst_ip, false) {
+        OUT_NO_ROUTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return (false, Ok(()));
+    }
     let src_ip = arp::our_ip();
     let total_len = (HEADER_LEN + payload.len()) as u16;
 

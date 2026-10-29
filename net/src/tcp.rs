@@ -2305,6 +2305,8 @@ pub enum TcpError {
     Timeout,
     /// Too much already unacknowledged — retry the send later.
     WouldBlock,
+    /// No route leads to the address, or only a broadcast or multicast one.
+    Unreachable,
 }
 
 impl core::fmt::Display for TcpError {
@@ -2316,6 +2318,7 @@ impl core::fmt::Display for TcpError {
             TcpError::ConnectionFailed => write!(f, "connection failed"),
             TcpError::NotConnected => write!(f, "not connected"),
             TcpError::Timeout => write!(f, "connection timed out"),
+            TcpError::Unreachable => write!(f, "network unreachable"),
         }
     }
 }

@@ -94,6 +94,11 @@ pub fn take_tx_segs() -> u32 {
 /// `fiber::pump_peers` cannot cover it: it returns early when called from
 /// inside a fiber, and a module is a fiber.
 pub fn connect_start_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
+    // tcp_v4_connect: no route, or one to a broadcast or multicast address,
+    // is ENETUNREACH at once rather than a SYN that times out.
+    if !ipv4::iface().output_ok(remote_ip, true) {
+        return Err(TcpError::Unreachable);
+    }
     stack().connect_start(&mut KernelEnv, owner, remote_ip, remote_port)
 }
 

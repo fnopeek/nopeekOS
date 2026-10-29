@@ -14,8 +14,23 @@ pub fn handle_frame(frame: &[u8], csum_ok: bool) {
 
     match ethertype {
         ETHERTYPE_ARP => super::arp::handle_arp(frame),
-        ETHERTYPE_IPV4 => super::ipv4::handle_ipv4(&frame[HEADER_LEN..], csum_ok),
+        ETHERTYPE_IPV4 => super::ipv4::handle_ipv4(&frame[HEADER_LEN..], csum_ok, pkt_type(frame)),
         _ => {} // ignore unknown
+    }
+}
+
+/// `eth_type_trans`: whom the frame was addressed to.
+fn pkt_type(frame: &[u8]) -> net_core::ip::PktType {
+    use net_core::ip::PktType;
+    let dst = &frame[0..6];
+    if dst == BROADCAST {
+        PktType::Broadcast
+    } else if dst[0] & 1 != 0 {
+        PktType::Multicast
+    } else if netdev::mac().is_some_and(|m| m == dst) {
+        PktType::Host
+    } else {
+        PktType::OtherHost
     }
 }
 

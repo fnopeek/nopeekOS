@@ -707,5 +707,12 @@ pub fn intent_net_info() {
             nmac[0], nmac[1], nmac[2], nmac[3], nmac[4], nmac[5], state, age);
     }
     kprintln!("  Dropped unresolved: {}", crate::net::arp::unresolved());
+    let (ins, no_route) = crate::net::ipv4::drops();
+    for (why, n) in ins {
+        kprintln!("  Dropped in ({}): {}", why, n);
+    }
+    if no_route > 0 {
+        kprintln!("  Refused out (no route): {}", no_route);
+    }
     kprintln!();
 }
