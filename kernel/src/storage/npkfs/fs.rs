@@ -490,6 +490,7 @@ pub fn gc() -> Result<GcStats, Error> {
 
     let orphans: alloc::vec::Vec<[u8; 32]> = all.into_iter().filter(|h| !reachable.contains(h)).collect();
     let (removed, failed) = storage::remove_many(&orphans).map_err(Error::Storage)?;
+    super::tree_cache::forget(&orphans);
     if failed > 0 {
         crate::kprintln!("[npk] gc: {} orphan(s) could not be removed (corrupt) — left in place", failed);
     }

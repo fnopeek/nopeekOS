@@ -31,6 +31,7 @@ mod btree;
 pub mod storage;
 pub mod bench;
 pub mod paths;
+pub mod tree_cache;
 pub mod fs;
 
 pub use types::{FsError, BLOCK_SIZE};

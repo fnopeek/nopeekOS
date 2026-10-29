@@ -27,6 +27,7 @@ pub fn unlock(pass: &[u8]) -> bool {
         Some(mut dek) => {
             crypto::set_disk_key(&dek);
             dek.fill(0);
+            crate::npkfs::tree_cache::clear();
             true
         }
         None => false,
@@ -36,6 +37,7 @@ pub fn unlock(pass: &[u8]) -> bool {
 /// Lock: the derived keys leave memory; the next access needs `unlock`.
 pub fn lock() {
     crypto::clear_disk_key();
+    crate::npkfs::tree_cache::clear();
 }
 
 /// Fresh install: draw a new DEK, wrap it under `pass` and unlock.

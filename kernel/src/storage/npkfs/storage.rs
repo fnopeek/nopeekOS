@@ -216,6 +216,7 @@ pub fn mount() -> Result<(), FsError> {
     let generation = sb.generation;
     let jrnl = Journal::new(sb.journal_head, sb.journal_seq);
 
+    super::tree_cache::clear();
     *FS.lock() = Some(State {
         cache, sb, bitmap: bmap, journal: jrnl, generation,
         pending_old_blocks: Vec::new(),
@@ -524,9 +525,10 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64, u64, u64)>
     result
 }
 
-/// Write back and forget the block cache, so the next reads come from
-/// the device.
+/// Write back and forget the block cache and the Tree cache, so the next
+/// reads come from the device.
 pub fn bench_drop_caches() -> bool {
+    super::tree_cache::clear();
     let mut lock = FS.lock();
     let Some(fs) = lock.as_mut() else { return false };
     fs.cache.drop_all().is_ok()

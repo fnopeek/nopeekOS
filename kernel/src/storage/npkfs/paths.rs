@@ -93,9 +93,15 @@ fn fetch_tree(hash: &[u8; 32]) -> Result<Vec<TreeEntry>, PathError> {
     if *hash == EMPTY_ROOT {
         return Ok(Vec::new());
     }
-    let bytes = storage::get(hash)?.ok_or(PathError::Corrupt)?;
+    let (bytes, cached) = match super::tree_cache::get(hash) {
+        Some(b) => (b, true),
+        None => (storage::get(hash)?.ok_or(PathError::Corrupt)?, false),
+    };
     match Object::decode(&bytes).map_err(|_| PathError::Corrupt)? {
-        Object::Tree(entries) => Ok(entries),
+        Object::Tree(entries) => {
+            if !cached { super::tree_cache::put(hash, &bytes); }
+            Ok(entries)
+        }
         Object::Blob(_) | Object::Chunked { .. } => Err(PathError::NotADirectory),
     }
 }
@@ -118,6 +124,7 @@ fn store_tree(entries: Vec<TreeEntry>) -> Result<([u8; 32], u64), PathError> {
     // `fs::exists` walk still works because the volume is unlocked with the
     // device key at mount, before login.
     storage::put(&hash, &bytes)?;
+    super::tree_cache::put(&hash, &bytes);
     Ok((hash, recursive_size))
 }
 
@@ -385,6 +392,7 @@ pub fn mkdir(root: &[u8; 32], path: &str) -> Result<[u8; 32], PathError> {
     let (bytes, hash) = empty.encode_and_hash().map_err(|_| PathError::Corrupt)?;
     // AEAD-wrapped like every object (see store_tree).
     storage::put(&hash, &bytes)?;
+    super::tree_cache::put(&hash, &bytes);
 
     let entry = TreeEntry {
         name: String::from(*segs.last().unwrap()),

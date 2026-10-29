@@ -389,6 +389,8 @@ pub fn intent_fsinfo() {
             if let Some((held, dirty)) = crate::storage::npkfs::storage::cache_held() {
                 kprintln!("  Cache:       {} blocks ({} MB), {} dirty", held, held * 4 / 1024, dirty);
             }
+            let (trees, frames) = crate::storage::npkfs::tree_cache::held();
+            kprintln!("  Trees:       {} cached ({} MB)", trees, frames * 4 / 1024);
             kprintln!();
         }
         None => kprintln!("[npk] Filesystem not mounted"),
@@ -473,6 +475,8 @@ pub fn intent_disk_info() {
                 if let Some((held, dirty)) = crate::storage::npkfs::storage::cache_held() {
                     kprintln!("  Cache:     {} blocks ({} MB), {} dirty", held, held * 4 / 1024, dirty);
                 }
+                let (trees, frames) = crate::storage::npkfs::tree_cache::held();
+                kprintln!("  Trees:     {} cached ({} MB)", trees, frames * 4 / 1024);
             }
 
             print_crypto_bench();
