@@ -269,6 +269,7 @@ fn objects(hz: u64) -> bool {
 
 #[derive(Clone)]
 struct FileRun {
+    write_cold: u64,
     write: u64,
     cold: u64,
     warm: u64,
@@ -280,29 +281,37 @@ struct FileRun {
 fn file_run(size: usize, count: u32, label: &str, wbuf: &mut [u8], rbuf: &mut [u8], seq: &mut u64, hz: u64)
             -> FileRun {
     let name = |i: u32| format!("{}/{}/{:04}", ROOT, label, i);
-    let mut run = FileRun { write: 0, cold: 0, warm: 0, put: None, get: None, failures: 0 };
+    let mut run = FileRun { write_cold: 0, write: 0, cold: 0, warm: 0, put: None, get: None, failures: 0 };
     for i in 0..count { host::delete(&name(i)); }
     let bytes = size as u64 * count as u64;
 
-    // Write: each file distinct, or content addressing stores it once.
-    let before = counters();
-    let t0 = host::tsc_now();
-    for i in 0..count {
-        // Every 4 KiB block differs from every earlier run's, so no chunk of
-        // a large file deduplicates against the last run.
-        *seq += 1;
-        for block in wbuf[..size].chunks_mut(4096) {
-            let n = block.len().min(8);
-            block[..n].copy_from_slice(&seq.to_le_bytes()[..n]);
+    // Write: each file distinct, or content addressing stores it once. Once
+    // after the caches are dropped, once more with them warm, as they are
+    // in use; the breakdown is the warm pass.
+    let mut write_pass = |run: &mut FileRun| {
+        let before = counters();
+        let t0 = host::tsc_now();
+        for i in 0..count {
+            // Every 4 KiB block differs from every earlier pass's, so no
+            // chunk of a large file deduplicates against the last one.
+            *seq += 1;
+            for block in wbuf[..size].chunks_mut(4096) {
+                let n = block.len().min(8);
+                block[..n].copy_from_slice(&seq.to_le_bytes()[..n]);
+            }
+            if !host::store(&name(i), &wbuf[..size]) {
+                print(&format!("     WARN: store {} failed\n", name(i)));
+                run.failures += 1;
+            }
         }
-        if !host::store(&name(i), &wbuf[..size]) {
-            print(&format!("     WARN: store {} failed\n", name(i)));
-            run.failures += 1;
-        }
-    }
-    let t = host::tsc_now().wrapping_sub(t0);
-    run.write = mbs(bytes, t, hz);
-    if let (Some(b), Some(a)) = (before, counters()) { run.put = Some((b, a, t)); }
+        let t = host::tsc_now().wrapping_sub(t0);
+        (mbs(bytes, t, hz), before.zip(counters()).map(|(b, a)| (b, a, t)))
+    };
+    let _ = host::disk_bench(DROP_CACHES, 0, 0, &mut [0u64; 1]);
+    run.write_cold = write_pass(&mut run).0;
+    let (rate, put) = write_pass(&mut run);
+    run.write = rate;
+    run.put = put;
 
     // Read cold: the block cache dropped first.
     let _ = host::disk_bench(DROP_CACHES, 0, 0, &mut [0u64; 1]);
@@ -358,8 +367,9 @@ fn files(hz: u64) -> u32 {
             .map(|_| file_run(size, count, label, &mut wbuf, &mut rbuf, &mut seq, hz))
             .collect();
         failures += runs.iter().map(|r| r.failures).sum::<u32>();
-        print(&format!("     {} x {}  write {}  read cold {}  warm {} MB/s\n",
+        print(&format!("     {} x {}  write cold {}  warm {}  read cold {}  warm {} MB/s\n",
             pad(label, 7), pad(&format!("{}", count), 2),
+            pad(&format!("{}", median(runs.iter().map(|r| r.write_cold).collect())), 5),
             spread(runs.iter().map(|r| r.write).collect()),
             spread(runs.iter().map(|r| r.cold).collect()),
             pad(&format!("{}", median(runs.iter().map(|r| r.warm).collect())), 6)));
@@ -373,7 +383,7 @@ fn files(hz: u64) -> u32 {
         if let Some((b, a, t)) = r.put {
             let objects = a.put[0].saturating_sub(b.put[0]);
             let commits = a.commit[0].saturating_sub(b.commit[0]);
-            print(&format!("     {} files: {} us each, {} objects and {} commit(s) per file\n",
+            print(&format!("     {} files, caches warm: {} us each, {} objects and {} commit(s) per file\n",
                 label, t * 1_000_000 / hz / files.max(1) as u64,
                 objects / files.max(1) as u64, commits / files.max(1) as u64));
             print(&format!("       write: {}\n", breakdown(&WRITE_STAGES, &b.write, &a.write, t)));
