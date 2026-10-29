@@ -610,6 +610,18 @@ fn l3_map_in(proto: u8, dst_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16,
     None
 }
 
+/// The guest port of a mapping, looked up without touching its state: for
+/// an ICMP error about one of its packets (conntrack's `RELATED`).
+fn l3_lookup(proto: u8, host_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16) -> Option<u16> {
+    if !(L3_PORT_LO..L3_PORT_HI).contains(&hport) { return None; }
+    let tbl = L3.lock();
+    let slot = tbl.by_port[(hport - L3_PORT_LO) as usize];
+    if slot == NO_SLOT { return None; }
+    let m = tbl.maps[slot as usize].as_ref()?;
+    (m.proto == proto && m.host_ip == host_ip && m.remote_ip == rip && m.remote_port == rport)
+        .then_some(m.guest_port)
+}
+
 /// Incremental ones-complement checksum update (RFC 1624). Adjust an existing
 /// checksum for a set of changed 16-bit words in O(changes) instead of
 /// recomputing over the whole segment — `HC' = ~(~HC + Σ(~old + new))`. NAT only
@@ -1667,6 +1679,9 @@ pub fn tap_inbound(ip: &[u8], csum_ok: bool) -> bool {
     let src_ip: [u8; 4] = ip[12..16].try_into().unwrap();
     let dst_ip: [u8; 4] = ip[16..20].try_into().unwrap();
     let l4 = &ip[ihl..];
+    if proto == PROTO_ICMP && l4.len() >= 8 && matches!(l4[0], 3 | 11 | 12) {
+        return icmp_error_inbound(ip, ihl);
+    }
     let (remote_port, host_port) = if proto == PROTO_ICMP {
         if l4.len() < 8 || l4[0] != ICMP_ECHO_REPLY { return false; }
         (0u16, u16::from_be_bytes([l4[4], l4[5]]))
@@ -1744,6 +1759,120 @@ pub fn tap_inbound(ip: &[u8], csum_ok: bool) -> bool {
             frame[l4_off + 6..l4_off + 8].copy_from_slice(&c.to_be_bytes());
         }
     }
+    tap_push(frame);
+    true
+}
+
+/// `nf_nat_icmp_reply_translation`: an ICMP error quoting a packet we
+/// masqueraded for the guest goes to the guest, the quoted packet's source
+/// and the outer destination turned back into the guest's. Anything else is
+/// the host's own.
+fn icmp_error_inbound(ip: &[u8], ihl: usize) -> bool {
+    let tot = (u16::from_be_bytes([ip[2], ip[3]]) as usize).min(ip.len());
+    let icmp = &ip[ihl..tot];
+    let host_ip: [u8; 4] = ip[16..20].try_into().unwrap();
+    let inner = &icmp[8..];
+    if inner.len() < IPV4_HDR_LEN || inner[0] >> 4 != 4 { return false; }
+    let iihl = (inner[0] & 0x0F) as usize * 4;
+    if iihl < IPV4_HDR_LEN || inner.len() < iihl + 8 || inner[12..16] != host_ip { return false; }
+    let iproto = inner[9];
+    let rip: [u8; 4] = inner[16..20].try_into().unwrap();
+    let il4 = &inner[iihl..];
+    let (hport, rport) = match iproto {
+        PROTO_TCP | PROTO_UDP => (u16::from_be_bytes([il4[0], il4[1]]), u16::from_be_bytes([il4[2], il4[3]])),
+        PROTO_ICMP if il4[0] == ICMP_ECHO_REQUEST => (u16::from_be_bytes([il4[4], il4[5]]), 0),
+        _ => return false,
+    };
+    let Some(gport) = l3_lookup(iproto, host_ip, hport, rip, rport) else { return false };
+
+    let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + tot);
+    frame[..VNET_HDR_LEN].fill(0);
+    write_eth(&mut frame, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
+    let ip_off = VNET_HDR_LEN + ETH_HDR_LEN;
+    frame[ip_off..].copy_from_slice(&ip[..tot]);
+    // The outer header: to the guest.
+    frame[ip_off + 16..ip_off + 20].copy_from_slice(&GUEST_IP);
+    frame[ip_off + 10] = 0; frame[ip_off + 11] = 0;
+    let c = ipv4_checksum(&frame[ip_off..ip_off + ihl]);
+    frame[ip_off + 10..ip_off + 12].copy_from_slice(&c.to_be_bytes());
+    // The quoted header: from the guest.
+    let in_off = ip_off + ihl + 8;
+    frame[in_off + 12..in_off + 16].copy_from_slice(&GUEST_IP);
+    frame[in_off + 10] = 0; frame[in_off + 11] = 0;
+    let c = ipv4_checksum(&frame[in_off..in_off + iihl]);
+    frame[in_off + 10..in_off + 12].copy_from_slice(&c.to_be_bytes());
+    // The quoted transport header: the guest's port, its checksum kept
+    // right where the quote reaches it.
+    let l4_off = in_off + iihl;
+    let quoted = frame.len() - l4_off;
+    let ip_words = [
+        (u16::from_be_bytes([host_ip[0], host_ip[1]]), u16::from_be_bytes([GUEST_IP[0], GUEST_IP[1]])),
+        (u16::from_be_bytes([host_ip[2], host_ip[3]]), u16::from_be_bytes([GUEST_IP[2], GUEST_IP[3]])),
+        (hport, gport),
+    ];
+    match iproto {
+        PROTO_TCP => {
+            frame[l4_off..l4_off + 2].copy_from_slice(&gport.to_be_bytes());
+            if quoted >= 18 {
+                let old = u16::from_be_bytes([frame[l4_off + 16], frame[l4_off + 17]]);
+                frame[l4_off + 16..l4_off + 18].copy_from_slice(&csum_update(old, &ip_words).to_be_bytes());
+            }
+        }
+        PROTO_UDP => {
+            frame[l4_off..l4_off + 2].copy_from_slice(&gport.to_be_bytes());
+            let old = u16::from_be_bytes([frame[l4_off + 6], frame[l4_off + 7]]);
+            if old != 0 {
+                let c = csum_update(old, &ip_words);
+                frame[l4_off + 6..l4_off + 8].copy_from_slice(&(if c == 0 { 0xFFFF } else { c }).to_be_bytes());
+            }
+        }
+        _ => {
+            frame[l4_off + 4..l4_off + 6].copy_from_slice(&gport.to_be_bytes());
+            let old = u16::from_be_bytes([frame[l4_off + 2], frame[l4_off + 3]]);
+            frame[l4_off + 2..l4_off + 4].copy_from_slice(&csum_update(old, &[(hport, gport)]).to_be_bytes());
+        }
+    }
+    fix_icmp_checksum(&mut frame[ip_off + ihl..]);
+    NS_RX_ICMP_ERR.fetch_add(1, AtOrd::Relaxed);
+    tap_push(frame);
+    true
+}
+
+/// ICMP errors for guest flows, passed on to the guest.
+static NS_RX_ICMP_ERR: AtomicU64 = AtomicU64::new(0);
+/// Fragmentation Needed sent to the guest for packets larger than the path.
+static NS_TX_FRAG_NEEDED: AtomicU64 = AtomicU64::new(0);
+
+/// `ip_forward`'s `ip_exceeds_mtu`: a packet of the guest with DF set that
+/// would go out larger than the path MTU (a TCP super-frame by its segment
+/// size) is answered with Fragmentation Needed from the gateway, so the
+/// guest lowers its path MTU instead of losing every such packet.
+fn exceeds_path_mtu(ip: &[u8], ihl: usize, l4: &[u8], proto: u8, gso_size: u16, dst: [u8; 4]) -> bool {
+    if ip[6] & 0x40 == 0 { return false; }
+    let mtu = crate::net::ipv4::path_mtu(dst);
+    let size = if proto == PROTO_TCP && gso_size > 0 && l4.len() >= TCP_HDR_LEN {
+        let thlen = ((l4[12] >> 4) as usize * 4).clamp(TCP_HDR_LEN, l4.len());
+        IPV4_HDR_LEN + thlen + (l4.len() - thlen).min(gso_size as usize)
+    } else {
+        IPV4_HDR_LEN + l4.len()
+    };
+    if size as u32 <= mtu { return false; }
+    let ip_total = (u16::from_be_bytes([ip[2], ip[3]]) as usize).min(ip.len()).max(ihl);
+    let Some(msg) = net_core::ip::icmp_error_message(&ip[..ip_total], 3, 4, mtu) else { return true };
+    let tot = IPV4_HDR_LEN + msg.len();
+    let mut frame = frame_pool_get(VNET_HDR_LEN + ETH_HDR_LEN + tot);
+    frame[..VNET_HDR_LEN].fill(0);
+    write_eth(&mut frame, &GUEST_MAC, &GATEWAY_MAC, ETHERTYPE_IPV4);
+    let o = VNET_HDR_LEN + ETH_HDR_LEN;
+    let h = &mut frame[o..o + IPV4_HDR_LEN];
+    h.copy_from_slice(&[0x45, net_core::ip::TOS_INTERNETCONTROL, 0, 0, 0, 0, 0, 0, 64, PROTO_ICMP, 0, 0,
+        GATEWAY_IP[0], GATEWAY_IP[1], GATEWAY_IP[2], GATEWAY_IP[3],
+        GUEST_IP[0], GUEST_IP[1], GUEST_IP[2], GUEST_IP[3]]);
+    h[2..4].copy_from_slice(&(tot as u16).to_be_bytes());
+    let c = ipv4_checksum(h);
+    h[10..12].copy_from_slice(&c.to_be_bytes());
+    frame[o + IPV4_HDR_LEN..].copy_from_slice(&msg);
+    NS_TX_FRAG_NEEDED.fetch_add(1, AtOrd::Relaxed);
     tap_push(frame);
     true
 }
@@ -1913,6 +2042,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
                     cap_reject("UDP", dst_ip, dst_port);
                     return None;
                 }
+                if exceeds_path_mtu(ip, ihl, l4, PROTO_UDP, 0, dst_ip) { return None; }
                 l3_outbound(PROTO_UDP, src_port, dst_ip, dst_port, l4, 0, head)
             }
         }
@@ -1924,6 +2054,7 @@ fn handle_ipv4(frame: &[u8], caps: &NetCaps, gso_size: u16) -> Option<Vec<u8>> {
                 cap_reject("TCP", dst_ip, dst_port);
                 return None;
             }
+            if exceeds_path_mtu(ip, ihl, l4, PROTO_TCP, gso_size, dst_ip) { return None; }
             l3_outbound(PROTO_TCP, src_port, dst_ip, dst_port, l4, gso_size, head)
         }
         PROTO_ICMP => {
@@ -2254,6 +2385,7 @@ pub struct BridgeStats {
     pub ip_malformed: u64, pub ip_to_gw: u64, pub ip_dns: u64, pub ip_proto: u64,
     pub tx_runt: u64, pub tx_badtcp: u64, pub tx_arpmiss: u64,
     pub tx_ringbad: u64, pub tx_trunc: u64, pub rx_unmatched: u64,
+    pub rx_icmp_err: u64, pub tx_frag_needed: u64,
 }
 
 // Previous snapshot, so a second `netstat` a few seconds later reads as a rate.
@@ -2342,6 +2474,8 @@ pub fn bridge_stats() -> BridgeStats {
         tx_ringbad: NS_TX_RINGBAD.load(AtOrd::Relaxed),
         tx_trunc: NS_TX_TRUNC.load(AtOrd::Relaxed),
         rx_unmatched: NS_RX_UNMATCHED.load(AtOrd::Relaxed),
+        rx_icmp_err: NS_RX_ICMP_ERR.load(AtOrd::Relaxed),
+        tx_frag_needed: NS_TX_FRAG_NEEDED.load(AtOrd::Relaxed),
     }
 }
 
@@ -2378,7 +2512,7 @@ pub fn reset_counters() {
               &NS_GTIMER, &RPT_GT, &RPT_TAPDEL,
               &NS_IP_MALFORMED, &NS_IP_TO_GW, &NS_IP_DNS, &NS_IP_PROTO,
               &NS_TX_RUNT, &NS_TX_BADTCP, &NS_TX_ARPMISS, &NS_TX_RINGBAD,
-              &NS_TX_TRUNC, &NS_RX_UNMATCHED,
+              &NS_TX_TRUNC, &NS_RX_UNMATCHED, &NS_RX_ICMP_ERR, &NS_TX_FRAG_NEEDED,
               &NS_TAP_FULL, &NS_TAP_DELIVERED, &NS_MAP_REHOMED] {
         c.store(0, AtOrd::Relaxed);
     }
