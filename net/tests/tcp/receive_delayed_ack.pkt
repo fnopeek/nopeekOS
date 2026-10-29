@@ -1,9 +1,16 @@
-// In-order data is ACKed once the 40 ms delayed-ACK timer runs out.
+// #70: the first data is ACKed at once (quick-ACK mode); in an interactive
+// exchange, where we answered, the next waits for the 40 ms delayed-ACK
+// timeout (tcp_event_data_recv, __tcp_ack_snd_check, pingpong mode).
 0      connect 192.0.2.2:80
 +0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
 +0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK,TS val 100 ecr 0,nop,wscale 7>
 +0     > . 1:1(0) ack 1
 
 0.1    < P. 1:101(100) ack 1 win 1000 <nop,nop,TS val 200 ecr 0>
-+0.04  > . 1:1(0) ack 101 <nop,nop,TS val ? ecr 200>
++0     > . 1:1(0) ack 101 <nop,nop,TS val ? ecr 200>
++0     recv 100
++0     send 100
++0     > P. 1:101(100) ack 101
++0.01  < P. 101:201(100) ack 101 win 1000 <nop,nop,TS val 210 ecr 0>
++0.04  > . 101:101(0) ack 201 <nop,nop,TS val ? ecr 210>
 +0     recv 100

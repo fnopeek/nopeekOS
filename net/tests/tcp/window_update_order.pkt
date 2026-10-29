@@ -7,7 +7,7 @@
 +0     > . 1:1(0) ack 1 win 65535
 
 +0.1   < P. 1:101(100) ack 1 win 4000
-+0.04  > . 1:1(0) ack 101
++0     > . 1:1(0) ack 101
 +0     recv 100
 // Reordered: older than what we acknowledged, with a smaller window.
 +0.01  < . 1:1(0) ack 1 win 1000

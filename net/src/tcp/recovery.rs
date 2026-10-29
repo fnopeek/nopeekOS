@@ -22,7 +22,7 @@
 //! Every segment is one skb with `tcp_skb_pcount` 1.
 
 use super::*;
-use super::cubic;
+use super::{ack, cubic};
 
 /// `TCPCB_SACKED_ACKED`, `TCPCB_SACKED_RETRANS`, `TCPCB_LOST`,
 /// `TCPCB_EVER_RETRANS`.
@@ -508,6 +508,7 @@ pub(super) fn slow_start_after_idle_check(c: &mut TcpConn, now: u64) {
 pub(super) fn event_data_sent(c: &mut TcpConn, now: u64) {
     if c.tx.in_flight() == 0 { cubic::tx_start(c, now); }
     c.tx.lsndtime = now;
+    ack::data_sent(c, now);
 }
 
 /// `tcp_init_congestion_control` and the stamps `tcp_init_transfer` sets,

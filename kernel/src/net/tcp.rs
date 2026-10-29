@@ -29,9 +29,6 @@ impl Env for KernelEnv {
     fn our_ip(&self) -> [u8; 4] { arp::our_ip() }
     fn random_u64(&mut self) -> u64 { crate::csprng::random_u64() }
     fn free_mib(&self) -> usize { crate::memory::stats().1 }
-    fn arp_target_for(&self, ip: [u8; 4]) -> [u8; 4] { ipv4::arp_target_for(ip) }
-    fn arp_known(&self, ip: [u8; 4]) -> bool { arp::lookup(ip).is_some() }
-    fn arp_request(&mut self, ip: [u8; 4]) { arp::request(ip) }
     fn ip_send(&mut self, dst: [u8; 4], segment: &[u8], id: u16) -> bool {
         ipv4::send_tcp(dst, segment, id)
     }
@@ -140,8 +137,8 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
                 if err.is_none() {
                     if let Some(c) = stack().conn_debug(handle) {
                         crate::kprintln!(
-                            "[tcp] connect gave up: state {} arp_tries {} syn_retries {}",
-                            c.state, c.arp_tries, c.retries);
+                            "[tcp] connect gave up: state {} syn_retries {}",
+                            c.state, c.retries);
                     }
                 }
                 stack().remove(handle);
@@ -159,14 +156,12 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
         }
 
         if crate::interrupts::ticks() - t0 > 1000 { // 10s timeout
-            // Say how far it got. A connect that dies has three distinct
-            // shapes: next hop never resolved (`arp_pending` still set, or it
-            // gave up and broadcast), SYN sent and never answered (`retries`
-            // climbing), or the state machine stuck somewhere else entirely.
+            // Say how far it got: SYN never answered (`retries` climbing),
+            // or the state machine stuck somewhere else.
             if let Some(c) = stack().conn_debug(handle) {
                 crate::kprintln!(
-                    "[tcp] connect timeout: state {} arp_pending {} arp_tries {} syn_retries {}",
-                    c.state, c.arp_pending, c.arp_tries, c.retries);
+                    "[tcp] connect timeout: state {} syn_retries {}",
+                    c.state, c.retries);
             }
             stack().remove(handle);
             return Err(TcpError::Timeout);
@@ -399,10 +394,7 @@ pub fn tick_connections() {
     // The segments go out after the table is let go: holding it across the
     // TX doorbell would block worker-core `recv` behind Core-0's periodic
     // ACKs/retries.
-    let (pending, arp_probes) = stack().tick(&mut KernelEnv);
-    for t in &arp_probes {
-        arp::request(*t);
-    }
+    let pending = stack().tick(&mut KernelEnv);
     for p in &pending {
         core_tcp::send_pending(&mut KernelEnv, &STATS, p);
     }

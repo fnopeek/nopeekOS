@@ -1,0 +1,21 @@
+// #70: while out-of-order data waits, the first three duplicate ACKs go at
+// once for the sender's fast retransmit; the rest are held and sent as one
+// (SACK compression, __tcp_ack_snd_check). Filling the hole is ACKed at
+// once (RFC 5681 §4.2).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK,nop,wscale 7>
++0     > . 1:1(0) ack 1
++0.1   < . 1461:2921(1460) ack 1 win 1000
++0     > . 1:1(0) ack 1 <nop,nop,sack 1461:2921>
++0     < . 2921:4381(1460) ack 1 win 1000
++0     > . 1:1(0) ack 1 <nop,nop,sack 1461:4381>
++0     < . 4381:5841(1460) ack 1 win 1000
++0     > . 1:1(0) ack 1 <nop,nop,sack 1461:5841>
++0     < . 5841:7301(1460) ack 1 win 1000
++0     < . 7301:8761(1460) ack 1 win 1000
++0     < . 8761:10221(1460) ack 1 win 1000
+// Held until the next tick (Linux: at most 1 ms).
++0.01  > . 1:1(0) ack 1 <nop,nop,sack 1461:10221>
++0     < . 1:1461(1460) ack 1 win 1000
++0     > . 1:1(0) ack 10221

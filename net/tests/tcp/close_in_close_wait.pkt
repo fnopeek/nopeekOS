@@ -5,8 +5,9 @@
 +0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
 +0     > . 1:1(0) ack 1 win 65535
 
+// The ACK of its FIN waits (tcp_fin enters pingpong mode), so our FIN can
+// carry it.
 +0.1   < F. 1:1(0) ack 1 win 4000
-+0     > . 1:1(0) ack 2 win 65535
 +0     state CLOSE_WAIT
 +0     close
 +0     > F. 1:1(0) ack 2 win 65535

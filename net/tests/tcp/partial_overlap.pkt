@@ -6,9 +6,9 @@
 +0     > . 1:1(0) ack 1 win 65535
 
 +0.1   < P. 1:101(100) ack 1 win 4000
-+0.04  > . 1:1(0) ack 101
++0     > . 1:1(0) ack 101
 +0     < P. 51:201(150) ack 1 win 4000
-+0.04  > . 1:1(0) ack 201
++0     > . 1:1(0) ack 201
 +0     recv 200
 
 // Out of order: 401:501 and 351:451 wait behind a hole, 201:401 fills it.

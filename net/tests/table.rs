@@ -21,9 +21,6 @@ impl Env for TestEnv {
         self.rng >> 16
     }
     fn free_mib(&self) -> usize { 1024 }
-    fn arp_target_for(&self, ip: [u8; 4]) -> [u8; 4] { ip }
-    fn arp_known(&self, _ip: [u8; 4]) -> bool { true }
-    fn arp_request(&mut self, _ip: [u8; 4]) {}
     fn mtu(&self, _dst: [u8; 4]) -> u32 { 1500 }
     fn update_pmtu(&mut self, _dst: [u8; 4], _mtu: u32) {}
     fn ip_send(&mut self, _dst: [u8; 4], segment: &[u8], _id: u16) -> bool {

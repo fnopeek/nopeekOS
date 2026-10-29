@@ -52,9 +52,6 @@ impl Env for TestEnv {
         self.rng
     }
     fn free_mib(&self) -> usize { 1024 }
-    fn arp_target_for(&self, ip: [u8; 4]) -> [u8; 4] { ip }
-    fn arp_known(&self, _ip: [u8; 4]) -> bool { true }
-    fn arp_request(&mut self, _ip: [u8; 4]) {}
     fn mtu(&self, _dst: [u8; 4]) -> u32 { self.pmtu }
     fn update_pmtu(&mut self, _dst: [u8; 4], mtu: u32) {
         let mtu = if mtu < net_core::ip::MIN_PMTU { self.pmtu.min(net_core::ip::MIN_PMTU) } else { mtu };
@@ -255,7 +252,7 @@ impl Run {
             let next = (self.env.now_us / 10_000 + 1) * 10_000;
             self.env.now_us = next.min(to_us);
             if self.env.now_us == next {
-                let (pending, _arp) = self.stack.tick(&mut self.env);
+                let pending = self.stack.tick(&mut self.env);
                 for p in &pending {
                     tcp::send_pending(&mut self.env, self.stack.stats(), p);
                 }
@@ -356,7 +353,12 @@ impl Run {
         let hdr = ((seg[12] >> 4) as usize) * 4;
         let win = u16::from_be_bytes([seg[14], seg[15]]);
         let len = (seg.len() - hdr) as u32;
-        let got_opts = wire_opts(&seg, hdr);
+        // SACK blocks name the peer's sequence space, relative like the rest.
+        let got_opts: Vec<Opt> = wire_opts(&seg, hdr).into_iter().map(|o| match o {
+            Opt::Sack(b) => Opt::Sack(b.into_iter()
+                .map(|(l, r)| (l.wrapping_sub(PEER_ISN), r.wrapping_sub(PEER_ISN))).collect()),
+            o => o,
+        }).collect();
         let rel_seq = seq.wrapping_sub(local_isn);
         let rel_ack = ack.wrapping_sub(PEER_ISN);
         let mut desc = format!("{} {}:{}({}) ack {} win {}", flags_str(flags), rel_seq,

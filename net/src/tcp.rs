@@ -16,6 +16,7 @@ use alloc::collections::VecDeque;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+mod ack;
 mod cubic;
 mod recovery;
 
@@ -30,12 +31,6 @@ pub trait Env {
     fn random_u64(&mut self) -> u64;
     /// Free memory in MiB, for the receive budget.
     fn free_mib(&self) -> usize;
-    /// The address whose link-layer address a packet to `ip` needs: the
-    /// gateway off-link, `ip` itself on-link, broadcast for broadcast.
-    fn arp_target_for(&self, ip: [u8; 4]) -> [u8; 4];
-    /// Whether the link-layer address of `ip` is known.
-    fn arp_known(&self, ip: [u8; 4]) -> bool;
-    fn arp_request(&mut self, ip: [u8; 4]);
     /// Hand a TCP segment to IP, with DF set and identification `id`.
     /// False when it did not leave: the driver queue refused it or no
     /// route leads to `dst`. A segment waiting for ARP counts as sent.
@@ -162,7 +157,7 @@ impl<E: Env + ?Sized> Io<'_, E> {
 // listening socket. We mix a per-boot CSPRNG secret (`Stack::new`) with the
 // connection 4-tuple via BLAKE3-keyed-hash, then add a tick-derived
 // monotonic counter so retried connections still grow forward.
-fn generate_isn(secret: &[u8; 32], ticks: u64, saddr: [u8; 4], daddr: [u8; 4], sport: u16, dport: u16) -> u32 {
+fn generate_isn(secret: &[u8; 32], now_us: u64, saddr: [u8; 4], daddr: [u8; 4], sport: u16, dport: u16) -> u32 {
     let mut buf = [0u8; 12];
     buf[0..4].copy_from_slice(&saddr);
     buf[4..8].copy_from_slice(&daddr);
@@ -171,10 +166,10 @@ fn generate_isn(secret: &[u8; 32], ticks: u64, saddr: [u8; 4], daddr: [u8; 4], s
     let h = blake3::keyed_hash(secret, &buf);
     let b = h.as_bytes();
     let hash_part = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-    // Monotonic component: 100 Hz tick × 2500 ≈ 4 µs ISN step (RFC 6528 §3
-    // suggests a ~250 kHz clock). Wrap is fine — the secret-keyed hash
-    // ensures the absolute value is unguessable per 4-tuple.
-    let timer = (ticks as u32).wrapping_mul(2500);
+    // secure_tcp_seq: plus the clock in 64 ns steps (RFC 6528 §3 asks for
+    // one of about 4 µs or finer). Wrap is fine; the keyed hash keeps the
+    // value unguessable per 4-tuple.
+    let timer = (now_us.wrapping_mul(1000) >> 6) as u32;
     hash_part.wrapping_add(timer)
 }
 
@@ -380,8 +375,6 @@ fn ooo_runs_trim(runs: &mut BTreeMap<u64, u64>, want: u64) {
 }
 // Cold-cache ARP while a SYN waits: one WiFi round trip between probes, and a
 // total budget of ~500 ms before the SYN goes out to broadcast regardless.
-const ARP_RETRANS_TICKS: u64 = 5; // 50 ms
-const ARP_MAX_TRIES: u8 = 10;
 const FIN_TIMEOUT_TICKS: u64 = 6000; // 60 s, like Linux's tcp_fin_timeout
 /// Microseconds per tick.
 const TICK_US: u64 = 10_000;
@@ -439,12 +432,6 @@ const TCP_INIT_CWND: u32 = 10;
 // Host TCP only ever has a handful of live connections (OTA/https/dns), so the
 // worst-case footprint is small; the guest browser uses its own (microvm) TCP.
 const RECV_BUF_SIZE: usize = 8 * 1024 * 1024;
-const DELAYED_ACK_TICKS: u64 = 4; // 40ms at 100Hz
-// ACK coalescing: send one ACK per N in-order segments (a held ACK is still
-// flushed by the 40 ms timer). 8 ≈ one ACK per ~11.7 KB at 1460 MSS, which
-// cuts the ACK packet rate and the work on the busy-spin RX core. Safe because
-// timestamps give the sender a per-segment RTT regardless.
-const ACK_COALESCE: u16 = 8;
 // Cap on buffered out-of-order data per connection. Beyond this, new
 // ahead-segments are dropped (the sender will retransmit) so a lossy link
 // can't blow up the heap.
@@ -615,10 +602,8 @@ struct TcpConn {
     /// A one-shot D-SACK block (RFC 2883): the range of a segment we already
     /// had. Emitted as the first SACK block of the next ACK, then cleared.
     dsack: Option<(u32, u32)>,
-    ack_pending: bool,
-    ack_tick: u64,
-    // In-order segments received since our last ACK (ACK-coalescing counter).
-    acks_held: u16,
+    /// `icsk_ack`: when to ACK what came in.
+    ack: ack::AckState,
 
     // ── Windows (RFC 9293 §3.8.6, Linux `tcp_ack_update_window`,
     //    `tcp_select_window`) ───────────────────────────────────────────
@@ -690,11 +675,9 @@ struct TcpConn {
     // instead of everything past the cumulative ACK.
     sack_ok: bool,
 
-    // Next-hop MAC not yet known: the SYN is held back until ARP answers.
-    // Sending it to L2 broadcast instead is what most gateways drop, and the
-    // recovery is then a full 1 s SYN retry.
-    arp_pending: bool,
-    arp_tries: u8,
+    /// `inet_saddr`: our address when the connection began. Segments go
+    /// out from it only while it is still ours.
+    local_ip: [u8; 4],
     /// The owner has let go (`close`). Until then a Closed slot still
     /// belongs to whoever holds the handle and is not reused under it.
     released: bool,
@@ -788,9 +771,7 @@ impl TcpConn {
             rtx_at: 0,
             tx: recovery::Tx::new(),
             dsack: None,
-            ack_pending: false,
-            ack_tick: 0,
-            acks_held: 0,
+            ack: ack::AckState::default(),
             snd_wl1: 0,
             rcv_wnd: core::cell::Cell::new(INITIAL_WINDOW as u32),
             rcv_wup: core::cell::Cell::new(0),
@@ -817,8 +798,7 @@ impl TcpConn {
             ts_ok: false,
             ts_recent: 0,
             sack_ok: false,
-            arp_pending: false,
-            arp_tries: 0,
+            local_ip: [0; 4],
             released: false,
             owner,
             mss_clamp: TCP_MSS_DEFAULT,
@@ -1007,8 +987,6 @@ impl TcpConn {
 #[derive(Debug, Clone, Copy)]
 pub struct ConnDebug {
     pub state: &'static str,
-    pub arp_pending: bool,
-    pub arp_tries: u8,
     pub retries: u8,
 }
 
@@ -1179,47 +1157,35 @@ impl Stack {
     /// A random ephemeral port no connection uses (RFC 6056, algorithm 1).
     /// Sequential ports let an off-path sender guess the 4-tuple of every
     /// connection to a known server.
-    fn alloc_port<E: Env + ?Sized>(&self, env: &mut E) -> u16 {
-        let mut port = 0;
-        for _ in 0..64 {
-            port = 49152 + (env.random_u64() % 16384) as u16;
-            if !self.conns.port_in_use(port) {
-                break;
-            }
-        }
-        port
+    fn alloc_port<E: Env + ?Sized>(&self, env: &mut E) -> Option<u16> {
+        // __inet_hash_connect: from a random offset through the whole range.
+        let offset = (env.random_u64() % 16384) as u16;
+        (0..16384u16).map(|i| 49152 + (offset + i) % 16384).find(|&p| !self.conns.port_in_use(p))
     }
 
     /// Open a TCP connection without waiting for the handshake: the handle
     /// comes back at once, the caller asks `connect_status` until it answers.
     ///
-    /// The cold-cache ARP wait becomes part of the same state machine: we
-    /// ask once here and hold the SYN back (`arp_pending`) until `tick` sees
-    /// the answer. Sending it to broadcast meanwhile is what most gateways
-    /// drop.
-    ///
     /// On behalf of `owner`: a module holds at most `PER_OWNER_MAX`.
     pub fn connect_start<E: Env + ?Sized>(
         &mut self, env: &mut E, owner: Owner, remote_ip: [u8; 4], remote_port: u16,
     ) -> Result<Handle, TcpError> {
-        let local_port = self.alloc_port(env);
-        let iss = generate_isn(&self.isn_secret, env.ticks(), env.our_ip(), remote_ip, local_port, remote_port);
-
-        let arp_target = env.arp_target_for(remote_ip);
-        let arp_pending = arp_target != [255, 255, 255, 255]
-            && !env.arp_known(arp_target);
-        if arp_pending { env.arp_request(arp_target); }
+        // inet_hash_connect: a source address and a free port, or no
+        // connection.
+        let local_ip = env.our_ip();
+        if local_ip == [0; 4] { return Err(TcpError::Unreachable); }
+        let local_port = self.alloc_port(env).ok_or(TcpError::TooManyConnections)?;
+        let iss = generate_isn(&self.isn_secret, env.uptime_us(), local_ip, remote_ip, local_port, remote_port);
 
         let mut conn = TcpConn::blank(State::SynSent, local_port, owner);
         conn.remote_ip = remote_ip;
         conn.remote_port = remote_port;
+        conn.local_ip = local_ip;
         conn.snd_nxt = iss.wrapping_add(1);
         conn.snd_una = iss;
         conn.snd_iss = iss;
         conn.last_send_tick = env.ticks();
         conn.syn_sent_us = env.uptime_us();
-        conn.arp_pending = arp_pending;
-        conn.arp_tries = 1;
         conn.set_path(env);
         // tcp_v4_connect: `inet_id` starts at random.
         conn.inet_id.set(env.random_u64() as u16);
@@ -1234,8 +1200,7 @@ impl Stack {
         }
         let handle = self.conns.insert(conn);
 
-        // Only when the next hop is known. Otherwise `tick` releases it.
-        if !arp_pending { self.send_syn(env, handle)?; }
+        self.send_syn(env, handle)?;
 
         Ok(handle)
     }
@@ -1270,8 +1235,6 @@ impl Stack {
     pub fn conn_debug(&self, handle: Handle) -> Option<ConnDebug> {
         self.conns.get(handle).map(|c| ConnDebug {
             state: c.state.name(),
-            arp_pending: c.arp_pending,
-            arp_tries: c.arp_tries,
             retries: c.retries,
         })
     }
@@ -1394,20 +1357,8 @@ impl Stack {
         conn.copied_total = conn.copied_total.saturating_add(available as u64);
         rcv_space_adjust(conn, io.env.uptime_us());
 
-        // tcp_cleanup_rbuf: a read that at least doubles the window the
-        // peer may use is worth an ACK now; anything less waits for the
-        // next ACK we send anyway.
-        if available > 0 && matches!(conn.state, State::Established | State::FinWait1 | State::FinWait2) {
-            let now_win = conn.receive_window();
-            if 2 * now_win as usize <= full_space(conn, io.st) {
-                let new = select_window_raw(conn, io.st);
-                if new != 0 && new >= 2 * now_win {
-                    let w = recv_window(conn, io.st);
-                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
-                    conn.ack_pending = false;
-                    conn.acks_held = 0;
-                }
-            }
+        if conn.established && !matches!(conn.state, State::Closed | State::TimeWait) {
+            ack::cleanup_rbuf(conn, &mut io, available);
         }
 
         Ok(available)
@@ -1484,7 +1435,7 @@ impl Stack {
             .filter(|c| c.released && matches!(c.state, State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck))
             .count();
         if orphans > self.max_orphans {
-            if let Some(conn) = self.conns.get(handle) {
+            if let Some(conn) = self.conns.get_mut(handle) {
                 send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, RST | ACK, 0, &[]);
             }
             self.conns.remove(handle);
@@ -1527,7 +1478,7 @@ impl Stack {
                 if flags & SYN != 0 {
                     if let Some(li) = conns.listener(dst_port) {
                         // Accept the SYN on the listening socket
-                        let iss = generate_isn(secret, io.ticks(), io.env.our_ip(), src_ip, dst_port, src_port);
+                        let iss = generate_isn(secret, io.env.uptime_us(), io.env.our_ip(), src_ip, dst_port, src_port);
                         let peer_ws = parse_wscale(data, data_offset);
                         let peer_mss = parse_mss(data, data_offset);
                         let now = io.ticks();
@@ -1535,8 +1486,10 @@ impl Stack {
                         let new_id = io.env.random_u64() as u16;
                         let env = &*io.env;
                         let mut advmss = 0;
+                        let local_ip = io.env.our_ip();
                         conns.relink(li, |conn| {
                             conn.state = State::SynReceived;
+                            conn.local_ip = local_ip;
                             conn.remote_ip = src_ip;
                             conn.remote_port = src_port;
                             conn.rcv_off = 0;
@@ -1647,6 +1600,7 @@ impl Stack {
         {
             if !(no_data && conn.oow_limited(io.ticks())) {
                 if !payload.is_empty() {
+                    ack::enter_quickack_mode(conn, ack::TCP_MAX_QUICKACKS);
                     conn.dsack = Some((seq, seq.wrapping_add(payload.len() as u32)));
                 }
                 let w = recv_window(conn, io.st);
@@ -1824,8 +1778,6 @@ impl Stack {
                             conn.probe_at = 0;
                         }
                     }
-                    // tcp_data_snd_check: whatever the window now lets out.
-                    write_xmit(conn, &mut io);
                 }
 
                 // Our FIN acknowledged (everything up to it is).
@@ -1885,10 +1837,6 @@ impl Stack {
                                 conn.ts_recent = ts;
                             }
                         }
-                        // tcp_measure_rcv_mss
-                        if payload.len() >= conn.rcv_mss as usize {
-                            conn.rcv_mss = (payload.len() as u16).min(conn.advmss);
-                        }
                         let space = RECV_BUF_SIZE - conn.recv_buf.len();
                         let mut copy = payload.len().min(space);
                         if !mem_charge(&io, copy) { copy = 0; }
@@ -1900,7 +1848,7 @@ impl Stack {
                         // Gap just filled — pull any now-contiguous segments out of
                         // the reassembly queue. Only the lowest stored offset can be
                         // next; if it doesn't meet rcv_nxt there's still a hole.
-                        let mut filled = false;
+                        let had_ooo = !conn.ooo.is_empty();
                         loop {
                             let want = conn.rcv_off;
                             // Peek the lowest stored offset (copy out k+len so the
@@ -1924,7 +1872,6 @@ impl Stack {
                             conn.rcv_nxt = conn.rcv_nxt.wrapping_add(new as u32);
                             conn.rcv_off += new as u64;
                             conn.recv_buf.extend(seg[skip..].iter().copied());
-                            filled = true;
                         }
                         io.st.max_rxbuf.fetch_max(conn.recv_buf.len(),
                             Ordering::Relaxed);
@@ -1948,30 +1895,14 @@ impl Stack {
                                 }
                             }
                         }
-                        // A filled gap must be ACKed immediately so the sender stops
-                        // retransmitting and advances — don't let it sit in coalescing.
-                        // A D-SACK goes out at once, with the ACK it belongs to.
-                        if filled || conn.dsack.is_some() {
-                            let w = recv_window(conn, io.st);
-                            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
-                            conn.dsack = None;
-                            conn.acks_held = 0;
-                            conn.ack_pending = false;
-                        } else {
-                        // Coalesced ACK: one ACK per ACK_COALESCE in-order segments.
-                        // A lone held ACK is flushed by the 40 ms timer in
-                        // tick_connections so a trickle/idle never strands the sender.
-                        conn.acks_held += 1;
-                        if conn.acks_held >= ACK_COALESCE {
-                            let w = recv_window(conn, io.st);
-                            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
-                            conn.acks_held = 0;
-                            conn.ack_pending = false;
-                        } else {
-                            conn.ack_pending = true;
-                            conn.ack_tick = io.ticks();
+                        if copy < payload.len() {
+                            // No room: say so at once.
+                            conn.ack.pending |= ack::ACK_NOMEM | ack::ACK_NOW;
+                            ack::schedule_ack(conn);
                         }
-                        }
+                        if copy > 0 { ack::event_data_recv(conn, copy, data_offset, flags, io.ticks()); }
+                        // RFC 5681 §4.2: a filled gap is ACKed at once.
+                        if had_ooo && conn.ooo.is_empty() { conn.ack.pending |= ack::ACK_NOW; }
                     } else {
                         if (seq.wrapping_sub(conn.rcv_nxt) as i32) > 0 {
                             // AHEAD = a real gap (an earlier segment was lost). Buffer
@@ -2011,10 +1942,11 @@ impl Stack {
                                 conn.ooo.insert(off, payload.to_vec());
                                 ooo_runs_add(&mut conn.ooo_runs, off, end);
                             }
-                            let w = recv_window(conn, io.st);
-                            send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
-                            conn.dsack = None;
-                            conn.ack_pending = false;
+                            if !in_window {
+                                // Past the window, a zero window probe for one.
+                                ack::enter_quickack_mode(conn, ack::TCP_MAX_QUICKACKS);
+                            }
+                            ack::schedule_ack(conn);
                         } else {
                             // BEHIND = we already have these bytes. Answer with a
                             // D-SACK (RFC 2883): an ACK naming an already
@@ -2032,14 +1964,13 @@ impl Stack {
                                 } else {
                                     end
                                 };
-                                if (hi.wrapping_sub(seq) as i32) > 0 {
+                                if (hi.wrapping_sub(seq) as i32) > 0 && conn.sack_ok {
                                     conn.dsack = Some((seq, hi));
-                                    let w = recv_window(conn, io.st);
-                                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
-                                    conn.dsack = None;
-                                    conn.ack_pending = false;
-                                    conn.acks_held = 0;
                                 }
+                                // A retransmission: our ACK was lost, so ACK
+                                // at once.
+                                ack::enter_quickack_mode(conn, ack::TCP_MAX_QUICKACKS);
+                                ack::schedule_ack(conn);
                             }
                         }
                     }
@@ -2054,24 +1985,44 @@ impl Stack {
                 {
                     conn.rcv_nxt = conn.rcv_nxt.wrapping_add(1);
                     conn.closed = true;
-                    conn.state = match conn.state {
-                        State::Established => State::CloseWait,
-                        // Ours not yet acknowledged: both closed at once.
-                        State::FinWait1 => State::Closing,
-                        _ => State::TimeWait,
-                    };
-                    if conn.state == State::TimeWait { conn.last_send_tick = io.ticks(); }
-                    let w = recv_window(conn, io.st);
-                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                    // tcp_fin
+                    ack::schedule_ack(conn);
+                    match conn.state {
+                        State::Established => {
+                            // Our side will likely close soon: its FIN can
+                            // carry the ACK.
+                            conn.state = State::CloseWait;
+                            ack::enter_pingpong_mode(conn);
+                        }
+                        State::FinWait1 => {
+                            // Ours not yet acknowledged: both closed at once.
+                            ack::send_ack(conn, &mut io);
+                            conn.state = State::Closing;
+                        }
+                        _ => {
+                            ack::send_ack(conn, &mut io);
+                            conn.state = State::TimeWait;
+                            conn.last_send_tick = io.ticks();
+                        }
+                    }
                 } else if flags & FIN != 0 && end.wrapping_add(1) == conn.rcv_nxt
                     && matches!(conn.state, State::CloseWait | State::Closing | State::LastAck | State::TimeWait)
                 {
                     // The peer sent its FIN again: our ACK was lost. In
                     // TIME-WAIT that restarts the wait (RFC 9293 §3.10.7.4).
-                    if conn.state == State::TimeWait { conn.last_send_tick = io.ticks(); }
-                    let w = recv_window(conn, io.st);
-                    send_seg(conn, &mut io, conn.snd_nxt, conn.rcv_nxt, ACK, w, &[]);
+                    if conn.state == State::TimeWait {
+                        conn.last_send_tick = io.ticks();
+                        ack::send_ack(conn, &mut io);
+                    } else {
+                        ack::enter_quickack_mode(conn, ack::TCP_MAX_QUICKACKS);
+                        ack::schedule_ack(conn);
+                    }
                 }
+
+                // tcp_data_snd_check, then tcp_ack_snd_check: data going out
+                // carries the ACK.
+                if conn.sends() { write_xmit(conn, &mut io); }
+                if conn.state != State::TimeWait { ack::ack_snd_check(conn, &mut io, true); }
             }
 
             _ => {}
@@ -2164,8 +2115,8 @@ impl Stack {
     }
 
     /// Periodic tick: retransmit, delayed ACKs, timeouts. Returns the segments
-    /// and ARP probes to send once the caller let go of the table.
-    pub fn tick<E: Env + ?Sized>(&mut self, env: &mut E) -> (Vec<PendingSeg>, Vec<[u8; 4]>) {
+    /// to send once the caller let go of the table.
+    pub fn tick<E: Env + ?Sized>(&mut self, env: &mut E) -> Vec<PendingSeg> {
         let mut io = Io { env, st: self.st };
         let now = io.ticks();
 
@@ -2174,9 +2125,6 @@ impl Stack {
         // across the TX doorbell would block worker-core `recv` behind Core-0's
         // periodic ACKs/retries.
         let mut pending: alloc::vec::Vec<PendingSeg> = alloc::vec::Vec::new();
-        // Same reason: an ARP request hits the NIC, so collect and fire after
-        // the table is let go.
-        let mut arp_probes: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
         // Retransmits are not collected here: `retransmit_skb` and `write_xmit`
         // send them from the send buffer like any other segment.
         {
@@ -2195,8 +2143,8 @@ impl Stack {
                 {
                     write_xmit(slot, &mut io);
                 }
-                // Delayed ACK
-                if slot.ack_pending && now - slot.ack_tick >= DELAYED_ACK_TICKS {
+                // The delayed ACK and SACK compression timers.
+                if ack::timer_due(slot, now) && slot.local_ip == io.env.our_ip() {
                     let w = recv_window(slot, io.st);
                     let mut opts = [0u8; 40];
                     let len = build_seg_opts(slot, ACK, &mut opts, false, io.ts_now_ms());
@@ -2206,8 +2154,7 @@ impl Stack {
                         ack: slot.rcv_nxt, flags: ACK, window: w, opts, opts_len: len,
                         id: slot.next_id(),
                     });
-                    slot.ack_pending = false;
-                    slot.acks_held = 0;
+                    ack::event_ack_sent(slot);
                 }
 
                 // SYN retry
@@ -2216,27 +2163,7 @@ impl Stack {
                     let opts_len = syn_opts(&mut opts, io.ts_now_ms(), slot.advmss);
                     let mut send_syn_now = false;
 
-                    if slot.arp_pending {
-                        // Next hop still unknown, SYN held back. Re-ask every
-                        // RETRANS window — one request is a coin flip over WiFi,
-                        // and both the request and the reply can be the loss.
-                        let target = io.env.arp_target_for(slot.remote_ip);
-                        if io.env.arp_known(target) {
-                            slot.arp_pending = false;
-                            send_syn_now = true;
-                        } else if now.wrapping_sub(slot.last_send_tick) >= ARP_RETRANS_TICKS {
-                            slot.arp_tries += 1;
-                            slot.last_send_tick = now;
-                            if slot.arp_tries > ARP_MAX_TRIES {
-                                // Give up asking and send anyway (to broadcast).
-                                // From here the normal SYN retry runs.
-                                slot.arp_pending = false;
-                                send_syn_now = true;
-                            } else {
-                                arp_probes.push(target);
-                            }
-                        }
-                    } else if now.saturating_sub(slot.last_send_tick) >= slot.rto {
+                    if now.saturating_sub(slot.last_send_tick) >= slot.rto {
                         // tcp_retransmit_timer, tcp_write_timeout: SYN
                         // retries model 1 s doubling, about 127 s for six.
                         if slot.retransmits_timed_out(io.ts_now_ms(), TCP_SYN_RETRIES, TCP_TIMEOUT_INIT, 0) {
@@ -2252,7 +2179,7 @@ impl Stack {
                         }
                     }
 
-                    if send_syn_now {
+                    if send_syn_now && slot.local_ip == io.env.our_ip() {
                         slot.last_send_tick = now;
                         slot.syn_sent_us = io.env.uptime_us();
                         pending.push(PendingSeg {
@@ -2355,7 +2282,7 @@ impl Stack {
             }
         }
 
-        (pending, arp_probes)
+        pending
     }
 
     fn send_syn<E: Env + ?Sized>(&mut self, env: &mut E, handle: Handle) -> Result<(), TcpError> {
@@ -2379,7 +2306,7 @@ impl Stack {
     pub fn has_timers(&self) -> bool {
         self.conns.iter().any(|c| match c.state {
             State::Closed | State::Listen => false,
-            State::Established | State::CloseWait => c.ack_pending || !c.send_buf.is_empty(),
+            State::Established | State::CloseWait => c.ack.pending != 0 || !c.send_buf.is_empty(),
             _ => true,
         })
     }
@@ -2759,18 +2686,22 @@ fn build_seg_opts(conn: &TcpConn, flags: u8, opts: &mut [u8; 40], has_payload: b
 /// TSval + the peer's echoed TSval) when timestamps were negotiated (RFC 7323).
 /// All connection-originated segments (ACKs, data, FIN) must carry it so the
 /// sender gets a clean per-segment RTT sample despite our ACK jitter.
-fn send_seg<E: Env + ?Sized>(conn: &TcpConn, io: &mut Io<E>, seq: u32, ack: u32, flags: u8,
+fn send_seg<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>, seq: u32, ack: u32, flags: u8,
             window: u16, payload: &[u8]) -> bool {
+    // ip_route_output_ports: a source address no longer ours has no route.
+    if conn.local_ip != io.env.our_ip() { return false; }
     io.st.tx_segs.fetch_add(1, Ordering::Relaxed);
     let mut opts = [0u8; 40];
     let len = build_seg_opts(conn, flags, &mut opts, !payload.is_empty(), io.ts_now_ms());
-    if len > 0 {
+    let sent = if len > 0 {
         send_segment_with_opts(io, conn.remote_ip, conn.local_port, conn.remote_port,
             seq, ack, flags, window, payload, &opts[..len], conn.next_id())
     } else {
         send_segment(io, conn.remote_ip, conn.local_port, conn.remote_port,
             seq, ack, flags, window, payload, conn.next_id())
-    }
+    };
+    if flags & ACK != 0 && ack == conn.rcv_nxt { ack::event_ack_sent(conn); }
+    sent
 }
 
 /// A fully-resolved zero-payload segment captured under the table's lock

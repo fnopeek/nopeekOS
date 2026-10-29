@@ -5,9 +5,12 @@
 +0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
 +0     > . 1:1(0) ack 1 win 65535
 
+// The ACK of a FIN is delayed (pingpong mode), with no data seen yet by
+// one tick.
 +0.1   < F. 1:1(0) ack 1 win 4000
-+0     > . 1:1(0) ack 2 win 65535
-+0.2   < F. 1:1(0) ack 1 win 4000
++0.01  > . 1:1(0) ack 2 win 65535
+// Our ACK was lost: the retransmission is ACKed at once (quick-ACK mode).
++0.19  < F. 1:1(0) ack 1 win 4000
 +0     > . 1:1(0) ack 2 win 65535
 +0     close
 +0     > F. 1:1(0) ack 2 win 65535
