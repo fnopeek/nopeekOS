@@ -33,10 +33,14 @@ pub trait Env {
     /// Whether the link-layer address of `ip` is known.
     fn arp_known(&self, ip: [u8; 4]) -> bool;
     fn arp_request(&mut self, ip: [u8; 4]);
-    /// Hand a TCP segment to IP. False when the driver queue refused it.
-    fn ip_send(&mut self, dst: [u8; 4], segment: &[u8]) -> bool;
+    /// Hand a TCP segment to IP, with DF set and identification `id`.
+    /// False when the driver queue refused it.
+    fn ip_send(&mut self, dst: [u8; 4], segment: &[u8], id: u16) -> bool;
     /// The path MTU to `dst`: the device's, or less once a router said so.
     fn mtu(&self, dst: [u8; 4]) -> u32;
+    /// A router said the path to `dst` carries only `mtu` (the route's
+    /// `__ip_rt_update_pmtu`).
+    fn update_pmtu(&mut self, dst: [u8; 4], mtu: u32);
 }
 
 /// The stack's counters. Atomic, so diagnostics and `send_blocking` read
@@ -665,6 +669,28 @@ struct TcpConn {
     pmtu: u32,
     /// `max_window`: the largest window the peer offered.
     max_window: u32,
+
+    /// `inet_id`: the IP identification of the next segment (DF is set, so
+    /// it only has to be unique enough for duplicate detection).
+    inet_id: core::cell::Cell<u16>,
+    /// What an ICMP error said: fatal in SYN-SENT, otherwise `sk_err_soft`.
+    sock_err: Option<SockErr>,
+}
+
+/// The error a connection ended with, or last learned of (`sk_err`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SockErr {
+    /// ECONNREFUSED: port unreachable.
+    Refused,
+    /// EHOSTUNREACH and its kin.
+    HostUnreachable,
+    /// ENETUNREACH.
+    NetUnreachable,
+    /// ENOPROTOOPT, EPROTO: the peer does not speak TCP, or a parameter
+    /// problem.
+    Protocol,
+    /// EMSGSIZE: the path carries less than the smallest MSS we send.
+    MsgSize,
 }
 
 /// Who holds a connection: the kernel itself, or a module by its pid.
@@ -741,7 +767,16 @@ impl TcpConn {
             advmss: 1460,
             pmtu: 1500,
             max_window: 0,
+            inet_id: core::cell::Cell::new(0),
+            sock_err: None,
         }
+    }
+
+    /// `ip_select_ident_segs` for a connected socket.
+    fn next_id(&self) -> u16 {
+        let id = self.inet_id.get();
+        self.inet_id.set(id.wrapping_add(1));
+        id
     }
 
     /// `ipv4_default_advmss` and `tcp_mtup_init`: what we announce and the
@@ -984,6 +1019,8 @@ impl Stack {
         conn.arp_pending = arp_pending;
         conn.arp_tries = 1;
         conn.set_path(env);
+        // tcp_v4_connect: `inet_id` starts at random.
+        conn.inet_id.set(env.random_u64() as u16);
 
         // A connection the owner still holds counts against it until the
         // owner lets go, even once it is Closed (reset, retransmits
@@ -1270,6 +1307,7 @@ impl Stack {
                         let peer_ws = parse_wscale(data, data_offset);
                         let peer_mss = parse_mss(data, data_offset);
                         let now = io.ticks();
+                        let new_id = io.env.random_u64() as u16;
                         let env = &*io.env;
                         let mut advmss = 0;
                         conns.relink(li, |conn| {
@@ -1286,6 +1324,7 @@ impl Stack {
                             conn.wscale_ok = peer_ws.is_some();
                             conn.snd_wscale = peer_ws.unwrap_or(0);
                             conn.set_path(env);
+                            conn.inet_id.set(new_id);
                             conn.mss_clamp = peer_mss.unwrap_or(TCP_MSS_DEFAULT);
                             conn.sync_mss();
                             advmss = conn.advmss;
@@ -1300,14 +1339,14 @@ impl Stack {
                         };
                         send_segment_with_opts(
                             &mut io, src_ip, dst_port, src_port,
-                            iss, seq.wrapping_add(1), SYN | ACK, INITIAL_WINDOW, &[], opts,
+                            iss, seq.wrapping_add(1), SYN | ACK, INITIAL_WINDOW, &[], opts, 0,
                         );
                         return;
                     }
                 }
                 // No connection and no listener: send RST if not RST
                 if flags & RST == 0 {
-                    send_segment(&mut io, src_ip, dst_port, src_port, ack, seq.wrapping_add(1), RST | ACK, 0, &[]);
+                    send_segment(&mut io, src_ip, dst_port, src_port, ack, seq.wrapping_add(1), RST | ACK, 0, &[], 0);
                 }
                 return;
             }
@@ -1737,6 +1776,67 @@ impl Stack {
         }
     }
 
+    /// `tcp_v4_err`: an ICMP error about a segment we sent.
+    ///
+    /// The quoted sequence number must lie in [snd_una, snd_nxt] (RFC 5927
+    /// §4.1), or anyone who guesses the 4-tuple could reset the connection
+    /// or talk its MSS down. Fragmentation Needed lowers the path MTU and
+    /// resends what is in flight at the new size (`tcp_v4_mtu_reduced`).
+    /// Any other error ends a connection still in its handshake; later it
+    /// is only remembered (RFC 1122 §4.2.3.9: soft errors).
+    pub fn icmp_error<E: Env + ?Sized>(&mut self, env: &mut E, e: &crate::ip::IcmpError) {
+        use crate::ip::{ICMP_DEST_UNREACH, ICMP_FRAG_NEEDED, ICMP_PARAMETERPROB, ICMP_TIME_EXCEEDED};
+        let t = e.transport();
+        let sport = u16::from_be_bytes([t[0], t[1]]);
+        let dport = u16::from_be_bytes([t[2], t[3]]);
+        let seq = u32::from_be_bytes([t[4], t[5], t[6], t[7]]);
+        let Some(h) = self.conns.find((sport, e.inner_dst(), dport)) else { return };
+        let mut io = Io { env, st: self.st };
+        let Some(conn) = self.conns.get_mut(h) else { return };
+        if conn.state != State::Listen
+            && seq.wrapping_sub(conn.snd_una) > conn.snd_nxt.wrapping_sub(conn.snd_una)
+        {
+            return;
+        }
+        let err = match e.kind {
+            ICMP_PARAMETERPROB => SockErr::Protocol,
+            ICMP_DEST_UNREACH if e.code == ICMP_FRAG_NEEDED => {
+                if matches!(conn.state, State::Listen | State::Closed) { return; }
+                io.env.update_pmtu(conn.remote_ip, e.info);
+                let mtu = io.env.mtu(conn.remote_ip);
+                if mtu < conn.pmtu {
+                    conn.pmtu = mtu;
+                    conn.sync_mss();
+                    // "Resend the TCP packet because it's clear that old
+                    // packet has been dropped."
+                    retransmit_all(conn, &mut io);
+                }
+                return;
+            }
+            // icmp_err_convert.
+            ICMP_DEST_UNREACH => match e.code {
+                2 => SockErr::Protocol,
+                3 => SockErr::Refused,
+                0 | 6 | 9 | 11 => SockErr::NetUnreachable,
+                _ => SockErr::HostUnreachable,
+            },
+            ICMP_TIME_EXCEEDED => SockErr::HostUnreachable,
+            _ => return,
+        };
+        conn.sock_err = Some(err);
+        if matches!(conn.state, State::SynSent | State::SynReceived) {
+            // tcp_done
+            conn.error = true;
+            conn.state = State::Closed;
+            conn.last_send_tick = io.ticks();
+        }
+    }
+
+    /// The error the connection at `handle` ended with or last learned of.
+    pub fn conn_error(&self, handle: Handle) -> Option<SockErr> {
+        self.conns.get(handle).and_then(|c| c.sock_err)
+    }
+
     /// Periodic tick: retransmit, delayed ACKs, timeouts. Returns the segments
     /// and ARP probes to send once the caller let go of the table.
     pub fn tick<E: Env + ?Sized>(&mut self, env: &mut E) -> (Vec<PendingSeg>, Vec<[u8; 4]>) {
@@ -1777,6 +1877,7 @@ impl Stack {
                         dst_ip: slot.remote_ip, src_port: slot.local_port,
                         dst_port: slot.remote_port, seq: slot.snd_nxt,
                         ack: slot.rcv_nxt, flags: ACK, window: w, opts, opts_len: len,
+                        id: slot.next_id(),
                     });
                     slot.ack_pending = false;
                     slot.acks_held = 0;
@@ -1827,7 +1928,7 @@ impl Stack {
                             dst_ip: slot.remote_ip, src_port: slot.local_port,
                             dst_port: slot.remote_port, seq: slot.snd_iss,
                             ack: 0, flags: SYN, window: INITIAL_WINDOW,
-                            opts, opts_len,
+                            opts, opts_len, id: slot.next_id(),
                         });
                     }
                 }
@@ -1907,7 +2008,7 @@ impl Stack {
         let len = syn_opts(&mut opts, io.ts_now_ms(), conn.advmss);
         send_segment_with_opts(
             &mut io, conn.remote_ip, conn.local_port, conn.remote_port,
-            conn.snd_iss, 0, SYN, INITIAL_WINDOW, &[], &opts[..len],
+            conn.snd_iss, 0, SYN, INITIAL_WINDOW, &[], &opts[..len], conn.next_id(),
         );
         Ok(())
     }
@@ -2017,6 +2118,27 @@ fn retransmit_head<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
     }
 }
 
+/// `tcp_simple_retransmit` after the MSS fell: everything in flight was
+/// larger than the path now carries, so it goes out again, at the new size.
+/// `snd_nxt` stays where it is.
+fn retransmit_all<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
+    let mss = eff_mss(conn).min(1460);
+    let in_flight = (conn.snd_nxt.wrapping_sub(conn.snd_una) as usize).min(conn.send_buf.len());
+    let mut chunk = [0u8; 1460];
+    let mut off = 0;
+    while off < in_flight {
+        let n = (in_flight - off).min(mss);
+        chunk[..n].copy_from_slice(&conn.send_buf[off..off + n]);
+        let w = recv_window(conn, io.st);
+        if !send_seg(conn, io, conn.snd_una.wrapping_add(off as u32), conn.rcv_nxt, ACK | PSH, w, &chunk[..n]) {
+            io.st.send_refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        off += n;
+    }
+    conn.last_send_tick = io.ticks();
+}
+
 /// `tcp_reno_ssthresh` (tcp_cong.c:512): half, at least two.
 fn reno_ssthresh(conn: &TcpConn) -> u32 {
     (conn.snd_cwnd >> 1).max(2)
@@ -2051,14 +2173,17 @@ fn syn_opts(opts: &mut [u8; 40], tsval: u32, advmss: u16) -> usize {
 
 fn send_segment<E: Env + ?Sized>(
     io: &mut Io<E>, dst_ip: [u8; 4], src_port: u16, dst_port: u16,
-    seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8],
+    seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8], id: u16,
 ) -> bool {
-    send_segment_with_opts(io, dst_ip, src_port, dst_port, seq, ack, flags, window, payload, &[])
+    send_segment_with_opts(io, dst_ip, src_port, dst_port, seq, ack, flags, window, payload, &[], id)
 }
 
+/// `id`: the connection's next identification; 0 for a segment no
+/// connection sends (a reset, a SYN-ACK), as Linux's control socket and
+/// listener do.
 fn send_segment_with_opts<E: Env + ?Sized>(
     io: &mut Io<E>, dst_ip: [u8; 4], src_port: u16, dst_port: u16,
-    seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8], options: &[u8],
+    seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8], options: &[u8], id: u16,
 ) -> bool {
     let opts_padded = (options.len() + 3) & !3; // pad to 4 bytes
     let header_len = HEADER_LEN + opts_padded;
@@ -2089,7 +2214,7 @@ fn send_segment_with_opts<E: Env + ?Sized>(
 
     // The result matters: the driver queue refuses when it is full, and the
     // caller must not treat the segment as sent.
-    io.env.ip_send(dst_ip, &pkt)
+    io.env.ip_send(dst_ip, &pkt, id)
 }
 
 fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {
@@ -2325,10 +2450,10 @@ fn send_seg<E: Env + ?Sized>(conn: &TcpConn, io: &mut Io<E>, seq: u32, ack: u32,
     let len = build_seg_opts(conn, flags, &mut opts, !payload.is_empty(), io.ts_now_ms());
     if len > 0 {
         send_segment_with_opts(io, conn.remote_ip, conn.local_port, conn.remote_port,
-            seq, ack, flags, window, payload, &opts[..len])
+            seq, ack, flags, window, payload, &opts[..len], conn.next_id())
     } else {
         send_segment(io, conn.remote_ip, conn.local_port, conn.remote_port,
-            seq, ack, flags, window, payload)
+            seq, ack, flags, window, payload, conn.next_id())
     }
 }
 
@@ -2346,6 +2471,7 @@ pub struct PendingSeg {
     window: u16,
     opts: [u8; 40],
     opts_len: usize,
+    id: u16,
 }
 
 /// Send a segment `tick` returned.
@@ -2354,10 +2480,10 @@ pub fn send_pending<E: Env + ?Sized>(env: &mut E, st: &'static Stats, p: &Pendin
     io.st.tx_segs.fetch_add(1, Ordering::Relaxed);
     if p.opts_len > 0 {
         send_segment_with_opts(&mut io, p.dst_ip, p.src_port, p.dst_port,
-            p.seq, p.ack, p.flags, p.window, &[], &p.opts[..p.opts_len]);
+            p.seq, p.ack, p.flags, p.window, &[], &p.opts[..p.opts_len], p.id);
     } else {
         send_segment(&mut io, p.dst_ip, p.src_port, p.dst_port,
-            p.seq, p.ack, p.flags, p.window, &[]);
+            p.seq, p.ack, p.flags, p.window, &[], p.id);
     }
 }
 

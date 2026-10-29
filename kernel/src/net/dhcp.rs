@@ -112,6 +112,7 @@ pub fn forget() {
     no_lease();
     arp::flush();
     super::dns::flush();
+    super::ipv4::flush_pmtu();
 }
 
 /// Begin a lease. Returns at once.

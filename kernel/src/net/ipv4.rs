@@ -52,9 +52,34 @@ pub fn mtu() -> u32 {
     MTU.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Path MTUs learned from Fragmentation Needed.
+static PMTU: Mutex<net_core::ip::Pmtu> = Mutex::new(net_core::ip::Pmtu::new());
+
 /// The path MTU to `dst`.
-pub fn path_mtu(_dst: [u8; 4]) -> u32 {
-    mtu()
+pub fn path_mtu(dst: [u8; 4]) -> u32 {
+    PMTU.lock().get(dst, mtu(), crate::interrupts::ticks())
+}
+
+/// A router said the path to `dst` carries only `mtu`.
+pub fn update_pmtu(dst: [u8; 4], mtu: u32) {
+    PMTU.lock().update(dst, mtu, self::mtu(), crate::interrupts::ticks());
+}
+
+/// Forget the learned path MTUs: they belong to the network we left.
+pub fn flush_pmtu() {
+    PMTU.lock().flush();
+}
+
+/// The identification counters for datagrams that may be fragmented.
+static IDENTS: spin::Once<Mutex<net_core::ip::Idents>> = spin::Once::new();
+
+/// `__ip_select_ident`.
+fn select_ident(dst: [u8; 4], src: [u8; 4], proto: u8) -> u16 {
+    let idents = IDENTS.call_once(|| Mutex::new(net_core::ip::Idents::new(
+        crate::csprng::random_256(), crate::memory::usable_bytes(),
+        || crate::csprng::random_u64() as u32)));
+    idents.lock().select(dst, src, proto, crate::interrupts::ticks() as u32,
+        |range| if range == 0 { 0 } else { (crate::csprng::random_u64() % range as u64) as u32 })
 }
 
 pub fn too_big() -> u64 {
@@ -196,7 +221,13 @@ pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
 
 /// Send an IPv4 packet with custom TTL (for traceroute)
 pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> bool {
-    transmit(dst_ip, protocol, payload, ttl, Tx::Wait, Forwarded::default()).0
+    transmit(dst_ip, protocol, payload, ttl, Tx::Wait, None).0
+}
+
+/// Send a TCP segment of a connection: DF set (`IP_PMTUDISC_WANT`), its
+/// identification from the connection's `inet_id`.
+pub fn send_tcp(dst_ip: [u8; 4], segment: &[u8], id: u16) -> bool {
+    transmit(dst_ip, PROTO_TCP, segment, 64, Tx::Wait, Some(Forwarded { tos: 0, id, df: true })).0
 }
 
 /// The header fields a forwarded packet keeps from its sender: TOS (with the
@@ -215,7 +246,7 @@ pub struct Forwarded {
 pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::Try, head);
+    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::Try, Some(head));
     sent.map(|()| resolved)
 }
 
@@ -224,7 +255,7 @@ pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
 pub fn try_send_partial(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, head);
+    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, Some(head));
     sent.map(|()| resolved)
 }
 
@@ -239,9 +270,12 @@ enum Tx {
 }
 
 /// Build and hand over one packet. Returns whether it went to the card (or
-/// waits for its next hop's address), and the card's verdict.
+/// waits for its next hop's address), and the card's verdict. `head`: the
+/// fields of a TCP segment or a forwarded packet; `None` for a datagram of
+/// ours that no connection sends, which gets them as
+/// `ip_select_ident_segs` does for an unconnected socket.
 fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
-            head: Forwarded)
+            head: Option<Forwarded>)
     -> (bool, Result<(), crate::virtio_net::NetError>)
 {
     // __mkroute_output: no loopback device, and 0/8 and 240/4 lead nowhere.
@@ -257,6 +291,14 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
     }
     let src_ip = arp::our_ip();
     let total_len = (HEADER_LEN + payload.len()) as u16;
+    let head = head.unwrap_or_else(|| if protocol == PROTO_UDP {
+        // DF set (`IP_PMTUDISC_WANT`): an atomic datagram needs no unique
+        // identification (RFC 6864 §4.1).
+        Forwarded { tos: 0, id: 0, df: true }
+    } else {
+        // ICMP's socket is `IP_PMTUDISC_DONT`: no DF, a unique identification.
+        Forwarded { tos: 0, id: select_ident(dst_ip, src_ip, protocol), df: false }
+    });
 
     let mut pkt = alloc::vec![0u8; total_len as usize];
 

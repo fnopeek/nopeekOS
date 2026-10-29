@@ -1,0 +1,14 @@
+// Once established an unreachable is only a soft error, and an ICMP error
+// quoting a sequence number outside [snd_una, snd_nxt] is ignored (RFC 5927).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK,TS val 100 ecr 0,nop,wscale 7>
++0     > . 1:1(0) ack 1
+
++0     send 100
++0     > P. 1:101(100) ack 1
++0     < icmp 3 3 seq 1
++0     status 1
++0     < icmp 3 4 mtu 600 seq 5000
++0     < icmp 3 4 mtu 600 seq 200
++0     status 1

@@ -26,6 +26,15 @@ pub fn handle_icmp(ip_packet: &[u8], data: &[u8]) {
     let icmp_type = data[0];
     let src_ip = <[u8; 4]>::try_from(&ip_packet[12..16]).unwrap();
 
+    // icmp_unreach: an error about a datagram of ours goes to its protocol.
+    if let Some(e) = net_core::ip::icmp_error(data, super::arp::our_ip()) {
+        match e.inner_proto() {
+            ipv4::PROTO_TCP => super::tcp::icmp_error(&e),
+            ipv4::PROTO_UDP => super::udp::icmp_error(&e),
+            _ => {}
+        }
+    }
+
     match icmp_type {
         // Unconfigured, a reply would carry 0.0.0.0 as its source.
         ECHO_REQUEST if super::arp::our_ip() != [0; 4] => send_echo_reply(src_ip, data),

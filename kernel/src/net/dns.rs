@@ -261,6 +261,11 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
         let t0 = crate::interrupts::ticks();
         while crate::interrupts::ticks().wrapping_sub(t0) < *leg {
             super::poll();
+            // Port or host unreachable from the resolver: no answer will come.
+            if udp::take_error(local_port) == Some((dns_server, DNS_PORT)) {
+                crate::kprintln!("[npk] dns: {} — the resolver is unreachable (ICMP)", name);
+                break 'legs;
+            }
             if let Some((src_ip, src_port, data)) = udp::recv(local_port) {
                 seen += 1;
                 // Only our reply ends the wait — a negative answer is an

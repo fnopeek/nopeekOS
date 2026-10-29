@@ -32,10 +32,11 @@ impl Env for KernelEnv {
     fn arp_target_for(&self, ip: [u8; 4]) -> [u8; 4] { ipv4::arp_target_for(ip) }
     fn arp_known(&self, ip: [u8; 4]) -> bool { arp::lookup(ip).is_some() }
     fn arp_request(&mut self, ip: [u8; 4]) { arp::request(ip) }
-    fn ip_send(&mut self, dst: [u8; 4], segment: &[u8]) -> bool {
-        ipv4::send(dst, ipv4::PROTO_TCP, segment)
+    fn ip_send(&mut self, dst: [u8; 4], segment: &[u8], id: u16) -> bool {
+        ipv4::send_tcp(dst, segment, id)
     }
     fn mtu(&self, dst: [u8; 4]) -> u32 { ipv4::path_mtu(dst) }
+    fn update_pmtu(&mut self, dst: [u8; 4], mtu: u32) { ipv4::update_pmtu(dst, mtu) }
 }
 
 /// Empty looks at `ack_gen` before yielding.
@@ -133,13 +134,22 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
             // the connection (a RST answers a SYN with a refusal). They call
             // for opposite investigations, so they get different errors.
             -2 => {
-                if let Some(c) = stack().conn_debug(handle) {
-                    crate::kprintln!(
-                        "[tcp] connect gave up: state {} arp_tries {} syn_retries {}",
-                        c.state, c.arp_tries, c.retries);
+                // An ICMP error says why at once; without one our retries ran
+                // out.
+                let err = stack().conn_error(handle);
+                if err.is_none() {
+                    if let Some(c) = stack().conn_debug(handle) {
+                        crate::kprintln!(
+                            "[tcp] connect gave up: state {} arp_tries {} syn_retries {}",
+                            c.state, c.arp_tries, c.retries);
+                    }
                 }
                 stack().remove(handle);
-                return Err(TcpError::Timeout);
+                return Err(match err {
+                    Some(net_core::tcp::SockErr::Refused) => TcpError::ConnectionRefused,
+                    Some(_) => TcpError::Unreachable,
+                    None => TcpError::Timeout,
+                });
             }
             n if n < 0 => {
                 stack().remove(handle);
@@ -371,6 +381,11 @@ pub fn peer(handle: usize) -> Option<([u8; 4], u16)> {
 /// that worker core.
 pub fn close(handle: usize) -> Result<(), TcpError> {
     stack().close(&mut KernelEnv, handle)
+}
+
+/// An ICMP error about one of our segments (from `icmp`).
+pub fn icmp_error(e: &net_core::ip::IcmpError) {
+    stack().icmp_error(&mut KernelEnv, e);
 }
 
 /// Handle incoming TCP segment (called from ipv4)

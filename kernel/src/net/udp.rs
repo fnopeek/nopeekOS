@@ -19,6 +19,8 @@ struct UdpListener {
     src_ip: [u8; 4],
     src_port: u16,
     has_data: bool,
+    /// A hard ICMP error for a datagram it sent: (to address, to port).
+    err: Option<([u8; 4], u16)>,
 }
 
 static LISTENERS: Mutex<[Option<UdpListener>; MAX_LISTENERS]> = Mutex::new(
@@ -55,6 +57,32 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
     // here in silence — indistinguishable from a reply that never came.
     NO_LISTENER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     NO_LISTENER_PORT.store(dst_port, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// `__udp4_lib_err`: a hard error (`icmp_err_convert` fatal, or a
+/// parameter problem) for a datagram one of our listeners sent. Our
+/// clients send to one server and wait for it, as a connected socket does,
+/// so it is theirs to see.
+pub fn icmp_error(e: &net_core::ip::IcmpError) {
+    use net_core::ip::{ICMP_DEST_UNREACH, ICMP_PARAMETERPROB};
+    let hard = match e.kind {
+        ICMP_DEST_UNREACH => matches!(e.code, 2 | 3 | 6..=10 | 13..=15),
+        ICMP_PARAMETERPROB => true,
+        _ => false,
+    };
+    if !hard { return; }
+    let t = e.transport();
+    let sport = u16::from_be_bytes([t[0], t[1]]);
+    let dport = u16::from_be_bytes([t[2], t[3]]);
+    let mut listeners = LISTENERS.lock();
+    if let Some(l) = listeners.iter_mut().flatten().find(|l| l.port == sport) {
+        l.err = Some((e.inner_dst(), dport));
+    }
+}
+
+/// The hard ICMP error a listener's datagram drew, once.
+pub fn take_error(port: u16) -> Option<([u8; 4], u16)> {
+    LISTENERS.lock().iter_mut().flatten().find(|l| l.port == port).and_then(|l| l.err.take())
 }
 
 /// Datagrams dropped because no listener was registered, and the last such
@@ -114,6 +142,7 @@ pub fn listen(port: u16) -> bool {
             src_ip: [0; 4],
             src_port: 0,
             has_data: false,
+            err: None,
         });
         true
     } else {
@@ -150,6 +179,7 @@ pub fn listen_ephemeral() -> Option<u16> {
             src_ip: [0; 4],
             src_port: 0,
             has_data: false,
+            err: None,
         });
         return Some(port);
     }

@@ -236,3 +236,141 @@ pub fn options_ok(opts: &[u8]) -> Result<(), Drop> {
     }
     if srr { Err(Drop::SourceRoute) } else { Ok(()) }
 }
+
+// ── Identification (`ip_select_ident_segs`) ──────────────────────────
+
+/// `ip_idents`/`ip_tstamps`: per-bucket ID counters for datagrams that may
+/// be fragmented, the bucket chosen by a keyed hash of (dst, src, protocol)
+/// (`__ip_select_ident`). A bucket idle for a while jumps ahead by a random
+/// amount, so its counter says nothing about how much was sent.
+pub struct Idents {
+    key: [u8; 32],
+    ids: alloc::vec::Vec<u32>,
+    stamps: alloc::vec::Vec<u32>,
+}
+
+impl Idents {
+    /// `alloc_large_system_hash("IP idents", .., scale 16, .., 2048,
+    /// 256 * 1024)`, the counters seeded at random.
+    pub fn new(key: [u8; 32], ram_bytes: u64, mut rnd: impl FnMut() -> u32) -> Self {
+        let n = ((ram_bytes >> 16) as usize).next_power_of_two().clamp(2048, 256 * 1024);
+        Idents { key, ids: (0..n).map(|_| rnd()).collect(), stamps: alloc::vec![0; n] }
+    }
+
+    /// `ip_idents_reserve` for one datagram; `now` in ticks.
+    pub fn select(&mut self, dst: [u8; 4], src: [u8; 4], proto: u8, now: u32, rnd: impl FnOnce(u32) -> u32) -> u16 {
+        let mut msg = [0u8; 9];
+        msg[0..4].copy_from_slice(&dst);
+        msg[4..8].copy_from_slice(&src);
+        msg[8] = proto;
+        let h = blake3::keyed_hash(&self.key, &msg);
+        let hash = u32::from_le_bytes(h.as_bytes()[0..4].try_into().unwrap());
+        let b = hash as usize & (self.ids.len() - 1);
+        let old = self.stamps[b];
+        let mut delta = 0;
+        if old != now {
+            self.stamps[b] = now;
+            delta = rnd(now.wrapping_sub(old));
+        }
+        let id = self.ids[b].wrapping_add(delta);
+        self.ids[b] = id.wrapping_add(1);
+        id as u16
+    }
+}
+
+// ── Path MTU (`__ip_rt_update_pmtu`, the route's nexthop exceptions) ──
+
+/// `ip_rt_min_pmtu`: a router may not talk the path below this.
+pub const MIN_PMTU: u32 = 512 + 20 + 20;
+/// `ip_rt_mtu_expires`, in ticks: 10 minutes.
+pub const MTU_EXPIRES: u64 = 10 * 60 * 100;
+/// Exceptions kept at most: `FNHE_HASH_SIZE` buckets of
+/// `FNHE_RECLAIM_DEPTH`.
+const PMTU_MAX: usize = 2048 * 5;
+
+/// Path MTUs learned from Fragmentation Needed, per destination.
+#[derive(Default)]
+pub struct Pmtu {
+    map: alloc::collections::BTreeMap<[u8; 4], (u32, u64)>,
+}
+
+impl Pmtu {
+    pub const fn new() -> Self { Pmtu { map: alloc::collections::BTreeMap::new() } }
+
+    /// The MTU to `dst`, `dev_mtu` without a live exception.
+    pub fn get(&self, dst: [u8; 4], dev_mtu: u32, now: u64) -> u32 {
+        match self.map.get(&dst) {
+            Some(&(mtu, expires)) if now < expires => mtu.min(dev_mtu),
+            _ => dev_mtu,
+        }
+    }
+
+    /// A router said the path to `dst` carries only `mtu`. Only lowers, and
+    /// never below `MIN_PMTU`.
+    pub fn update(&mut self, dst: [u8; 4], mtu: u32, dev_mtu: u32, now: u64) {
+        let old = self.get(dst, dev_mtu, now);
+        if old < mtu { return; }
+        let mtu = if mtu < MIN_PMTU { old.min(MIN_PMTU) } else { mtu };
+        if self.map.len() >= PMTU_MAX && !self.map.contains_key(&dst) {
+            if let Some(oldest) = self.map.iter().min_by_key(|(_, v)| v.1).map(|(k, _)| *k) {
+                self.map.remove(&oldest);
+            }
+        }
+        self.map.insert(dst, (mtu, now + MTU_EXPIRES));
+    }
+
+    pub fn flush(&mut self) { self.map.clear(); }
+}
+
+// ── ICMP errors (`icmp_unreach`) ──────────────────────────────────────
+
+pub const ICMP_DEST_UNREACH: u8 = 3;
+pub const ICMP_TIME_EXCEEDED: u8 = 11;
+pub const ICMP_PARAMETERPROB: u8 = 12;
+pub const ICMP_FRAG_NEEDED: u8 = 4;
+const ICMP_EXC_FRAGTIME: u8 = 1;
+const NR_ICMP_UNREACH: u8 = 15;
+
+/// An ICMP error about a datagram of ours.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IcmpError<'a> {
+    pub kind: u8,
+    pub code: u8,
+    /// The next-hop MTU of Fragmentation Needed, the pointer of a Parameter
+    /// Problem, 0 otherwise.
+    pub info: u32,
+    /// The datagram's header and at least the first 8 bytes after it.
+    pub inner: &'a [u8],
+}
+
+impl IcmpError<'_> {
+    pub fn inner_dst(&self) -> [u8; 4] { self.inner[16..20].try_into().unwrap() }
+    pub fn inner_proto(&self) -> u8 { self.inner[9] }
+    /// The transport header of the datagram, its first 8 bytes at least.
+    pub fn transport(&self) -> &[u8] { &self.inner[((self.inner[0] & 0x0f) as usize) * 4..] }
+}
+
+/// `icmp_unreach` for an ICMP message `icmp` that says something about a
+/// datagram `our_ip` sent: Destination Unreachable, Time Exceeded (not the
+/// reassembly timer's) or Parameter Problem, quoting a whole IPv4 header and
+/// 8 bytes of its payload.
+pub fn icmp_error(icmp: &[u8], our_ip: [u8; 4]) -> Option<IcmpError<'_>> {
+    if icmp.len() < 8 { return None; }
+    let (kind, code) = (icmp[0], icmp[1]);
+    let info = match kind {
+        ICMP_DEST_UNREACH => {
+            if code > NR_ICMP_UNREACH { return None; }
+            if code == ICMP_FRAG_NEEDED { u16::from_be_bytes([icmp[6], icmp[7]]) as u32 } else { 0 }
+        }
+        ICMP_PARAMETERPROB => icmp[4] as u32,
+        ICMP_TIME_EXCEEDED if code == ICMP_EXC_FRAGTIME => return None,
+        ICMP_TIME_EXCEEDED => 0,
+        _ => return None,
+    };
+    let inner = &icmp[8..];
+    if inner.len() < 20 || inner[0] >> 4 != 4 { return None; }
+    let ihl = ((inner[0] & 0x0f) as usize) * 4;
+    if ihl < 20 || inner.len() < ihl + 8 { return None; }
+    if inner[12..16] != our_ip { return None; }
+    Some(IcmpError { kind, code, info, inner })
+}

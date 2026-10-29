@@ -1,0 +1,6 @@
+// A port unreachable for our SYN ends the connection at once (tcp_v4_err in
+// SYN-SENT), instead of after the SYN retransmits.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < icmp 3 3 seq 0
++0     status -2

@@ -8,6 +8,7 @@
 //! +0     > . 1:1(0) ack 1                                    segment out
 //! +0     connect 192.0.2.2:80 | listen 80 | send 100 | recv 100 | close
 //! +0     status 1                                            connect_status
+//! +0     < icmp 3 4 mtu 1000 seq 1    ICMP error quoting our segment at seq 1
 //! ```
 //!
 //! Times are seconds, `+` relative to the previous line. Sequence numbers
@@ -33,6 +34,7 @@ struct TestEnv {
     now_us: u64,
     rng: u64,
     sent: VecDeque<([u8; 4], Vec<u8>)>,
+    pmtu: u32,
 }
 
 impl Env for TestEnv {
@@ -49,8 +51,12 @@ impl Env for TestEnv {
     fn arp_target_for(&self, ip: [u8; 4]) -> [u8; 4] { ip }
     fn arp_known(&self, _ip: [u8; 4]) -> bool { true }
     fn arp_request(&mut self, _ip: [u8; 4]) {}
-    fn mtu(&self, _dst: [u8; 4]) -> u32 { 1500 }
-    fn ip_send(&mut self, dst: [u8; 4], segment: &[u8]) -> bool {
+    fn mtu(&self, _dst: [u8; 4]) -> u32 { self.pmtu }
+    fn update_pmtu(&mut self, _dst: [u8; 4], mtu: u32) {
+        let mtu = if mtu < net_core::ip::MIN_PMTU { self.pmtu.min(net_core::ip::MIN_PMTU) } else { mtu };
+        self.pmtu = self.pmtu.min(mtu);
+    }
+    fn ip_send(&mut self, dst: [u8; 4], segment: &[u8], _id: u16) -> bool {
         self.sent.push_back((dst, segment.to_vec()));
         true
     }
@@ -229,7 +235,7 @@ impl Run {
     fn new() -> Self {
         Run {
             stack: Stack::new([7; 32], Box::leak(Box::new(Stats::new())), 4 << 30),
-            env: TestEnv { now_us: 0, rng: 0x9e37_79b9_7f4a_7c15, sent: VecDeque::new() },
+            env: TestEnv { now_us: 0, rng: 0x9e37_79b9_7f4a_7c15, sent: VecDeque::new(), pmtu: 1500 },
             handle: None,
             peer: ([192, 0, 2, 2], 0),
             local_port: 0,
@@ -300,6 +306,35 @@ impl Run {
         Ok(())
     }
 
+    /// `icmp TYPE CODE [mtu N] seq S`: an ICMP error from the peer quoting
+    /// our segment at relative sequence S.
+    fn icmp(&mut self, rest: &str) -> Result<(), String> {
+        let w: Vec<&str> = rest.split_whitespace().collect();
+        let (mut kind, mut code, mut mtu, mut seq) = (None, None, 0u16, None);
+        let mut i = 0;
+        while i < w.len() {
+            match w[i] {
+                "mtu" => { mtu = parse_num(w.get(i + 1).ok_or("mtu N")?)?; i += 2; }
+                "seq" => { seq = Some(parse_num::<u32>(w.get(i + 1).ok_or("seq S")?)?); i += 2; }
+                x if kind.is_none() => { kind = Some(parse_num::<u8>(x)?); i += 1; }
+                x => { code = Some(parse_num::<u8>(x)?); i += 1; }
+            }
+        }
+        let local_isn = self.local_isn.ok_or("an ICMP error before our SYN")?;
+        let mut m = vec![kind.ok_or("icmp TYPE")?, code.ok_or("icmp CODE")?, 0, 0, 0, 0];
+        m.extend(mtu.to_be_bytes());
+        let mut ip = vec![0x45, 0, 0, 40, 0, 0, 0x40, 0, 64, 6, 0, 0];
+        ip.extend(OUR_IP);
+        ip.extend(self.peer.0);
+        m.extend(ip);
+        m.extend(self.local_port.to_be_bytes());
+        m.extend(self.peer.1.to_be_bytes());
+        m.extend(local_isn.wrapping_add(seq.ok_or("seq S")?).to_be_bytes());
+        let e = net_core::ip::icmp_error(&m, OUR_IP).ok_or("not an ICMP error the stack takes")?;
+        self.stack.icmp_error(&mut self.env, &e);
+        Ok(())
+    }
+
     fn outbound(&mut self, want: &Seg) -> Result<(), String> {
         let (dst, seg) = self.env.sent.pop_front()
             .ok_or("expected a segment, the stack sent none")?;
@@ -347,6 +382,7 @@ impl Run {
             return Err(format!("unexpected segment to {dst:?}: flags {}", flags_str(seg[13])));
         }
         match cmd {
+            "<" if rest.starts_with("icmp") => self.icmp(&rest[4..]),
             "<" => self.inbound(&parse_seg(rest)?),
             "connect" => {
                 let (ip, port) = rest.split_once(':').ok_or("connect a.b.c.d:port")?;

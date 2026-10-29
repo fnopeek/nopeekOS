@@ -1,0 +1,25 @@
+// Fragmentation Needed for a segment in flight: the MSS follows the new
+// path MTU (1000 - 40 - 12 = 948) and what was in flight goes out again at
+// that size (tcp_v4_mtu_reduced, tcp_simple_retransmit).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK,TS val 100 ecr 0,nop,wscale 7>
++0     > . 1:1(0) ack 1
+
++0     send 3000
++0     > P. 1:1449(1448) ack 1
++0     > P. 1449:2897(1448) ack 1
++0     > P. 2897:3001(104) ack 1
++0.01  < icmp 3 4 mtu 1000 seq 1
++0     > P. 1:949(948) ack 1
++0     > P. 949:1897(948) ack 1
++0     > P. 1897:2845(948) ack 1
++0     > P. 2845:3001(156) ack 1
+// A lower MTU than the floor is taken as 552 (ip_rt_min_pmtu): 500 bytes.
++0.01  < icmp 3 4 mtu 300 seq 1
++0     > P. 1:501(500) ack 1
++0     > P. 501:1001(500) ack 1
++0     > P. 1001:1501(500) ack 1
++0     > P. 1501:2001(500) ack 1
++0     > P. 2001:2501(500) ack 1
++0     > P. 2501:3001(500) ack 1
