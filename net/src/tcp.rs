@@ -34,7 +34,8 @@ pub trait Env {
     fn arp_known(&self, ip: [u8; 4]) -> bool;
     fn arp_request(&mut self, ip: [u8; 4]);
     /// Hand a TCP segment to IP, with DF set and identification `id`.
-    /// False when the driver queue refused it.
+    /// False when it did not leave: the driver queue refused it or no
+    /// route leads to `dst`. A segment waiting for ARP counts as sent.
     fn ip_send(&mut self, dst: [u8; 4], segment: &[u8], id: u16) -> bool;
     /// The path MTU to `dst`: the device's, or less once a router said so.
     fn mtu(&self, dst: [u8; 4]) -> u32;

@@ -279,13 +279,18 @@ pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
 
 /// Send an IPv4 packet with custom TTL (for traceroute)
 pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> bool {
-    transmit(dst_ip, protocol, payload, ttl, Tx::Wait, None).0
+    matches!(transmit(dst_ip, protocol, payload, ttl, Tx::Wait, None), Ok(Handed::Card))
 }
 
 /// Send a TCP segment of a connection: DF set (`IP_PMTUDISC_WANT`), its
-/// identification from the connection's `inet_id`.
+/// identification from the connection's `inet_id`. True once it is on its
+/// way: taken by the card, or queued until ARP answers, which counts as sent
+/// as `neigh_resolve_output` returns success for it. False when the card
+/// refused it or it has no route (`tcp_transmit_skb` reporting an error), so
+/// the connection keeps it for later.
 pub fn send_tcp(dst_ip: [u8; 4], segment: &[u8], id: u16) -> bool {
-    transmit(dst_ip, PROTO_TCP, segment, 64, Tx::Wait, Some(Forwarded { tos: 0, id, df: true })).0
+    matches!(transmit(dst_ip, PROTO_TCP, segment, 64, Tx::Wait, Some(Forwarded { tos: 0, id, df: true })),
+        Ok(Handed::Card | Handed::Queued))
 }
 
 /// The header fields a forwarded packet keeps from its sender: TOS (with the
@@ -304,8 +309,7 @@ pub struct Forwarded {
 pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::Try, Some(head));
-    sent.map(|()| resolved)
+    transmit(dst_ip, protocol, payload, 64, Tx::Try, Some(head)).map(|h| h == Handed::Card)
 }
 
 /// `try_send` for a TCP or UDP payload whose check field holds the
@@ -313,8 +317,7 @@ pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
 pub fn try_send_partial(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    let (resolved, sent) = transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, Some(head));
-    sent.map(|()| resolved)
+    transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, Some(head)).map(|h| h == Handed::Card)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -327,25 +330,35 @@ enum Tx {
     TryPartial,
 }
 
-/// Build and hand over one packet. Returns whether it went to the card (or
-/// waits for its next hop's address), and the card's verdict. `head`: the
+/// Where `transmit` left a packet the card did not refuse.
+#[derive(Clone, Copy, PartialEq)]
+enum Handed {
+    /// Taken by the card.
+    Card,
+    /// Waiting in the neighbour's queue for ARP.
+    Queued,
+    /// Dropped: no route, or larger than the path MTU.
+    Nowhere,
+}
+
+/// Build and hand over one packet: where it went, or the card's refusal. `head`: the
 /// fields of a TCP segment or a forwarded packet; `None` for a datagram of
 /// ours that no connection sends, which gets them as
 /// `ip_select_ident_segs` does for an unconnected socket.
 fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
             head: Option<Forwarded>)
-    -> (bool, Result<(), crate::virtio_net::NetError>)
+    -> Result<Handed, crate::virtio_net::NetError>
 {
     // __mkroute_output: no loopback device, and 0/8 and 240/4 lead nowhere.
     if !iface().output_ok(dst_ip, false) {
         OUT_NO_ROUTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        return (false, Ok(()));
+        return Ok(Handed::Nowhere);
     }
     // ip_finish_output: nothing larger than the path MTU goes out (RFC 1122
     // §3.3.3 MMS_S); there is no local fragmentation.
     if (HEADER_LEN + payload.len()) as u32 > path_mtu(dst_ip) {
         TOO_BIG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        return (false, Ok(()));
+        return Ok(Handed::Nowhere);
     }
     let src_ip = arp::our_ip();
     let total_len = (HEADER_LEN + payload.len()) as u16;
@@ -390,15 +403,13 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
             arp::Mode::Wait => eth::send_frame(&eth::BROADCAST, eth::ETHERTYPE_IPV4, &pkt),
             _ => eth::try_send_frame(&eth::BROADCAST, eth::ETHERTYPE_IPV4, &pkt),
         };
-        return (true, sent);
+        return sent.map(|()| Handed::Card);
     }
     // A unicast datagram never goes to the link-layer broadcast address
     // (RFC 1122 §3.3.6): with the next hop unknown it waits in the
     // neighbour's queue until ARP answers.
-    match arp::output(hop, arp::Pkt { ip: pkt, mode }) {
-        Ok(sent) => (sent, Ok(())),
-        Err(e) => (true, Err(e)),
-    }
+    arp::output(hop, arp::Pkt { ip: pkt, mode })
+        .map(|sent| if sent { Handed::Card } else { Handed::Queued })
 }
 
 fn ipv4_checksum(header: &[u8]) -> u16 {
