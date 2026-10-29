@@ -499,8 +499,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "net_core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "nopeekos-kernel"
-version = "0.736.0"
+version = "0.737.0"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -518,6 +525,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "miniz_oxide",
+ "net_core",
  "p256",
  "p384",
  "postcard",

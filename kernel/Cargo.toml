@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.736.0"
+version = "0.737.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["nopeek"]
@@ -17,6 +17,7 @@ spin = "0.12"         # Spinlock (no_std mutex)
 # generator to the tree, not a dependency tree.
 forge_core = { path = "../forge/core" }
 hid_core = { path = "../hid" }
+net_core = { path = "../net" }
 
 bitflags = "2.13"     # Flag-basierte Enums
 

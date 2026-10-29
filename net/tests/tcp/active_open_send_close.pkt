@@ -1,0 +1,15 @@
+// Active open with every option, one request out, an orderly close.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) win 65535 <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK,TS val 100 ecr 0,nop,wscale 7>
++0     > . 1:1(0) ack 1 <nop,nop,TS val ? ecr 100>
++0     status 1
+
++0     send 100
++0     > P. 1:101(100) ack 1 <nop,nop,TS val ? ecr 100>
++0.01  < . 1:1(0) ack 101 win 1000 <nop,nop,TS val 101 ecr 0>
+
++0     close
++0     > F. 101:101(0) ack 1 <nop,nop,TS val ? ecr 100>
++0.01  < F. 1:1(0) ack 102 win 1000 <nop,nop,TS val 102 ecr 0>
++0     > . 102:102(0) ack 2 <nop,nop,TS val ? ecr 100>

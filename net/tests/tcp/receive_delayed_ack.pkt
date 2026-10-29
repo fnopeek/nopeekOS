@@ -1,0 +1,9 @@
+// In-order data is ACKed once the 40 ms delayed-ACK timer runs out.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK,TS val 100 ecr 0,nop,wscale 7>
++0     > . 1:1(0) ack 1
+
+0.1    < P. 1:101(100) ack 1 win 1000 <nop,nop,TS val 200 ecr 0>
++0.04  > . 1:1(0) ack 101 <nop,nop,TS val ? ecr 200>
++0     recv 100

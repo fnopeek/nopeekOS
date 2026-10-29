@@ -2791,7 +2791,7 @@ impl OpenFile {
 }
 
 /// Files one module may hold open at once, like its TCP connections
-/// (`net::tcp::PER_OWNER_MAX`, Linux `RLIMIT_NOFILE`).
+/// (`net_core::tcp::PER_OWNER_MAX`, Linux `RLIMIT_NOFILE`).
 const FILES_PER_MODULE: usize = 32;
 
 /// Kernel memory the module's open files other than `except` leave for it:

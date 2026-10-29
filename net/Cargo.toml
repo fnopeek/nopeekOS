@@ -1,0 +1,14 @@
+[package]
+name = "net_core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "The network stack's protocol logic, after Linux net/ipv4"
+
+# no_std + alloc rlib. Builds for x86_64-nopeek AND for the std harness.
+[lib]
+crate-type = ["rlib"]
+
+[dependencies.blake3]
+version = "1.8"
+default-features = false

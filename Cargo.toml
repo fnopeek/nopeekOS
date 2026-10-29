@@ -1,5 +1,5 @@
 [workspace]
-members = ["kernel", "forge/core", "hid"]
+members = ["kernel", "forge/core", "hid", "net"]
 exclude = [
     "forge/harness",
     "tools/wasm/wallpaper",

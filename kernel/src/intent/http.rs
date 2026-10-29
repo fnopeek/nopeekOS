@@ -2643,15 +2643,15 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
                 crate::net::tcp::snd_limit_of(handle) / 1024,
                 crate::net::tcp::snd_wnd_of(handle) / 1024,
                 segs, wb,
-                crate::net::tcp::SEND_REFUSED.load(Relaxed));
+                crate::net::tcp::STATS.send_refused.load(Relaxed));
             // Congestion state: a cwnd stuck at one and a full send buffer
             // look the same from outside but need opposite fixes.
             kprintln!("[netbench]   stau: cwnd {} · ssthresh {} · {} Doppelquittungen{} \
 · {}x schnell wiederholt · {}x Zeitueberschreitung",
-                cw, ss, crate::net::tcp::DUPACKS_SEEN.load(Relaxed),
+                cw, ss, crate::net::tcp::STATS.dupacks_seen.load(Relaxed),
                 if rec { " · IN ERHOLUNG" } else { "" },
-                crate::net::tcp::FAST_RETRANS.load(Relaxed),
-                crate::net::tcp::RTO_FIRED.load(Relaxed));
+                crate::net::tcp::STATS.fast_retrans.load(Relaxed),
+                crate::net::tcp::STATS.rto_fired.load(Relaxed));
             let _ = dup;
             let _ = maxbuf;
             let _ = crate::net::tcp::close(handle);
@@ -2677,18 +2677,18 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
             pct(blocked_tsc), wb, pct(poll_tsc), maxbuf / 1024,
             crate::net::tcp::snd_limit_of(handle) / 1024,
             crate::net::tcp::snd_wnd_of(handle) / 1024,
-            crate::net::tcp::SEND_REFUSED.load(
+            crate::net::tcp::STATS.send_refused.load(
                 core::sync::atomic::Ordering::Relaxed));
         {
             use core::sync::atomic::Ordering::Relaxed;
             let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
             kprintln!("[netbench] stau: cwnd {} Pakete · ssthresh {} · {} Doppelquittungen{} \
 · {}x schnell wiederholt · {}x Zeitueberschreitung · Schlange voll {}x",
-                cw, ss, crate::net::tcp::DUPACKS_SEEN.load(Relaxed),
+                cw, ss, crate::net::tcp::STATS.dupacks_seen.load(Relaxed),
                 if rec { " · IN ERHOLUNG" } else { "" },
-                crate::net::tcp::FAST_RETRANS.load(Relaxed),
-                crate::net::tcp::RTO_FIRED.load(Relaxed),
-                crate::net::tcp::SEND_REFUSED.load(Relaxed));
+                crate::net::tcp::STATS.fast_retrans.load(Relaxed),
+                crate::net::tcp::STATS.rto_fired.load(Relaxed),
+                crate::net::tcp::STATS.send_refused.load(Relaxed));
             let _ = dup;
         }
         if segs > 0 {

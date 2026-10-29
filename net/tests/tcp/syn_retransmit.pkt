@@ -1,0 +1,6 @@
+// An unanswered SYN goes out again after one second (RFC 6298 §2.1), with
+// the same options.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) win 65535 <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++1.01  > S 0:0(0) win 65535 <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0     status 0
