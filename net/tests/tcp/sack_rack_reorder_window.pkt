@@ -1,0 +1,41 @@
+// #57: with SACK, loss is found by time (RACK, RFC 8985). A hole below one
+// SACKed segment waits a quarter of the minimum RTT for reordering, then
+// is resent once; recovery ends with the window halved (PRR, RFC 6937).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460,sackOK>
++0     > . 1:1(0) ack 1
++0     send 14600
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0     > P. 4381:5841(1460) ack 1
++0     > P. 5841:7301(1460) ack 1
++0     > P. 7301:8761(1460) ack 1
++0     > P. 8761:10221(1460) ack 1
++0     > P. 10221:11681(1460) ack 1
++0     > P. 11681:13141(1460) ack 1
++0     > P. 13141:14601(1460) ack 1
+// Segment 1 is lost; segment 2 arrives. Not lost yet: reordering may still
+// bring it within 2.5 ms (min_rtt / 4), so the reordering timer runs.
++0.01  < . 1:1(0) ack 1 win 65535 <sack 1461:2921>
++0.01  > P. 1:1461(1460) ack 1
++0     < . 1:1(0) ack 1 win 65535 <sack 1461:7301>
++0     < . 1:1(0) ack 1 win 65535 <sack 1461:14601>
++0.01  < . 1:1(0) ack 14601 win 65535
+// Ten segments in flight before, half after: the window is 5.
++0     send 14600
++0     > P. 14601:16061(1460) ack 1
++0     > P. 16061:17521(1460) ack 1
++0     > P. 17521:18981(1460) ack 1
++0     > P. 18981:20441(1460) ack 1
++0     > P. 20441:21901(1460) ack 1
+// Congestion avoidance from here: one segment more per window.
++0.01  < . 1:1(0) ack 21901 win 65535
++0     > P. 21901:23361(1460) ack 1
++0     > P. 23361:24821(1460) ack 1
++0     > P. 24821:26281(1460) ack 1
++0     > P. 26281:27741(1460) ack 1
++0     > P. 27741:29201(1460) ack 1
++0.01  < . 1:1(0) ack 29201 win 65535
++0.5   status 1

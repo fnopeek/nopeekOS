@@ -1,0 +1,22 @@
+// #57: after an RTO everything in flight is lost (tcp_enter_loss); one
+// segment goes out, and each ACK lets the window grow from one by slow
+// start (tcp_xmit_retransmit_queue in CA_Loss).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 65535 <mss 1460>
++0     > . 1:1(0) ack 1
++0     send 7300
++0     > P. 1:1461(1460) ack 1
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0     > P. 4381:5841(1460) ack 1
++0     > P. 5841:7301(1460) ack 1
++0.21  > P. 1:1461(1460) ack 1
++0.01  < . 1:1(0) ack 1461 win 65535
++0     > P. 1461:2921(1460) ack 1
++0     > P. 2921:4381(1460) ack 1
++0.01  < . 1:1(0) ack 4381 win 65535
++0     > P. 4381:5841(1460) ack 1
++0     > P. 5841:7301(1460) ack 1
++0.01  < . 1:1(0) ack 7301 win 65535
++0.5   status 1

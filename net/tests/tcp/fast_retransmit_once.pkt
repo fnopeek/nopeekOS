@@ -18,11 +18,13 @@
 +0     > P. 11681:13141(1460) ack 1
 +0     > P. 13141:14601(1460) ack 1
 // Segments 1 and 4 are lost: eight duplicate ACKs, one retransmission.
+// The first is a window update, its sequence number past the SYN-ACK's
+// (tcp_may_update_window), so the fourth is the third duplicate.
 +0.01  < . 1:1(0) ack 1 win 65535
 +0     < . 1:1(0) ack 1 win 65535
 +0     < . 1:1(0) ack 1 win 65535
-+0     > P. 1:1461(1460) ack 1
 +0     < . 1:1(0) ack 1 win 65535
++0     > P. 1:1461(1460) ack 1
 +0     < . 1:1(0) ack 1 win 65535
 +0     < . 1:1(0) ack 1 win 65535
 +0     < . 1:1(0) ack 1 win 65535

@@ -16,6 +16,8 @@ use alloc::collections::VecDeque;
 use alloc::collections::BTreeMap;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
+mod recovery;
+
 /// What the stack needs from the machine it runs on.
 pub trait Env {
     /// The 100 Hz tick count.
@@ -277,42 +279,6 @@ fn rcv_space_adjust(conn: &mut TcpConn, now: u64) {
 
 /// tcp_input.c:587 `tcp_sndbuf_expand` — the counterpart of `rcvbuf_grow`.
 ///
-/// Linux derives the send buffer from the congestion window:
-/// `2 * max(TCP_INIT_CWND, snd_cwnd, reordering+1) * per_mss`, capped by
-/// `tcp_wmem[2]`. The factor 2 covers CUBIC's 1.7 plus slack for an
-/// application slow to react to `EPOLLOUT`.
-///
-/// Without congestion control there is no `snd_cwnd`; instead we use the
-/// same quantity measured: how much was acknowledged in one RTT. The
-/// factor 2 stays. `tcp_should_expand_sndbuf` (tcp_input.c:5804) does not
-/// translate: its gate is a filled congestion window, and here the buffer
-/// is the only brake.
-fn sndbuf_grow(conn: &mut TcpConn, newval: usize) {
-    conn.snd_space = newval;
-    let want = newval.saturating_mul(2).clamp(SND_BUF_INIT, SND_BUF_MAX);
-    // Only grow — the same rule as tcp_input.c:922.
-    if want > conn.snd_buf_limit {
-        conn.snd_buf_limit = want;
-    }
-}
-
-/// The mirror of `rcv_space_adjust`: called whenever an ACK has cleared
-/// data.
-fn snd_space_adjust(conn: &mut TcpConn, now: u64) {
-    let time = now.saturating_sub(conn.sndq_time_us);
-    let srtt_us = (conn.srtt_ms as u64).saturating_mul(1000);
-    // Less than one RTT says nothing — the same bound as on the receive side.
-    if srtt_us == 0 || time < srtt_us {
-        return;
-    }
-    let acked = conn.acked_total.saturating_sub(conn.sndq_acked0);
-    if acked > conn.snd_space as u64 {
-        sndbuf_grow(conn, acked.min(SND_BUF_MAX as u64) as usize);
-    }
-    conn.sndq_acked0 = conn.acked_total;
-    conn.sndq_time_us = now;
-}
-
 /// How much may be in flight: bounded by our buffer and by the peer's
 /// window.
 fn snd_allowed(conn: &TcpConn) -> usize {
@@ -441,36 +407,17 @@ const TCP_ORPHAN_RETRIES: u8 = 8;
 /// A starting value below the caller's chunk size is a deadlock, not a slow
 /// start: growth depends on ACKs for data that could never be sent.
 const SND_BUF_INIT: usize = 256 * 1024;
-/// Send buffer ceiling.
-///
-/// Linux uses `sysctl_tcp_wmem[2]` = 4 MB, which it can afford because of
-/// SACK, PRR and Limited Transmit. Without them, every loss overflowing
-/// intermediate buffers is an RTO, so a buffer far above the
-/// bandwidth-delay product collapses throughput. Raise this once SACK
-/// exists.
-const SND_BUF_MAX: usize = 256 * 1024;
+/// Send buffer ceiling, `sysctl_tcp_wmem[2]`. Below it the buffer follows
+/// the congestion window (`tcp_sndbuf_expand`).
+const SND_BUF_MAX: usize = 4 * 1024 * 1024;
 
-/// Congestion control is off: it needs loss accounting we do not have.
-///
-/// Linux computes `tcp_packets_in_flight = packets_out - sacked_out -
-/// lost_out + retrans_out` and lowers `sacked_out` on every duplicate ACK
-/// (`tcp_add_reno_sack`), even without SACK. Here "in flight" is simply
-/// `snd_nxt - snd_una`, which never shrinks on loss: after one lost
-/// segment `cwnd` drops and `write_xmit` would never send again, leaving
-/// one retransmit per RTO. Without loss accounting a congestion window is
-/// worse than none.
-///
-/// Fast retransmit stays on (three duplicate ACKs resend at once); only
-/// window reduction is off. Enable only once these exist, in order:
-/// `packets_out`/`sacked_out`/`lost_out` as real counters,
-/// `tcp_add_reno_sack`, sender-side SACK, then PRR.
-const CONG_CONTROL: bool = false;
-
-/// `tcp_ca_state`: where the sender stands with loss.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// `tcp_ca_state`: where the sender stands with loss, in Linux's order.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum CaState {
     /// `TCP_CA_Open`: nothing lost.
     Open,
+    /// `TCP_CA_Disorder`: SACKs or duplicate ACKs, nothing lost yet.
+    Disorder,
     /// `TCP_CA_Recovery`: fast retransmit sent, until `high_seq` is
     /// acknowledged (RFC 6582).
     Recovery,
@@ -480,9 +427,6 @@ enum CaState {
 
 /// `TCP_INIT_CWND` — ten segments (RFC 6928).
 const TCP_INIT_CWND: u32 = 10;
-/// Default `tp->reordering`: three duplicate ACKs trigger fast retransmit
-/// (RFC 5681 §3.2).
-const DUPACK_THRESH: u32 = 3;
 
 // 8 MiB receive buffer → 8 MiB window with scaling → fills the bandwidth-delay
 // product for ~gigabit even at tens-of-ms RTT. Grown lazily (VecDeque::new),
@@ -590,7 +534,7 @@ struct TcpConn {
 
     // Buffers
     recv_buf: VecDeque<u8>,
-    send_buf: Vec<u8>,
+    send_buf: VecDeque<u8>,
     // Out-of-order reassembly: segments received ahead of a gap, keyed by
     // stream offset (see `rcv_off`). Without it a single lost packet forces
     // the sender into go-back-N (retransmit the whole window), and the re-burst
@@ -603,8 +547,7 @@ struct TcpConn {
     // with a large window. Advisory: a desync only makes SACK suboptimal,
     // never corrupts data (the bytes still come from `ooo`).
     ooo_runs: BTreeMap<u64, u64>,
-    // Smoothed RTT in milliseconds, `srtt_us` rounded, for the send buffer
-    // and the diagnostics.
+    // Smoothed RTT in milliseconds, `srtt_us` rounded, for the diagnostics.
     srtt_ms: u32,
     /// `tcp_rtt_estimator`: SRTT times 8 and the mean deviation times 4, in
     /// µs; `mdev_max_us` is the largest deviation of the current window,
@@ -618,11 +561,6 @@ struct TcpConn {
     rto: u64,
     /// `retrans_stamp`: when the data first retransmitted went out.
     retrans_stamp: Option<u64>,
-    /// The segment timed for an RTT sample without timestamps (RFC 6298
-    /// §3, Karn): its end and when it was sent, in µs.
-    rtt_timer: Option<(u32, u64)>,
-    /// Everything below this was retransmitted at least once.
-    retrans_end: u32,
     /// When our SYN or SYN-ACK went out, in µs.
     syn_sent_us: u64,
     /// `icsk_user_timeout` (`TCP_USER_TIMEOUT`), in ticks; 0: none.
@@ -660,14 +598,13 @@ struct TcpConn {
     /// `sk_rcvbuf` — the window DRS allows.
     drs_win: u32,
 
-    // Retransmit. `send_buf` holds every byte we sent and the peer has not
-    // acknowledged, starting at `snd_una`; `rto_tick` is when the oldest of
-    // them went out. Without retransmit a single lost segment leaves a hole
-    // the peer can never fill, so it delivers nothing more to its application
-    // while our sends all report success.
+    // Retransmit. `send_buf` holds every byte queued and not acknowledged,
+    // starting at `snd_una`; `tx` the segments sent from it. `rtx_at` is
+    // when the retransmit timer fires (`ICSK_TIME_RETRANS`).
     retries: u8,
     last_send_tick: u64,
-    rto_tick: u64,
+    rtx_at: u64,
+    tx: recovery::Tx,
 
     // Delayed ACK
     /// A one-shot D-SACK block (RFC 2883): the range of a segment we already
@@ -717,34 +654,17 @@ struct TcpConn {
     snd_wscale: u8,
     /// The peer's window, scaled (RFC 9293 §3.8.6).
     snd_wnd: u32,
-    /// Our send buffer, which grows — the counterpart of `drs_win` on the
-    /// receive side. Linux derives it from the congestion window in
-    /// `tcp_sndbuf_expand` (tcp_input.c:587); without `snd_cwnd` we grow it
-    /// like `tcp_rcv_space_adjust` does: if the last RTT filled the buffer
-    /// on a clean path, it is too small. See `sndbuf_grow`.
+    /// Our send buffer (`sk_sndbuf`), which grows with the congestion
+    /// window (`tcp_sndbuf_expand`).
     snd_buf_limit: usize,
-    /// Mirror of `rcvq_space.seq`: total bytes the peer has acknowledged.
-    acked_total: u64,
-    /// Value at the last measurement point.
-    sndq_acked0: u64,
-    /// Time of the last measurement point.
-    sndq_time_us: u64,
-    /// The measured need of one RTT — mirror of `rcvq_space`.
-    snd_space: usize,
 
-    // ── Congestion control, RFC 5681 / RFC 6582 (New Reno) ───────────
-    //
-    // Limits how much of the send buffer `write_xmit` pushes at once; see
-    // `CONG_CONTROL` for why window reduction is currently off.
+    // ── Congestion control, RFC 5681, Reno ───────────────────────────
     /// `tcp_snd_cwnd` — in packets, like Linux.
     snd_cwnd: u32,
     /// `snd_ssthresh`. Initially infinite: the first loss sets it.
     snd_ssthresh: u32,
     /// `snd_cwnd_cnt` — the fractional packets of `tcp_cong_avoid_ai`.
     snd_cwnd_cnt: u32,
-    /// `sacked_out` without SACK (`tcp_add_reno_sack`): duplicate ACKs, each
-    /// a segment that left the network.
-    dupacks: u32,
     /// `icsk_ca_state`.
     ca_state: CaState,
     /// `high_seq`: `snd_nxt` when Recovery or Loss began; they end only
@@ -846,8 +766,6 @@ impl TcpConn {
             rtt_seq: 0,
             rto: TCP_TIMEOUT_INIT,
             retrans_stamp: None,
-            rtt_timer: None,
-            retrans_end: 0,
             syn_sent_us: 0,
             user_timeout: 0,
             rcv_rtt_us8: 0,
@@ -859,10 +777,11 @@ impl TcpConn {
             // `rcvbuf_grow` divides by zero.
             rcvq_space: 10 * 1460,
             drs_win: RCV_WND_MIN as u32,
-            send_buf: Vec::new(),
+            send_buf: VecDeque::new(),
             retries: 0,
             last_send_tick: 0,
-            rto_tick: 0,
+            rtx_at: 0,
+            tx: recovery::Tx::new(),
             dsack: None,
             ack_pending: false,
             ack_tick: 0,
@@ -885,14 +804,9 @@ impl TcpConn {
             snd_wscale: 0,
             snd_wnd: 0,
             snd_buf_limit: SND_BUF_INIT,
-            acked_total: 0,
-            sndq_acked0: 0,
-            sndq_time_us: 0,
-            snd_space: 0,
             snd_cwnd: TCP_INIT_CWND,
             snd_ssthresh: u32::MAX,
             snd_cwnd_cnt: 0,
-            dupacks: 0,
             ca_state: CaState::Open,
             high_seq: 0,
             ts_ok: false,
@@ -1014,17 +928,20 @@ impl TcpConn {
     /// (RFC 6298 §5.7, `tcp_init_metrics`).
     fn handshake_rtt(&mut self, now_us: u64, tsecr: Option<u32>, ts_now_ms: u32) {
         let retransmitted = self.retries > 0;
+        let mut sample = None;
         if !retransmitted {
-            self.ack_update_rtt(now_us.saturating_sub(self.syn_sent_us).max(1));
+            sample = Some(now_us.saturating_sub(self.syn_sent_us).max(1));
         } else if let Some(t) = tsecr.filter(|&t| t != 0 && self.ts_ok) {
             let delta = ts_now_ms.wrapping_sub(t);
-            if delta < i32::MAX as u32 / 1000 { self.ack_update_rtt(delta.max(1) as u64 * 1000); }
+            if delta < i32::MAX as u32 / 1000 { sample = Some(delta.max(1) as u64 * 1000); }
+        }
+        if let Some(m) = sample {
+            recovery::rtt_min_sample(self, m, now_us / TICK_US);
+            self.ack_update_rtt(m);
         }
         if self.srtt_us == 0 { self.rto = TCP_TIMEOUT_FALLBACK; }
         self.retries = 0;
         self.retrans_stamp = None;
-        self.rtt_timer = None;
-        self.retrans_end = self.snd_una;
     }
 
     /// `tcp_clamp_rto_to_user_timeout`: the timer never runs past the user
@@ -1033,31 +950,6 @@ impl TcpConn {
         let Some(stamp) = self.retrans_stamp.filter(|_| self.user_timeout != 0) else { return self.rto };
         let elapsed = now.saturating_sub(stamp);
         self.rto.min(self.user_timeout.saturating_sub(elapsed).max(1))
-    }
-
-    /// The RTT sample of an ACK that took new data up to `ack`
-    /// (`tcp_clean_rtx_queue`, `tcp_ack_update_rtt`): the timed segment
-    /// unless retransmitted data is acknowledged too, else the echoed
-    /// timestamp.
-    fn rtt_sample(&mut self, prior_una: u32, ack: u32, now_us: u64, tsecr: Option<u32>, ts_now_ms: u32) {
-        let acked_retrans = (prior_una.wrapping_sub(self.retrans_end) as i32) < 0;
-        let mut sample = None;
-        if let Some((end, sent)) = self.rtt_timer {
-            if (ack.wrapping_sub(end) as i32) >= 0 {
-                if !acked_retrans { sample = Some(now_us.saturating_sub(sent)); }
-                self.rtt_timer = None;
-            }
-        }
-        if sample.is_none() && self.ts_ok {
-            if let Some(tsecr) = tsecr.filter(|&t| t != 0) {
-                // tcp_rtt_tsopt_us
-                let delta = ts_now_ms.wrapping_sub(tsecr);
-                if delta < i32::MAX as u32 / 1000 {
-                    sample = Some(delta.max(1) as u64 * 1000);
-                }
-            }
-        }
-        if let Some(m) = sample { self.ack_update_rtt(m.max(1)); }
     }
 
     /// Unsent bytes wait for a window that does not take the next segment,
@@ -1416,12 +1308,13 @@ impl Stack {
         self.conns.get(handle).map_or(0, |c| c.send_buf.len())
     }
 
-    /// (cwnd in packets, ssthresh, duplicate ACKs, in recovery)
+    /// (cwnd in packets, ssthresh, segments SACKed or duplicate-ACKed, in
+    /// recovery)
     pub fn cwnd_of(&self, handle: Handle) -> (u32, u32, u32, bool) {
         self.conns.get(handle).map_or((0, 0, 0, false), |c| {
             (c.snd_cwnd,
              if c.snd_ssthresh == u32::MAX { 0 } else { c.snd_ssthresh },
-             c.dupacks, c.ca_state == CaState::Recovery)
+             c.tx.sacked_out, c.ca_state == CaState::Recovery)
         })
     }
 
@@ -1447,13 +1340,12 @@ impl Stack {
         if !conn.send_buf.is_empty()
             && (conn.send_buf.len() + data.len() > snd_allowed(conn) || !mem_charge(&io, data.len()))
         {
+            conn.tx.nospace = true;
             return Err(TcpError::WouldBlock);
         }
 
-        let now = io.ticks();
-        // Oldest unacked byte starts its clock now if nothing was in flight.
-        if conn.send_buf.is_empty() { conn.rto_tick = now; conn.retries = 0; conn.retrans_stamp = None; }
-        conn.send_buf.extend_from_slice(data);
+        if conn.send_buf.is_empty() { conn.retries = 0; conn.retrans_stamp = None; }
+        conn.send_buf.extend(data);
 
         // Send in effective-MSS chunks immediately (no Nagle). Effective, not
         // MSS: the option bytes come out of the same 1514.
@@ -1571,8 +1463,6 @@ impl Stack {
         conn.fin_queued = true;
         conn.last_send_tick = io.ticks();
         if conn.snd_una == conn.snd_nxt {
-            // The FIN is the oldest unacknowledged byte: its clock starts now.
-            conn.rto_tick = io.ticks();
             conn.retries = 0;
             conn.retrans_stamp = None;
         }
@@ -1898,137 +1788,16 @@ impl Stack {
             | State::Closing | State::LastAck | State::TimeWait => {
                 // ACK processing
                 if flags & ACK != 0 && conn.state != State::TimeWait {
-                    // The peer's window: flow control per RFC 9293 §3.8.6. The
-                    // scale is the SYN-ACK's (`snd_wscale`) and applies to every
-                    // segment except the SYN itself (RFC 7323 §2.2).
-                    let vorheriges_fenster = conn.snd_wnd;
-                    // tcp_ack_update_window: only a newer segment may set the
-                    // window, or the same one growing it (tcp_may_update_window,
-                    // RFC 9293 §3.10.7.4 SND.WL1/WL2), so a reordered older ACK
-                    // cannot shrink it.
-                    let nwin = (adv_window as u32) << conn.snd_wscale;
-                    let newer_ack = (ack.wrapping_sub(conn.snd_una) as i32) > 0;
-                    let newer_seq = (seq.wrapping_sub(conn.snd_wl1) as i32) > 0;
-                    if newer_ack || newer_seq || (seq == conn.snd_wl1 && (nwin > conn.snd_wnd || nwin == 0)) {
-                        conn.snd_wl1 = seq;
-                        if conn.snd_wnd != nwin {
-                            conn.snd_wnd = nwin;
-                            // A larger window may lift the half-window bound on
-                            // the MSS.
-                            if nwin > conn.max_window {
-                                conn.max_window = nwin;
-                                conn.sync_mss();
-                            }
-                        }
-                    }
-                    // Every ACK answers our probes (RFC 1122 §4.2.2.17: stay
-                    // open while the peer responds).
-                    conn.probes_out = 0;
-                    conn.last_ack_rx = io.ticks();
                     // Every ACK wakes the sender, not only one that clears data:
                     // a pure window update carries `ack == snd_una`, and the
                     // sender must notice the reopened window. The wakeup does not
                     // claim anything changed, only that a retry might be worth it.
                     io.st.ack_gen.fetch_add(1, Ordering::Relaxed);
-                    // ── Duplicate ACK: RFC 5681 §3.2 ─────────────────────
-                    //
-                    // Three in a row mean "one segment is missing, the rest is
-                    // arriving". Without fast retransmit the only recovery is
-                    // the RTO, one MSS per round, which stalls a large window.
-                    //
-                    // A duplicate ACK acknowledges no new bytes, carries no
-                    // payload and does not change the window; otherwise it is a
-                    // window update.
-                    let ist_dup = payload.is_empty()
-                        && ack == conn.snd_una
-                        && !conn.send_buf.is_empty()
-                        && conn.snd_wnd == vorheriges_fenster;
-                    if ist_dup {
-                        conn.dupacks += 1;
-                        io.st.dupacks_seen.fetch_add(1, Ordering::Relaxed);
-                        // tcp_fastretrans_alert: the third enters Recovery,
-                        // once per loss event; in Recovery and Loss they only
-                        // count.
-                        if conn.dupacks >= DUPACK_THRESH && conn.ca_state == CaState::Open {
-                            // tcp_enter_recovery: halve, and resend the
-                            // missing segment now instead of waiting for the
-                            // RTO.
-                            conn.ca_state = CaState::Recovery;
-                            conn.high_seq = conn.snd_nxt;
-                            if CONG_CONTROL {
-                                conn.snd_ssthresh = reno_ssthresh(conn);
-                                conn.snd_cwnd =
-                                    conn.snd_ssthresh + DUPACK_THRESH;
-                                conn.snd_cwnd_cnt = 0;
-                            }
-                            // Only the missing segment, not the whole window:
-                            // everything behind it is in flight and may stay
-                            // so. Go-back-N (`snd_nxt = snd_una`) would make
-                            // `write_xmit` burst hundreds of packets at once; it
-                            // belongs to the RTO, where we really know nothing.
-                            retransmit_head(conn, &mut io);
-                            io.st.fast_retrans.fetch_add(1, Ordering::Relaxed);
-                        } else if conn.ca_state == CaState::Recovery && CONG_CONTROL {
-                            // "Inflate": every further duplicate ACK means a
-                            // segment has left the network.
-                            conn.snd_cwnd += 1;
-                            write_xmit(conn, &mut io);
-                        }
-                    }
-                    if ack_in_range(conn.snd_una, ack, conn.snd_nxt) {
-                        // Drop the acknowledged prefix from the retransmit queue
-                        // and restart the timer for whatever is still in flight.
-                        let acked = ack.wrapping_sub(conn.snd_una) as usize;
-                        let drop_n = acked.min(conn.send_buf.len());
-                        conn.send_buf.drain(..drop_n);
-                        let prior_una = conn.snd_una;
-                        conn.snd_una = ack;
-                        // The RTT sample belongs to the ACK that takes new
-                        // data (tcp_clean_rtx_queue -> tcp_ack_update_rtt).
-                        let tsecr = parse_tsecr(data, data_offset);
-                        let ts_now = io.ts_now_ms();
-                        conn.rtt_sample(prior_una, ack, io.env.uptime_us(), tsecr, ts_now);
-                        if (ack.wrapping_sub(conn.retrans_end) as i32) > 0 { conn.retrans_end = ack; }
-                        conn.retries = 0;
-                        conn.retrans_stamp = None;
-                        conn.rto_tick = io.ticks();
-                        // The send buffer grows here — where Linux calls
-                        // `tcp_check_space` -> `tcp_new_space` ->
-                        // `tcp_sndbuf_expand`: when an ACK has made room.
-                        conn.acked_total =
-                            conn.acked_total.wrapping_add(acked as u64);
-                        snd_space_adjust(conn, io.env.uptime_us());
-                        // ── Update the congestion window ────────────────
-                        let mss_now = eff_mss(conn).max(1);
-                        let acked_pkts = (acked.div_ceil(mss_now) as u32).max(1);
-                        let partial = (conn.high_seq.wrapping_sub(ack) as i32) > 0;
-                        match conn.ca_state {
-                            CaState::Recovery if partial => {
-                                // RFC 6582 §3.2 step 3, tcp_remove_reno_sacks
-                                // and tcp_mark_head_lost: the next hole is
-                                // the new head; resend it now.
-                                conn.dupacks = conn.dupacks.saturating_sub(acked_pkts - 1);
-                                retransmit_head(conn, &mut io);
-                                io.st.fast_retrans.fetch_add(1, Ordering::Relaxed);
-                            }
-                            CaState::Loss if partial => conn.dupacks = 0,
-                            CaState::Recovery => {
-                                // tcp_end_cwnd_reduction
-                                conn.ca_state = CaState::Open;
-                                conn.dupacks = 0;
-                                if CONG_CONTROL {
-                                    conn.snd_cwnd = conn.snd_ssthresh;
-                                    conn.snd_cwnd_cnt = 0;
-                                }
-                            }
-                            CaState::Loss | CaState::Open => {
-                                conn.ca_state = CaState::Open;
-                                conn.dupacks = 0;
-                                if CONG_CONTROL { cong_avoid(conn, acked_pkts); }
-                            }
-                        }
-                        write_xmit(conn, &mut io);
-                    }
+                    // The window scale is the SYN-ACK's and applies to every
+                    // segment except the SYN itself (RFC 7323 §2.2).
+                    let nwin = (adv_window as u32) << conn.snd_wscale;
+                    let has_data = !payload.is_empty() || flags & FIN != 0;
+                    recovery::ack(conn, &mut io, data, data_offset, ack, seq, nwin, has_data);
                 }
 
                 if flags & ACK != 0 && conn.sends() {
@@ -2344,7 +2113,7 @@ impl Stack {
                     conn.sync_mss();
                     // "Resend the TCP packet because it's clear that old
                     // packet has been dropped."
-                    retransmit_all(conn, &mut io);
+                    recovery::simple_retransmit(conn, &mut io);
                 }
                 return;
             }
@@ -2395,7 +2164,7 @@ impl Stack {
         // Same reason: an ARP request hits the NIC, so collect and fire after
         // the table is let go.
         let mut arp_probes: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
-        // Retransmits are not collected here: `retransmit_head` and `write_xmit`
+        // Retransmits are not collected here: `retransmit_skb` and `write_xmit`
         // send them from the send buffer like any other segment.
         {
             let conns = &mut self.conns;
@@ -2481,62 +2250,45 @@ impl Stack {
                     }
                 }
 
-                // Data retransmit. `send_buf` starts at snd_una, so the head of
-                // it is exactly the segment the peer is missing; the FIN counts
-                // too (tcp_retransmit_timer in every state that sends).
-                if slot.sends() && slot.snd_una != slot.snd_nxt {
-                    if now.saturating_sub(slot.rto_tick) >= slot.rto_clamped(now) {
-                        // tcp_retransmit_timer: into a zero window the
-                        // retransmits are probes, and the connection lives
-                        // while the peer still answers (tcp_rtx_probe0_timed_out:
-                        // twice TCP_RTO_MAX without an ACK).
-                        let zero_window = slot.snd_wnd == 0
-                            && now.saturating_sub(slot.last_ack_rx) <= 2 * TCP_RTO_MAX;
-                        // tcp_write_timeout: 15 retransmissions from 200 ms
-                        // (about 924 s), 8 once the owner closed.
-                        let retry_until = if !slot.released {
-                            TCP_RETRIES2
-                        } else if slot.rto < TCP_RTO_MAX {
-                            TCP_ORPHAN_RETRIES
-                        } else {
-                            0
-                        };
-                        if !zero_window
-                            && slot.retransmits_timed_out(now, retry_until, TCP_RTO_MIN, slot.user_timeout)
-                        {
-                            slot.error = true;
-                            slot.state = State::Closed;
-                            slot.last_send_tick = now;
-                        } else {
-                            slot.retrans_stamp.get_or_insert(slot.rto_tick);
-                            slot.retries = slot.retries.saturating_add(1);
-                            slot.rto = (slot.rto << 1).min(TCP_RTO_MAX);
-                            slot.rto_tick = now;
-                            slot.last_send_tick = now;
-                            // ── `tcp_enter_loss` ───────────────────────
-                            //
-                            // An RTO is the strongest congestion signal
-                            // (RFC 5681 §3.1): halve the threshold, window to
-                            // one, slow start again.
-                            //
-                            // `snd_nxt` is not rewound. `ack_in_range(una, ack,
-                            // nxt)` only accepts ACKs up to `snd_nxt`; after a
-                            // rewind the peer's real cumulative ACK would fall
-                            // outside the range and be discarded forever. Like
-                            // Linux, `snd_nxt` stays the highest sequence ever
-                            // sent and the head is resent from the retransmit
-                            // queue (`tcp_xmit_retransmit_queue`).
-                            if CONG_CONTROL {
-                                slot.snd_ssthresh = reno_ssthresh(slot);
-                                slot.snd_cwnd = 1;
-                                slot.snd_cwnd_cnt = 0;
-                            }
-                            slot.ca_state = CaState::Loss;
-                            slot.high_seq = slot.snd_nxt;
-                            slot.dupacks = 0;
-                            io.st.rto_fired.fetch_add(1, Ordering::Relaxed);
-                            retransmit_head(slot, &mut io);
-                        }
+                // RACK's reordering timer holds the retransmit timer's slot.
+                if slot.tx.reo_at != 0 && now >= slot.tx.reo_at {
+                    recovery::rack_reo_timeout(slot, &mut io);
+                }
+
+                // tcp_retransmit_timer, in every state that sends: the head
+                // of the retransmit queue, the FIN included.
+                if slot.sends() && slot.tx.packets_out != 0 && slot.tx.reo_at == 0 && now >= slot.rtx_at {
+                    // Into a zero window the retransmits are probes, and the
+                    // connection lives while the peer still answers
+                    // (tcp_rtx_probe0_timed_out: twice TCP_RTO_MAX without
+                    // an ACK).
+                    let zero_window = slot.snd_wnd == 0
+                        && now.saturating_sub(slot.last_ack_rx) <= 2 * TCP_RTO_MAX;
+                    // tcp_write_timeout: 15 retransmissions from 200 ms
+                    // (about 924 s), 8 once the owner closed.
+                    let retry_until = if !slot.released {
+                        TCP_RETRIES2
+                    } else if slot.rto < TCP_RTO_MAX {
+                        TCP_ORPHAN_RETRIES
+                    } else {
+                        0
+                    };
+                    if !zero_window
+                        && slot.retransmits_timed_out(now, retry_until, TCP_RTO_MIN, slot.user_timeout)
+                    {
+                        slot.error = true;
+                        slot.state = State::Closed;
+                        slot.last_send_tick = now;
+                    } else {
+                        // `snd_nxt` stays the highest sequence sent; the
+                        // head goes out again from the retransmit queue.
+                        recovery::enter_loss(slot, io.env.uptime_us());
+                        slot.retries = slot.retries.saturating_add(1);
+                        io.st.rto_fired.fetch_add(1, Ordering::Relaxed);
+                        recovery::retransmit_skb(slot, &mut io, 0);
+                        slot.last_send_tick = now;
+                        slot.rto = (slot.rto << 1).min(TCP_RTO_MAX);
+                        slot.rtx_at = now + slot.rto_clamped(now);
                     }
                 }
 
@@ -2624,7 +2376,8 @@ impl Stack {
 }
 
 /// tcp_output.c `tcp_write_xmit` — pushes out what is unsent in the buffer
-/// and stops when the device refuses.
+/// as far as the congestion window and the peer's window let, and stops
+/// when the device refuses.
 ///
 /// Like Linux with `netif_stop_queue`: when the driver queue says no, the
 /// segment stays in the buffer instead of being lost. `snd_nxt` advances
@@ -2635,139 +2388,72 @@ impl Stack {
 fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
     let mss = eff_mss(conn).min(1460);
     let mut chunk = [0u8; 1460];
+    let mut sent_pkts = 0;
+    let mut is_cwnd_limited = false;
     loop {
         let sent = conn.snd_nxt.wrapping_sub(conn.snd_una) as usize;
-        if conn.fin_sent || sent >= conn.send_buf.len() {
-            // Everything queued is out; the FIN alone if it still waits.
-            if conn.fin_queued && !conn.fin_sent && sent == conn.send_buf.len() {
-                let w = recv_window(conn, io.st);
-                if send_seg(conn, io, conn.snd_nxt, conn.rcv_nxt, FIN | ACK, w, &[]) {
-                    conn.snd_nxt = conn.snd_nxt.wrapping_add(1);
-                    conn.fin_sent = true;
-                    conn.last_send_tick = io.ticks();
-                } else {
-                    io.st.send_refused.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            return;
+        if conn.fin_sent || (sent >= conn.send_buf.len() && !conn.fin_queued) {
+            break;
         }
-        // ── Gate 1: the congestion window (tcp_output.c:2238 `tcp_cwnd_test`)
-        //
-        // `in_flight >= cwnd`: nothing more until an ACK makes room.
-        // Disabled while `CONG_CONTROL` is off.
-        let in_flight = sent.div_ceil(mss) as u32;
-        if CONG_CONTROL && in_flight >= conn.snd_cwnd {
-            return;
+        // ── Gate 1: the congestion window (`tcp_cwnd_test`)
+        if conn.tx.in_flight() >= conn.snd_cwnd {
+            is_cwnd_limited = true;
+            break;
         }
-        // ── Gate 2: the peer's window
-        //           (tcp_output.c:2295 `tcp_snd_wnd_test`)
-        let n = (conn.send_buf.len() - sent).min(mss);
-        if sent + n > conn.snd_wnd as usize {
-            // tcp_check_probe_timer: nothing in flight to bring an ACK.
-            if sent == 0 && conn.probe_at == 0 {
-                conn.probe_at = io.ticks() + conn.probe0_when();
-            }
-            return;
-        }
-        chunk[..n].copy_from_slice(&conn.send_buf[sent..sent + n]);
         let seq = conn.snd_nxt;
         let w = recv_window(conn, io.st);
-        // The FIN rides on the last byte queued (tcp_send_fin).
-        let fin = conn.fin_queued && sent + n == conn.send_buf.len();
-        let flags = if fin { FIN | ACK | PSH } else { ACK | PSH };
-        if !send_seg(conn, io, seq, conn.rcv_nxt, flags, w, &chunk[..n]) {
-            // Full. Nothing lost, just not sent yet.
-            io.st.send_refused.fetch_add(1, Ordering::Relaxed);
-            return;
+        if sent >= conn.send_buf.len() {
+            // Everything queued is out; the FIN alone.
+            if !send_seg(conn, io, seq, conn.rcv_nxt, FIN | ACK, w, &[]) {
+                io.st.send_refused.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+            conn.snd_nxt = seq.wrapping_add(1);
+            conn.fin_sent = true;
+        } else {
+            // ── Gate 2: the peer's window (`tcp_snd_wnd_test`)
+            let n = (conn.send_buf.len() - sent).min(mss);
+            if sent + n > conn.snd_wnd as usize {
+                // tcp_check_probe_timer: nothing in flight to bring an ACK.
+                if sent == 0 && conn.probe_at == 0 {
+                    conn.probe_at = io.ticks() + conn.probe0_when();
+                }
+                break;
+            }
+            copy_out(&conn.send_buf, sent, &mut chunk[..n]);
+            // The FIN rides on the last byte queued (tcp_send_fin).
+            let fin = conn.fin_queued && sent + n == conn.send_buf.len();
+            let flags = if fin { FIN | ACK | PSH } else { ACK | PSH };
+            if !send_seg(conn, io, seq, conn.rcv_nxt, flags, w, &chunk[..n]) {
+                // Full. Nothing lost, just not sent yet.
+                io.st.send_refused.fetch_add(1, Ordering::Relaxed);
+                break;
+            }
+            io.st.send_segs.fetch_add(1, Ordering::Relaxed);
+            conn.snd_nxt = seq.wrapping_add(n as u32 + fin as u32);
+            if fin { conn.fin_sent = true; }
         }
-        io.st.send_segs.fetch_add(1, Ordering::Relaxed);
-        conn.snd_nxt = conn.snd_nxt.wrapping_add(n as u32 + fin as u32);
-        if conn.rtt_timer.is_none() { conn.rtt_timer = Some((conn.snd_nxt, io.env.uptime_us())); }
-        if fin { conn.fin_sent = true; }
-        conn.last_send_tick = io.ticks();
+        let now = io.ticks();
+        recovery::new_data_sent(conn, seq, conn.snd_nxt, conn.fin_sent, now, io.env.uptime_us());
+        conn.last_send_tick = now;
+        sent_pkts += 1;
     }
+    recovery::xmit_done(conn, sent_pkts, is_cwnd_limited);
 }
 
-/// `tcp_slow_start` (tcp_cong.c:454) + `tcp_cong_avoid_ai` (:468),
-/// combined as in `tcp_reno_cong_avoid` (:493).
-fn cong_avoid(conn: &mut TcpConn, acked_pkts: u32) {
-    if conn.snd_cwnd < conn.snd_ssthresh {
-        // "In safe area, increase."
-        conn.snd_cwnd = (conn.snd_cwnd + acked_pkts).min(conn.snd_ssthresh);
-        return;
-    }
-    // "In dangerous area, increase slowly" — one packet per window.
-    let w = conn.snd_cwnd.max(1);
-    if conn.snd_cwnd_cnt >= w {
-        conn.snd_cwnd_cnt = 0;
-        conn.snd_cwnd += 1;
-    }
-    conn.snd_cwnd_cnt += acked_pkts;
-    if conn.snd_cwnd_cnt >= w {
-        let delta = conn.snd_cwnd_cnt / w;
-        conn.snd_cwnd_cnt -= delta * w;
-        conn.snd_cwnd += delta;
-    }
-}
-
-/// Resend the segment at `snd_una`, and only that one: `tcp_retransmit_skb`
-/// on the head of the retransmit queue. `snd_nxt` stays put; what lies
-/// beyond it is in flight.
-fn retransmit_head<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
-    if conn.send_buf.is_empty() && !conn.fin_sent {
-        return;
-    }
-    let mss = eff_mss(conn).min(1460);
-    let n = conn.send_buf.len().min(mss);
-    let mut chunk = [0u8; 1460];
-    chunk[..n].copy_from_slice(&conn.send_buf[..n]);
-    let w = recv_window(conn, io.st);
-    // The FIN, alone or on the last data, as it went out first.
-    let flags = if conn.fin_sent && n == conn.send_buf.len() {
-        if n == 0 { FIN | ACK } else { FIN | ACK | PSH }
+/// Copy `out.len()` bytes from offset `off` of the send buffer.
+fn copy_out(buf: &VecDeque<u8>, off: usize, out: &mut [u8]) {
+    let (a, b) = buf.as_slices();
+    let n = out.len();
+    if off + n <= a.len() {
+        out.copy_from_slice(&a[off..off + n]);
+    } else if off >= a.len() {
+        out.copy_from_slice(&b[off - a.len()..off - a.len() + n]);
     } else {
-        ACK | PSH
-    };
-    if send_seg(conn, io, conn.snd_una, conn.rcv_nxt, flags, w, &chunk[..n]) {
-        conn.last_send_tick = io.ticks();
-        let end = conn.snd_una.wrapping_add(n as u32 + (flags & FIN != 0) as u32);
-        if (end.wrapping_sub(conn.retrans_end) as i32) > 0 { conn.retrans_end = end; }
-    } else {
-        io.st.send_refused.fetch_add(1, Ordering::Relaxed);
+        let k = a.len() - off;
+        out[..k].copy_from_slice(&a[off..]);
+        out[k..].copy_from_slice(&b[..n - k]);
     }
-}
-
-/// `tcp_simple_retransmit` after the MSS fell: everything in flight was
-/// larger than the path now carries, so it goes out again, at the new size.
-/// `snd_nxt` stays where it is.
-fn retransmit_all<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
-    let mss = eff_mss(conn).min(1460);
-    let in_flight = (conn.snd_nxt.wrapping_sub(conn.snd_una) as usize).min(conn.send_buf.len());
-    let mut chunk = [0u8; 1460];
-    let mut off = 0;
-    while off < in_flight {
-        let n = (in_flight - off).min(mss);
-        chunk[..n].copy_from_slice(&conn.send_buf[off..off + n]);
-        let w = recv_window(conn, io.st);
-        let fin = conn.fin_sent && off + n == conn.send_buf.len();
-        let flags = if fin { FIN | ACK | PSH } else { ACK | PSH };
-        if !send_seg(conn, io, conn.snd_una.wrapping_add(off as u32), conn.rcv_nxt, flags, w, &chunk[..n]) {
-            io.st.send_refused.fetch_add(1, Ordering::Relaxed);
-            return;
-        }
-        off += n;
-    }
-    if in_flight == 0 && conn.fin_sent {
-        let w = recv_window(conn, io.st);
-        send_seg(conn, io, conn.snd_una, conn.rcv_nxt, FIN | ACK, w, &[]);
-    }
-    conn.retrans_end = conn.snd_nxt;
-    conn.last_send_tick = io.ticks();
-}
-
-/// `tcp_reno_ssthresh` (tcp_cong.c:512): half, at least two.
-fn reno_ssthresh(conn: &TcpConn) -> u32 {
-    (conn.snd_cwnd >> 1).max(2)
 }
 
 // === Internal ===
@@ -3103,13 +2789,6 @@ fn seq_in_window(conn: &TcpConn, seq: u32) -> bool {
     let off = seq.wrapping_sub(conn.rcv_nxt) as usize;
     let wnd = rcv_space(conn);
     if wnd == 0 { off == 0 } else { off < wnd }
-}
-
-fn ack_in_range(una: u32, ack: u32, nxt: u32) -> bool {
-    // Check if ack is within (una, nxt] accounting for wrapping
-    let diff_una = ack.wrapping_sub(una);
-    let diff_nxt = nxt.wrapping_sub(una);
-    diff_una > 0 && diff_una <= diff_nxt
 }
 
 /// Whether a Closed connection can be freed: its owner let go, or the
