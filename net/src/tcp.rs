@@ -4,7 +4,7 @@
 //! - No Nagle (low latency for request/response)
 //! - 40ms delayed ACK (not 200ms)
 //! - Initial window: 10 segments
-//! - 3 retries, max 10s timeout (fast failure)
+//! - Retransmission after RFC 6298 and Linux: RTO from SRTT and RTTVAR
 //! - Capability-gated: no cap = no connection
 //!
 //! The connection table is a [`Stack`]; everything it needs from the
@@ -410,22 +410,26 @@ fn ooo_runs_trim(runs: &mut BTreeMap<u64, u64>, want: u64) {
         if ke > want { runs.remove(&ks); runs.insert(want, ke); }
     }
 }
-const MAX_RETRIES: u8 = 3;
-const RETRY_TICKS_BASE: u64 = 100; // 1 second (100Hz)
 // Cold-cache ARP while a SYN waits: one WiFi round trip between probes, and a
 // total budget of ~500 ms before the SYN goes out to broadcast regardless.
 const ARP_RETRANS_TICKS: u64 = 5; // 50 ms
 const ARP_MAX_TRIES: u8 = 10;
 const FIN_TIMEOUT_TICKS: u64 = 6000; // 60 s, like Linux's tcp_fin_timeout
-// Retransmit timeout for data. Base 200 ms, doubled per attempt (RFC 6298
-// style), give up after MAX_DATA_RETRIES, then the connection is honestly
-// dead instead of silently one-way.
-const RTO_TICKS_BASE: u64 = 20; // 200 ms = Linux TCP_RTO_MIN (HZ/5)
-/// Retransmissions before an established connection is declared dead.
-/// Same as Linux `TCP_RETR2` (include/net/tcp.h:119). With the shift capped
-/// at 5 the RTO tops out at 6.4 s, so 15 attempts span roughly 70 s; a
-/// saturated WiFi link can stall for several seconds without being dead.
-const MAX_DATA_RETRIES: u8 = 15;
+/// Microseconds per tick.
+const TICK_US: u64 = 10_000;
+/// `TCP_RTO_MIN`, in ticks: the floor RTTVAR never falls below.
+const TCP_RTO_MIN: u64 = 20;
+/// `TCP_TIMEOUT_INIT`, in ticks: the RTO before the first sample
+/// (RFC 6298 §2.1).
+const TCP_TIMEOUT_INIT: u64 = 100;
+/// `TCP_TIMEOUT_FALLBACK`, in ticks: the RTO after a handshake that was
+/// retransmitted and gave no sample (RFC 6298 §5.7).
+const TCP_TIMEOUT_FALLBACK: u64 = 300;
+/// `sysctl_tcp_syn_retries`: SYN retransmissions, about 127 s.
+const TCP_SYN_RETRIES: u8 = 6;
+/// `tcp_orphan_retries` with the sysctl at 0: retransmissions for a
+/// connection its owner closed.
+const TCP_ORPHAN_RETRIES: u8 = 8;
 // Ceiling on unacknowledged bytes held for retransmit. A peer that stops
 // acknowledging must not grow this without bound; `send` refuses past it,
 // which is the backpressure the caller needs to see.
@@ -586,9 +590,30 @@ struct TcpConn {
     // with a large window. Advisory: a desync only makes SACK suboptimal,
     // never corrupts data (the bytes still come from `ooo`).
     ooo_runs: BTreeMap<u64, u64>,
-    // Smoothed RTT in milliseconds, from the peer's echoed TSecr. Kept as a
-    // diagnostic only; the advertised window comes from DRS below.
+    // Smoothed RTT in milliseconds, `srtt_us` rounded, for the send buffer
+    // and the diagnostics.
     srtt_ms: u32,
+    /// `tcp_rtt_estimator`: SRTT times 8 and the mean deviation times 4, in
+    /// µs; `mdev_max_us` is the largest deviation of the current window,
+    /// `rttvar_us` the RTTVAR of RFC 6298; `rtt_seq` ends that window.
+    srtt_us: u32,
+    mdev_us: u32,
+    mdev_max_us: u32,
+    rttvar_us: u32,
+    rtt_seq: u32,
+    /// `icsk_rto`, in ticks.
+    rto: u64,
+    /// `retrans_stamp`: when the data first retransmitted went out.
+    retrans_stamp: Option<u64>,
+    /// The segment timed for an RTT sample without timestamps (RFC 6298
+    /// §3, Karn): its end and when it was sent, in µs.
+    rtt_timer: Option<(u32, u64)>,
+    /// Everything below this was retransmitted at least once.
+    retrans_end: u32,
+    /// When our SYN or SYN-ACK went out, in µs.
+    syn_sent_us: u64,
+    /// `icsk_user_timeout` (`TCP_USER_TIMEOUT`), in ticks; 0: none.
+    user_timeout: u64,
 
     // ── DRS: Dynamic Right Sizing (Linux `tcp_rcv_space_adjust`) ────────
     //
@@ -799,6 +824,17 @@ impl TcpConn {
             ooo_bytes: 0,
             ooo_runs: BTreeMap::new(),
             srtt_ms: 0,
+            srtt_us: 0,
+            mdev_us: 0,
+            mdev_max_us: 0,
+            rttvar_us: 0,
+            rtt_seq: 0,
+            rto: TCP_TIMEOUT_INIT,
+            retrans_stamp: None,
+            rtt_timer: None,
+            retrans_end: 0,
+            syn_sent_us: 0,
+            user_timeout: 0,
             rcv_rtt_us8: 0,
             rcvq_copied0: 0,
             copied_total: 0,
@@ -888,7 +924,125 @@ impl TcpConn {
     fn probe0_when(&self) -> u64 {
         // ilog2(TCP_RTO_MAX / TCP_RTO_MIN) + 1
         let shift = self.backoff.min(10);
-        (RTO_TICKS_BASE << shift).min(TCP_RTO_MAX)
+        (self.rto.max(TCP_RTO_MIN) << shift).min(TCP_RTO_MAX)
+    }
+
+    /// `tcp_rtt_estimator`: fold the sample `m` (µs) into SRTT and RTTVAR
+    /// (RFC 6298 §2, Van Jacobson's scaled form).
+    fn rtt_estimator(&mut self, m: u64) {
+        let rto_min_us = (TCP_RTO_MIN * TICK_US) as i64;
+        let mut m = m.min(i32::MAX as u64) as i64;
+        let mut srtt = self.srtt_us as i64;
+        if srtt != 0 {
+            m -= srtt >> 3;
+            srtt += m;
+            if m < 0 {
+                m = -m;
+                m -= (self.mdev_us >> 2) as i64;
+                if m > 0 { m >>= 3; }
+            } else {
+                m -= (self.mdev_us >> 2) as i64;
+            }
+            self.mdev_us = (self.mdev_us as i64 + m).max(0) as u32;
+            if self.mdev_us > self.mdev_max_us {
+                self.mdev_max_us = self.mdev_us;
+                if self.mdev_max_us > self.rttvar_us { self.rttvar_us = self.mdev_max_us; }
+            }
+            if (self.snd_una.wrapping_sub(self.rtt_seq) as i32) > 0 {
+                if self.mdev_max_us < self.rttvar_us {
+                    self.rttvar_us -= (self.rttvar_us - self.mdev_max_us) >> 2;
+                }
+                self.rtt_seq = self.snd_nxt;
+                self.mdev_max_us = rto_min_us as u32;
+            }
+        } else {
+            srtt = m << 3;
+            self.mdev_us = (m << 1) as u32;
+            self.rttvar_us = self.mdev_us.max(rto_min_us as u32);
+            self.mdev_max_us = self.rttvar_us;
+            self.rtt_seq = self.snd_nxt;
+        }
+        self.srtt_us = srtt.clamp(1, u32::MAX as i64) as u32;
+        self.srtt_ms = ((self.srtt_us >> 3) / 1000).max(1);
+    }
+
+    /// `tcp_ack_update_rtt` with a sample, then `tcp_set_rto`: RTO is
+    /// SRTT + 4 RTTVAR, at most `TCP_RTO_MAX` (RFC 6298 §2.3, §2.5).
+    fn ack_update_rtt(&mut self, sample_us: u64) {
+        self.rtt_estimator(sample_us);
+        let rto_us = (self.srtt_us >> 3) as u64 + self.rttvar_us as u64;
+        self.rto = rto_us.div_ceil(TICK_US).min(TCP_RTO_MAX);
+    }
+
+    /// `retransmits_timed_out`: whether the retransmissions since
+    /// `retrans_stamp` took longer than `boundary` of them would from
+    /// `rto_base` (`tcp_model_timeout`), or than the user timeout.
+    fn retransmits_timed_out(&self, now: u64, boundary: u8, rto_base: u64, user_timeout: u64) -> bool {
+        if self.retries == 0 { return false; }
+        let timeout = if user_timeout != 0 {
+            user_timeout
+        } else {
+            let thresh = (TCP_RTO_MAX / rto_base).ilog2() as u64;
+            let boundary = boundary as u64;
+            if boundary <= thresh {
+                ((2 << boundary) - 1) * rto_base
+            } else {
+                ((2 << thresh) - 1) * rto_base + (boundary - thresh) * TCP_RTO_MAX
+            }
+        };
+        self.retrans_stamp.is_some_and(|t| now.saturating_sub(t) >= timeout)
+    }
+
+    /// The handshake's RTT sample (`tcp_synack_rtt_meas`, `tcp_ack` on the
+    /// SYN-ACK): from our SYN or SYN-ACK unless it was retransmitted, else
+    /// from the echoed timestamp; without one the RTO falls back to 3 s
+    /// (RFC 6298 §5.7, `tcp_init_metrics`).
+    fn handshake_rtt(&mut self, now_us: u64, tsecr: Option<u32>, ts_now_ms: u32) {
+        let retransmitted = self.retries > 0;
+        if !retransmitted {
+            self.ack_update_rtt(now_us.saturating_sub(self.syn_sent_us).max(1));
+        } else if let Some(t) = tsecr.filter(|&t| t != 0 && self.ts_ok) {
+            let delta = ts_now_ms.wrapping_sub(t);
+            if delta < i32::MAX as u32 / 1000 { self.ack_update_rtt(delta.max(1) as u64 * 1000); }
+        }
+        if self.srtt_us == 0 { self.rto = TCP_TIMEOUT_FALLBACK; }
+        self.retries = 0;
+        self.retrans_stamp = None;
+        self.rtt_timer = None;
+        self.retrans_end = self.snd_una;
+    }
+
+    /// `tcp_clamp_rto_to_user_timeout`: the timer never runs past the user
+    /// timeout.
+    fn rto_clamped(&self, now: u64) -> u64 {
+        let Some(stamp) = self.retrans_stamp.filter(|_| self.user_timeout != 0) else { return self.rto };
+        let elapsed = now.saturating_sub(stamp);
+        self.rto.min(self.user_timeout.saturating_sub(elapsed).max(1))
+    }
+
+    /// The RTT sample of an ACK that took new data up to `ack`
+    /// (`tcp_clean_rtx_queue`, `tcp_ack_update_rtt`): the timed segment
+    /// unless retransmitted data is acknowledged too, else the echoed
+    /// timestamp.
+    fn rtt_sample(&mut self, prior_una: u32, ack: u32, now_us: u64, tsecr: Option<u32>, ts_now_ms: u32) {
+        let acked_retrans = (prior_una.wrapping_sub(self.retrans_end) as i32) < 0;
+        let mut sample = None;
+        if let Some((end, sent)) = self.rtt_timer {
+            if (ack.wrapping_sub(end) as i32) >= 0 {
+                if !acked_retrans { sample = Some(now_us.saturating_sub(sent)); }
+                self.rtt_timer = None;
+            }
+        }
+        if sample.is_none() && self.ts_ok {
+            if let Some(tsecr) = tsecr.filter(|&t| t != 0) {
+                // tcp_rtt_tsopt_us
+                let delta = ts_now_ms.wrapping_sub(tsecr);
+                if delta < i32::MAX as u32 / 1000 {
+                    sample = Some(delta.max(1) as u64 * 1000);
+                }
+            }
+        }
+        if let Some(m) = sample { self.ack_update_rtt(m.max(1)); }
     }
 
     /// Unsent bytes wait for a window that does not take the next segment,
@@ -1148,6 +1302,7 @@ impl Stack {
         conn.snd_una = iss;
         conn.snd_iss = iss;
         conn.last_send_tick = env.ticks();
+        conn.syn_sent_us = env.uptime_us();
         conn.arp_pending = arp_pending;
         conn.arp_tries = 1;
         conn.set_path(env);
@@ -1282,7 +1437,7 @@ impl Stack {
 
         let now = io.ticks();
         // Oldest unacked byte starts its clock now if nothing was in flight.
-        if conn.send_buf.is_empty() { conn.rto_tick = now; conn.retries = 0; }
+        if conn.send_buf.is_empty() { conn.rto_tick = now; conn.retries = 0; conn.retrans_stamp = None; }
         conn.send_buf.extend_from_slice(data);
 
         // Send in effective-MSS chunks immediately (no Nagle). Effective, not
@@ -1404,6 +1559,7 @@ impl Stack {
             // The FIN is the oldest unacknowledged byte: its clock starts now.
             conn.rto_tick = io.ticks();
             conn.retries = 0;
+            conn.retrans_stamp = None;
         }
         // The FIN goes after everything still queued (RFC 9293 §3.10.4).
         write_xmit(conn, &mut io);
@@ -1459,6 +1615,7 @@ impl Stack {
                         let peer_ws = parse_wscale(data, data_offset);
                         let peer_mss = parse_mss(data, data_offset);
                         let now = io.ticks();
+                        let now_us = io.env.uptime_us();
                         let new_id = io.env.random_u64() as u16;
                         let env = &*io.env;
                         let mut advmss = 0;
@@ -1473,6 +1630,7 @@ impl Stack {
                             conn.snd_nxt = iss.wrapping_add(1);
                             conn.snd_una = iss;
                             conn.last_send_tick = now;
+                            conn.syn_sent_us = now_us;
                             // Scaling is active only if the peer offered it too.
                             conn.wscale_ok = peer_ws.is_some();
                             conn.snd_wscale = peer_ws.unwrap_or(0);
@@ -1626,6 +1784,10 @@ impl Stack {
                     conn.last_ack_rx = io.ticks();
                     conn.sync_mss();
                     conn.init_rcv_mss();
+                    // tcp_synack_rtt_meas
+                    let tsecr = parse_tsecr(data, data_offset);
+                    let ts_now = io.ts_now_ms();
+                    conn.handshake_rtt(io.env.uptime_us(), tsecr, ts_now);
                 }
             }
 
@@ -1698,6 +1860,9 @@ impl Stack {
                     // The peer's MSS, or the default; then the MSS for the
                     // options now negotiated.
                     if let Some(m) = parse_mss(data, data_offset) { conn.mss_clamp = m; }
+                    let tsecr = parse_tsecr(data, data_offset);
+                    let ts_now = io.ts_now_ms();
+                    conn.handshake_rtt(io.env.uptime_us(), tsecr, ts_now);
                     // The SYN-ACK's window is never scaled (RFC 7323 §2.2);
                     // it sets the send window, and this segment is the one
                     // that did (tcp_init_wl).
@@ -1750,25 +1915,6 @@ impl Stack {
                     // sender must notice the reopened window. The wakeup does not
                     // claim anything changed, only that a retry might be worth it.
                     io.st.ack_gen.fetch_add(1, Ordering::Relaxed);
-                    // The RTT sample belongs to the ACK, not to the data: during
-                    // an upload the peer sends bare ACKs, and without a sample
-                    // `snd_space_adjust` could never grow the send buffer. Linux
-                    // samples in `tcp_ack_update_rtt`, called from
-                    // `tcp_clean_rtx_queue`, where an ACK comes in.
-                    if conn.ts_ok {
-                        if let Some(tsecr) = parse_tsecr(data, data_offset) {
-                            if tsecr != 0 {
-                                let sample = io.ts_now_ms().wrapping_sub(tsecr);
-                                if (1..6000).contains(&sample) {
-                                    conn.srtt_ms = if conn.srtt_ms == 0 {
-                                        sample
-                                    } else {
-                                        (conn.srtt_ms * 7 + sample) / 8
-                                    };
-                                }
-                            }
-                        }
-                    }
                     // ── Duplicate ACK: RFC 5681 §3.2 ─────────────────────
                     //
                     // Three in a row mean "one segment is missing, the rest is
@@ -1819,8 +1965,16 @@ impl Stack {
                         let acked = ack.wrapping_sub(conn.snd_una) as usize;
                         let drop_n = acked.min(conn.send_buf.len());
                         conn.send_buf.drain(..drop_n);
+                        let prior_una = conn.snd_una;
                         conn.snd_una = ack;
+                        // The RTT sample belongs to the ACK that takes new
+                        // data (tcp_clean_rtx_queue -> tcp_ack_update_rtt).
+                        let tsecr = parse_tsecr(data, data_offset);
+                        let ts_now = io.ts_now_ms();
+                        conn.rtt_sample(prior_una, ack, io.env.uptime_us(), tsecr, ts_now);
+                        if (ack.wrapping_sub(conn.retrans_end) as i32) > 0 { conn.retrans_end = ack; }
                         conn.retries = 0;
+                        conn.retrans_stamp = None;
                         conn.rto_tick = io.ticks();
                         // The send buffer grows here — where Linux calls
                         // `tcp_check_space` -> `tcp_new_space` ->
@@ -1967,7 +2121,7 @@ impl Stack {
                             Ordering::Relaxed);
 
                         // Keep the SACK run-set in sync with what's now delivered, and
-                        // refresh the RTT estimate from the peer's echoed TSecr (our
+                        // measure the receiver's RTT from the peer's echoed TSecr (our
                         // TSval is `io.ts_now_ms()`, so now - TSecr = RTT); it feeds DRS
                         // via `rcv_rtt_update`.
                         let delivered = conn.rcv_off;
@@ -1980,8 +2134,6 @@ impl Stack {
                                     // an echo from another connection.
                                     let sample = io.ts_now_ms().wrapping_sub(tsecr);
                                     if (1..6000).contains(&sample) {
-                                        conn.srtt_ms = if conn.srtt_ms == 0 { sample }
-                                            else { (conn.srtt_ms * 7 + sample) / 8 };
                                         rcv_rtt_update(conn, sample * 1000);
                                     }
                                 }
@@ -2188,6 +2340,15 @@ impl Stack {
         }
     }
 
+    /// `TCP_USER_TIMEOUT`: how long, in ms, sent data may stay
+    /// unacknowledged before the connection is given up (0: the
+    /// retransmission count decides).
+    pub fn set_user_timeout(&mut self, handle: Handle, ms: u32) -> Result<(), TcpError> {
+        let conn = self.conns.get_mut(handle).ok_or(TcpError::NotConnected)?;
+        conn.user_timeout = (ms as u64).div_ceil(TICK_US / 1000);
+        Ok(())
+    }
+
     /// The error the connection at `handle` ended with or last learned of.
     pub fn conn_error(&self, handle: Handle) -> Option<SockErr> {
         self.conns.get(handle).and_then(|c| c.sock_err)
@@ -2266,21 +2427,24 @@ impl Stack {
                                 arp_probes.push(target);
                             }
                         }
-                    } else {
-                        let retry_interval = RETRY_TICKS_BASE << slot.retries.min(4);
-                        if now - slot.last_send_tick > retry_interval {
-                            if slot.retries >= MAX_RETRIES {
-                                slot.error = true;
-                                slot.state = State::Closed;
-                            } else {
-                                slot.retries += 1;
-                                send_syn_now = true;
-                            }
+                    } else if now.saturating_sub(slot.last_send_tick) >= slot.rto {
+                        // tcp_retransmit_timer, tcp_write_timeout: SYN
+                        // retries model 1 s doubling, about 127 s for six.
+                        if slot.retransmits_timed_out(now, TCP_SYN_RETRIES, TCP_TIMEOUT_INIT, 0) {
+                            slot.error = true;
+                            slot.state = State::Closed;
+                            slot.last_send_tick = now;
+                        } else {
+                            slot.retrans_stamp.get_or_insert(slot.last_send_tick);
+                            slot.retries += 1;
+                            slot.rto = (slot.rto << 1).min(TCP_RTO_MAX);
+                            send_syn_now = true;
                         }
                     }
 
                     if send_syn_now {
                         slot.last_send_tick = now;
+                        slot.syn_sent_us = io.env.uptime_us();
                         pending.push(PendingSeg {
                             dst_ip: slot.remote_ip, src_port: slot.local_port,
                             dst_port: slot.remote_port, seq: slot.snd_iss,
@@ -2294,19 +2458,32 @@ impl Stack {
                 // it is exactly the segment the peer is missing; the FIN counts
                 // too (tcp_retransmit_timer in every state that sends).
                 if slot.sends() && slot.snd_una != slot.snd_nxt {
-                    let rto = RTO_TICKS_BASE << slot.retries.min(5);
-                    if now.saturating_sub(slot.rto_tick) > rto {
+                    if now.saturating_sub(slot.rto_tick) >= slot.rto_clamped(now) {
                         // tcp_retransmit_timer: into a zero window the
                         // retransmits are probes, and the connection lives
                         // while the peer still answers (tcp_rtx_probe0_timed_out:
                         // twice TCP_RTO_MAX without an ACK).
                         let zero_window = slot.snd_wnd == 0
                             && now.saturating_sub(slot.last_ack_rx) <= 2 * TCP_RTO_MAX;
-                        if slot.retries >= MAX_DATA_RETRIES && !zero_window {
+                        // tcp_write_timeout: 15 retransmissions from 200 ms
+                        // (about 924 s), 8 once the owner closed.
+                        let retry_until = if !slot.released {
+                            TCP_RETRIES2
+                        } else if slot.rto < TCP_RTO_MAX {
+                            TCP_ORPHAN_RETRIES
+                        } else {
+                            0
+                        };
+                        if !zero_window
+                            && slot.retransmits_timed_out(now, retry_until, TCP_RTO_MIN, slot.user_timeout)
+                        {
                             slot.error = true;
                             slot.state = State::Closed;
+                            slot.last_send_tick = now;
                         } else {
-                            slot.retries = slot.retries.saturating_add(1).min(MAX_DATA_RETRIES);
+                            slot.retrans_stamp.get_or_insert(slot.rto_tick);
+                            slot.retries = slot.retries.saturating_add(1);
+                            slot.rto = (slot.rto << 1).min(TCP_RTO_MAX);
                             slot.rto_tick = now;
                             slot.last_send_tick = now;
                             // ── `tcp_enter_loss` ───────────────────────
@@ -2343,6 +2520,7 @@ impl Stack {
                     } else if slot.probes_out >= TCP_RETRIES2 {
                         slot.error = true;
                         slot.state = State::Closed;
+                        slot.last_send_tick = now;
                         slot.probe_at = 0;
                     } else {
                         // tcp_write_wakeup, tcp_xmit_probe_skb: a sequence
@@ -2476,6 +2654,7 @@ fn write_xmit<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
         }
         io.st.send_segs.fetch_add(1, Ordering::Relaxed);
         conn.snd_nxt = conn.snd_nxt.wrapping_add(n as u32 + fin as u32);
+        if conn.rtt_timer.is_none() { conn.rtt_timer = Some((conn.snd_nxt, io.env.uptime_us())); }
         if fin { conn.fin_sent = true; }
         conn.last_send_tick = io.ticks();
     }
@@ -2523,6 +2702,8 @@ fn retransmit_head<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
     };
     if send_seg(conn, io, conn.snd_una, conn.rcv_nxt, flags, w, &chunk[..n]) {
         conn.last_send_tick = io.ticks();
+        let end = conn.snd_una.wrapping_add(n as u32 + (flags & FIN != 0) as u32);
+        if (end.wrapping_sub(conn.retrans_end) as i32) > 0 { conn.retrans_end = end; }
     } else {
         io.st.send_refused.fetch_add(1, Ordering::Relaxed);
     }
@@ -2552,6 +2733,7 @@ fn retransmit_all<E: Env + ?Sized>(conn: &mut TcpConn, io: &mut Io<E>) {
         let w = recv_window(conn, io.st);
         send_seg(conn, io, conn.snd_una, conn.rcv_nxt, FIN | ACK, w, &[]);
     }
+    conn.retrans_end = conn.snd_nxt;
     conn.last_send_tick = io.ticks();
 }
 

@@ -1,0 +1,20 @@
+// #59: the RTO comes from the measured RTT (RFC 6298 §2, tcp_rtt_estimator,
+// tcp_set_rto): a 100 ms handshake gives SRTT 100 ms and RTTVAR 200 ms (its
+// floor), so RTO 300 ms, doubled per retransmission. An ACK of retransmitted
+// data gives no sample (Karn), and the backed-off RTO stays.
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.1   < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1
++0     send 100
++0     > P. 1:101(100) ack 1
++0.29  status 1
++0.01  > P. 1:101(100) ack 1
++0.59  status 1
++0.01  > P. 1:101(100) ack 1
+
++0.05  < . 1:1(0) ack 101 win 4000
++0     send 100
++0     > P. 101:201(100) ack 1
++1.19  status 1
++0.01  > P. 101:201(100) ack 1

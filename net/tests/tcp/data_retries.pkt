@@ -1,0 +1,26 @@
+// #76: unacknowledged data is retransmitted with the RTO doubling up to
+// 120 s, and the connection is given up once 15 retransmissions from 200 ms
+// would have taken longer (tcp_retries2, tcp_model_timeout: 924.6 s).
+0      connect 192.0.2.2:80
++0     > S 0:0(0) <mss 1460,sackOK,nop,nop,TS val ? ecr 0,nop,wscale 8,eol>
++0.01  < S. 0:0(0) ack 1 win 4000 <mss 1460>
++0     > . 1:1(0) ack 1
++0     send 100
++0     > P. 1:101(100) ack 1
++0.21   > P. 1:101(100) ack 1
++0.42   > P. 1:101(100) ack 1
++0.84   > P. 1:101(100) ack 1
++1.68   > P. 1:101(100) ack 1
++3.36   > P. 1:101(100) ack 1
++6.72   > P. 1:101(100) ack 1
++13.44  > P. 1:101(100) ack 1
++26.88  > P. 1:101(100) ack 1
++53.76  > P. 1:101(100) ack 1
++107.52 > P. 1:101(100) ack 1
++120    > P. 1:101(100) ack 1
++120    > P. 1:101(100) ack 1
++120    > P. 1:101(100) ack 1
++120    > P. 1:101(100) ack 1
++120    > P. 1:101(100) ack 1
++119.99 status 1
++0.01  status -2
