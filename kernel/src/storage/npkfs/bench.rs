@@ -41,6 +41,13 @@ pub static GET: Stages<5> = Stages::new();
 /// device write, B-tree insert.
 pub static PUT: Stages<6> = Stages::new();
 
+/// The dedup lookup at the start of `storage::put`: waiting for the store
+/// lock, then the B-tree walk.
+pub static LOOKUP: Stages<2> = Stages::new();
+/// Metadata block reads the cache served, and those it read from the device.
+pub static CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+pub static CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+
 /// `fs::write`: the path lock, storing the blob and the trees along the
 /// path, the commit.
 pub static WRITE: Stages<3> = Stages::new();

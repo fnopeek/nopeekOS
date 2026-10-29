@@ -3619,6 +3619,9 @@ pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: 
             v.push(crate::nvme::max_blocks_per_cmd() as u64);
             bench::WRITE.snapshot(&mut v);
             bench::COMMIT.snapshot(&mut v);
+            bench::LOOKUP.snapshot(&mut v);
+            v.push(bench::CACHE_HITS.load(core::sync::atomic::Ordering::Relaxed));
+            v.push(bench::CACHE_MISSES.load(core::sync::atomic::Ordering::Relaxed));
             true
         }
         _ => false,

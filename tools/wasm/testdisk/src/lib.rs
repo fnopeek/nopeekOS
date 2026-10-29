@@ -131,6 +131,11 @@ struct Counters {
     cmd_blocks: u64,
     write: [u64; 5],
     commit: [u64; 8],
+    /// Dedup lookups: count, -, lock wait, walk; then cache hits, misses.
+    /// Zero on a kernel that does not report them.
+    lookup: [u64; 4],
+    hits: u64,
+    misses: u64,
 }
 
 fn counters() -> Option<Counters> {
@@ -142,6 +147,11 @@ fn counters() -> Option<Counters> {
     c.put.copy_from_slice(&v[8..16]);
     c.write.copy_from_slice(&v[17..22]);
     c.commit.copy_from_slice(&v[22..30]);
+    if v.len() >= 36 {
+        c.lookup.copy_from_slice(&v[30..34]);
+        c.hits = v[34];
+        c.misses = v[35];
+    }
     Some(c)
 }
 
@@ -389,6 +399,11 @@ fn files(hz: u64) -> u32 {
             print(&format!("       write: {}\n", breakdown(&WRITE_STAGES, &b.write, &a.write, t)));
             print(&format!("       objects: {}\n", breakdown(&PUT_STAGES, &b.put, &a.put, t)));
             print(&format!("       commits: {}\n", breakdown(&COMMIT_STAGES, &b.commit, &a.commit, t)));
+            let lookups = a.lookup[0].saturating_sub(b.lookup[0]).max(1);
+            let us = |i: usize| a.lookup[i].saturating_sub(b.lookup[i]) * 1_000_000 / hz / lookups;
+            let per_file = |x: u64, y: u64| x.saturating_sub(y) / files.max(1) as u64;
+            print(&format!("       dedup lookup: lock wait {} us, walk {} us each; metadata reads per file: {} cached, {} from the device\n",
+                us(2), us(3), per_file(a.hits, b.hits), per_file(a.misses, b.misses)));
         }
     }
     if let Some(r) = last_big {

@@ -843,8 +843,11 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
     // and encryption below would be wasted work.
     {
         let mut lock = FS.lock();
+        let t_locked = rdtsc();
         let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
-        if btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some() {
+        let found = btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some();
+        super::bench::LOOKUP.add(0, &[t0, t_locked, rdtsc()]);
+        if found {
             return Ok(());
         }
     }

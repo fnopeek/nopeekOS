@@ -137,11 +137,14 @@ impl BlockCache {
 
     /// Read a block into buf. Uses cache, loads from disk on miss.
     pub fn read(&mut self, block: u64, buf: &mut [u8; BLOCK_SIZE]) -> Result<(), FsError> {
+        use core::sync::atomic::Ordering::Relaxed;
         if let Some(&s) = self.map.get(&block) {
             self.touch(s);
             buf.copy_from_slice(self.bytes(s));
+            super::bench::CACHE_HITS.fetch_add(1, Relaxed);
             return Ok(());
         }
+        super::bench::CACHE_MISSES.fetch_add(1, Relaxed);
         blkdev::read_block(block, buf)?;
         let s = self.take(block)?;
         self.bytes_mut(s).copy_from_slice(buf);
