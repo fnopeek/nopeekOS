@@ -7,7 +7,7 @@ use spin::{Mutex, MutexGuard, Once};
 use net_core::tcp::{self as core_tcp, Env, Stack, Stats};
 use super::{ipv4, arp};
 
-pub use net_core::tcp::{Owner, KERNEL, TcpError};
+pub use net_core::tcp::{Owner, KERNEL, TcpError, TcpInfo};
 
 /// The stack's counters.
 pub static STATS: Stats = Stats::new();
@@ -397,6 +397,7 @@ pub fn has_timers() -> bool {
     stack().has_timers()
 }
 
-pub fn list_connections() -> alloc::vec::Vec<(u16, [u8; 4], u16, &'static str)> {
-    stack().list_connections()
+/// Every connection, with `tcp_get_info` for the full ones.
+pub fn connections() -> alloc::vec::Vec<core_tcp::ConnRow> {
+    stack().connections(&KernelEnv)
 }

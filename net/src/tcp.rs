@@ -1042,6 +1042,65 @@ impl TcpConn {
     }
 }
 
+/// One connection as `tcp_get_info` describes it (`ss -ti`). Times in µs
+/// unless named otherwise.
+#[derive(Debug, Clone, Default)]
+pub struct TcpInfo {
+    pub ca_state: &'static str,
+    pub retransmits: u8,
+    pub probes: u8,
+    pub backoff: u8,
+    pub timestamps: bool,
+    pub sack: bool,
+    /// Window scales, theirs and ours, when negotiated.
+    pub wscale: Option<(u8, u8)>,
+    pub rto_us: u64,
+    pub ato_us: u64,
+    pub snd_mss: u16,
+    pub rcv_mss: u16,
+    pub advmss: u16,
+    pub pmtu: u32,
+    /// Segments in flight, SACKed, lost, retransmitted; for a listener
+    /// `unacked` is the accept queue and `sacked` its bound.
+    pub unacked: u32,
+    pub sacked: u32,
+    pub lost: u32,
+    pub retrans: u32,
+    pub total_retrans: u32,
+    pub last_data_sent_ms: u64,
+    pub last_data_recv_ms: u64,
+    pub last_ack_recv_ms: u64,
+    pub rtt_us: u32,
+    pub rttvar_us: u32,
+    pub min_rtt_us: u32,
+    pub rcv_rtt_us: u32,
+    pub snd_cwnd: u32,
+    /// `None` while still infinite.
+    pub snd_ssthresh: Option<u32>,
+    pub reordering: u32,
+    pub rcv_space: u32,
+    pub delivered: u32,
+    /// Bytes per second, from the last rate sample.
+    pub delivery_rate: u64,
+    pub app_limited: bool,
+    pub dsack_dups: u32,
+    pub reord_seen: u32,
+    pub snd_wnd: u32,
+    pub rcv_wnd: u32,
+    pub notsent_bytes: usize,
+}
+
+/// A row of `Stack::connections`: the 4-tuple, the state, and for a full
+/// connection its `TcpInfo`.
+#[derive(Debug, Clone)]
+pub struct ConnRow {
+    pub local_port: u16,
+    pub remote_ip: [u8; 4],
+    pub remote_port: u16,
+    pub state: &'static str,
+    pub info: Option<TcpInfo>,
+}
+
 /// How far a connection got, for a caller that gave up on it.
 #[derive(Debug, Clone, Copy)]
 pub struct ConnDebug {
@@ -2415,11 +2474,21 @@ impl Stack {
         })
     }
 
-    pub fn list_connections(&self) -> Vec<(u16, [u8; 4], u16, &'static str)> {
+    /// Every connection with what `tcp_get_info` reports for it; TIME-WAIT
+    /// entries and requests only by state.
+    pub fn connections<E: Env + ?Sized>(&self, env: &E) -> Vec<ConnRow> {
+        let now = env.ticks();
         self.conns.iter()
-            .map(|c| (c.local_port, c.remote_ip, c.remote_port, c.state.name()))
-            .chain(self.conns.tw.iter().map(|(&(lp, rip, rp), tw)| (lp, rip, rp, timewait::name(tw))))
-            .chain(self.conns.reqs.keys().map(|&(lp, rip, rp)| (lp, rip, rp, "SYN_RECV")))
+            .map(|c| ConnRow {
+                local_port: c.local_port, remote_ip: c.remote_ip, remote_port: c.remote_port,
+                state: c.state.name(), info: Some(tcp_get_info(c, now)),
+            })
+            .chain(self.conns.tw.iter().map(|(&(lp, rip, rp), tw)| ConnRow {
+                local_port: lp, remote_ip: rip, remote_port: rp, state: timewait::name(tw), info: None,
+            }))
+            .chain(self.conns.reqs.keys().map(|&(lp, rip, rp)| ConnRow {
+                local_port: lp, remote_ip: rip, remote_port: rp, state: "SYN_RECV", info: None,
+            }))
             .collect()
     }
 
@@ -2856,6 +2925,38 @@ fn seq_in_window(conn: &TcpConn, seq: u32) -> bool {
     let off = seq.wrapping_sub(conn.rcv_nxt) as usize;
     let wnd = rcv_space(conn);
     if wnd == 0 { off == 0 } else { off < wnd }
+}
+
+/// `tcp_get_info`.
+fn tcp_get_info(c: &TcpConn, now: u64) -> TcpInfo {
+    let mut i = TcpInfo {
+        retransmits: c.retries,
+        probes: c.probes_out,
+        backoff: c.backoff,
+        timestamps: c.ts_ok,
+        sack: c.sack_ok,
+        wscale: c.wscale_ok.then_some((c.snd_wscale, OUR_WSCALE)),
+        rto_us: c.rto * TICK_US,
+        snd_mss: c.mss_cache,
+        rcv_mss: c.rcv_mss,
+        advmss: c.advmss,
+        pmtu: c.pmtu,
+        last_ack_recv_ms: now.saturating_sub(c.last_ack_rx) * (TICK_US / 1000),
+        rtt_us: c.srtt_us >> 3,
+        rttvar_us: c.mdev_us >> 2,
+        rcv_rtt_us: c.rcv_rtt_us8 >> 3,
+        snd_cwnd: c.snd_cwnd,
+        snd_ssthresh: (c.snd_ssthresh != u32::MAX).then_some(c.snd_ssthresh),
+        rcv_space: c.rcvq_space,
+        snd_wnd: c.snd_wnd,
+        rcv_wnd: c.rcv_wnd.get(),
+        notsent_bytes: c.send_buf.len().saturating_sub(c.snd_nxt.wrapping_sub(c.snd_una) as usize),
+        ..TcpInfo::default()
+    };
+    recovery::fill_info(c, &mut i, now);
+    ack::fill_info(c, &mut i, now);
+    if let Some(l) = &c.listen { (i.unacked, i.sacked) = listen::backlog_info(l); }
+    i
 }
 
 /// Whether a Closed connection can be freed: its owner let go, or the

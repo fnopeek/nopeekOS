@@ -802,6 +802,32 @@ fn check_sack_reordering(c: &mut TcpConn, low_seq: u32) {
     c.tx.reord_seen += 1;
 }
 
+/// The sender's part of `tcp_get_info`.
+pub(super) fn fill_info(c: &TcpConn, i: &mut TcpInfo, now: u64) {
+    i.ca_state = match c.ca_state {
+        CaState::Open => "open", CaState::Disorder => "disorder", CaState::Cwr => "cwr",
+        CaState::Recovery => "recovery", CaState::Loss => "loss",
+    };
+    i.reordering = c.tx.reordering;
+    i.unacked = c.tx.packets_out;
+    i.sacked = c.tx.sacked_out;
+    i.lost = c.tx.lost_out;
+    i.retrans = c.tx.retrans_out;
+    i.total_retrans = c.tx.total_retrans;
+    i.last_data_sent_ms = now.saturating_sub(c.tx.lsndtime) * (TICK_US / 1000);
+    i.min_rtt_us = if c.tx.min_rtt() == u32::MAX { 0 } else { c.tx.min_rtt() };
+    i.delivered = c.tx.delivered;
+    i.dsack_dups = c.tx.dsack_dups;
+    i.reord_seen = c.tx.reord_seen;
+    i.app_limited = c.tx.rate_app_limited;
+    // tcp_compute_delivery_rate
+    i.delivery_rate = if c.tx.rate_interval_us != 0 {
+        c.tx.rate_delivered as u64 * c.mss_cache as u64 * 1_000_000 / c.tx.rate_interval_us
+    } else {
+        0
+    };
+}
+
 // ── Delivery rate (tcp_rate.c) ───────────────────────────────────────
 
 /// `struct rate_sample`.

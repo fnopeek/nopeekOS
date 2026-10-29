@@ -150,7 +150,7 @@ pub fn intent_traceroute(args: &str) {
 }
 
 pub fn intent_netstat() {
-    let conns = crate::net::tcp::list_connections();
+    let conns = crate::net::tcp::connections();
     kprintln!();
     kprintln!("  Active TCP Connections");
     kprintln!("  ─────────────────────");
@@ -158,13 +158,42 @@ pub fn intent_netstat() {
         kprintln!("  (none)");
     } else {
         kprintln!("  {:>6}  {:>21}  {}", "Local", "Remote", "State");
-        for (lport, rip, rport, state) in &conns {
+        for c in &conns {
+            let r = c.remote_ip;
             kprintln!("  {:>6}  {}.{}.{}.{}:{:<5}  {}",
-                lport, rip[0], rip[1], rip[2], rip[3], rport, state);
+                c.local_port, r[0], r[1], r[2], r[3], c.remote_port, c.state);
+            if let Some(i) = &c.info {
+                print_tcp_info(i);
+            }
         }
     }
     bridge_report();
     kprintln!();
+}
+
+/// One connection's `tcp_info`, laid out as `ss -ti` prints it.
+fn print_tcp_info(i: &crate::net::tcp::TcpInfo) {
+    let ms = |us: u64| alloc::format!("{}.{:03}", us / 1000, us % 1000);
+    let mut l1 = alloc::format!("cubic {}", i.ca_state);
+    if let Some((snd, rcv)) = i.wscale { l1 += &alloc::format!(" wscale:{snd},{rcv}"); }
+    if i.timestamps { l1 += " ts"; }
+    if i.sack { l1 += " sack"; }
+    l1 += &alloc::format!(" rto:{} rtt:{}/{} ato:{} mss:{} pmtu:{} rcvmss:{} advmss:{}",
+        i.rto_us / 1000, ms(i.rtt_us as u64), ms(i.rttvar_us as u64), i.ato_us / 1000,
+        i.snd_mss, i.pmtu, i.rcv_mss, i.advmss);
+    kprintln!("          {}", l1);
+    let ssthresh = i.snd_ssthresh.map_or(alloc::string::String::from("-"), |v| alloc::format!("{v}"));
+    kprintln!("          cwnd:{} ssthresh:{} unacked:{} sacked:{} lost:{} retrans:{}/{} reordering:{}",
+        i.snd_cwnd, ssthresh, i.unacked, i.sacked, i.lost, i.retrans, i.total_retrans, i.reordering);
+    kprintln!("          lastsnd:{} lastrcv:{} lastack:{} minrtt:{} rcv_rtt:{} rcv_space:{}",
+        i.last_data_sent_ms, i.last_data_recv_ms, i.last_ack_recv_ms, ms(i.min_rtt_us as u64),
+        ms(i.rcv_rtt_us as u64), i.rcv_space);
+    kprintln!("          delivery_rate {} kB/s{} delivered:{} snd_wnd:{} rcv_wnd:{} notsent:{} dsack_dups:{} reord_seen:{}",
+        i.delivery_rate / 1000, if i.app_limited { " app_limited" } else { "" }, i.delivered,
+        i.snd_wnd, i.rcv_wnd, i.notsent_bytes, i.dsack_dups, i.reord_seen);
+    if i.retransmits != 0 || i.probes != 0 || i.backoff != 0 {
+        kprintln!("          retransmits:{} probes:{} backoff:{}", i.retransmits, i.probes, i.backoff);
+    }
 }
 
 /// The microVM's side of the wire. Not gated on `vm_active()`, which only

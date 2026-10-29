@@ -515,6 +515,9 @@ pub(super) fn timers<E: Env + ?Sized>(conns: &mut Table, io: &mut Io<E>) {
     }
 }
 
+/// For `tcp_get_info`: the accept queue's length and bound.
+pub(super) fn backlog_info(l: &Listener) -> (u32, u32) { (l.accept_queue.len() as u32, l.max_backlog) }
+
 /// `inet_csk_accept`: the oldest established connection, if any.
 pub(super) fn accept(conns: &mut Table, listener: Handle) -> Result<Option<Handle>, TcpError> {
     let l = conns.get_mut(listener).and_then(|c| c.listen.as_mut()).ok_or(TcpError::NotConnected)?;

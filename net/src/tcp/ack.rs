@@ -59,6 +59,12 @@ pub(super) struct AckState {
     comp_at: u64,
 }
 
+/// The receiver's part of `tcp_get_info`.
+pub(super) fn fill_info(c: &TcpConn, i: &mut TcpInfo, now: u64) {
+    i.ato_us = c.ack.ato.min(TCP_DELACK_MAX) * TICK_US;
+    i.last_data_recv_ms = now.saturating_sub(c.ack.lrcvtime) * (TICK_US / 1000);
+}
+
 pub(super) fn schedule_ack(c: &mut TcpConn) { c.ack.pending |= ACK_SCHED; }
 
 pub(super) fn ack_scheduled(c: &TcpConn) -> bool { c.ack.pending & ACK_SCHED != 0 }

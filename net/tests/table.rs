@@ -128,13 +128,26 @@ fn past_max_tw_buckets_time_wait_is_skipped() {
         // FIN+ACK from the peer: acknowledges our FIN and closes its side.
         st.input(&mut env, PEER, &segment(port, 5001, isn.wrapping_add(2), 0x11));
     }
-    let tw = st.list_connections().iter().filter(|c| c.3 == "TIME_WAIT").count();
-    let closed = st.list_connections().iter().filter(|c| c.3 == "CLOSED").count();
+    let tw = st.connections(&env).iter().filter(|c| c.state == "TIME_WAIT").count();
+    let closed = st.connections(&env).iter().filter(|c| c.state == "CLOSED").count();
     assert_eq!((tw, closed), (4, 0));
 
     let (h, port, isn) = establish(&mut st, &mut env);
     st.close(&mut env, h).unwrap();
     st.input(&mut env, PEER, &segment(port, 5001, isn.wrapping_add(2), 0x11));
-    let tw = st.list_connections().iter().filter(|c| c.3 == "TIME_WAIT").count();
+    let tw = st.connections(&env).iter().filter(|c| c.state == "TIME_WAIT").count();
     assert_eq!(tw, 4, "the fifth closes instead of waiting");
+}
+
+#[test]
+fn connections_report_tcp_info() {
+    let mut st = stack(1 << 20);
+    let mut env = TestEnv::default();
+    let (_h, port, _isn) = establish(&mut st, &mut env);
+    let rows = st.connections(&env);
+    let row = rows.iter().find(|c| c.local_port == port).expect("the connection");
+    assert_eq!(row.state, "ESTABLISHED");
+    let i = row.info.as_ref().expect("tcp_info of a full connection");
+    assert_eq!((i.ca_state, i.snd_cwnd, i.snd_ssthresh, i.unacked), ("open", 10, None, 0));
+    assert!(i.snd_mss > 0 && i.rto_us >= 200_000, "{i:?}");
 }
