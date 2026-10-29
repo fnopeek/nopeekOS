@@ -172,8 +172,10 @@ const IPOPT_TS_PRESPEC: u8 = 3;
 
 /// `ip_rcv_options`: the options after the 20-byte header are well formed
 /// (`__ip_options_compile` for a received packet), and none is a source
-/// route.
-pub fn options_ok(opts: &[u8]) -> Result<(), Drop> {
+/// route. A malformed list names the offending byte (`pp_ptr`) as an
+/// offset into the options, for the Parameter Problem.
+pub fn options_ok(opts: &[u8]) -> Result<(), (Drop, usize)> {
+    let bad = |at: usize| Err((Drop::BadOptions, at));
     let (mut srr, mut rr, mut ts, mut cipso) = (false, false, false, false);
     let mut i = 0;
     while i < opts.len() {
@@ -183,49 +185,57 @@ pub fn options_ok(opts: &[u8]) -> Result<(), Drop> {
             IPOPT_NOOP => { i += 1; continue; }
             _ => {}
         }
-        if l < 2 { return Err(Drop::BadOptions); }
+        if l < 2 { return bad(i); }
         let optlen = opts[i + 1] as usize;
-        if optlen < 2 || optlen > l { return Err(Drop::BadOptions); }
+        if optlen < 2 || optlen > l { return bad(i); }
         let o = &opts[i..i + optlen];
         match o[0] {
             IPOPT_SSRR | IPOPT_LSRR => {
-                if optlen < 3 || o[2] < 4 || srr { return Err(Drop::BadOptions); }
+                if optlen < 3 { return bad(i + 1); }
+                if o[2] < 4 { return bad(i + 2); }
+                if srr { return bad(i); }
                 srr = true;
             }
             IPOPT_RR => {
-                if rr || optlen < 3 || o[2] < 4 { return Err(Drop::BadOptions); }
-                if o[2] as usize <= optlen && o[2] as usize + 3 > optlen { return Err(Drop::BadOptions); }
+                if rr { return bad(i); }
+                if optlen < 3 { return bad(i + 1); }
+                if o[2] < 4 { return bad(i + 2); }
+                if o[2] as usize <= optlen && o[2] as usize + 3 > optlen { return bad(i + 2); }
                 rr = true;
             }
             IPOPT_TIMESTAMP => {
-                if ts || optlen < 4 || o[2] < 5 { return Err(Drop::BadOptions); }
+                if ts { return bad(i); }
+                if optlen < 4 { return bad(i + 1); }
+                if o[2] < 5 { return bad(i + 2); }
                 let ptr = o[2] as usize;
                 if ptr <= optlen {
-                    if ptr + 3 > optlen { return Err(Drop::BadOptions); }
+                    if ptr + 3 > optlen { return bad(i + 2); }
                     match o[3] & 0xf {
                         IPOPT_TS_TSONLY => {}
                         IPOPT_TS_TSANDADDR | IPOPT_TS_PRESPEC => {
-                            if ptr + 7 > optlen { return Err(Drop::BadOptions); }
+                            if ptr + 7 > optlen { return bad(i + 2); }
                         }
                         _ => {}
                     }
                 } else if o[3] & 0xf != IPOPT_TS_PRESPEC && o[3] >> 4 == 15 {
-                    return Err(Drop::BadOptions);
+                    return bad(i + 3);
                 }
                 ts = true;
             }
             IPOPT_RA => {
-                if optlen < 4 { return Err(Drop::BadOptions); }
+                if optlen < 4 { return bad(i + 1); }
             }
             IPOPT_CIPSO => {
                 // `cipso_v4_validate` without NetLabel: a DOI and tags that
                 // fit the option.
-                if cipso || optlen < 8 || o[2..6] == [0; 4] { return Err(Drop::BadOptions); }
+                if cipso { return bad(i); }
+                if optlen < 8 { return bad(i + 1); }
+                if o[2..6] == [0; 4] { return bad(i + 2); }
                 let mut j = 6;
                 while j < optlen {
-                    if j + 1 == optlen { return Err(Drop::BadOptions); }
+                    if j + 1 == optlen { return bad(i + j); }
                     let tag_len = o[j + 1] as usize;
-                    if tag_len == 0 || tag_len > optlen - j { return Err(Drop::BadOptions); }
+                    if tag_len == 0 || tag_len > optlen - j { return bad(i + j + 1); }
                     j += tag_len;
                 }
                 cipso = true;
@@ -234,7 +244,7 @@ pub fn options_ok(opts: &[u8]) -> Result<(), Drop> {
         }
         i += optlen;
     }
-    if srr { Err(Drop::SourceRoute) } else { Ok(()) }
+    if srr { Err((Drop::SourceRoute, 0)) } else { Ok(()) }
 }
 
 // ── Identification (`ip_select_ident_segs`) ──────────────────────────
@@ -373,4 +383,106 @@ pub fn icmp_error(icmp: &[u8], our_ip: [u8; 4]) -> Option<IcmpError<'_>> {
     if ihl < 20 || inner.len() < ihl + 8 { return None; }
     if inner[12..16] != our_ip { return None; }
     Some(IcmpError { kind, code, info, inner })
+}
+
+// ── Sending ICMP errors (`__icmp_send`) ───────────────────────────────
+
+pub const ICMP_PORT_UNREACH: u8 = 3;
+pub const ICMP_PROT_UNREACH: u8 = 2;
+/// `IPTOS_PREC_INTERNETCONTROL`.
+pub const TOS_INTERNETCONTROL: u8 = 0xc0;
+
+/// `icmp_pointers[type].error`; an unknown type counts as an error.
+fn is_error_type(t: u8) -> bool {
+    !matches!(t, 0 | 8 | 13 | 14 | 15 | 16 | 17 | 18)
+}
+
+/// The ICMP message reporting `kind`/`code` about the received datagram
+/// `orig` (a whole IPv4 datagram to us), or `None` where `__icmp_send` says
+/// nothing: a non-initial fragment, or an ICMP error itself. It quotes as
+/// much of `orig` as a 576-byte datagram holds. The caller has made sure
+/// the datagram came to our address in a unicast frame.
+pub fn icmp_error_message(orig: &[u8], kind: u8, code: u8, info: u32) -> Option<alloc::vec::Vec<u8>> {
+    if orig.len() < 20 { return None; }
+    let ihl = ((orig[0] & 0x0f) as usize) * 4;
+    if u16::from_be_bytes([orig[6], orig[7]]) & 0x1fff != 0 { return None; }
+    if orig[9] == 1 && (orig.len() <= ihl || is_error_type(orig[ihl])) { return None; }
+    let room = 576 - 20 - 8;
+    let quoted = &orig[..orig.len().min(room)];
+    let mut m = alloc::vec![kind, code, 0, 0];
+    m.extend_from_slice(&info.to_be_bytes());
+    m.extend_from_slice(quoted);
+    let mut sum = 0u32;
+    for c in m.chunks(2) {
+        sum += u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32;
+    }
+    while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
+    m[2..4].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+    Some(m)
+}
+
+const HZ: u64 = 100;
+/// `sysctl_icmp_msgs_per_sec`, `sysctl_icmp_msgs_burst`.
+const MSGS_PER_SEC: i64 = 1000;
+const MSGS_BURST: i64 = 50;
+/// `sysctl_icmp_ratelimit` (1 s) and `XRLIM_BURST_FACTOR`.
+const RATELIMIT: u64 = HZ;
+const XRLIM_BURST_FACTOR: u64 = 6;
+/// `sysctl_icmp_ratemask`: Destination Unreachable, Source Quench, Time
+/// Exceeded, Parameter Problem.
+const RATEMASK: u32 = 0x1818;
+/// `inet_peer_threshold`, and the idle time after which a peer may go.
+const PEERS_MAX: usize = 65536 + 128;
+const PEER_MINTTL: u64 = 120 * HZ;
+
+/// The two limits on ICMP errors: one for all (`icmp_global_allow`), one
+/// per destination (`icmpv4_xrlim_allow` on its `inet_peer`).
+pub struct IcmpLimit {
+    credit: i64,
+    stamp: u64,
+    /// Per destination: tokens and when they were last topped up.
+    peers: alloc::collections::BTreeMap<[u8; 4], (u64, u64)>,
+}
+
+impl IcmpLimit {
+    pub const fn new() -> Self {
+        IcmpLimit { credit: 0, stamp: 0, peers: alloc::collections::BTreeMap::new() }
+    }
+
+    /// Whether an ICMP error of `kind`/`code` to `dst` may go out now.
+    /// `rnd3` draws from 0..3, the credits a message costs.
+    pub fn allow(&mut self, dst: [u8; 4], kind: u8, code: u8, now: u64, rnd3: impl FnOnce() -> i64) -> bool {
+        // icmpv4_mask_allow: Fragmentation Needed and types outside the
+        // mask are never limited.
+        if kind > 18 || RATEMASK & (1 << kind) == 0 || (kind == ICMP_DEST_UNREACH && code == ICMP_FRAG_NEEDED) {
+            return true;
+        }
+        // icmp_global_allow
+        if self.credit <= 0 {
+            let delta = now.saturating_sub(self.stamp).min(HZ);
+            if delta < HZ / 50 { return false; }
+            let incr = MSGS_PER_SEC * delta as i64 / HZ as i64;
+            if incr == 0 { return false; }
+            self.stamp = now;
+            self.credit = (self.credit + incr).min(MSGS_BURST);
+        }
+        // inet_peer_xrlim_allow
+        if self.peers.len() >= PEERS_MAX && !self.peers.contains_key(&dst) {
+            self.peers.retain(|_, p| now.saturating_sub(p.1) < PEER_MINTTL);
+        }
+        let ok = if self.peers.len() >= PEERS_MAX && !self.peers.contains_key(&dst) {
+            true
+        } else {
+            let p = self.peers.entry(dst).or_insert((XRLIM_BURST_FACTOR * RATELIMIT, now));
+            let delta = now.saturating_sub(p.1);
+            if delta > 0 {
+                p.1 = now;
+                p.0 = (p.0 + delta).min(XRLIM_BURST_FACTOR * RATELIMIT);
+            }
+            if p.0 >= RATELIMIT { p.0 -= RATELIMIT; true } else { false }
+        };
+        // icmp_global_consume
+        if ok { self.credit -= rnd3(); }
+        ok
+    }
 }

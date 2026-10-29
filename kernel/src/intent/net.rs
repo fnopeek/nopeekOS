@@ -715,6 +715,9 @@ pub fn intent_net_info() {
     if no_route > 0 {
         kprintln!("  Refused out (no route): {}", no_route);
     }
+    if crate::net::ipv4::icmp_limited() > 0 {
+        kprintln!("  ICMP errors held back (rate limit): {}", crate::net::ipv4::icmp_limited());
+    }
     if crate::net::ipv4::too_big() > 0 {
         kprintln!("  Refused out (larger than the MTU): {}", crate::net::ipv4::too_big());
     }

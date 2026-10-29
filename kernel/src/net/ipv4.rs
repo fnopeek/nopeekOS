@@ -70,6 +70,32 @@ pub fn flush_pmtu() {
     PMTU.lock().flush();
 }
 
+/// The limits on the ICMP errors we send.
+static ICMP_LIMIT: Mutex<net_core::ip::IcmpLimit> = Mutex::new(net_core::ip::IcmpLimit::new());
+
+/// ICMP errors held back by the limits (Linux MIB `RateLimitHost`).
+static ICMP_LIMITED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn icmp_limited() -> u64 {
+    ICMP_LIMITED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// `__icmp_send`: tell the sender of `orig`, a datagram that came to our
+/// address in a unicast frame, what became of it; within the limits.
+pub fn icmp_send(orig: &[u8], kind: u8, code: u8, info: u32) {
+    let Some(msg) = net_core::ip::icmp_error_message(orig, kind, code, info) else { return };
+    let dst: [u8; 4] = orig[12..16].try_into().unwrap();
+    let allowed = ICMP_LIMIT.lock().allow(dst, kind, code, crate::interrupts::ticks(),
+        || (crate::csprng::random_u64() % 3) as i64);
+    if !allowed {
+        ICMP_LIMITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return;
+    }
+    let src = arp::our_ip();
+    let head = Forwarded { tos: net_core::ip::TOS_INTERNETCONTROL, id: select_ident(dst, src, PROTO_ICMP), df: false };
+    let _ = transmit(dst, PROTO_ICMP, &msg, 64, Tx::Wait, Some(head));
+}
+
 /// The identification counters for datagrams that may be fragmented.
 static IDENTS: spin::Once<Mutex<net_core::ip::Idents>> = spin::Once::new();
 
@@ -148,9 +174,19 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     let dst_ip = <[u8; 4]>::try_from(&data[16..20]).unwrap();
 
     // ip_rcv_options, and the martian checks that hold whatever our address.
-    if let Err(d) = net_core::ip::options_ok(&data[HEADER_LEN..ihl])
-        .and_then(|()| net_core::ip::early(l2, src_ip, dst_ip))
-    {
+    if let Err((d, at)) = net_core::ip::options_ok(&data[HEADER_LEN..ihl]) {
+        // A malformed list is reported back (`ip_options_compile`), when
+        // the datagram was ours.
+        if d == net_core::ip::Drop::BadOptions
+            && iface().input_route(l2, src_ip, dst_ip, false) == Ok(net_core::ip::Dest::Local)
+        {
+            icmp_send(&data[..total_len], net_core::ip::ICMP_PARAMETERPROB, 0,
+                ((HEADER_LEN + at) as u32) << 24);
+        }
+        drop_in(d);
+        return;
+    }
+    if let Err(d) = net_core::ip::early(l2, src_ip, dst_ip) {
         drop_in(d);
         return;
     }
@@ -185,6 +221,10 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
         PROTO_ICMP if local => super::icmp::handle_icmp(data, payload),
         PROTO_UDP => super::udp::handle_udp(data, payload),
         PROTO_TCP if local => super::tcp::handle_tcp(data, payload),
+        PROTO_ICMP | PROTO_TCP => {}
+        // ip_local_deliver_finish: nobody speaks it.
+        _ if local => icmp_send(&data[..total_len], net_core::ip::ICMP_DEST_UNREACH,
+            net_core::ip::ICMP_PROT_UNREACH, 0),
         _ => {}
     }
 }

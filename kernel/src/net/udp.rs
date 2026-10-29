@@ -52,11 +52,17 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
             return;
         }
     }
-    // Nobody was home. A reply that arrives one microsecond after its waiter
-    // gave up, or on a port whose listener was never registered, is dropped
-    // here in silence — indistinguishable from a reply that never came.
+    drop(listeners);
+    // Nobody was home: a reply that arrives one microsecond after its waiter
+    // gave up, or on a port whose listener was never registered. Its sender
+    // learns so, as from `__udp4_lib_rcv`, if it was sent to our address.
     NO_LISTENER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     NO_LISTENER_PORT.store(dst_port, core::sync::atomic::Ordering::Relaxed);
+    if ip_packet[16..20] == super::arp::our_ip() {
+        let total = u16::from_be_bytes([ip_packet[2], ip_packet[3]]) as usize;
+        ipv4::icmp_send(&ip_packet[..total.min(ip_packet.len())], net_core::ip::ICMP_DEST_UNREACH,
+            net_core::ip::ICMP_PORT_UNREACH, 0);
+    }
 }
 
 /// `__udp4_lib_err`: a hard error (`icmp_err_convert` fatal, or a
