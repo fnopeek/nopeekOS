@@ -1,23 +1,50 @@
 //! ICMP — Internet Control Message Protocol
 //!
-//! Handles ping (echo request/reply).
+//! Answers echo requests, passes errors to the protocols they concern, and
+//! carries the echo probes of `ping` and `traceroute`.
 
-use crate::kprintln;
 use super::ipv4;
 
 const ECHO_REQUEST: u8 = 8;
 const ECHO_REPLY: u8   = 0;
 
-static PING_RECEIVED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static TTL_EXPIRED_FROM: spin::Mutex<Option<[u8; 4]>> = spin::Mutex::new(None);
-
-/// Check if a TTL-expired ICMP was received (for traceroute)
-pub fn ttl_expired_from() -> Option<[u8; 4]> {
-    TTL_EXPIRED_FROM.lock().take()
+/// The echo probe in flight: to whom, with which identifier and sequence
+/// number, and what came back for it.
+struct Probe {
+    dst: [u8; 4],
+    id: u16,
+    seq: u16,
+    answer: Option<Answer>,
 }
 
-pub fn ping_received() -> bool {
-    PING_RECEIVED.swap(false, core::sync::atomic::Ordering::Relaxed)
+/// What came back for a probe.
+#[derive(Clone, Copy)]
+pub enum Answer {
+    /// The echo reply, from the destination.
+    Echo,
+    /// A router on the way: its TTL ran out (traceroute's hop).
+    TimeExceeded([u8; 4]),
+    /// Destination Unreachable with `code`, from the router or host that
+    /// said so.
+    Unreachable([u8; 4], u8),
+}
+
+static PROBE: spin::Mutex<Option<Probe>> = spin::Mutex::new(None);
+
+/// What came back for the probe in flight, once.
+pub fn answer() -> Option<Answer> {
+    PROBE.lock().as_mut().and_then(|p| p.answer.take())
+}
+
+/// Note `a` for the probe in flight if it is `(dst, id, seq)`, as a ping
+/// socket matches (`ping_rcv`): anything else, a late reply to an earlier
+/// probe or a stranger's, does not count.
+fn credit(dst: [u8; 4], id: u16, seq: u16, a: Answer) {
+    if let Some(p) = PROBE.lock().as_mut() {
+        if p.dst == dst && p.id == id && p.seq == seq {
+            p.answer = Some(a);
+        }
+    }
 }
 
 pub fn handle_icmp(ip_packet: &[u8], data: &[u8]) {
@@ -31,6 +58,18 @@ pub fn handle_icmp(ip_packet: &[u8], data: &[u8]) {
         match e.inner_proto() {
             ipv4::PROTO_TCP => super::tcp::icmp_error(&e),
             ipv4::PROTO_UDP => super::udp::icmp_error(&e),
+            // About one of our echo probes: the quoted request names it.
+            ipv4::PROTO_ICMP if e.transport()[0] == ECHO_REQUEST => {
+                let t = e.transport();
+                let id = u16::from_be_bytes([t[4], t[5]]);
+                let seq = u16::from_be_bytes([t[6], t[7]]);
+                let a = if e.kind == net_core::ip::ICMP_TIME_EXCEEDED {
+                    Answer::TimeExceeded(src_ip)
+                } else {
+                    Answer::Unreachable(src_ip, e.code)
+                };
+                credit(e.inner_dst(), id, seq, a);
+            }
             _ => {}
         }
     }
@@ -38,15 +77,10 @@ pub fn handle_icmp(ip_packet: &[u8], data: &[u8]) {
     match icmp_type {
         // Unconfigured, a reply would carry 0.0.0.0 as its source.
         ECHO_REQUEST if super::arp::our_ip() != [0; 4] => send_echo_reply(src_ip, data),
-        11 => {
-            // Time Exceeded (TTL expired in transit) — used by traceroute
-            *TTL_EXPIRED_FROM.lock() = Some(src_ip);
-        }
         ECHO_REPLY => {
+            let id = u16::from_be_bytes([data[4], data[5]]);
             let seq = u16::from_be_bytes([data[6], data[7]]);
-            kprintln!("[npk] PONG from {}.{}.{}.{} seq={}",
-                src_ip[0], src_ip[1], src_ip[2], src_ip[3], seq);
-            PING_RECEIVED.store(true, core::sync::atomic::Ordering::Relaxed);
+            credit(src_ip, id, seq, Answer::Echo);
         }
         _ => {}
     }
@@ -67,13 +101,13 @@ fn send_echo_reply(dst_ip: [u8; 4], request: &[u8]) {
     let _ = ipv4::send(dst_ip, ipv4::PROTO_ICMP, &reply);
 }
 
-/// Send a ping (echo request) to the given IP
-pub fn ping(dst_ip: [u8; 4], seq: u16) {
+/// Send an echo request to `dst_ip` with identifier `id`, sequence `seq`
+/// and TTL `ttl`, and wait for what comes back for it (`answer`).
+pub fn probe(dst_ip: [u8; 4], id: u16, seq: u16, ttl: u8) {
     let mut pkt = [0u8; 64];
     pkt[0] = ECHO_REQUEST;
     pkt[1] = 0;   // code
-    pkt[4] = 0;   // identifier high
-    pkt[5] = 1;   // identifier low
+    pkt[4..6].copy_from_slice(&id.to_be_bytes());
     pkt[6..8].copy_from_slice(&seq.to_be_bytes());
 
     // Fill payload with pattern
@@ -85,35 +119,15 @@ pub fn ping(dst_ip: [u8; 4], seq: u16) {
     let checksum = icmp_checksum(&pkt);
     pkt[2..4].copy_from_slice(&checksum.to_be_bytes());
 
-    let _ = ipv4::send(dst_ip, ipv4::PROTO_ICMP, &pkt);
-    kprintln!("[npk] PING {}.{}.{}.{} seq={}",
-        dst_ip[0], dst_ip[1], dst_ip[2], dst_ip[3], seq);
+    *PROBE.lock() = Some(Probe { dst: dst_ip, id, seq, answer: None });
+    let _ = ipv4::send_with_ttl(dst_ip, ipv4::PROTO_ICMP, &pkt, ttl);
 }
 
-/// Send ICMP echo with custom TTL (for traceroute)
-pub fn ping_ttl(dst_ip: [u8; 4], seq: u16, ttl: u8) {
-    let mut pkt = [0u8; 64];
-    pkt[0] = ECHO_REQUEST;
-    pkt[5] = 1;
-    pkt[6..8].copy_from_slice(&seq.to_be_bytes());
-    for i in 8..64 { pkt[i] = i as u8; }
-    let checksum = icmp_checksum(&pkt);
-    pkt[2..4].copy_from_slice(&checksum.to_be_bytes());
-    let _ = super::ipv4::send_with_ttl(dst_ip, super::ipv4::PROTO_ICMP, &pkt, ttl);
+/// The probe is over; later answers go nowhere.
+pub fn probe_done() {
+    *PROBE.lock() = None;
 }
 
 fn icmp_checksum(data: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    for i in (0..data.len()).step_by(2) {
-        let word = if i + 1 < data.len() {
-            u16::from_be_bytes([data[i], data[i + 1]])
-        } else {
-            (data[i] as u16) << 8
-        };
-        sum += word as u32;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
+    !super::csum::fold(super::csum::sum(data))
 }

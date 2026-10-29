@@ -628,13 +628,7 @@ fn l3_lookup(proto: u8, host_ip: [u8; 4], hport: u16, rip: [u8; 4], rport: u16) 
 /// rewrites the IP + port (≤3 words), so this avoids a full pass over the
 /// segment on the inbound hot path.
 fn csum_update(old_check: u16, changes: &[(u16, u16)]) -> u16 {
-    let mut sum = (!old_check) as u32;
-    for &(old, new) in changes {
-        sum += (!old) as u32 & 0xFFFF;
-        sum += new as u32;
-    }
-    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
-    !(sum as u16)
+    crate::net::csum::update(old_check, changes)
 }
 
 /// Masqueraded packets the host card refused for a full ring, in order —
@@ -1312,19 +1306,7 @@ fn fix_icmp_checksum(icmp: &mut [u8]) {
     }
     icmp[2] = 0;
     icmp[3] = 0;
-    let mut sum: u32 = 0;
-    let mut i = 0;
-    while i + 1 < icmp.len() {
-        sum += u16::from_be_bytes([icmp[i], icmp[i + 1]]) as u32;
-        i += 2;
-    }
-    if i < icmp.len() {
-        sum += (icmp[i] as u32) << 8;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    let c = !(sum as u16);
+    let c = !crate::net::csum::fold(crate::net::csum::sum(icmp));
     icmp[2..4].copy_from_slice(&c.to_be_bytes());
 }
 
@@ -2265,19 +2247,7 @@ fn write_eth(buf: &mut [u8], dst: &[u8; 6], src: &[u8; 6], ethertype: u16) {
 }
 
 fn ipv4_checksum(header: &[u8]) -> u16 {
-    let mut sum: u32 = 0;
-    let mut i = 0;
-    while i + 1 < header.len() {
-        sum += u16::from_be_bytes([header[i], header[i + 1]]) as u32;
-        i += 2;
-    }
-    if i < header.len() {
-        sum += (header[i] as u32) << 8;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
+    !crate::net::csum::fold(crate::net::csum::sum(header))
 }
 
 fn cap_reject(proto: &str, ip: [u8; 4], port: u16) {

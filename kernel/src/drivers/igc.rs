@@ -756,9 +756,8 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
     hdr[24] = 0; hdr[25] = 0;
     let paylen = (frame.len() - l4_off) as u32;
     let seed = u16::from_be_bytes([hdr[l4_off + 16], hdr[l4_off + 17]]);
-    let mut sum = (!seed) as u32 + paylen;
-    while sum >> 16 != 0 { sum = (sum & 0xFFFF) + (sum >> 16); }
-    hdr[l4_off + 16..l4_off + 18].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+    let seed = !crate::net::csum::fold((!seed) as u64 + paylen as u64);
+    hdr[l4_off + 16..l4_off + 18].copy_from_slice(&seed.to_be_bytes());
 
     // The whole frame into a free super-frame buffer, its headers rewritten.
     let slot = d.tso_free.trailing_zeros() as usize;

@@ -40,24 +40,37 @@ pub fn intent_ping(args: &str) {
     let mut best = u64::MAX;
     let mut worst = 0u64;
     let mut total = 0u64;
+    // A fresh identifier for this run: only replies to it count.
+    let id = crate::csprng::random_u64() as u16;
     for seq in 1..=count {
-        let _ = crate::net::icmp::ping_received(); // clear any stale flag
         let t0 = crate::interrupts::ticks();
-        crate::net::icmp::ping(ip, seq);
-        let mut hit = false;
+        crate::net::icmp::probe(ip, id, seq, 64);
+        kprintln!("[npk] PING {}.{}.{}.{} seq={}", ip[0], ip[1], ip[2], ip[3], seq);
+        let mut answer = None;
         while crate::interrupts::ticks().wrapping_sub(t0) < 100 { // 1 s per probe
             crate::net::poll();
-            if crate::net::icmp::ping_received() { hit = true; break; }
+            answer = crate::net::icmp::answer();
+            if answer.is_some() { break; }
             core::hint::spin_loop();
         }
-        if hit {
-            let ms = crate::interrupts::ticks().wrapping_sub(t0) * 10;
-            got += 1;
-            total += ms;
-            if ms < best { best = ms; }
-            if ms > worst { worst = ms; }
-        } else {
-            kprintln!("[npk] seq={} timeout", seq);
+        match answer {
+            Some(crate::net::icmp::Answer::Echo) => {
+                let ms = crate::interrupts::ticks().wrapping_sub(t0) * 10;
+                kprintln!("[npk] PONG from {}.{}.{}.{} seq={}", ip[0], ip[1], ip[2], ip[3], seq);
+                got += 1;
+                total += ms;
+                if ms < best { best = ms; }
+                if ms > worst { worst = ms; }
+            }
+            Some(crate::net::icmp::Answer::Unreachable(from, code)) => {
+                kprintln!("[npk] seq={} unreachable (code {}) from {}.{}.{}.{}",
+                    seq, code, from[0], from[1], from[2], from[3]);
+            }
+            Some(crate::net::icmp::Answer::TimeExceeded(from)) => {
+                kprintln!("[npk] seq={} TTL ran out at {}.{}.{}.{}",
+                    seq, from[0], from[1], from[2], from[3]);
+            }
+            None => kprintln!("[npk] seq={} timeout", seq),
         }
         // Space the probes out; back to back they share one fate on a bad link.
         if seq < count {
@@ -65,6 +78,7 @@ pub fn intent_ping(args: &str) {
             while crate::interrupts::ticks() < until { crate::net::poll(); }
         }
     }
+    crate::net::icmp::probe_done();
 
     kprintln!("[npk] {} sent, {} received, {}% lost{}",
         count, got, (count - got) as u32 * 100 / count as u32,
@@ -94,38 +108,45 @@ pub fn intent_traceroute(args: &str) {
         }
     };
 
-    // ARP resolve gateway
-    crate::net::arp::request([10, 0, 2, 2]);
-    for _ in 0..50_000 { crate::net::poll(); core::hint::spin_loop(); }
+    // The first hop answers ARP before the first probe, not during it.
+    let hop = crate::net::ipv4::arp_target_for(ip);
+    let _ = crate::net::arp::resolve(hop, 50);
 
     kprintln!("[npk] Traceroute to {}.{}.{}.{} (max 20 hops)", ip[0], ip[1], ip[2], ip[3]);
 
+    let id = crate::csprng::random_u64() as u16;
     for ttl in 1..=20u8 {
-        crate::net::icmp::ping_ttl(ip, ttl as u16, ttl);
+        crate::net::icmp::probe(ip, id, ttl as u16, ttl);
 
         let t0 = crate::interrupts::ticks();
-        let mut _found = false;
-
         loop {
             crate::net::poll();
-
-            if let Some(from) = crate::net::icmp::ttl_expired_from() {
-                kprintln!("  {:>2}  {}.{}.{}.{}", ttl, from[0], from[1], from[2], from[3]);
-                _found = true;
-                break;
-            }
-            if crate::net::icmp::ping_received() {
-                kprintln!("  {:>2}  {}.{}.{}.{} (destination)", ttl, ip[0], ip[1], ip[2], ip[3]);
-                return; // reached destination
+            match crate::net::icmp::answer() {
+                Some(crate::net::icmp::Answer::TimeExceeded(from)) => {
+                    kprintln!("  {:>2}  {}.{}.{}.{}", ttl, from[0], from[1], from[2], from[3]);
+                    break;
+                }
+                Some(crate::net::icmp::Answer::Echo) => {
+                    kprintln!("  {:>2}  {}.{}.{}.{} (destination)", ttl, ip[0], ip[1], ip[2], ip[3]);
+                    crate::net::icmp::probe_done();
+                    return; // reached destination
+                }
+                Some(crate::net::icmp::Answer::Unreachable(from, code)) => {
+                    kprintln!("  {:>2}  {}.{}.{}.{} (unreachable, code {})",
+                        ttl, from[0], from[1], from[2], from[3], code);
+                    crate::net::icmp::probe_done();
+                    return;
+                }
+                None => {}
             }
             if crate::interrupts::ticks() - t0 > 100 { // 1s per hop
                 kprintln!("  {:>2}  *", ttl);
-                _found = true;
                 break;
             }
             core::hint::spin_loop();
         }
     }
+    crate::net::icmp::probe_done();
 }
 
 pub fn intent_netstat() {

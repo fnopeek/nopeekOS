@@ -2218,30 +2218,8 @@ fn send_segment_with_opts<E: Env + ?Sized>(
 }
 
 fn tcp_checksum(src_ip: &[u8; 4], dst_ip: &[u8; 4], segment: &[u8]) -> u16 {
-    let mut sum = 0u32;
-
-    // Pseudo-header
-    sum += u16::from_be_bytes([src_ip[0], src_ip[1]]) as u32;
-    sum += u16::from_be_bytes([src_ip[2], src_ip[3]]) as u32;
-    sum += u16::from_be_bytes([dst_ip[0], dst_ip[1]]) as u32;
-    sum += u16::from_be_bytes([dst_ip[2], dst_ip[3]]) as u32;
-    sum += 6u32; // protocol TCP
-    sum += segment.len() as u32;
-
-    // TCP segment
-    for i in (0..segment.len()).step_by(2) {
-        let word = if i + 1 < segment.len() {
-            u16::from_be_bytes([segment[i], segment[i + 1]])
-        } else {
-            (segment[i] as u16) << 8
-        };
-        sum += word as u32;
-    }
-
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
+    use crate::csum::{fold, pseudo, sum};
+    !fold(pseudo(*src_ip, *dst_ip, 6, segment.len()) + sum(segment))
 }
 
 /// The MSS option (kind 2, len 4) of a SYN; 0 counts as absent, as in

@@ -402,17 +402,5 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
 }
 
 fn ipv4_checksum(header: &[u8]) -> u16 {
-    let mut sum = 0u32;
-    for i in (0..header.len()).step_by(2) {
-        let word = if i + 1 < header.len() {
-            u16::from_be_bytes([header[i], header[i + 1]])
-        } else {
-            (header[i] as u16) << 8
-        };
-        sum += word as u32;
-    }
-    while sum >> 16 != 0 {
-        sum = (sum & 0xFFFF) + (sum >> 16);
-    }
-    !(sum as u16)
+    !super::csum::fold(super::csum::sum(header))
 }

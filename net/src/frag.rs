@@ -220,10 +220,8 @@ impl Defrag {
         out[7] = 0;
         out[10] = 0;
         out[11] = 0;
-        let mut sum = 0u32;
-        for c in out[..head.len()].chunks(2) { sum += u16::from_be_bytes([c[0], c[1]]) as u32; }
-        while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
-        out[10..12].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+        let c = !crate::csum::fold(crate::csum::sum(&out[..head.len()]));
+        out[10..12].copy_from_slice(&c.to_be_bytes());
         self.oks += 1;
         Defragged::Complete(out)
     }

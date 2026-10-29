@@ -37,6 +37,16 @@ pub fn fold(mut s: u64) -> u16 {
     s as u16
 }
 
+/// RFC 1624 incremental update of the checksum `check` for 16-bit words
+/// that changed from `old` to `new`: `HC' = ~(~HC + Σ(~m + m'))`.
+pub fn update(check: u16, changes: &[(u16, u16)]) -> u16 {
+    let mut s = (!check) as u64;
+    for &(old, new) in changes {
+        s += (!old) as u64 + new as u64;
+    }
+    !fold(s)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -62,5 +72,15 @@ mod tests {
         }
         let ff = [0xFFu8; 1500];
         assert_eq!(fold(sum(&ff)), reference(&ff));
+    }
+
+    #[test]
+    fn update_matches_a_full_sum() {
+        let mut data = [0u8; 64];
+        for (i, b) in data.iter_mut().enumerate() { *b = (i * 37 + 3) as u8; }
+        let before = !fold(sum(&data));
+        let old = u16::from_be_bytes([data[10], data[11]]);
+        data[10] = 0xab; data[11] = 0xcd;
+        assert_eq!(update(before, &[(old, 0xabcd)]), !fold(sum(&data)));
     }
 }

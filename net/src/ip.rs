@@ -412,12 +412,8 @@ pub fn icmp_error_message(orig: &[u8], kind: u8, code: u8, info: u32) -> Option<
     let mut m = alloc::vec![kind, code, 0, 0];
     m.extend_from_slice(&info.to_be_bytes());
     m.extend_from_slice(quoted);
-    let mut sum = 0u32;
-    for c in m.chunks(2) {
-        sum += u16::from_be_bytes([c[0], *c.get(1).unwrap_or(&0)]) as u32;
-    }
-    while sum >> 16 != 0 { sum = (sum & 0xffff) + (sum >> 16); }
-    m[2..4].copy_from_slice(&(!(sum as u16)).to_be_bytes());
+    let c = !crate::csum::fold(crate::csum::sum(&m));
+    m[2..4].copy_from_slice(&c.to_be_bytes());
     Some(m)
 }
 

@@ -4,7 +4,7 @@
 //! Layers: Ethernet → ARP → IPv4 → ICMP/UDP/TCP
 //! Every connection requires a capability token.
 
-pub mod csum;
+pub use net_core::csum;
 pub mod eth;
 pub mod fq_codel;
 pub mod arp;
