@@ -1733,7 +1733,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("https <host> [path]", "HTTPS GET (TLS 1.3)");
             help_row("http <host> [path]", "HTTP GET (plaintext)");
             help_row("curl <host> [path]", "Alias of http (also: wget)");
-            help_row("netstat", "Active connections");
+            help_row("netstat", "Active connections (-s: counters)");
             help_row("net", "Interface state");
             help_row("ifconfig", "Address, gateway, MAC");
             help_row("dhcp", "Ask for a lease again");

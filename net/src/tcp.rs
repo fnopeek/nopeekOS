@@ -465,6 +465,7 @@ fn mem_charge<E: Env + ?Sized>(io: &Io<E>, n: usize) -> bool {
     if n == 0 { return true; }
     if io.st.mem_held.load(Ordering::Relaxed) + n > tcp_mem_limit(io) {
         io.st.mem_drops.fetch_add(1, Ordering::Relaxed);
+        crate::mib::inc(crate::mib::Mib::TcpExtTCPRcvQDrop);
         return false;
     }
     io.st.mem_held.fetch_add(n, Ordering::Relaxed);
@@ -1319,6 +1320,7 @@ impl Stack {
         let handle = self.conns.insert(conn);
 
         self.send_syn(env, handle)?;
+        crate::mib::inc(crate::mib::Mib::TcpActiveOpens);
 
         Ok(handle)
     }
@@ -1562,7 +1564,11 @@ impl Stack {
     pub fn input<E: Env + ?Sized>(&mut self, env: &mut E, src_ip: [u8; 4], data: &[u8]) {
         let mut io = Io { env, st: self.st };
         let secret = &self.isn_secret;
-        if data.len() < HEADER_LEN { return; }
+        crate::mib::inc(crate::mib::Mib::TcpInSegs);
+        if data.len() < HEADER_LEN {
+            crate::mib::inc(crate::mib::Mib::TcpInErrs);
+            return;
+        }
 
         let src_port = u16::from_be_bytes([data[0], data[1]]);
         let dst_port = u16::from_be_bytes([data[2], data[3]]);
@@ -1571,7 +1577,10 @@ impl Stack {
         let data_offset = ((data[12] >> 4) as usize) * 4;
         // tcp_v4_rcv: a header shorter than 20 bytes or longer than the
         // segment is no segment.
-        if data_offset < HEADER_LEN || data_offset > data.len() { return; }
+        if data_offset < HEADER_LEN || data_offset > data.len() {
+            crate::mib::inc(crate::mib::Mib::TcpInErrs);
+            return;
+        }
         let flags = data[13];
         let adv_window = u16::from_be_bytes([data[14], data[15]]);
 
@@ -1670,7 +1679,7 @@ impl Stack {
             };
             if accept {
                 conn.error = true;
-                conn.state = State::Closed;
+                set_closed(conn);
                 conn.last_send_tick = io.ticks();
             } else if !matches!(conn.state, State::SynSent | State::Listen)
                 && seq_in_window(conn, seq)
@@ -1950,7 +1959,7 @@ impl Stack {
                             conn.state = State::TimeWait;
                             conn.last_send_tick = io.ticks();
                         }
-                        State::LastAck => conn.state = State::Closed,
+                        State::LastAck => set_closed(conn),
                         _ => {}
                     }
                 }
@@ -1971,7 +1980,7 @@ impl Stack {
                             seq.wrapping_add(payload.len() as u32), RST | ACK, 0, &[], 0);
                     }
                     conn.error = true;
-                    conn.state = State::Closed;
+                    set_closed(conn);
                     conn.last_send_tick = io.ticks();
                 }
 
@@ -2196,7 +2205,7 @@ impl Stack {
         if let Some(sub) = sub {
             let tw = timewait::from_conn(conn, sub, timewait::fin_time(conn), io.ticks());
             new_tw = Some(((conn.local_port, conn.remote_ip, conn.remote_port), tw));
-            conn.state = State::Closed;
+            set_closed(conn);
             conn.last_send_tick = io.ticks();
         }
         // A connection its owner let go of is gone once it closes (tcp_done).
@@ -2260,7 +2269,7 @@ impl Stack {
         if matches!(conn.state, State::SynSent | State::SynReceived) {
             // tcp_done
             conn.error = true;
-            conn.state = State::Closed;
+            set_closed(conn);
             conn.last_send_tick = io.ticks();
         }
     }
@@ -2333,7 +2342,7 @@ impl Stack {
                         // retries model 1 s doubling, about 127 s for six.
                         if slot.retransmits_timed_out(io.ts_now_ms(), TCP_SYN_RETRIES, TCP_TIMEOUT_INIT, 0) {
                             slot.error = true;
-                            slot.state = State::Closed;
+                            set_closed(slot);
                             slot.last_send_tick = now;
                         } else {
                             // tcp_connect stamps the first SYN.
@@ -2385,7 +2394,7 @@ impl Stack {
                         && slot.retransmits_timed_out(io.ts_now_ms(), retry_until, TCP_RTO_MIN, slot.user_timeout)
                     {
                         slot.error = true;
-                        slot.state = State::Closed;
+                        set_closed(slot);
                         slot.last_send_tick = now;
                     } else {
                         // `snd_nxt` stays the highest sequence sent; the
@@ -2393,6 +2402,7 @@ impl Stack {
                         recovery::enter_loss(slot, io.env.uptime_us());
                         slot.retries = slot.retries.saturating_add(1);
                         io.st.rto_fired.fetch_add(1, Ordering::Relaxed);
+                        crate::mib::inc(crate::mib::Mib::TcpExtTCPTimeouts);
                         recovery::retransmit_skb(slot, &mut io, 0);
                         slot.last_send_tick = now;
                         slot.rto = (slot.rto << 1).min(TCP_RTO_MAX);
@@ -2407,7 +2417,7 @@ impl Stack {
                         slot.probes_out = 0;
                     } else if slot.probes_out >= TCP_RETRIES2 {
                         slot.error = true;
-                        slot.state = State::Closed;
+                        set_closed(slot);
                         slot.last_send_tick = now;
                         slot.probe_at = 0;
                     } else {
@@ -2429,7 +2439,7 @@ impl Stack {
                 if matches!(slot.state, State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck)
                     && now.saturating_sub(slot.last_send_tick) > FIN_TIMEOUT_TICKS
                 {
-                    slot.state = State::Closed;
+                    set_closed(slot);
                 }
             }
             // A Closed connection its owner let go of is gone; one the kernel
@@ -2663,6 +2673,10 @@ fn send_segment_with_opts<E: Env + ?Sized>(
     io: &mut Io<E>, dst_ip: [u8; 4], src_port: u16, dst_port: u16,
     seq: u32, ack: u32, flags: u8, window: u16, payload: &[u8], options: &[u8], id: u16,
 ) -> bool {
+    crate::mib::inc(crate::mib::Mib::TcpOutSegs);
+    if flags & RST != 0 {
+        crate::mib::inc(crate::mib::Mib::TcpOutRsts);
+    }
     let opts_padded = (options.len() + 3) & !3; // pad to 4 bytes
     let header_len = HEADER_LEN + opts_padded;
     let total_len = header_len + payload.len();
@@ -2995,6 +3009,17 @@ fn tcp_get_info(c: &TcpConn, now: u64) -> TcpInfo {
 
 /// Whether a Closed connection can be freed: its owner let go, or the
 /// kernel left it alone for FIN_TIMEOUT_TICKS.
+/// `tcp_set_state(TCP_CLOSE)` and `tcp_done`: a reset of a synchronized
+/// connection counts as EstabResets, the end of a handshake as AttemptFails.
+fn set_closed(c: &mut TcpConn) {
+    match c.state {
+        State::Established | State::CloseWait => crate::mib::inc(crate::mib::Mib::TcpEstabResets),
+        State::SynSent | State::SynReceived => crate::mib::inc(crate::mib::Mib::TcpAttemptFails),
+        _ => {}
+    }
+    c.state = State::Closed;
+}
+
 fn reusable_conn(c: &TcpConn, now: u64) -> bool {
     c.state == State::Closed && (c.released
         || (c.owner == KERNEL && now.saturating_sub(c.last_send_tick) > FIN_TIMEOUT_TICKS))

@@ -2282,7 +2282,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "netstat" | "connections" => {
             if require_cap(vault, &session, Rights::READ, "netstat") {
-                net::intent_netstat();
+                net::intent_netstat(args);
             }
         }
         "http" | "curl" | "wget" => {

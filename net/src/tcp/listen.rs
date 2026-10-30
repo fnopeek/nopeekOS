@@ -419,6 +419,7 @@ fn syn_recv_sock<E: Env + ?Sized>(conns: &mut Table, io: &mut Io<E>, key: Tuple,
     c.handshake_rtt(now_us, tsecr, io.ts_now_ms());
     recovery::init_congestion_control(&mut c, now, now_us);
     let child = conns.insert(c);
+    crate::mib::inc(crate::mib::Mib::TcpPassiveOpens);
     if let Some(l) = conns.get_mut(listener).and_then(|c| c.listen.as_mut()) {
         l.accept_queue.push_back(child);
     }

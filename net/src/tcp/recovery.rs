@@ -414,6 +414,7 @@ pub(super) fn send_loss_probe<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>) 
             probed = true;
         }
         if probed {
+            crate::mib::inc(crate::mib::Mib::TcpExtTCPLossProbes);
             c.tx.tlp_high_seq = Some(c.snd_nxt);
             // rearm_rto restarts the RTO from now.
             c.tx.pending = Pending::Retrans;
@@ -1329,6 +1330,7 @@ fn retransmit_skb_raw<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i: usize
 pub(super) fn retransmit_skb<E: Env + ?Sized>(c: &mut TcpConn, io: &mut Io<E>, i: usize) -> bool {
     let ok = retransmit_skb_raw(c, io, i);
     if ok {
+        crate::mib::inc(crate::mib::Mib::TcpRetransSegs);
         c.tx.queue[i].sacked |= RETRANS;
         c.tx.retrans_out += 1;
     }

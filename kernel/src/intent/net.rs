@@ -153,7 +153,10 @@ pub fn intent_traceroute(args: &str) {
     crate::net::icmp::probe_done();
 }
 
-pub fn intent_netstat() {
+pub fn intent_netstat(args: &str) {
+    if args.trim() == "-s" {
+        return netstat_counters();
+    }
     let conns = crate::net::tcp::connections();
     kprintln!();
     kprintln!("  Active TCP Connections");
@@ -802,6 +805,32 @@ pub fn intent_net_info() {
     }
     if crate::net::ipv4::too_big() > 0 {
         kprintln!("  Refused out (larger than the MTU): {}", crate::net::ipv4::too_big());
+    }
+    kprintln!();
+}
+
+/// `netstat -s`: the counters under the names Linux's `nstat` prints, the
+/// ones that are not zero.
+fn netstat_counters() {
+    use net_core::mib::{self, Mib};
+    let (oks, fails, timeouts) = crate::net::ipv4::reasm_stats();
+    let estab = crate::net::tcp::connections().iter()
+        .filter(|c| matches!(c.state, "ESTABLISHED" | "CLOSE_WAIT"))
+        .count() as u64;
+    kprintln!();
+    for &m in Mib::ALL {
+        let v = match m {
+            Mib::IpReasmOKs => oks,
+            Mib::IpReasmFails => fails,
+            Mib::IpReasmTimeout => timeouts,
+            _ => mib::get(m),
+        };
+        if v != 0 {
+            kprintln!("  {:<28} {}", m.name(), v);
+        }
+        if m == Mib::TcpEstabResets && estab != 0 {
+            kprintln!("  {:<28} {}", "TcpCurrEstab", estab);
+        }
     }
     kprintln!();
 }

@@ -14,5 +14,6 @@ pub mod dhcp;
 pub mod dns;
 pub mod frag;
 pub mod ip;
+pub mod mib;
 pub mod neigh;
 pub mod tcp;

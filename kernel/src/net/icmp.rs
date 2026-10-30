@@ -48,9 +48,21 @@ fn credit(dst: [u8; 4], id: u16, seq: u16, a: Answer) {
 }
 
 pub fn handle_icmp(ip_packet: &[u8], data: &[u8]) {
-    if data.len() < 8 { return; }
+    use net_core::mib::{self, Mib};
+    mib::inc(Mib::IcmpInMsgs);
+    if data.len() < 8 {
+        mib::inc(Mib::IcmpInErrors);
+        return;
+    }
 
     let icmp_type = data[0];
+    match icmp_type {
+        net_core::ip::ICMP_DEST_UNREACH => mib::inc(Mib::IcmpInDestUnreachs),
+        net_core::ip::ICMP_TIME_EXCEEDED => mib::inc(Mib::IcmpInTimeExcds),
+        ECHO_REQUEST => mib::inc(Mib::IcmpInEchos),
+        ECHO_REPLY => mib::inc(Mib::IcmpInEchoReps),
+        _ => {}
+    }
     let src_ip = <[u8; 4]>::try_from(&ip_packet[12..16]).unwrap();
 
     // icmp_unreach: an error about a datagram of ours goes to its protocol.
@@ -98,6 +110,8 @@ fn send_echo_reply(dst_ip: [u8; 4], request: &[u8]) {
     let checksum = icmp_checksum(&reply);
     reply[2..4].copy_from_slice(&checksum.to_be_bytes());
 
+    net_core::mib::inc(net_core::mib::Mib::IcmpOutMsgs);
+    net_core::mib::inc(net_core::mib::Mib::IcmpOutEchoReps);
     let _ = ipv4::send(dst_ip, ipv4::PROTO_ICMP, &reply);
 }
 
@@ -120,6 +134,8 @@ pub fn probe(dst_ip: [u8; 4], id: u16, seq: u16, ttl: u8) {
     pkt[2..4].copy_from_slice(&checksum.to_be_bytes());
 
     *PROBE.lock() = Some(Probe { dst: dst_ip, id, seq, answer: None });
+    net_core::mib::inc(net_core::mib::Mib::IcmpOutMsgs);
+    net_core::mib::inc(net_core::mib::Mib::IcmpOutEchos);
     let _ = ipv4::send_with_ttl(dst_ip, ipv4::PROTO_ICMP, &pkt, ttl);
 }
 

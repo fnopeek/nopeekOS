@@ -15,11 +15,16 @@ static ROUTES: Mutex<net_core::ip::Routes> = Mutex::new(net_core::ip::Routes::ne
 static IN_DROPS: [core::sync::atomic::AtomicU64; net_core::ip::Drop::COUNT] =
     [const { core::sync::atomic::AtomicU64::new(0) }; net_core::ip::Drop::COUNT];
 
-/// Datagrams refused for want of a route (Linux MIB `OutNoRoutes`).
-static OUT_NO_ROUTES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+use net_core::mib::{self, Mib};
 
 fn drop_in(d: net_core::ip::Drop) {
     IN_DROPS[d as usize].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    use net_core::ip::Drop;
+    match d {
+        Drop::BadOptions | Drop::SourceRoute => mib::inc(Mib::IpInHdrErrors),
+        Drop::MartianDest | Drop::NotForUs => mib::inc(Mib::IpInAddrErrors),
+        _ => {}
+    }
 }
 
 /// Every receive check that dropped something, with its count, and the
@@ -30,7 +35,7 @@ pub fn drops() -> (alloc::vec::Vec<(&'static str, u64)>, u64) {
         .map(|d| (d.name(), IN_DROPS[*d as usize].load(Relaxed)))
         .filter(|(_, n)| *n > 0)
         .collect();
-    (ins, OUT_NO_ROUTES.load(Relaxed))
+    (ins, mib::get(Mib::IpOutNoRoutes))
 }
 
 /// The largest IPv4 datagram the Ethernet devices carry.
@@ -39,9 +44,6 @@ pub const DEVICE_MTU: u32 = (crate::netdev::MTU - eth::HEADER_LEN) as u32;
 /// The interface MTU: the device's, or less when DHCP says so (option 26).
 static MTU: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(DEVICE_MTU);
 
-/// Datagrams larger than the MTU, refused: nothing fragments them (Linux
-/// MIB `FragFails`).
-static TOO_BIG: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Set the interface MTU, within 68 (RFC 791) and what the device carries.
 pub fn set_mtu(mtu: u32) {
@@ -73,11 +75,9 @@ pub fn flush_pmtu() {
 /// The limits on the ICMP errors we send.
 static ICMP_LIMIT: Mutex<net_core::ip::IcmpLimit> = Mutex::new(net_core::ip::IcmpLimit::new());
 
-/// ICMP errors held back by the limits (Linux MIB `RateLimitHost`).
-static ICMP_LIMITED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
+/// ICMP errors held back by the limits (`IcmpOutRateLimitHost`).
 pub fn icmp_limited() -> u64 {
-    ICMP_LIMITED.load(core::sync::atomic::Ordering::Relaxed)
+    mib::get(Mib::IcmpOutRateLimitHost)
 }
 
 /// `__icmp_send`: tell the sender of `orig`, a datagram that came to our
@@ -88,9 +88,15 @@ pub fn icmp_send(orig: &[u8], kind: u8, code: u8, info: u32) {
     let allowed = ICMP_LIMIT.lock().allow(dst, kind, code, crate::interrupts::ticks(),
         || (crate::csprng::random_u64() % 3) as i64);
     if !allowed {
-        ICMP_LIMITED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        mib::inc(Mib::IcmpOutRateLimitHost);
         return;
     }
+    mib::inc(Mib::IcmpOutMsgs);
+    mib::inc(match kind {
+        net_core::ip::ICMP_DEST_UNREACH => Mib::IcmpOutDestUnreachs,
+        net_core::ip::ICMP_TIME_EXCEEDED => Mib::IcmpOutTimeExcds,
+        _ => Mib::IcmpOutParmProbs,
+    });
     let src = arp::our_ip();
     let head = Forwarded { tos: net_core::ip::TOS_INTERNETCONTROL, id: select_ident(dst, src, PROTO_ICMP), df: false };
     let _ = transmit(dst, PROTO_ICMP, &msg, 64, Tx::Wait, Some(head), None);
@@ -108,8 +114,10 @@ fn select_ident(dst: [u8; 4], src: [u8; 4], proto: u8) -> u16 {
         |range| if range == 0 { 0 } else { (crate::csprng::random_u64() % range as u64) as u32 })
 }
 
+/// Datagrams larger than the MTU, refused: nothing fragments them
+/// (`IpFragFails`).
 pub fn too_big() -> u64 {
-    TOO_BIG.load(core::sync::atomic::Ordering::Relaxed)
+    mib::get(Mib::IpFragFails)
 }
 
 /// Our address and mask.
@@ -166,16 +174,23 @@ pub fn arp_target_for(dst_ip: [u8; 4]) -> Option<[u8; 4]> {
 }
 
 pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
-    if data.len() < HEADER_LEN { return; }
+    mib::inc(Mib::IpInReceives);
+    if data.len() < HEADER_LEN {
+        mib::inc(Mib::IpInHdrErrors);
+        return;
+    }
 
     let version = data[0] >> 4;
     let ihl = (data[0] & 0x0F) as usize * 4;
-    if version != 4 || ihl < 20 || data.len() < ihl { return; }
-
     let total_len = u16::from_be_bytes([data[2], data[3]]) as usize;
-    if total_len < ihl || total_len > data.len() { return; }
-    // ip_rcv_core: a header whose checksum does not hold is dropped.
-    if super::csum::fold(super::csum::sum(&data[..ihl])) != 0xFFFF { return; }
+    // ip_rcv_core: a malformed header, or one whose checksum does not hold.
+    if version != 4 || ihl < 20 || data.len() < ihl
+        || total_len < ihl || total_len > data.len()
+        || super::csum::fold(super::csum::sum(&data[..ihl])) != 0xFFFF
+    {
+        mib::inc(Mib::IpInHdrErrors);
+        return;
+    }
 
     let protocol = data[9];
     let src_ip = <[u8; 4]>::try_from(&data[12..16]).unwrap();
@@ -203,6 +218,7 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     // (`ipv4_conntrack_defrag`, `ip_local_deliver`): a fragment waits for
     // the rest, and the whole datagram goes on from here.
     if u16::from_be_bytes([data[6], data[7]]) & 0x3FFF != 0 {
+        mib::inc(Mib::IpReasmReqds);
         let r = DEFRAG.lock().input(&data[..total_len], crate::interrupts::ticks());
         if let net_core::frag::Defragged::Complete(whole) = r {
             handle_ipv4(&whole, false, l2);
@@ -229,6 +245,13 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     };
     // The L4 checksum, unless the card verified it (skb_checksum_init).
     if !csum_ok && !l4_checksum_holds(protocol, src_ip, dst_ip, payload) {
+        let (errs, csum) = match protocol {
+            PROTO_TCP => (Mib::TcpInErrs, Mib::TcpInCsumErrors),
+            PROTO_UDP => (Mib::UdpInErrors, Mib::UdpInCsumErrors),
+            _ => (Mib::IcmpInErrors, Mib::IcmpInCsumErrors),
+        };
+        mib::inc(errs);
+        mib::inc(csum);
         return;
     }
 
@@ -236,14 +259,20 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     // §4.2.3.10); ICMP to a broadcast address is ignored, echo requests
     // included (`icmp_echo_ignore_broadcasts`).
     let local = dest == net_core::ip::Dest::Local;
+    if matches!(protocol, PROTO_UDP) || (local && matches!(protocol, PROTO_ICMP | PROTO_TCP)) {
+        mib::inc(Mib::IpInDelivers);
+    }
     match protocol {
         PROTO_ICMP if local => super::icmp::handle_icmp(data, payload),
         PROTO_UDP => super::udp::handle_udp(data, payload),
         PROTO_TCP if local => super::tcp::handle_tcp(data, payload),
         PROTO_ICMP | PROTO_TCP => {}
         // ip_local_deliver_finish: nobody speaks it.
-        _ if local => icmp_send(&data[..total_len], net_core::ip::ICMP_DEST_UNREACH,
-            net_core::ip::ICMP_PROT_UNREACH, 0),
+        _ if local => {
+            mib::inc(Mib::IpInUnknownProtos);
+            icmp_send(&data[..total_len], net_core::ip::ICMP_DEST_UNREACH,
+                net_core::ip::ICMP_PROT_UNREACH, 0)
+        }
         _ => {}
     }
 }
@@ -359,15 +388,16 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
             head: Option<Forwarded>, src: Option<[u8; 4]>)
     -> Result<Handed, crate::virtio_net::NetError>
 {
+    mib::inc(Mib::IpOutRequests);
     // __mkroute_output: no loopback device, and 0/8 and 240/4 lead nowhere.
     if !iface().output_ok(dst_ip, false) {
-        OUT_NO_ROUTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        mib::inc(Mib::IpOutNoRoutes);
         return Ok(Handed::Nowhere);
     }
     // ip_finish_output: nothing larger than the path MTU goes out (RFC 1122
     // §3.3.3 MMS_S); there is no local fragmentation.
     if (HEADER_LEN + payload.len()) as u32 > path_mtu(dst_ip) {
-        TOO_BIG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        mib::inc(Mib::IpFragFails);
         return Ok(Handed::Nowhere);
     }
     let src_ip = src.unwrap_or_else(arp::our_ip);
@@ -406,7 +436,7 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
         Tx::TryPartial => arp::Mode::Partial { tcp: protocol == PROTO_TCP },
     };
     let Some(hop) = arp_target_for(dst_ip) else {
-        OUT_NO_ROUTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        mib::inc(Mib::IpOutNoRoutes);
         return Ok(Handed::Nowhere);
     };
     if hop == [255, 255, 255, 255] {
