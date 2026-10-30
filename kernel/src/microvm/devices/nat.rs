@@ -2059,6 +2059,7 @@ enum DnsOutcome {
     Answer([u8; 4]),  // A record
     NoData,           // NOERROR, no answer — name exists, no such RR type
     NxDomain,         // name does not exist
+    ServFail,         // the lookup failed; the guest may ask again
 }
 
 /// Parse a DNS query, answer it from the host resolver's CACHE, and synthesize
@@ -2071,8 +2072,9 @@ enum DnsOutcome {
 /// buffers, the card runs dry, and the reply that would end the wait can no
 /// longer arrive — the host loses its network too.
 ///
-/// So: hit → answer, known-bad → NXDOMAIN, unknown → hand the name to Core 0
-/// and drop the query. UDP DNS is retried by whoever asked, and the retry
+/// So: hit → answer, known answer without an address → NXDOMAIN or NODATA,
+/// a failed lookup → SERVFAIL, unknown → hand the name to Core 0 and drop
+/// the query. UDP DNS is retried by whoever asked, and the retry
 /// finds a warm cache.
 fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
     let q = parse_dns_query(dgram)?;
@@ -2087,7 +2089,9 @@ fn handle_dns(src_ip: [u8; 4], src_port: u16, dgram: &[u8]) -> Option<Vec<u8>> {
         }
         match crate::net::dns::cached(q.name.as_str()) {
             crate::net::dns::Cached::Ip(ip) => DnsOutcome::Answer(ip),
-            crate::net::dns::Cached::Failed => DnsOutcome::NxDomain,
+            crate::net::dns::Cached::NxDomain => DnsOutcome::NxDomain,
+            crate::net::dns::Cached::NoData => DnsOutcome::NoData,
+            crate::net::dns::Cached::TempFail => DnsOutcome::ServFail,
             crate::net::dns::Cached::Unknown => {
                 crate::net::dns::want(q.name.as_str());
                 return None;
@@ -2166,6 +2170,7 @@ fn build_dns_reply(q: &DnsQuery, out: &DnsOutcome) -> Vec<u8> {
         DnsOutcome::Answer(_) => (0, 1),
         DnsOutcome::NoData    => (0, 0),
         DnsOutcome::NxDomain  => (3, 0),
+        DnsOutcome::ServFail  => (2, 0),
     };
     let mut p = Vec::with_capacity(64);
     // Header

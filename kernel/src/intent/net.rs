@@ -754,13 +754,13 @@ pub fn intent_net_info() {
                 g[0], g[1], g[2], g[3]);
         }
     }
-    let servers = crate::net::dns::servers();
+    let servers = crate::net::dns::server_levels();
     if servers.is_empty() {
         kprintln!("  DNS      (none)");
     }
-    for d in servers {
-        kprintln!("  DNS      {}.{}.{}.{}{}", d[0], d[1], d[2], d[3],
-            if d == dns { "" } else { "  (not queried)" });
+    for (d, level) in servers {
+        kprintln!("  DNS      {}.{}.{}.{}  {}{}", d[0], d[1], d[2], d[3], level,
+            if d == dns { "  (current)" } else { "" });
     }
     match crate::net::dhcp::status() {
         Some((state, srv, Some((t1, t2, exp)))) => kprintln!(

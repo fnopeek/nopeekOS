@@ -11,6 +11,7 @@ extern crate alloc;
 pub mod acd;
 pub mod csum;
 pub mod dhcp;
+pub mod dns;
 pub mod frag;
 pub mod ip;
 pub mod neigh;

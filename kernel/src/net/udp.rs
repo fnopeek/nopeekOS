@@ -37,7 +37,6 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
     if length < HEADER_LEN || length > data.len() { return; }
     let payload = &data[HEADER_LEN..length.min(data.len())];
     let src_ip = <[u8; 4]>::try_from(&ip_packet[12..16]).unwrap();
-    RX_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     if dst_port == 68 && super::dhcp::deliver(payload, ip_packet[16..20] == super::arp::our_ip()) {
         return;
@@ -60,8 +59,6 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
     // Nobody was home: a reply that arrives one microsecond after its waiter
     // gave up, or on a port whose listener was never registered. Its sender
     // learns so, as from `__udp4_lib_rcv`, if it was sent to our address.
-    NO_LISTENER.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    NO_LISTENER_PORT.store(dst_port, core::sync::atomic::Ordering::Relaxed);
     if ip_packet[16..20] == super::arp::our_ip() {
         let total = u16::from_be_bytes([ip_packet[2], ip_packet[3]]) as usize;
         ipv4::icmp_send(&ip_packet[..total.min(ip_packet.len())], net_core::ip::ICMP_DEST_UNREACH,
@@ -95,25 +92,6 @@ pub fn take_error(port: u16) -> Option<([u8; 4], u16)> {
     LISTENERS.lock().iter_mut().flatten().find(|l| l.port == port).and_then(|l| l.err.take())
 }
 
-/// Datagrams dropped because no listener was registered, and the last such
-/// port. Read by the DNS failure path: "nothing arrived" and "it arrived and we
-/// had already stopped listening" are different faults.
-pub fn no_listener_stats() -> (u32, u16) {
-    (NO_LISTENER.load(core::sync::atomic::Ordering::Relaxed),
-     NO_LISTENER_PORT.load(core::sync::atomic::Ordering::Relaxed))
-}
-
-/// Every UDP datagram that reached this layer, whoever it was for. Cumulative;
-/// callers take a snapshot and report the delta, since a total since boot
-/// says nothing about the lookup that just failed.
-pub fn rx_total() -> u32 {
-    RX_TOTAL.load(core::sync::atomic::Ordering::Relaxed)
-}
-
-static RX_TOTAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-
-static NO_LISTENER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-static NO_LISTENER_PORT: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
 /// UDP checksum over the IPv4 pseudo-header + datagram (RFC 768). A computed
 /// zero goes on the wire as 0xFFFF, because zero is the "no checksum" escape.
