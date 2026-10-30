@@ -366,8 +366,8 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     let (mx, my) = cursor::atomic_pos();
     let rx = (mx - cx as i32).clamp(0, cw as i32 - 1) as u32;
     let ry = (my - cy as i32).clamp(0, ch as i32 - 1) as u32;
-    let ax = out as u32 * slot + rx * (slot - 1) / (cw - 1).max(1);
-    let ay = ry * ABS_MAX / (ch - 1).max(1);
+    let ax = out as u32 * slot + (rx as u64 * (slot - 1) as u64 / (cw as u64 - 1).max(1)) as u32;
+    let ay = (ry as u64 * ABS_MAX as u64 / (ch as u64 - 1).max(1)) as u32;
 
     let mut any = false;
 

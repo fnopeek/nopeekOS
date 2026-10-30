@@ -110,8 +110,11 @@ const ABS_X: u16 = 0x00;
 const ABS_Y: u16 = 0x01;
 const REL_WHEEL:  u16 = 0x08;
 const REL_HWHEEL: u16 = 0x06;
-/// Logical range reported for ABS_X/ABS_Y (matches qemu usb-tablet).
-pub const ABS_MAX: u32 = 32767;
+/// Logical range reported for ABS_X/ABS_Y: 65536 units for each of the
+/// guest outputs x is cut into (`shade::forward_pointer_to_guest`), finer
+/// than a pixel at any output width the display hardware drives.
+/// virtio_input_absinfo carries it as le32.
+pub const ABS_MAX: u32 = crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS as u32 * 65536 - 1;
 
 const NUM_QUEUES: u16 = 2;
 const MAX_QUEUE_SIZE: u16 = 256;
