@@ -9,15 +9,15 @@
 //! Code is mapped W^X: writable while it is being filled, executable
 //! afterwards, never both.
 //!
-//! Everything lives above the identity-mapped first 64 GB, where nothing else
-//! claims addresses.
+//! Everything lives above the identity map (`paging::IDENTITY_MAX`), where
+//! nothing else claims addresses.
 
 use crate::mm::paging::{self, PageFlags};
 use crate::memory;
 
-/// First address above the identity map. Below this everything is mapped 1:1
+/// The furthest the identity map reaches. Below this RAM is mapped 1:1
 /// through 1 GB huge pages, so this is where free address space starts.
-const REGION_BASE: u64 = 64 * 1024 * 1024 * 1024;
+const REGION_BASE: u64 = paging::IDENTITY_MAX;
 
 /// What one instance reserves. A power of two well above `8 GiB + page` keeps
 /// the arithmetic to a shift and leaves the next instance nowhere near.
@@ -108,8 +108,8 @@ fn map_range(at: u64, bytes: u64, flags: PageFlags) -> bool {
             unmap_range(at, off);
             return false;
         };
-        // SAFETY: the frame allocator just handed this out and the first
-        // 64 GB are identity-mapped, so the frame is addressable here.
+        // SAFETY: the frame allocator just handed this out, and every frame
+        // it hands out is identity-mapped, so the frame is addressable here.
         unsafe { core::ptr::write_bytes(frame as *mut u8, 0, PAGE as usize) };
         if paging::map_page(at + off, frame, flags).is_err() {
             memory::deallocate_frame(frame);

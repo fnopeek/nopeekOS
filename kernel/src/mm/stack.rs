@@ -15,8 +15,9 @@ use spin::Mutex;
 use super::memory::{self, PAGE_SIZE};
 use super::paging::{self, PageFlags};
 
-/// Start of the stack range: 64 TiB, far above the identity map (64 GiB)
-/// and forge's instance and code ranges (they end below 17 TiB).
+/// Start of the stack range: 64 TiB, far above the identity map (up to
+/// 8 TiB), forge's instance and code ranges (below 32 TiB) and the device
+/// window (to 48 TiB).
 const REGION_BASE: u64 = 64 << 40;
 
 /// Address space per slot: the guard page plus up to `SLOT_BYTES - PAGE`

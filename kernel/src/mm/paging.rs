@@ -1,7 +1,7 @@
 //! Virtual Memory Manager
 //!
 //! 4-level x86_64 paging: PML4 → PDPT → PDT → PT → 4KB page.
-//! `init` replaces the firmware tables with our own 64 GB identity map.
+//! `init` replaces the firmware tables with our own identity map of all RAM.
 #![allow(dead_code)]
 
 use bitflags::bitflags;
@@ -61,13 +61,22 @@ impl core::fmt::Display for PagingError {
     }
 }
 
-/// End of the identity map: below it every physical address is mapped at
-/// itself (`init`). Above it the address space belongs to forge's instances
-/// (from 64 GB), its code, the device window and the kernel stacks.
-pub const IDENTITY_END: u64 = 64 << 30;
+/// The furthest the identity map may reach: forge's instances start here,
+/// then its code, the device window and the kernel stacks.
+pub const IDENTITY_MAX: u64 = 8 << 40;
+
+/// End of the identity map (`init`): below it every physical address is
+/// mapped at itself. All of RAM, at least 64 GiB so device windows there
+/// stay identity-mapped, rounded up to whole 1 GiB pages, at most
+/// `IDENTITY_MAX` (Linux `init_mem_mapping` maps up to `max_pfn`).
+static IDENTITY_END: AtomicU64 = AtomicU64::new(64 << 30);
+
+pub fn identity_end() -> u64 {
+    IDENTITY_END.load(Ordering::Relaxed)
+}
 
 /// The window device memory above `IDENTITY_END` is mapped into (Linux
-/// `ioremap`): 32 TiB up to 48 TiB, clear of forge (below 17 TiB) and the
+/// `ioremap`): 32 TiB up to 48 TiB, clear of forge (below 32 TiB) and the
 /// kernel stacks (from 64 TiB).
 const IOREMAP_BASE: u64 = 32 << 40;
 const IOREMAP_END: u64 = 48 << 40;
@@ -87,7 +96,7 @@ struct IoMap {
 static IOMAPS: spin::Mutex<(u64, alloc::vec::Vec<IoMap>)> = spin::Mutex::new((IOREMAP_BASE, alloc::vec::Vec::new()));
 
 /// `ioremap`: map `len` bytes of device memory at `phys` with `flags` and
-/// return the CPU address of `phys`. Below `IDENTITY_END` that is `phys`
+/// return the CPU address of `phys`. Below `identity_end` that is `phys`
 /// itself; above it a range of the device window, so that a BAR or
 /// framebuffer high in the physical space never lands on another user of
 /// that virtual address. A page already mapped to something else is an
@@ -95,7 +104,7 @@ static IOMAPS: spin::Mutex<(u64, alloc::vec::Vec<IoMap>)> = spin::Mutex::new((IO
 pub fn ioremap(phys: u64, len: u64, flags: PageFlags) -> Result<u64, PagingError> {
     let start = phys & !0xFFF;
     let end = phys.checked_add(len.max(1)).ok_or(PagingError::NoAddressSpace)?.next_multiple_of(0x1000);
-    if end <= IDENTITY_END {
+    if end <= identity_end() {
         let mut a = start;
         while a < end {
             map_page(a, a, flags)?;
@@ -205,7 +214,7 @@ pub fn sync_tlb() {
 unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> {
     // SAFETY: the caller (map_page, under PT_LOCK) passes a live identity-
     // mapped table whose entry at index is a 1 GB page; the new table is a
-    // fresh frame below the 64 GB identity limit, filled before it is linked.
+    // fresh frame inside the identity map, filled before it is linked.
     unsafe {
         let entry = read_entry(pdpt, index);
         let huge_base = entry_addr(entry); // 1GB-aligned physical base
@@ -233,7 +242,7 @@ unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> 
 unsafe fn split_2mb_to_4kb(pdt: u64, index: usize) -> Result<u64, PagingError> {
     // SAFETY: the caller (map_page, under PT_LOCK) passes a live identity-
     // mapped table whose entry at index is a 2 MB page; the new table is a
-    // fresh frame below the 64 GB identity limit, filled before it is linked.
+    // fresh frame inside the identity map, filled before it is linked.
     unsafe {
         let entry = read_entry(pdt, index);
         let huge_base = entry_addr(entry);
@@ -283,7 +292,7 @@ unsafe fn zero_frame(addr: u64) {
 /// Walk to the next table level. If not present, allocate a new table.
 unsafe fn get_or_create(table_phys: u64, index: usize) -> Result<u64, PagingError> {
     // SAFETY: the caller holds PT_LOCK and passes a live table; a new table is
-    // a fresh frame below the 64 GB identity limit, zeroed before it is linked.
+    // a fresh frame inside the identity map, zeroed before it is linked.
     unsafe {
         let entry = read_entry(table_phys, index);
 
@@ -319,29 +328,30 @@ pub fn init() {
     // its own PML4 — those tables are in firmware-owned memory marked
     // read-only, so we can't add new entries to them later (e.g. for
     // MMIO regions or WASM module memory). We allocate fresh
-    // tables from our frame allocator and identity-map 64 GB via
-    // 1 GB huge pages.
+    // tables from our frame allocator and identity-map all of RAM via
+    // 1 GB huge pages, one PDPT per 512 GB.
+    let end = memory::memory_top_bytes().next_multiple_of(1 << 30).clamp(64 << 30, IDENTITY_MAX);
+    IDENTITY_END.store(end, Ordering::Relaxed);
     let pml4_phys = memory::allocate_frame()
         .expect("paging::init: failed to allocate PML4 frame");
-    let pdpt_phys = memory::allocate_frame()
-        .expect("paging::init: failed to allocate PDPT frame");
-    // SAFETY: both frames are fresh from the allocator, 4 KiB-aligned and below
-    // 64 GB, still identity-mapped by the firmware's tables, and referenced by
-    // nothing else.
-    unsafe {
-        // Zero both tables.
-        core::ptr::write_bytes(pml4_phys as *mut u8, 0, 4096);
-        core::ptr::write_bytes(pdpt_phys as *mut u8, 0, 4096);
-
-        // PML4[0] → PDPT, Present + Writable.
-        let pml4 = pml4_phys as *mut u64;
-        *pml4 = pdpt_phys | 0x03;
-
-        // PDPT: 64 entries, each a 1 GB huge page identity mapping.
-        // 0x83 = Present (bit 0) + Writable (bit 1) + Huge (bit 7).
-        let pdpt = pdpt_phys as *mut u64;
-        for i in 0..64u64 {
-            *pdpt.add(i as usize) = (i << 30) | 0x83;
+    // SAFETY: the frame is fresh from the allocator, 4 KiB-aligned, still
+    // identity-mapped by the firmware's tables, and referenced by nothing else.
+    unsafe { core::ptr::write_bytes(pml4_phys as *mut u8, 0, 4096) };
+    let gigs = end >> 30;
+    for p in 0..gigs.div_ceil(512) {
+        let pdpt_phys = memory::allocate_frame()
+            .expect("paging::init: failed to allocate PDPT frame");
+        // SAFETY: as for the PML4; the PDPT is filled before it is linked,
+        // and `p` < 16 indexes the PML4's lower entries.
+        unsafe {
+            core::ptr::write_bytes(pdpt_phys as *mut u8, 0, 4096);
+            // 0x83 = Present (bit 0) + Writable (bit 1) + Huge (bit 7).
+            let pdpt = pdpt_phys as *mut u64;
+            for i in 0..(gigs - p * 512).min(512) {
+                *pdpt.add(i as usize) = ((p * 512 + i) << 30) | 0x83;
+            }
+            // PML4[p] → PDPT, Present + Writable.
+            *(pml4_phys as *mut u64).add(p as usize) = pdpt_phys | 0x03;
         }
     }
     PML4_PHYS.store(pml4_phys, Ordering::Relaxed);
@@ -349,18 +359,15 @@ pub fn init() {
     // Switch CR3 to our new tables. Any TLB entries from UEFI's
     // mapping get flushed. From here on, MMIO mappings can be added
     // freely (map_page will modify our own tables, which are writable).
-    // SAFETY: the new tables identity-map the first 64 GB, which hold the
+    // SAFETY: the new tables identity-map all of RAM, which holds the
     // kernel image, its stack and every frame the allocator hands out, so every
     // live address keeps its meaning across the switch.
     unsafe {
         core::arch::asm!("mov cr3, {}", in(reg) pml4_phys);
     }
 
-    crate::kdebug!("[npk] Paging: 64 GB identity-mapped, NX enabled (own PML4 @ {:#x})", pml4_phys);
+    crate::kdebug!("[npk] Paging: {} GB identity-mapped, NX enabled (own PML4 @ {:#x})", end >> 30, pml4_phys);
 }
-
-/// End of the identity mapping (see `init`: 64 GB).
-pub const IDENTITY_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
 
 /// Read one byte at a physical address (identity-mapped, so physical equals
 /// virtual). Meant for firmware windows such as ACPI SystemMemory regions.
@@ -371,7 +378,7 @@ pub const IDENTITY_LIMIT: u64 = 64 * 1024 * 1024 * 1024;
 /// status bytes. Not implemented: an uncached mapping for registers that
 /// change on their own.
 pub fn read_phys_u8(addr: u64) -> Option<u8> {
-    if addr >= IDENTITY_LIMIT { return None; }
+    if addr >= identity_end() { return None; }
     // SAFETY: inside the identity mapping, a single byte, read-only.
     Some(unsafe { core::ptr::read_volatile(addr as *const u8) })
 }

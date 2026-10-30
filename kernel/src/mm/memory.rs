@@ -10,15 +10,23 @@ use crate::kprintln;
 
 pub const PAGE_SIZE: usize = 4096;
 
-const MAX_MEMORY: usize = 64 * 1024 * 1024 * 1024; // 64GB (identity-mapped via 1GB huge pages)
-const MAX_FRAMES: usize = MAX_MEMORY / PAGE_SIZE;
-const BITMAP_SIZE: usize = MAX_FRAMES / 8; // 32KB
+/// RAM the allocator can track: as far as the identity map can reach
+/// (`paging::IDENTITY_MAX`), since every frame it hands out is used at its
+/// physical address.
+const MAX_FRAMES: usize = (crate::mm::paging::IDENTITY_MAX / PAGE_SIZE as u64) as usize;
+
+/// The bitmap of a machine with up to 64 GiB. A larger one gets its bitmap
+/// from its own RAM at `init`, as Linux's memblock places the early
+/// allocator's tables in the memory it describes.
+const STATIC_FRAMES: usize = (64usize << 30) / PAGE_SIZE;
+static mut STATIC_BITMAP: [u8; STATIC_FRAMES / 8] = [0; STATIC_FRAMES / 8];
 
 static ALLOCATOR: Mutex<FrameAllocator> = Mutex::new(FrameAllocator::new());
 
 struct FrameAllocator {
-    /// Bit=1 → used/reserved, Bit=0 → free
-    bitmap: [u8; BITMAP_SIZE],
+    /// Bit=1 → used/reserved, Bit=0 → free; `len` bytes at `bits`.
+    bits: *mut u8,
+    len: usize,
     free_count: usize,
     memory_top: usize,
     /// No free frame lies in a bitmap byte below this one; `allocate` starts
@@ -26,31 +34,57 @@ struct FrameAllocator {
     next_byte: usize,
 }
 
+// SAFETY: `bits` points at memory only this allocator uses, and every access
+// goes through the mutex around it.
+unsafe impl Send for FrameAllocator {}
+
 impl FrameAllocator {
     const fn new() -> Self {
-        FrameAllocator { bitmap: [0u8; BITMAP_SIZE], free_count: 0, memory_top: 0, next_byte: 0 }
+        FrameAllocator {
+            bits: core::ptr::addr_of_mut!(STATIC_BITMAP) as *mut u8,
+            len: STATIC_FRAMES / 8,
+            free_count: 0,
+            memory_top: 0,
+            next_byte: 0,
+        }
+    }
+
+    fn bitmap(&self) -> &[u8] {
+        // SAFETY: `bits..bits + len` is the static bitmap or the RAM `init`
+        // set aside for it, used by nothing else.
+        unsafe { core::slice::from_raw_parts(self.bits, self.len) }
+    }
+
+    fn bitmap_mut(&mut self) -> &mut [u8] {
+        // SAFETY: as in `bitmap`; `&mut self` makes the access exclusive.
+        unsafe { core::slice::from_raw_parts_mut(self.bits, self.len) }
+    }
+
+    /// Frames the bitmap covers.
+    fn frames(&self) -> usize {
+        self.len * 8
     }
 
     fn mark_all_used(&mut self) {
-        for byte in self.bitmap.iter_mut() { *byte = 0xFF; }
+        self.bitmap_mut().fill(0xFF);
         self.free_count = 0;
     }
 
     fn set_free(&mut self, frame: usize) {
-        if frame >= MAX_FRAMES { return; }
+        if frame >= self.frames() { return; }
         let (byte, bit) = (frame / 8, frame % 8);
-        if self.bitmap[byte] & (1 << bit) != 0 {
-            self.bitmap[byte] &= !(1 << bit);
+        if self.bitmap()[byte] & (1 << bit) != 0 {
+            self.bitmap_mut()[byte] &= !(1 << bit);
             self.free_count += 1;
             self.next_byte = self.next_byte.min(byte);
         }
     }
 
     fn set_used(&mut self, frame: usize) {
-        if frame >= MAX_FRAMES { return; }
+        if frame >= self.frames() { return; }
         let (byte, bit) = (frame / 8, frame % 8);
-        if self.bitmap[byte] & (1 << bit) == 0 {
-            self.bitmap[byte] |= 1 << bit;
+        if self.bitmap()[byte] & (1 << bit) == 0 {
+            self.bitmap_mut()[byte] |= 1 << bit;
             if self.free_count > 0 { self.free_count -= 1; }
         }
     }
@@ -59,7 +93,7 @@ impl FrameAllocator {
         if length == 0 { return; }
         let start = ((base as usize) + PAGE_SIZE - 1) / PAGE_SIZE; // round up
         let end = ((base + length) as usize) / PAGE_SIZE;          // round down
-        for frame in start..end.min(MAX_FRAMES) {
+        for frame in start..end.min(self.frames()) {
             self.set_free(frame);
             if frame >= self.memory_top { self.memory_top = frame + 1; }
         }
@@ -69,20 +103,20 @@ impl FrameAllocator {
         if length == 0 { return; }
         let start = (base as usize) / PAGE_SIZE;                            // round down (conservative)
         let end = ((base + length) as usize + PAGE_SIZE - 1) / PAGE_SIZE;   // round up (conservative)
-        for frame in start..end.min(MAX_FRAMES) {
+        for frame in start..end.min(self.frames()) {
             self.set_used(frame);
         }
     }
 
     fn allocate(&mut self) -> Option<u64> {
-        let top_byte = ((self.memory_top + 7) / 8).min(BITMAP_SIZE);
+        let top_byte = ((self.memory_top + 7) / 8).min(self.len);
         for byte_idx in self.next_byte..top_byte {
-            let b = self.bitmap[byte_idx];
+            let b = self.bitmap()[byte_idx];
             if b == 0xFF { continue; }
             self.next_byte = byte_idx;
             let frame = byte_idx * 8 + b.trailing_ones() as usize;
             if frame >= self.memory_top { return None; }
-            self.bitmap[byte_idx] |= 1 << (frame % 8);
+            self.bitmap_mut()[byte_idx] |= 1 << (frame % 8);
             self.free_count -= 1;
             return Some((frame * PAGE_SIZE) as u64);
         }
@@ -171,6 +205,33 @@ pub fn is_firmware_device_region(base: u64, len: u64) -> bool {
 
 pub fn init(boot_info: &crate::boot_info::BootInfo) {
     let mut alloc = ALLOCATOR.lock();
+
+    // One bit per frame up to the highest usable one the identity map can
+    // reach. Past the static bitmap's 64 GiB, the bitmap goes into the
+    // first conventional region above 1 MiB that holds it.
+    let page = PAGE_SIZE as u64;
+    let top = boot_info.usable_regions()
+        .map(|r| ((r.physical_start + r.page_count * page) / page) as usize)
+        .max().unwrap_or(0)
+        .min(MAX_FRAMES);
+    let need = top.div_ceil(8);
+    let mut carved = None;
+    if need > alloc.len {
+        let bytes = (need as u64).next_multiple_of(page);
+        let home = boot_info.regions().iter()
+            .filter(|r| r.uefi_type == crate::boot_info::UEFI_CONVENTIONAL_MEMORY)
+            .map(|r| (r.physical_start.max(0x10_0000).next_multiple_of(page), r.physical_start + r.page_count * page))
+            .find(|&(b, e)| b + bytes <= e && b + bytes <= crate::mm::paging::IDENTITY_MAX);
+        match home {
+            Some((base, _)) => {
+                alloc.bits = base as *mut u8;
+                alloc.len = need;
+                carved = Some((base, bytes));
+            }
+            None => kprintln!("[npk] memory: no room for the frame bitmap of {} MB, tracking the first 64 GB",
+                top * PAGE_SIZE >> 20),
+        }
+    }
     alloc.mark_all_used();
 
     // Walk the UEFI memory map. Conventional + BootServices Code/Data
@@ -189,6 +250,9 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
     // out as a defence-in-depth guard; UEFI's map usually already
     // omits this range but firmware quirks happen.
     alloc.mark_region_used(0, 0x100000);
+    if let Some((base, bytes)) = carved {
+        alloc.mark_region_used(base, bytes);
+    }
 
     // The kernel image itself is the EfiLoaderCode/EfiLoaderData
     // region in the UEFI map — already left as "used" by the loop
@@ -277,7 +341,7 @@ fn contiguous_below(count: usize, limit_bytes: u64) -> Option<u64> {
         for i in 0..count {
             let frame = start + i;
             let (byte, bit) = (frame / 8, frame % 8);
-            if alloc.bitmap[byte] & (1 << bit) != 0 {
+            if alloc.bitmap()[byte] & (1 << bit) != 0 {
                 ok = false;
                 if start == 0 { return None; }
                 skip_to = if frame > count { frame - count } else { 0 };
@@ -318,7 +382,7 @@ fn contiguous_aligned_below(count: usize, align: usize, limit_bytes: u64) -> Opt
     }
     let mut start = (top - count) & !(align - 1);
     loop {
-        if (start..start + count).all(|f| alloc.bitmap[f / 8] & (1 << (f % 8)) == 0) {
+        if (start..start + count).all(|f| alloc.bitmap()[f / 8] & (1 << (f % 8)) == 0) {
             for f in start..start + count {
                 alloc.set_used(f);
             }
@@ -350,11 +414,11 @@ fn contiguous_aligned(count: usize, align: usize) -> Option<u64> {
         return None;
     }
     let mut alloc = ALLOCATOR.lock();
-    let top = alloc.memory_top.min(MAX_FRAMES);
+    let top = alloc.memory_top.min(alloc.frames());
     if count > top { return None; }
     let mut start = (top - count) & !(align - 1);
     loop {
-        if alloc.bitmap[start / 8..(start + count) / 8].iter().all(|&b| b == 0) {
+        if alloc.bitmap()[start / 8..(start + count) / 8].iter().all(|&b| b == 0) {
             for i in 0..count {
                 alloc.set_used(start + i);
             }

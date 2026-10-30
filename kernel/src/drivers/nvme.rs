@@ -443,7 +443,7 @@ struct Seg {
 /// map, where the heap lives (Linux `virt_to_phys`), else from the page
 /// tables (the kernel stacks).
 fn phys(addr: u64) -> Result<u64, BlkError> {
-    if addr < crate::mm::paging::IDENTITY_END { return Ok(addr); }
+    if addr < crate::mm::paging::identity_end() { return Ok(addr); }
     crate::mm::paging::translate(addr).ok_or(BlkError::OutOfRange)
 }
 

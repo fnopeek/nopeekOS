@@ -555,7 +555,7 @@ pub fn lapic_from_msr() -> Mmio {
     // side effect.
     let base = unsafe { msr::read(IA32_APIC_BASE) } & 0xFFFF_FFFF_F000;
     // SAFETY: the page IA32_APIC_BASE names is the xAPIC register window. It
-    // lies inside the 64 GB identity map, which `smp::init` and
+    // lies below 4 GiB inside the identity map, which `smp::init` and
     // `init_apic_timer` remap uncached, and it never moves.
     unsafe { Mmio::from_mapped(base, LAPIC_LEN) }
 }
