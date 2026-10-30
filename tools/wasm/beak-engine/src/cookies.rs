@@ -6,7 +6,9 @@
 //! Only persistent cookies survive a restart (see `serialize`); session cookies
 //! live until beak quits.
 //!
-//! Not implemented: `SameSite`.
+//! `SameSite` after RFC 6265bis §5.6.7, §5.7 and §5.8.3: a cookie without the
+//! attribute is `Lax`; `None` needs `Secure`. Not implemented: Chrome's
+//! two-minute exception for unsafe methods on fresh `Lax` cookies.
 
 extern crate alloc;
 use alloc::string::{String, ToString};
@@ -28,6 +30,54 @@ struct Cookie {
     /// Absolute expiry, seconds since the epoch. `None` = session cookie,
     /// which for this jar means "until beak quits".
     expires: Option<i64>,
+    same_site: SameSite,
+}
+
+/// A cookie's `SameSite` enforcement (RFC 6265bis §4.1.2.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SameSite {
+    None,
+    Lax,
+    Strict,
+}
+
+/// Where a request comes from (RFC 6265bis §5.2): whether it is same-site,
+/// and, for `Lax`, whether it is a top-level navigation with a safe method.
+#[derive(Clone, Copy, Debug)]
+pub struct Ctx {
+    pub same_site: bool,
+    pub top_level_nav: bool,
+    pub safe_method: bool,
+}
+
+impl Ctx {
+    /// A same-site request that is no navigation: a sub-resource of a page
+    /// of the same site, or the document's own script.
+    pub const SAME_SITE: Ctx = Ctx { same_site: true, top_level_nav: false, safe_method: true };
+
+    /// A sub-resource or `fetch` of the page at `doc` for `url`.
+    pub fn subresource(doc: &str, url: &str) -> Ctx {
+        Ctx { same_site: same_site(doc, url), top_level_nav: false, safe_method: true }
+    }
+
+    /// A top-level navigation to `url`, from the page at `initiator`, or
+    /// from the browser itself (address bar, history), which is same-site.
+    pub fn navigation(initiator: Option<&str>, url: &str, method: &str) -> Ctx {
+        Ctx {
+            same_site: initiator.is_none_or(|i| same_site(i, url)),
+            top_level_nav: true,
+            safe_method: matches!(method, "GET" | "HEAD" | "OPTIONS" | "TRACE"),
+        }
+    }
+}
+
+/// Same site (RFC 6265bis §5.2, HTML "schemelessly" plus the scheme): the
+/// same scheme and registrable domain, or the same host where there is none.
+pub fn same_site(a: &str, b: &str) -> bool {
+    let (ha, _, sa) = split_url(a);
+    let (hb, _, sb) = split_url(b);
+    let site = |h: &str| crate::site::registrable_domain(h).unwrap_or_else(|| h.to_ascii_lowercase());
+    sa == sb && !ha.is_empty() && site(&ha) == site(&hb)
 }
 
 /// RFC 6265 6.1 asks for at least 50 cookies per domain, 3000 in total and
@@ -64,13 +114,13 @@ fn global() -> &'static mut Jar {
 }
 
 /// File everything a response said with `Set-Cookie`, into the browser's jar.
-pub fn store(url: &str, headers: &str, now: i64) {
-    global().store(url, headers, now)
+pub fn store(url: &str, headers: &str, now: i64, ctx: Ctx) {
+    global().store(url, headers, now, ctx)
 }
 
 /// The `Cookie:` header value for `url` from the browser's jar.
-pub fn header_for(url: &str, now: i64) -> String {
-    global().header_for(url, now)
+pub fn header_for(url: &str, now: i64, ctx: Ctx) -> String {
+    global().header_for(url, now, ctx)
 }
 
 /// The `document.cookie` value for `url` from the browser's jar — without
@@ -86,9 +136,9 @@ pub fn store_from_script(url: &str, decl: &str, now: i64) {
 
 /// The names of the cookies sent for this URL, without values: a name is
 /// not a secret, and it makes diagnostics possible.
-pub fn names_for(url: &str, now: i64) -> String {
+pub fn names_for(url: &str, now: i64, ctx: Ctx) -> String {
     let mut out = String::new();
-    for part in header_for(url, now).split("; ") {
+    for part in header_for(url, now, ctx).split("; ") {
         let Some((n, _)) = part.split_once('=') else { continue };
         if !out.is_empty() { out.push(' '); }
         out.push_str(n);
@@ -236,7 +286,7 @@ impl Jar {
 /// (`capture_headers`). Otherwise a server could write its own `:hop` and
 /// file cookies against a host it does not own. Both sides must change
 /// together.
-pub fn store(&mut self, url: &str, headers: &str, now: i64) {
+pub fn store(&mut self, url: &str, headers: &str, now: i64, ctx: Ctx) {
     let (mut host, mut path, mut https) = split_url(url);
     for line in headers.split('\n') {
         let line = line.trim_end_matches('\r');
@@ -256,13 +306,13 @@ pub fn store(&mut self, url: &str, headers: &str, now: i64) {
         if !name.trim().eq_ignore_ascii_case("set-cookie") {
             continue;
         }
-        self.store_one(&host, &path, https, value.trim(), now, false);
+        self.store_one(&host, &path, https, value.trim(), now, false, ctx);
     }
 }
 
 /// `https`: the response (or the document, for a script) came over TLS.
 fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now: i64,
-             from_script: bool) {
+             from_script: bool, ctx: Ctx) {
     let mut parts = decl.split(';');
     let Some(pair) = parts.next() else { return };
     let Some((name, value)) = pair.split_once('=') else { return };
@@ -277,6 +327,8 @@ fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now
     let mut http_only = false;
     let mut expires: Option<i64> = None;
     let mut max_age: Option<i64> = None;
+    // §5.6.7: absent or unknown is the default enforcement, `Lax`.
+    let mut same_site = SameSite::Lax;
     for attr in parts {
         let (k, v) = match attr.split_once('=') {
             Some((k, v)) => (k.trim(), v.trim()),
@@ -294,7 +346,25 @@ fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now
             expires = parse_http_date(v);
         } else if k.eq_ignore_ascii_case("max-age") {
             max_age = v.parse::<i64>().ok();
+        } else if k.eq_ignore_ascii_case("samesite") {
+            same_site = if v.eq_ignore_ascii_case("none") {
+                SameSite::None
+            } else if v.eq_ignore_ascii_case("strict") {
+                SameSite::Strict
+            } else {
+                SameSite::Lax
+            };
         }
+    }
+
+    // §5.7: `SameSite=None` only on a `Secure` cookie, and a restricted
+    // cookie is not set by a cross-site request other than a top-level
+    // navigation.
+    if same_site == SameSite::None && !secure {
+        return;
+    }
+    if same_site != SameSite::None && !ctx.same_site && !ctx.top_level_nav {
+        return;
     }
 
     // Max-Age wins over Expires (RFC 6265 §5.2.2) and is relative, so it
@@ -362,6 +432,7 @@ fn store_one(&mut self, host: &str, req_path: &str, https: bool, decl: &str, now
         secure,
         http_only,
         expires: expiry,
+        same_site,
     });
 }
 
@@ -380,15 +451,15 @@ fn make_room(&mut self, domain: &str) {
 
 /// The `Cookie:` header value for `url`, or an empty string if the jar has
 /// nothing for it. Longer paths first (RFC 6265 §5.4).
-pub fn header_for(&mut self, url: &str, now: i64) -> String {
-    self.collect(url, now, false)
+pub fn header_for(&mut self, url: &str, now: i64, ctx: Ctx) -> String {
+    self.collect(url, now, false, ctx)
 }
 
 /// What `document.cookie` shows a script: the same, without `HttpOnly`
 /// cookies. A separate function rather than a flag on `header_for`, so
 /// every call site states who is asking.
 pub fn script_header_for(&mut self, url: &str, now: i64) -> String {
-    self.collect(url, now, true)
+    self.collect(url, now, true, Ctx::SAME_SITE)
 }
 
 /// File one `document.cookie = "..."` assignment: a single cookie string
@@ -399,10 +470,10 @@ pub fn store_from_script(&mut self, url: &str, decl: &str, now: i64) {
     if host.is_empty() {
         return;
     }
-    self.store_one(&host, &path, https, decl, now, true);
+    self.store_one(&host, &path, https, decl, now, true, Ctx::SAME_SITE);
 }
 
-fn collect(&mut self, url: &str, now: i64, for_script: bool) -> String {
+fn collect(&mut self, url: &str, now: i64, for_script: bool, ctx: Ctx) -> String {
     let (host, path, secure_req) = split_url(url);
     if host.is_empty() {
         return String::new();
@@ -417,6 +488,10 @@ fn collect(&mut self, url: &str, now: i64, for_script: bool) -> String {
                 && path_match(&path, &c.path)
                 && (!c.secure || secure_req)
                 && !(for_script && c.http_only)
+                // §5.8.3: a cross-site request carries `None` cookies, and
+                // `Lax` ones on a top-level navigation with a safe method.
+                && (ctx.same_site || c.same_site == SameSite::None
+                    || (c.same_site == SameSite::Lax && ctx.top_level_nav && ctx.safe_method))
         })
         .collect();
     hits.sort_by(|a, b| b.path.len().cmp(&a.path.len()));
@@ -456,7 +531,9 @@ impl Jar {
             let f = [&c.name, &c.value, &c.domain, &c.path];
             if f.iter().any(|x| x.contains('\t') || x.contains('\n')) { continue }
             if out.is_empty() { out.push_str(FILE_TAG); out.push('\n'); }
-            let flags = (c.host_only as u8) | ((c.secure as u8) << 1) | ((c.http_only as u8) << 2);
+            let ss = match c.same_site { SameSite::Lax => 0u8, SameSite::None => 1, SameSite::Strict => 2 };
+            let flags = (c.host_only as u8) | ((c.secure as u8) << 1) | ((c.http_only as u8) << 2)
+                | (ss << 3);
             let _ = core::fmt::Write::write_fmt(&mut out, format_args!(
                 "{}\t{}\t{}\t{}\t{}\t{}\n", c.name, c.value, c.domain, c.path, flags, exp));
         }
@@ -483,6 +560,7 @@ impl Jar {
                 path: path.into(),
                 host_only: flags & 1 != 0, secure: flags & 2 != 0, http_only: flags & 4 != 0,
                 expires: Some(exp),
+                same_site: match (flags >> 3) & 3 { 1 => SameSite::None, 2 => SameSite::Strict, _ => SameSite::Lax },
             });
             n += 1;
         }
@@ -509,25 +587,25 @@ mod tests {
     #[test]
     fn a_session_cookie_comes_back_on_the_next_request() {
         let mut j = jar();
-        j.store("https://example.com/login", "set-cookie: sid=abc; Path=/\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/account", 1000), "sid=abc");
+        j.store("https://example.com/login", "set-cookie: sid=abc; Path=/\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/account", 1000, Ctx::SAME_SITE), "sid=abc");
     }
 
     /// The logout idiom: the same cookie re-sent with an expiry in the past.
     #[test]
     fn an_expired_cookie_deletes_the_one_it_names() {
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: sid=abc\r\n", 1000);
-        j.store("https://example.com/", "set-cookie: sid=; Max-Age=0\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/", 1000), "");
+        j.store("https://example.com/", "set-cookie: sid=abc\r\n", 1000, Ctx::SAME_SITE);
+        j.store("https://example.com/", "set-cookie: sid=; Max-Age=0\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "");
     }
 
     /// The reason `script_header_for` exists.
     #[test]
     fn an_httponly_cookie_goes_on_the_request_but_never_to_a_script() {
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: sid=secret; HttpOnly\r\n                                         set-cookie: theme=dark\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/", 1000), "sid=secret; theme=dark");
+        j.store("https://example.com/", "set-cookie: sid=secret; HttpOnly\r\n                                         set-cookie: theme=dark\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "sid=secret; theme=dark");
         assert_eq!(j.script_header_for("https://example.com/", 1000), "theme=dark");
     }
 
@@ -544,61 +622,61 @@ mod tests {
     #[test]
     fn a_script_cannot_overwrite_an_httponly_cookie() {
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: sid=secret; HttpOnly\r\n", 1000);
+        j.store("https://example.com/", "set-cookie: sid=secret; HttpOnly\r\n", 1000, Ctx::SAME_SITE);
         j.store_from_script("https://example.com/", "sid=stolen", 1000);
-        assert_eq!(j.header_for("https://example.com/", 1000), "sid=secret");
+        assert_eq!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "sid=secret");
         assert_eq!(j.script_header_for("https://example.com/", 1000), "");
     }
 
     #[test]
     fn a_cookie_never_leaks_to_a_neighbouring_site() {
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: sid=abc\r\n", 1000);
-        assert_eq!(j.header_for("https://evil-example.com/", 1000), "");
-        assert_eq!(j.header_for("https://other.com/", 1000), "");
+        j.store("https://example.com/", "set-cookie: sid=abc\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://evil-example.com/", 1000, Ctx::SAME_SITE), "");
+        assert_eq!(j.header_for("https://other.com/", 1000, Ctx::SAME_SITE), "");
         // Host-only: set without a Domain, so not even a sub-domain gets it.
-        assert_eq!(j.header_for("https://sub.example.com/", 1000), "");
+        assert_eq!(j.header_for("https://sub.example.com/", 1000, Ctx::SAME_SITE), "");
     }
 
     #[test]
     fn a_domain_cookie_reaches_sub_domains_but_a_server_cannot_widen_past_its_site() {
         let mut j = jar();
-        j.store("https://www.example.com/", "set-cookie: a=1; Domain=example.com\r\n", 1000);
-        assert_eq!(j.header_for("https://api.example.com/", 1000), "a=1");
+        j.store("https://www.example.com/", "set-cookie: a=1; Domain=example.com\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://api.example.com/", 1000, Ctx::SAME_SITE), "a=1");
         // Reaching for a public suffix gets nothing at all.
-        j.store("https://www.example.com/", "set-cookie: b=2; Domain=com\r\n", 1000);
-        j.store("https://www.example.co.uk/", "set-cookie: c=3; Domain=co.uk\r\n", 1000);
-        assert!(!j.header_for("https://other.com/", 1000).contains("b=2"));
-        assert!(!j.header_for("https://other.co.uk/", 1000).contains("c=3"));
+        j.store("https://www.example.com/", "set-cookie: b=2; Domain=com\r\n", 1000, Ctx::SAME_SITE);
+        j.store("https://www.example.co.uk/", "set-cookie: c=3; Domain=co.uk\r\n", 1000, Ctx::SAME_SITE);
+        assert!(!j.header_for("https://other.com/", 1000, Ctx::SAME_SITE).contains("b=2"));
+        assert!(!j.header_for("https://other.co.uk/", 1000, Ctx::SAME_SITE).contains("c=3"));
     }
 
     #[test]
     fn path_scoping_follows_the_directory_not_the_document() {
         let mut j = jar();
-        j.store("https://example.com/app/login", "set-cookie: s=1\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/app/account", 1000), "s=1");
-        assert_eq!(j.header_for("https://example.com/other", 1000), "");
+        j.store("https://example.com/app/login", "set-cookie: s=1\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/app/account", 1000, Ctx::SAME_SITE), "s=1");
+        assert_eq!(j.header_for("https://example.com/other", 1000, Ctx::SAME_SITE), "");
     }
 
     #[test]
     fn a_secure_cookie_never_rides_a_plain_request() {
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: s=1; Secure\r\n", 1000);
-        assert_eq!(j.header_for("http://example.com/", 1000), "");
-        assert_eq!(j.header_for("https://example.com/", 1000), "s=1");
+        j.store("https://example.com/", "set-cookie: s=1; Secure\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("http://example.com/", 1000, Ctx::SAME_SITE), "");
+        assert_eq!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "s=1");
     }
 
     #[test]
     fn an_absolute_expiry_is_honoured_and_an_unparseable_one_is_a_session_cookie() {
         let mut j = jar();
         // 2030-01-01T00:00:00Z = 1893456000.
-        j.store("https://example.com/", "set-cookie: a=1; Expires=Tue, 01 Jan 2030 00:00:00 GMT\r\n", 1000);
+        j.store("https://example.com/", "set-cookie: a=1; Expires=Tue, 01 Jan 2030 00:00:00 GMT\r\n", 1000, Ctx::SAME_SITE);
         assert_eq!(super::parse_http_date("Tue, 01 Jan 2030 00:00:00 GMT"), Some(1_893_456_000));
-        assert_eq!(j.header_for("https://example.com/", 1_000_000), "a=1");
-        assert_eq!(j.header_for("https://example.com/", 2_000_000_000), "");
+        assert_eq!(j.header_for("https://example.com/", 1_000_000, Ctx::SAME_SITE), "a=1");
+        assert_eq!(j.header_for("https://example.com/", 2_000_000_000, Ctx::SAME_SITE), "");
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: b=2; Expires=whenever\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/", 2_000_000_000), "b=2");
+        j.store("https://example.com/", "set-cookie: b=2; Expires=whenever\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/", 2_000_000_000, Ctx::SAME_SITE), "b=2");
     }
 
     /// Header blocks in the shape real servers send. They cover both date
@@ -611,20 +689,20 @@ mod tests {
             "set-cookie: SOCS=CAAaBgiAht_TBg; expires=Wed, 08-Sep-2027 17:02:09 GMT; path=/; domain=.google.com; Secure; SameSite=lax\r\n",
             "set-cookie: AEC=AdJVEas; expires=Fri, 05-Feb-2027 17:02:09 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax\r\n",
             "set-cookie: __Secure-ENID=35.SE=Jkbdc; expires=Thu, 09-Sep-2027 09:20:27 GMT; path=/; domain=.google.com; Secure; HttpOnly; SameSite=lax\r\n",
-        ), 1_786_294_929);
-        let h = j.header_for("https://www.google.com/search?q=x", 1_786_294_929);
+        ), 1_786_294_929, Ctx::SAME_SITE);
+        let h = j.header_for("https://www.google.com/search?q=x", 1_786_294_929, Ctx::SAME_SITE);
         assert!(h.contains("SOCS=CAAaBgiAht_TBg"), "{h}");
         assert!(h.contains("__Secure-ENID=35.SE=Jkbdc"), "{h}");
         // Domain=.google.com reaches a sub-domain, but never a neighbour.
-        assert!(j.header_for("https://news.google.com/", 1_786_294_929).contains("SOCS="));
-        assert_eq!(j.header_for("https://google.com.evil.test/", 1_786_294_929), "");
+        assert!(j.header_for("https://news.google.com/", 1_786_294_929, Ctx::SAME_SITE).contains("SOCS="));
+        assert_eq!(j.header_for("https://google.com.evil.test/", 1_786_294_929, Ctx::SAME_SITE), "");
         // A dated cookie must outlive the session — the dash spelling is the
         // one easy to get wrong.
-        assert!(!j.header_for("https://www.google.com/", 1_800_000_000).is_empty());
+        assert!(!j.header_for("https://www.google.com/", 1_800_000_000, Ctx::SAME_SITE).is_empty());
         // …and still expire when it says. 2028-01-01 = 1830297600. This one
         // goes last: reading the jar prunes what has expired, so a later
         // question about an earlier moment would ask a pruned jar.
-        assert_eq!(j.header_for("https://www.google.com/", 1_830_297_600), "");
+        assert_eq!(j.header_for("https://www.google.com/", 1_830_297_600, Ctx::SAME_SITE), "");
 
         // No space after the semicolons, lowercase `secure`, RFC 1123 date, one
         // host-only and one Domain cookie side by side.
@@ -633,13 +711,13 @@ mod tests {
             "set-cookie: WMF-Last-Access=09-Aug-2026;Path=/;HttpOnly;secure;Expires=Thu, 10 Sep 2026 12:00:00 GMT\r\n",
             "set-cookie: WMF-Last-Access-Global=09-Aug-2026;Path=/;Domain=.wikipedia.org;HttpOnly;secure;Expires=Thu, 10 Sep 2026 12:00:00 GMT\r\n",
             "set-cookie: GeoIP=CH:ZH:Zweidlen-Dorf:47.56:8.47:v4; Path=/; secure; Domain=.wikipedia.org\r\n",
-        ), 1_786_294_929);
-        let h = j.header_for("https://de.wikipedia.org/wiki/X", 1_786_294_929);
+        ), 1_786_294_929, Ctx::SAME_SITE);
+        let h = j.header_for("https://de.wikipedia.org/wiki/X", 1_786_294_929, Ctx::SAME_SITE);
         assert!(h.contains("WMF-Last-Access=09-Aug-2026"), "{h}");
         assert!(h.contains("GeoIP=CH:ZH:Zweidlen-Dorf:47.56:8.47:v4"), "a value may hold colons: {h}");
         // The host-only one does not cross to another wikipedia sub-domain;
         // the Domain= ones do.
-        let h2 = j.header_for("https://en.wikipedia.org/wiki/X", 1_786_294_929);
+        let h2 = j.header_for("https://en.wikipedia.org/wiki/X", 1_786_294_929, Ctx::SAME_SITE);
         assert!(!h2.contains("WMF-Last-Access="), "{h2}");
         assert!(h2.contains("WMF-Last-Access-Global="), "{h2}");
 
@@ -648,16 +726,16 @@ mod tests {
         j.store("https://github.com/login", concat!(
             "set-cookie: _gh_sess=xQWvHNb1oK7%2Fiz; path=/; HttpOnly; secure; SameSite=Lax\r\n",
             "set-cookie: logged_in=no; expires=Mon, 09 Aug 2027 17:02:09 GMT; domain=.github.com; path=/; HttpOnly; secure; SameSite=Lax\r\n",
-        ), 1_786_294_929);
-        assert!(j.header_for("https://github.com/", 1_786_294_929).contains("_gh_sess=xQWvHNb1oK7%2Fiz"));
+        ), 1_786_294_929, Ctx::SAME_SITE);
+        assert!(j.header_for("https://github.com/", 1_786_294_929, Ctx::SAME_SITE).contains("_gh_sess=xQWvHNb1oK7%2Fiz"));
 
         // Netscape dates again, everything on .amazon.de.
         let mut j = jar();
         j.store("https://www.amazon.de/", concat!(
             "set-cookie: session-id=258-2923272-2531756; Domain=.amazon.de; Expires=Mon, 09-Aug-2027 17:02:10 GMT; Path=/; Secure\r\n",
             "set-cookie: i18n-prefs=CHF; Domain=.amazon.de; Expires=Mon, 09-Aug-2027 17:02:10 GMT; Path=/\r\n",
-        ), 1_786_294_929);
-        let h = j.header_for("https://www.amazon.de/gp/cart", 1_786_294_929);
+        ), 1_786_294_929, Ctx::SAME_SITE);
+        let h = j.header_for("https://www.amazon.de/gp/cart", 1_786_294_929, Ctx::SAME_SITE);
         assert!(h.contains("session-id=258-2923272-2531756"), "{h}");
         assert!(h.contains("i18n-prefs=CHF"), "{h}");
     }
@@ -677,10 +755,11 @@ mod tests {
                 "content-type: text/html\r\n",
             ),
             1_786_294_929,
+            Ctx::SAME_SITE,
         );
         // Set by consent.google.com with Domain=.google.com — so it rides the
         // search request, which is the whole point of accepting it.
-        assert!(j.header_for("https://www.google.com/search?q=x", 1_786_294_929).contains("SOCS="));
+        assert!(j.header_for("https://www.google.com/search?q=x", 1_786_294_929, Ctx::SAME_SITE).contains("SOCS="));
 
         // A hop that sets a host-only cookie scopes it to that hop's host and
         // to no other — the marker is what makes the difference visible.
@@ -692,9 +771,10 @@ mod tests {
                 "set-cookie: only=here\r\n",
             ),
             1000,
+            Ctx::SAME_SITE,
         );
-        assert_eq!(j.header_for("https://consent.google.com/save", 1000), "only=here");
-        assert_eq!(j.header_for("https://www.google.com/", 1000), "");
+        assert_eq!(j.header_for("https://consent.google.com/save", 1000, Ctx::SAME_SITE), "only=here");
+        assert_eq!(j.header_for("https://www.google.com/", 1000, Ctx::SAME_SITE), "");
     }
 
     /// Headers with no marker at all — every sub-resource response, and any
@@ -702,9 +782,9 @@ mod tests {
     #[test]
     fn an_unmarked_block_scopes_to_the_url_it_was_given() {
         let mut j = jar();
-        j.store("https://example.com/app/x", "set-cookie: a=1\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/app/y", 1000), "a=1");
-        assert_eq!(j.header_for("https://other.test/", 1000), "");
+        j.store("https://example.com/app/x", "set-cookie: a=1\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/app/y", 1000, Ctx::SAME_SITE), "a=1");
+        assert_eq!(j.header_for("https://other.test/", 1000, Ctx::SAME_SITE), "");
     }
 
     /// A name that promises something has to keep it, or it means nothing
@@ -712,13 +792,13 @@ mod tests {
     #[test]
     fn a_prefixed_name_that_breaks_its_promise_is_refused() {
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: __Secure-a=1\r\n", 1000);
-        j.store("https://example.com/app/x", "set-cookie: __Host-b=2; Secure\r\n", 1000);
-        j.store("https://example.com/", "set-cookie: __Host-c=3; Secure; Domain=example.com; Path=/\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/app/x", 1000), "");
+        j.store("https://example.com/", "set-cookie: __Secure-a=1\r\n", 1000, Ctx::SAME_SITE);
+        j.store("https://example.com/app/x", "set-cookie: __Host-b=2; Secure\r\n", 1000, Ctx::SAME_SITE);
+        j.store("https://example.com/", "set-cookie: __Host-c=3; Secure; Domain=example.com; Path=/\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/app/x", 1000, Ctx::SAME_SITE), "");
         // Kept when the promise holds.
-        j.store("https://example.com/", "set-cookie: __Host-d=4; Secure; Path=/\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/", 1000), "__Host-d=4");
+        j.store("https://example.com/", "set-cookie: __Host-d=4; Secure; Path=/\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "__Host-d=4");
     }
 
     /// A consent POST answered by a 303 that carries the decision. If this
@@ -734,9 +814,10 @@ mod tests {
                 "Expires=Wed, 08-Sep-2027 19:03:37 GMT; Path=/; Secure; SameSite=lax\r\n",
             ),
             1_786_303_417,
+            Ctx::SAME_SITE,
         );
         assert!(
-            j.header_for("https://www.google.com/search?q=stansstad", 1_786_303_417)
+            j.header_for("https://www.google.com/search?q=stansstad", 1_786_303_417, Ctx::SAME_SITE)
                 .contains("SOCS=CAESNQgCEitib3FfaWRl"),
             "the consent decision has to ride the search that follows it"
         );
@@ -745,8 +826,8 @@ mod tests {
     #[test]
     fn a_port_does_not_split_the_jar() {
         let mut j = jar();
-        j.store("https://example.com:8443/", "set-cookie: s=1\r\n", 1000);
-        assert_eq!(j.header_for("https://example.com/", 1000), "s=1");
+        j.store("https://example.com:8443/", "set-cookie: s=1\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "s=1");
     }
 
     /// A session cookie does not survive a restart: the site said it should
@@ -754,16 +835,16 @@ mod tests {
     #[test]
     fn only_cookies_with_an_expiry_survive_a_restart() {
         let mut j = jar();
-        j.store("https://example.com/", "set-cookie: sess=abc\r\n", 1000);
+        j.store("https://example.com/", "set-cookie: sess=abc\r\n", 1000, Ctx::SAME_SITE);
         j.store("https://example.com/",
-                "set-cookie: keep=xyz; Expires=Wed, 08-Sep-2027 19:03:37 GMT\r\n", 1000);
+                "set-cookie: keep=xyz; Expires=Wed, 08-Sep-2027 19:03:37 GMT\r\n", 1000, Ctx::SAME_SITE);
         let text = j.serialize(1000);
         assert!(text.contains("keep"), "der dauerhafte gehoert in die Datei");
         assert!(!text.contains("sess"), "der Sitzungskeks NICHT");
 
         let mut fresh = jar();
         assert_eq!(fresh.load(&text, 1000), 1);
-        assert_eq!(fresh.header_for("https://example.com/", 1000), "keep=xyz");
+        assert_eq!(fresh.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "keep=xyz");
     }
 
     /// A round trip keeps every flag: `Secure` and `HttpOnly` are boundaries,
@@ -773,15 +854,15 @@ mod tests {
         let mut j = jar();
         j.store("https://example.com/app/",
                 "set-cookie: t=1; Path=/app; Secure; HttpOnly; \
-                 Expires=Wed, 08-Sep-2027 19:03:37 GMT\r\n", 1000);
+                 Expires=Wed, 08-Sep-2027 19:03:37 GMT\r\n", 1000, Ctx::SAME_SITE);
         let text = j.serialize(1000);
         let mut fresh = jar();
         fresh.load(&text, 1000);
         // Secure: not over http.
-        assert_eq!(fresh.header_for("http://example.com/app/", 1000), "");
-        assert_eq!(fresh.header_for("https://example.com/app/", 1000), "t=1");
+        assert_eq!(fresh.header_for("http://example.com/app/", 1000, Ctx::SAME_SITE), "");
+        assert_eq!(fresh.header_for("https://example.com/app/", 1000, Ctx::SAME_SITE), "t=1");
         // Path: not outside.
-        assert_eq!(fresh.header_for("https://example.com/", 1000), "");
+        assert_eq!(fresh.header_for("https://example.com/", 1000, Ctx::SAME_SITE), "");
         // HttpOnly: not to script.
         assert_eq!(fresh.script_header_for("https://example.com/app/", 1000), "");
     }
@@ -797,7 +878,7 @@ mod tests {
                            "c\td\texample.com\t/\tX\t99999999999\n",
                            "e\tf\texample.com\t/\t0\t99999999999\n");
         assert_eq!(j.load(text, 1000), 2, "die zwei heilen, nicht mehr und nicht weniger");
-        let h = j.header_for("http://example.com/", 1000);
+        let h = j.header_for("http://example.com/", 1000, Ctx::SAME_SITE);
         assert!(h.contains("a=b") && h.contains("e=f"), "{h}");
     }
 
@@ -806,7 +887,7 @@ mod tests {
     fn an_expired_cookie_comes_back_from_neither_side() {
         let mut j = jar();
         j.store("https://example.com/",
-                "set-cookie: old=1; Expires=Wed, 08-Sep-2021 19:03:37 GMT\r\n", 1000);
+                "set-cookie: old=1; Expires=Wed, 08-Sep-2021 19:03:37 GMT\r\n", 1000, Ctx::SAME_SITE);
         assert_eq!(j.serialize(1_700_000_000), "");
         let mut fresh = jar();
         assert_eq!(fresh.load("old\t1\texample.com\t/\t0\t1631127817\n", 1_700_000_000), 0);
@@ -817,23 +898,23 @@ mod tests {
     #[test]
     fn a_public_suffix_is_refused_as_domain() {
         let mut j = jar();
-        j.store("https://a.github.io/", "set-cookie: s=1; Domain=github.io\r\n", 1000);
-        assert!(!j.header_for("https://b.github.io/", 1000).contains("s=1"));
-        assert!(!j.header_for("https://a.github.io/", 1000).contains("s=1"));
-        j.store("https://www.example.com/", "set-cookie: t=2; Domain=example.com\r\n", 1000);
-        assert!(j.header_for("https://shop.example.com/", 1000).contains("t=2"));
+        j.store("https://a.github.io/", "set-cookie: s=1; Domain=github.io\r\n", 1000, Ctx::SAME_SITE);
+        assert!(!j.header_for("https://b.github.io/", 1000, Ctx::SAME_SITE).contains("s=1"));
+        assert!(!j.header_for("https://a.github.io/", 1000, Ctx::SAME_SITE).contains("s=1"));
+        j.store("https://www.example.com/", "set-cookie: t=2; Domain=example.com\r\n", 1000, Ctx::SAME_SITE);
+        assert!(j.header_for("https://shop.example.com/", 1000, Ctx::SAME_SITE).contains("t=2"));
     }
 
     /// A Secure cookie only from TLS, also on a redirect hop.
     #[test]
     fn a_secure_cookie_needs_a_secure_origin() {
         let mut j = jar();
-        j.store("http://example.com/", "set-cookie: s=1; Secure\r\n", 1000);
-        assert!(!j.header_for("https://example.com/", 1000).contains("s=1"));
-        j.store("https://example.com/", ":hop http://example.com/x\nset-cookie: h=2; Secure\r\n", 1000);
-        assert!(!j.header_for("https://example.com/", 1000).contains("h=2"));
-        j.store("https://example.com/", "set-cookie: ok=3; Secure\r\n", 1000);
-        assert!(j.header_for("https://example.com/", 1000).contains("ok=3"));
+        j.store("http://example.com/", "set-cookie: s=1; Secure\r\n", 1000, Ctx::SAME_SITE);
+        assert!(!j.header_for("https://example.com/", 1000, Ctx::SAME_SITE).contains("s=1"));
+        j.store("https://example.com/", ":hop http://example.com/x\nset-cookie: h=2; Secure\r\n", 1000, Ctx::SAME_SITE);
+        assert!(!j.header_for("https://example.com/", 1000, Ctx::SAME_SITE).contains("h=2"));
+        j.store("https://example.com/", "set-cookie: ok=3; Secure\r\n", 1000, Ctx::SAME_SITE);
+        assert!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE).contains("ok=3"));
     }
 
     /// One site filling its share pushes out its own oldest cookie, never
@@ -841,13 +922,13 @@ mod tests {
     #[test]
     fn a_full_domain_evicts_its_own_oldest() {
         let mut j = jar();
-        j.store("https://bank.example/", "set-cookie: session=1\r\n", 1000);
+        j.store("https://bank.example/", "set-cookie: session=1\r\n", 1000, Ctx::SAME_SITE);
         for i in 0..MAX_PER_DOMAIN + 5 {
             let h = alloc::format!("set-cookie: t{}=x\r\n", i);
-            j.store("https://tracker.example/", &h, 1000);
+            j.store("https://tracker.example/", &h, 1000, Ctx::SAME_SITE);
         }
-        assert!(j.header_for("https://bank.example/", 1000).contains("session=1"));
-        let t = j.header_for("https://tracker.example/", 1000);
+        assert!(j.header_for("https://bank.example/", 1000, Ctx::SAME_SITE).contains("session=1"));
+        let t = j.header_for("https://tracker.example/", 1000, Ctx::SAME_SITE);
         assert!(!t.contains("t0=") && t.contains(&alloc::format!("t{}=", MAX_PER_DOMAIN + 4)));
     }
 
@@ -855,7 +936,77 @@ mod tests {
     fn an_oversized_cookie_is_ignored() {
         let mut j = jar();
         let big = alloc::format!("set-cookie: big={}\r\n", "x".repeat(MAX_COOKIE_BYTES));
-        j.store("https://example.com/", &big, 1000);
-        assert!(j.header_for("https://example.com/", 1000).is_empty());
+        j.store("https://example.com/", &big, 1000, Ctx::SAME_SITE);
+        assert!(j.header_for("https://example.com/", 1000, Ctx::SAME_SITE).is_empty());
+    }
+
+    fn sub(doc: &str, url: &str) -> Ctx { Ctx::subresource(doc, url) }
+
+    #[test]
+    fn same_site_is_scheme_and_registrable_domain() {
+        assert!(same_site("https://a.example.com/x", "https://b.example.com/y"));
+        assert!(!same_site("http://example.com/", "https://example.com/"));
+        assert!(!same_site("https://example.com/", "https://example.org/"));
+        assert!(!same_site("https://a.github.io/", "https://b.github.io/"), "a public suffix is no site");
+        assert!(same_site("https://192.168.1.1/", "https://192.168.1.1/x"));
+    }
+
+    #[test]
+    fn a_cookie_without_samesite_is_lax() {
+        let mut j = jar();
+        j.store("https://bank.example/", "set-cookie: sid=1; Path=/\r\n", 1000, Ctx::SAME_SITE);
+        let url = "https://bank.example/transfer";
+        assert_eq!(j.header_for(url, 1000, sub("https://evil.test/", url)), "", "no cross-site sub-resource");
+        assert_eq!(j.header_for(url, 1000, Ctx::navigation(Some("https://evil.test/"), url, "POST")), "",
+            "no cross-site form POST");
+        assert_eq!(j.header_for(url, 1000, Ctx::navigation(Some("https://evil.test/"), url, "GET")), "sid=1",
+            "a cross-site link still logs in");
+        assert_eq!(j.header_for(url, 1000, sub("https://www.bank.example/", url)), "sid=1");
+    }
+
+    #[test]
+    fn strict_stays_on_its_site_and_typed_addresses_are_same_site() {
+        let mut j = jar();
+        j.store("https://bank.example/", "set-cookie: s=1; SameSite=Strict\r\n", 1000, Ctx::SAME_SITE);
+        let url = "https://bank.example/";
+        assert_eq!(j.header_for(url, 1000, Ctx::navigation(Some("https://evil.test/"), url, "GET")), "");
+        assert_eq!(j.header_for(url, 1000, Ctx::navigation(None, url, "GET")), "s=1");
+        assert_eq!(j.header_for(url, 1000, Ctx::navigation(Some("https://bank.example/x"), url, "POST")), "s=1");
+    }
+
+    #[test]
+    fn samesite_none_needs_secure_and_goes_everywhere() {
+        let mut j = jar();
+        j.store("https://cdn.example/", "set-cookie: a=1; SameSite=None\r\n", 1000, Ctx::SAME_SITE);
+        assert_eq!(j.header_for("https://cdn.example/", 1000, Ctx::SAME_SITE), "", "None without Secure is refused");
+        j.store("https://cdn.example/", "set-cookie: b=2; SameSite=None; Secure\r\n", 1000, Ctx::SAME_SITE);
+        let url = "https://cdn.example/x.js";
+        assert_eq!(j.header_for(url, 1000, sub("https://site.test/", url)), "b=2");
+    }
+
+    #[test]
+    fn a_cross_site_subresource_cannot_set_a_restricted_cookie() {
+        let mut j = jar();
+        let url = "https://tracker.example/p.gif";
+        let ctx = sub("https://site.test/", url);
+        j.store(url, "set-cookie: lax=1\r\nset-cookie: none=1; SameSite=None; Secure\r\n", 1000, ctx);
+        assert_eq!(j.header_for(url, 1000, Ctx::SAME_SITE), "none=1");
+        // A cross-site top-level navigation may set one.
+        let nav = "https://tracker.example/";
+        j.store(nav, "set-cookie: lax=2\r\n", 1000, Ctx::navigation(Some("https://site.test/"), nav, "GET"));
+        assert!(j.header_for(nav, 1000, Ctx::SAME_SITE).contains("lax=2"));
+    }
+
+    #[test]
+    fn samesite_survives_a_restart() {
+        let mut j = jar();
+        j.store("https://bank.example/", "set-cookie: s=1; SameSite=Strict; Max-Age=600\r\n", 1000, Ctx::SAME_SITE);
+        j.store("https://cdn.example/", "set-cookie: n=1; SameSite=None; Secure; Max-Age=600\r\n", 1000, Ctx::SAME_SITE);
+        let mut k = jar();
+        assert_eq!(k.load(&j.serialize(1000), 1000), 2);
+        let bank = "https://bank.example/";
+        assert_eq!(k.header_for(bank, 1000, Ctx::navigation(Some("https://evil.test/"), bank, "GET")), "");
+        let cdn = "https://cdn.example/";
+        assert_eq!(k.header_for(cdn, 1000, sub("https://site.test/", cdn)), "n=1");
     }
 }

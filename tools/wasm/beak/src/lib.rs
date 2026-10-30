@@ -414,6 +414,9 @@ struct Doc {
     nav_stage: NavStage,
     /// The URL the running fetch asked for — not the one it ended at.
     nav_url: Option<String>,
+    /// The `SameSite` context of the navigation in flight, for the cookies
+    /// its response sets.
+    nav_cookie_ctx: cookies::Ctx,
     nav_push_hist: bool,
     /// Start of the running stage, for the timing lines in the log.
     nav_stage_ms: i64,
@@ -581,6 +584,7 @@ impl Doc {
         Doc {
             url: String::new(), edit: String::new(), hist: Vec::new(), hist_pos: 0,
             nav_job: -1, nav_stage: NavStage::Doc, nav_url: None, nav_push_hist: false,
+            nav_cookie_ctx: cookies::Ctx::SAME_SITE,
             nav_stage_ms: 0, nav_gen: 0, nav_start_ms: 0, nav_reported: true,
             content_gen: 0, scroll_y: 0, sel_anchor: None, sel: None, pending_link: None,
             find: None, found: Vec::new(), find_at: 0,
@@ -804,7 +808,7 @@ fn begin_batch(urls: &[String], cap: usize) -> i32 {
     let mut any = false;
     for (i, u) in urls.iter().enumerate() {
         if i > 0 { ck.push('\n'); }
-        let v = cookies::header_for(u, now);
+        let v = cookies::header_for(u, now, cookies::Ctx::subresource(url_str(), u));
         if !v.is_empty() { any = true; ck.push_str(&v); }
     }
     // No cookies involved: use the plain call; nothing for the kernel to
@@ -1398,8 +1402,12 @@ fn nav_asked() -> String {
 }
 
 /// Start a navigation and return at once. `push_hist` records the address we
-/// land on once the document is here.
-fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool) {
+/// land on once the document is here. `initiator`: the page it came from;
+/// `None` for the browser itself (address bar, history), which is same-site.
+fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str, push_hist: bool,
+             initiator: Option<&str>) {
+    let ctx = cookies::Ctx::navigation(initiator, url, method);
+    doc_mut().nav_cookie_ctx = ctx;
     // A navigation that did not come from a script (a click, the address
     // bar, history) breaks the script chain; otherwise the cap would keep
     // counting across pages and eventually stop a harmless redirect.
@@ -1440,7 +1448,7 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
 
     let now = unix_now();
     let mut hdrs = String::new();
-    let jar = cookies::header_for(url, now);
+    let jar = cookies::header_for(url, now, ctx);
     if !jar.is_empty() {
         hdrs.push_str("Cookie: ");
         hdrs.push_str(&jar);
@@ -1448,7 +1456,7 @@ fn nav_begin(engine: &Engine, method: &str, url: &str, body: &[u8], extra: &str,
     // Log which cookies are sent, by name. The value is a secret, the name
     // is not, and without it "5 held" says nothing.
     {
-        let mit = cookies::names_for(url, now);
+        let mit = cookies::names_for(url, now, ctx);
         let da = cookies::names_held(url);
         if !da.is_empty() || !mit.is_empty() {
             let mut m = String::from("[beak] cookies -> ");
@@ -1544,12 +1552,12 @@ fn cookies_persist() {
 /// Cookies are scoped to where the response came from, after redirects —
 /// filing them against the URL we asked for would scope a login cookie to the
 /// wrong host.
-fn file_cookies(asked: &str) {
+fn file_cookies(asked: &str, ctx: cookies::Ctx) {
     let now = unix_now();
     let Some(h) = http_getter(npk_http_response_headers) else { return };
     let from = fetched_from().unwrap_or_else(|| asked.to_string());
     let before = cookies::count();
-    cookies::store(&from, &h, now);
+    cookies::store(&from, &h, now, ctx);
     let after = cookies::count();
     if after != before || h.to_ascii_lowercase().contains("set-cookie") {
         // Only when something really changed — otherwise every response
@@ -1629,7 +1637,7 @@ fn nav_document_arrived(engine: &Engine) {
     };
     // Before anything downstream: the cookies belong to this response, and
     // the getters that carry them are overwritten by the next `take`.
-    file_cookies(&asked);
+    file_cookies(&asked, doc().nav_cookie_ctx);
     HTML_LEN.store(body.len(), Relaxed);
     *html_buf() = body;
     // The bytes are not UTF-8 just because we would like them to be, and the
@@ -2142,7 +2150,7 @@ fn sync_history(engine: &Engine, sess: &mut beak_engine::js::Session) {
                 if let Some(u) = target {
                     // `push_hist` must be false here, or going back would
                     // grow the history and never get out.
-                    nav_begin(engine, "GET", &u, &[], "", false);
+                    nav_begin(engine, "GET", &u, &[], "", false, None);
                     return;
                 }
             }
@@ -2194,7 +2202,8 @@ fn sync_nav(engine: &Engine) -> bool {
     doc_mut().nav_from_script = true;
     // `replace` and `reload` add no entry: otherwise "back" could never
     // leave a page that replaces itself.
-    nav_begin(engine, "GET", &n.url, &[], "", !n.replace && !n.reload);
+    let from = url_str().to_string();
+    nav_begin(engine, "GET", &n.url, &[], "", !n.replace && !n.reload, Some(&from));
     true
 }
 
@@ -2488,7 +2497,7 @@ fn pump_fetches() -> bool {
         // The cookies belong to this response, and the getters carrying them
         // are overwritten by the next `take`.
         let from = fetched_from().unwrap_or_default();
-        file_cookies(&from);
+        file_cookies(&from, cookies::Ctx::subresource(url_str(), &from));
         let status = http_status().max(0) as u16;
         let hdrs = response_headers();
         let body = alloc::string::String::from_utf8_lossy(&buf).into_owned();
@@ -2507,7 +2516,7 @@ fn pump_fetches() -> bool {
         // Cookies go along for the same origin only (rule K3), and the
         // engine lets only same-origin requests through. Across an origin
         // boundary they would be ambient authority.
-        let jar = cookies::header_for(&url, unix_now());
+        let jar = cookies::header_for(&url, unix_now(), cookies::Ctx::subresource(&base, &url));
         if !jar.is_empty() {
             if !hdrs.is_empty() { hdrs.push('\n'); }
             hdrs.push_str("Cookie: ");
@@ -3599,31 +3608,35 @@ fn subresources_cancel() {
 /// and logs the reason, so there is nothing to add here.
 fn fetch_url(engine: &Engine, url: &str) {
     set_url(url);
-    nav_begin(engine, "GET", url, &[], "", false);
+    nav_begin(engine, "GET", url, &[], "", false, None);
 }
 
 /// The same, but the address we land on joins the history — a click, a typed
 /// address, a form. Recorded when the document arrives, not now: recording
 /// where we aimed would make every trip back replay the redirect.
-fn nav_goto(engine: &Engine, url: &str) {
+/// `initiator`: the page of the click or form, `None` for a typed address.
+fn nav_goto(engine: &Engine, url: &str, initiator: Option<&str>) {
+    let from = initiator.map(String::from);
     set_url(url);
-    nav_begin(engine, "GET", url, &[], "", true);
+    nav_begin(engine, "GET", url, &[], "", true, from.as_deref());
 }
 
-/// Navigate by POSTing `body` to `url` (a form with `method=post`).
-fn post_url(engine: &Engine, url: &str, body: &[u8]) {
+/// Navigate by POSTing `body` to `url` (a form with `method=post`) from the
+/// page at `initiator`.
+fn post_url(engine: &Engine, url: &str, body: &[u8], initiator: &str) {
+    let from = String::from(initiator);
     set_url(url);
     nav_begin(
         engine, "POST", url, body,
         "Content-Type: application/x-www-form-urlencoded",
-        true,
+        true, Some(&from),
     );
 }
 
 /// Navigate the address bar's typed text (normalise scheme) — new entry.
 fn go(engine: &Engine, typed: &str) {
     if let Some(abs) = typed_to_url(typed) {
-        nav_goto(engine, &abs);
+        nav_goto(engine, &abs, None);
     }
 }
 
@@ -3749,7 +3762,7 @@ fn tab_load(engine: &Engine, cache: &mut Option<(Layout, i32, i32, u32)>, page: 
         return;
     }
     if doc().hist.is_empty() {
-        nav_goto(engine, &u);
+        nav_goto(engine, &u, None);
     } else {
         fetch_url(engine, &u);
     }
@@ -3960,11 +3973,13 @@ fn send_submission(engine: &Engine, sub: forms::Submission) {
             url.push('?');
             url.push_str(&sub.query);
         }
-        nav_goto(engine, &url);
+        let from = url_str().to_string();
+        nav_goto(engine, &url, Some(&from));
     } else {
         // A POST keeps the action's own query string — only a GET replaces it.
         let target = if action.contains('?') { action.clone() } else { url.clone() };
-        post_url(engine, &target, sub.query.as_bytes());
+        let from = url_str().to_string();
+        post_url(engine, &target, sub.query.as_bytes(), &from);
     }
 }
 
@@ -3972,7 +3987,7 @@ fn send_submission(engine: &Engine, sub: forms::Submission) {
 fn follow(engine: &Engine, href: &str) {
     let base = url_str().to_string();
     let abs = resolve(&base, href);
-    nav_goto(engine, &abs);
+    nav_goto(engine, &abs, Some(&base));
 }
 
 // ── Back/forward history (bounded list of URLs) ─────────────────────────────
