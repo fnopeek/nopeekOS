@@ -3069,8 +3069,8 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
         .and_then(|n| n.checked_mul(4)) else { return -1 };
     if glen(len) != Some(pixel_bytes) { return -1; }
     // The canvas caps, before anything is copied onto the kernel heap.
-    use crate::shade::widgets::canvas::{MAX_BYTES, MAX_DIM};
-    if width as u32 > MAX_DIM || height as u32 > MAX_DIM || pixel_bytes > MAX_BYTES { return -1; }
+    use crate::shade::widgets::canvas::{window_budget, MAX_DIM};
+    if width as u32 > MAX_DIM || height as u32 > MAX_DIM || pixel_bytes > window_budget() { return -1; }
     let Some(px) = guest(mem, ptr, pixel_bytes).and_then(copy_out) else { return -1 };
     if !crate::shade::widgets::canvas::commit(
         wid, canvas_id as u32, width as u32, height as u32, px) {
@@ -3114,9 +3114,9 @@ pub(crate) fn npk_canvas_commit_yuv(
     let Some(need_y) = ys.checked_mul(h as usize) else { return -1 };
     let Some(need_c) = cs.checked_mul(ch) else { return -1 };
     // The canvas caps, before anything is copied onto the kernel heap.
-    use crate::shade::widgets::canvas::{MAX_BYTES, MAX_DIM};
+    use crate::shade::widgets::canvas::{window_budget, MAX_DIM};
     if w > MAX_DIM || h > MAX_DIM
-        || need_y.saturating_add(need_c.saturating_mul(2)) > MAX_BYTES { return -1; }
+        || need_y.saturating_add(need_c.saturating_mul(2)) > window_budget() { return -1; }
 
     let data = &*mem;
     let take = |ptr: i32, n: usize| guest(data, ptr, n).and_then(copy_out);

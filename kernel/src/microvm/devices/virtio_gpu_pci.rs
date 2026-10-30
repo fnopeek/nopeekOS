@@ -204,13 +204,17 @@ struct VirtQueue {
 }
 
 
-/// Largest width or height of a 2D resource: 8K displays fit.
-const MAX_RESOURCE_DIM: u32 = 8192;
+/// Largest width or height of a 2D resource: what the display hardware
+/// scans out (`mode_config.max_width` on Gen12 and DCN).
+const MAX_RESOURCE_DIM: u32 = crate::shade::widgets::canvas::MAX_DIM;
 /// Host memory one device may hold for its guest: the pixel copies and the
-/// resource table together. How many resources there are and how large is
-/// the guest's choice, and every byte of it is host memory; their count is
-/// not limited otherwise (virglrenderer and crosvm keep an unbounded table).
-const MAX_HOST_PIXEL_BYTES: usize = 512 * 1024 * 1024;
+/// resource table together, a quarter of RAM as for a window's canvases.
+/// How many resources there are and how large is the guest's choice, and
+/// every byte of it is host memory; their count is not limited otherwise
+/// (virglrenderer and crosvm keep an unbounded table).
+fn host_budget() -> usize {
+    crate::shade::widgets::canvas::window_budget()
+}
 
 /// Most bytes of one control request the device reads from the guest.
 const MAX_CTRL_REQUEST: usize = 1024 * 1024;
@@ -1082,7 +1086,7 @@ impl VirtioGpu {
 
     /// Whether one more resource fits the device's host memory.
     fn room_for_resource(&mut self) -> bool {
-        self.table_bytes() + self.pixel_bytes() + core::mem::size_of::<Resource>() <= MAX_HOST_PIXEL_BYTES
+        self.table_bytes() + self.pixel_bytes() + core::mem::size_of::<Resource>() <= host_budget()
             && self.resources.try_reserve(1).is_ok()
     }
 
@@ -1744,7 +1748,7 @@ impl VirtioGpu {
 
         // Ensure host_pixels exists with the right size, without panicking
         // when the host cannot spare it.
-        if others + self.table_bytes() + total_pixels_bytes > MAX_HOST_PIXEL_BYTES { return; }
+        if others + self.table_bytes() + total_pixels_bytes > host_budget() { return; }
         {
             let host_buf = self.resources[ri].host_pixels.get_or_insert_with(Vec::new);
             if host_buf.len() != total_pixels_bytes {

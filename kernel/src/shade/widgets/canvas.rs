@@ -18,13 +18,20 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use spin::Mutex;
 
-/// Per-canvas pixel caps: 4096×4096, 64 MB.
-pub const MAX_DIM: u32 = 4096;
-pub const MAX_BYTES: usize = 64 * 1024 * 1024;
-/// Per-window caps. Canvas ids are the app's to choose, so without them one
-/// window could store a full-size bitmap under every id it likes.
-const WINDOW_BYTES: usize = 128 * 1024 * 1024;
-const WINDOW_CANVASES: usize = 64;
+/// Largest canvas side: what the display hardware scans out, Linux's
+/// `mode_config.max_width` on Gen12 and DCN.
+pub const MAX_DIM: u32 = 16384;
+
+/// Host bytes one entry costs besides its pixels.
+const ENTRY_BYTES: usize = 64;
+
+/// What all canvases of one window may hold: a quarter of RAM. Canvas ids
+/// are the app's to choose, so without a bound one window could store a
+/// full-size bitmap under every id it likes; a byte budget per owner, not
+/// a count, is that bound.
+pub fn window_budget() -> usize {
+    (crate::memory::usable_bytes() / 4) as usize
+}
 
 /// Which matrix and range the Y′CbCr planes were coded with. A video
 /// stream says so in its VUI; guessing here would tint every frame, so the
@@ -103,8 +110,10 @@ fn insert_within_caps(window_id: u32, canvas_id: u32, bmp: Bitmap) -> bool {
     let mut map = CANVASES.lock();
     let others = map.range((window_id, 0)..=(window_id, u32::MAX))
         .filter(|(k, _)| k.1 != canvas_id);
-    let (count, bytes) = others.fold((0usize, 0usize), |(n, b), (_, v)| (n + 1, b + v.px.bytes()));
-    if count >= WINDOW_CANVASES || bytes + bmp.px.bytes() > WINDOW_BYTES {
+    let bytes: usize = others.map(|(_, v)| v.px.bytes() + ENTRY_BYTES).sum();
+    if bytes + bmp.px.bytes() + ENTRY_BYTES > window_budget() {
+        crate::kprintln!("[npk] canvas: window {} would hold {} MB of canvases, more than its {} MB",
+            window_id, (bytes + bmp.px.bytes()) >> 20, window_budget() >> 20);
         return false;
     }
     map.insert((window_id, canvas_id), bmp);
@@ -122,7 +131,7 @@ static RECTS: Mutex<BTreeMap<(u32, u32), (i32, i32, u32, u32)>> = Mutex::new(BTr
 pub fn commit(window_id: u32, canvas_id: u32, w: u32, h: u32, px: Vec<u8>) -> bool {
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM { return false; }
     let need = (w as usize) * (h as usize) * 4;
-    if need > MAX_BYTES || px.len() != need { return false; }
+    if px.len() != need { return false; }
     insert_within_caps(window_id, canvas_id, Bitmap { w, h, px: Pixels::Bgra(px) })
 }
 
@@ -146,7 +155,6 @@ pub fn commit_i420(
     let need_y = ys.checked_mul(h as usize).unwrap_or(usize::MAX);
     let need_c = cs.checked_mul(ch).unwrap_or(usize::MAX);
     if y.len() < need_y || u.len() < need_c || v.len() < need_c { return false; }
-    if need_y.saturating_add(need_c.saturating_mul(2)) > MAX_BYTES { return false; }
     insert_within_caps(
         window_id, canvas_id,
         Bitmap { w, h, px: Pixels::I420 { y, u, v, ys, cs, coding } },
