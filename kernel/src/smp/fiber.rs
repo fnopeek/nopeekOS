@@ -638,6 +638,9 @@ pub fn steal_for(thief: usize, preemptible_only: bool) -> bool {
             slot.core.store(thief as u32, Ordering::SeqCst);
         }
         STEALS.fetch_add(1, Ordering::Relaxed);
+        if fiber.pid != 0 {
+            crate::process::set_core(fiber.pid, thief);
+        }
         FIBER_QUEUES[thief].lock().push_back(fiber);
         return true;
     }

@@ -1094,10 +1094,13 @@ fn admit_fiber_task(cid: usize, task: super::scheduler::Task) {
 }
 
 /// Whether core `c` may take over fibers from busy cores when it has nothing
-/// to run. Not Core 0 (the shell and the compositor want it responsive). A
+/// to run. Not Core 0 (the shell and the compositor want it responsive), and
+/// not a driver's core: it looks idle whenever its driver parks, and a taken
+/// app's long kernel call would keep the driver off it (as in `accepts`). A
 /// core holding a vCPU takes only preemptible fibers (`steal_for`).
 fn may_steal(c: usize) -> bool {
     c != 0 && c < 256
+        && !holds_driver(c)
         && IN_LOOP[c].load(Ordering::Acquire)
         && DEDICATED_VM_CORE.load(Ordering::Acquire) as usize != c
 }
