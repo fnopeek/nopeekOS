@@ -424,6 +424,8 @@ pub fn gc() -> Result<GcStats, Error> {
         return Ok(GcStats { kept: 0, removed: 0, skipped: true });
     }
 
+    let t_mark = crate::interrupts::rdtsc();
+    let _ = storage::take_longest_wait_us();
     let roots = storage::all_root_hashes().map_err(Error::Storage)?;
     let mut reachable: HashSet<[u8; 32]> = HashSet::new();
     // Work-list holds Tree hashes only (roots + Dir entries). File
@@ -502,6 +504,7 @@ pub fn gc() -> Result<GcStats, Error> {
     }
 
     let orphans: alloc::vec::Vec<[u8; 32]> = all.into_iter().filter(|h| !reachable.contains(h)).collect();
+    let t_sweep = crate::interrupts::rdtsc();
     let (removed, failed) = storage::remove_many(&orphans).map_err(Error::Storage)?;
     super::tree_cache::forget(&orphans);
     if failed > 0 {
@@ -514,7 +517,17 @@ pub fn gc() -> Result<GcStats, Error> {
     // we'd typically be running maintenance anyway. Writers may go on
     // meanwhile: `trim` discards only blocks that are still free.
     drop(guard);
+    let t_trim = crate::interrupts::rdtsc();
     storage::trim().map_err(Error::Storage)?;
+    let t_end = crate::interrupts::rdtsc();
+
+    // How long each step took and what a reader waited for the store, to
+    // tell which step a missed frame or a slow read falls into (#161).
+    if removed > 0 {
+        let ms = |a: u64, b: u64| b.saturating_sub(a) * 1000 / crate::interrupts::tsc_freq().max(1);
+        crate::kprintln!("[npk] gc: mark {} ms, sweep {} ms, trim {} ms; longest wait for the store {} us",
+            ms(t_mark, t_sweep), ms(t_sweep, t_trim), ms(t_trim, t_end), storage::take_longest_wait_us());
+    }
 
     // Reset pressure — this sweep covered everything orphaned so far.
     MUTATIONS_SINCE_GC.store(0, core::sync::atomic::Ordering::Relaxed);

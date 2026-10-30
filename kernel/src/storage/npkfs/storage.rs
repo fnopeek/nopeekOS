@@ -38,6 +38,32 @@ struct State {
 
 static FS: Mutex<Option<State>> = Mutex::new(None);
 
+/// `FS`, waited for as a fiber should (as `fs::root_lock`): gc holds it for
+/// a whole batch of removals and their commit, and a fiber spinning
+/// meanwhile keeps the drivers pinned to its core from running.
+fn fs_lock() -> spin::MutexGuard<'static, Option<State>> {
+    if let Some(g) = FS.try_lock() {
+        return g;
+    }
+    let t0 = crate::interrupts::rdtsc();
+    loop {
+        crate::smp::fiber::spin_or_yield();
+        if let Some(g) = FS.try_lock() {
+            let waited = crate::interrupts::rdtsc().saturating_sub(t0);
+            LONGEST_WAIT_TSC.fetch_max(waited, core::sync::atomic::Ordering::Relaxed);
+            return g;
+        }
+    }
+}
+
+/// The longest wait for `FS` since the last call, in microseconds.
+pub fn take_longest_wait_us() -> u64 {
+    let t = LONGEST_WAIT_TSC.swap(0, core::sync::atomic::Ordering::Relaxed);
+    t / (crate::interrupts::tsc_freq() / 1_000_000).max(1)
+}
+
+static LONGEST_WAIT_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 // ── Lifecycle ─────────────────────────────────────────────────────────
 
 /// Halt with an explicit reinstall message when a legacy npkFS magic
@@ -217,7 +243,7 @@ pub fn mount() -> Result<(), FsError> {
     let jrnl = Journal::new(sb.journal_head, sb.journal_seq);
 
     super::tree_cache::clear();
-    *FS.lock() = Some(State {
+    *fs_lock() = Some(State {
         cache, sb, bitmap: bmap, journal: jrnl, generation,
         pending_old_blocks: Vec::new(),
     });
@@ -235,7 +261,7 @@ pub fn mount() -> Result<(), FsError> {
 
 /// Blocks the metadata cache holds, and how many are dirty.
 pub fn cache_held() -> Option<(usize, usize)> {
-    FS.lock().as_ref().map(|fs| fs.cache.held())
+    fs_lock().as_ref().map(|fs| fs.cache.held())
 }
 
 /// The block cache's shrinker: clean blocks back to memory. Skips when
@@ -249,29 +275,29 @@ fn shrink_cache(want: usize) -> usize {
 /// Drop in-memory state. Used by the self-test to simulate a remount.
 /// Does not flush; caller is responsible for a successful prior commit.
 pub fn unmount() {
-    *FS.lock() = None;
+    *fs_lock() = None;
 }
 
 pub fn is_mounted() -> bool {
-    FS.lock().is_some()
+    fs_lock().is_some()
 }
 
 /// (total_blocks, free_blocks, object_count, generation)
 pub fn stats() -> Option<(u64, u64, u64, u64)> {
-    let lock = FS.lock();
+    let lock = fs_lock();
     let s = lock.as_ref()?;
     Some((s.sb.total_blocks, s.sb.free_blocks, s.sb.object_count, s.generation))
 }
 
 /// Keyslot `i`, None when not mounted or out of range.
 pub fn keyslot(i: usize) -> Option<crate::crypto::keyslot::Slot> {
-    let lock = FS.lock();
+    let lock = fs_lock();
     lock.as_ref()?.sb.keyslots.get(i).copied()
 }
 
 /// Whether any keyslot is in use, i.e. setup has run on this disk.
 pub fn has_keyslot() -> bool {
-    let lock = FS.lock();
+    let lock = fs_lock();
     lock.as_ref().is_some_and(|s| {
         s.sb.keyslots.iter().any(|k| !crate::crypto::keyslot::is_empty(k))
     })
@@ -280,7 +306,7 @@ pub fn has_keyslot() -> bool {
 /// Write keyslot `i` and commit the superblock durably. Only the
 /// superblock changes, so no journal entry is needed.
 pub fn set_keyslot(i: usize, slot: &crate::crypto::keyslot::Slot) -> Result<(), FsError> {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
     if i >= fs.sb.keyslots.len() { return Err(FsError::InvalidName); }
     fs.sb.keyslots[i] = *slot;
@@ -295,7 +321,7 @@ pub fn set_keyslot(i: usize, slot: &crate::crypto::keyslot::Slot) -> Result<(), 
 /// Per-installation 128-bit salt baked at mkfs time. Used by callers
 /// to derive deterministic-per-install secrets that survive remounts.
 pub fn install_salt() -> Option<[u8; 16]> {
-    let lock = FS.lock();
+    let lock = fs_lock();
     Some(lock.as_ref()?.sb.install_salt)
 }
 
@@ -314,7 +340,7 @@ pub fn raw_blk_bench() -> Option<(u64, u64)> {
     let hz = tsc_freq();
     if hz == 0 { return None; }
 
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut()?;
 
     let start = fs.bitmap.alloc(BLOCKS).ok()?;
@@ -359,7 +385,7 @@ pub fn raw_blk_bench() -> Option<(u64, u64)> {
 /// long ago, not just written, so a read reaches the flash (a block never
 /// written reads as zeros without it).
 fn used_runs() -> Option<Vec<(u64, u64)>> {
-    let lock = FS.lock();
+    let lock = fs_lock();
     let fs = lock.as_ref()?;
     let (start, end) = (fs.sb.data_start, fs.bitmap.total_blocks());
     let mut runs = Vec::new();
@@ -459,7 +485,7 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64, u64, u64)>
     // while the device writes, so nothing else is placed there.
     let mut areas: Vec<(u64, u64)> = Vec::new();
     {
-        let mut lock = FS.lock();
+        let mut lock = fs_lock();
         let fs = lock.as_mut()?;
         let mut got = 0;
         while got < total {
@@ -512,7 +538,7 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64, u64, u64)>
             result = Some((bytes, t2.saturating_sub(t0), t2.saturating_sub(t1), areas.len() as u64));
         }
     }
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     if let Some(fs) = lock.as_mut() {
         // TRIM is deferred (gc / idle drain), as for every free.
         for &(start, count) in &areas {
@@ -529,7 +555,7 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64, u64, u64)>
 /// reads come from the device.
 pub fn bench_drop_caches() -> bool {
     super::tree_cache::clear();
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let Some(fs) = lock.as_mut() else { return false };
     fs.cache.drop_all().is_ok()
 }
@@ -540,7 +566,7 @@ pub fn bench_drop_caches() -> bool {
 pub fn bench_read_objects(total: u64) -> Option<(u64, u64, u64)> {
     let mut entries: Vec<([u8; 32], u64)> = Vec::new();
     {
-        let mut lock = FS.lock();
+        let mut lock = fs_lock();
         let fs = lock.as_mut()?;
         let root = fs.sb.btree_root;
         btree::iter_all(&mut fs.cache, root, &mut |e: &BTreeEntryRaw| {
@@ -616,7 +642,7 @@ fn fsck_mark(seen: &mut [u64], dup: &mut [u64], rep: &mut FsckReport, block: u64
 ///     (it will be handed out again → a future double-alloc).
 /// No writes, no repair — pure diagnosis. Safe to call any time.
 pub fn self_check() -> Result<FsckReport, FsError> {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
     let total = fs.bitmap.total_blocks();
@@ -699,7 +725,7 @@ pub fn self_check() -> Result<FsckReport, FsError> {
 /// write IOPS; call this from `gc` or a periodic idle sweep so the SSD's
 /// FTL eventually learns which blocks are free.
 pub fn trim() -> Result<(), FsError> {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
     fs.bitmap.flush_trims();
     Ok(())
@@ -709,7 +735,7 @@ pub fn trim() -> Result<(), FsError> {
 /// values. Used by GC for the snapshot guarantee — anything reachable
 /// from any of the 8 rotating slots stays alive.
 pub fn all_root_hashes() -> Result<Vec<[u8; 32]>, FsError> {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
     let mut out = Vec::new();
@@ -732,7 +758,7 @@ pub fn all_root_hashes() -> Result<Vec<[u8; 32]>, FsError> {
 
 /// Iterate every B-tree entry's content hash. Used by GC sweep.
 pub fn all_object_hashes() -> Result<Vec<[u8; 32]>, FsError> {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
     let mut out = Vec::new();
     super::btree::iter_all(&mut fs.cache, fs.sb.btree_root, &mut |entry| {
@@ -744,7 +770,7 @@ pub fn all_object_hashes() -> Result<Vec<[u8; 32]>, FsError> {
 /// Current root Tree hash from the superblock. The path layer reads this
 /// to know where to start its walk; `commit_root` writes a new one.
 pub fn current_root() -> Option<[u8; 32]> {
-    let lock = FS.lock();
+    let lock = fs_lock();
     Some(lock.as_ref()?.sb.root_tree_hash)
 }
 
@@ -760,7 +786,7 @@ pub fn current_root() -> Option<[u8; 32]> {
 /// durable as it goes.
 pub fn flush_pending() -> Result<(), FsError> {
     let root = {
-        let lock = FS.lock();
+        let lock = fs_lock();
         let fs = lock.as_ref().ok_or(FsError::NotMounted)?;
         if fs.pending_old_blocks.is_empty() {
             return Ok(());
@@ -778,7 +804,7 @@ pub fn flush_pending() -> Result<(), FsError> {
 /// returns leaves the SB on disk pointing at the previous root —
 /// the in-cache uncommitted changes vanish, FS is consistent.
 pub fn commit_root(new_root: [u8; 32]) -> Result<(), FsError> {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
     let need_root_flip = fs.sb.root_tree_hash != new_root;
@@ -842,7 +868,7 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
     // ⇒ equal hash; if `hash` is already in the btree, the integrity hash
     // and encryption below would be wasted work.
     {
-        let mut lock = FS.lock();
+        let mut lock = fs_lock();
         let t_locked = rdtsc();
         let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
         let found = btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some();
@@ -867,7 +893,7 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
     let write_data: &[u8] = &encrypted;
     let t_enc = rdtsc();
 
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
 
     // Allocate extents (contiguous-first, halve on failure, indirect for overflow)
@@ -931,7 +957,7 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
         if res.is_err() { break; }
         consumed += span;
     }
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
     // A failed device write gives the blocks back, like every other error
     // path here; otherwise each retry of an aborted transfer strands its
@@ -1044,7 +1070,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     use crate::interrupts::{rdtsc, tsc_freq};
     let t0 = rdtsc();
 
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
     let t_lock = rdtsc();
 
@@ -1153,14 +1179,14 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
 /// if the hash is not stored. The index is not keyed, so a caller that
 /// sizes anything from it checks the object once it reads it.
 pub fn plaintext_size(hash: &[u8; 32]) -> Result<Option<u64>, FsError> {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
     Ok(btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.map(|e| e.plaintext_size))
 }
 
 /// True iff the hash is present in the index. No data read.
 pub fn has(hash: &[u8; 32]) -> bool {
-    let mut lock = FS.lock();
+    let mut lock = fs_lock();
     let fs = match lock.as_mut() {
         Some(s) => s,
         None => return false,
@@ -1186,7 +1212,7 @@ pub fn remove_many(hashes: &[[u8; 32]]) -> Result<(usize, usize), FsError> {
     let mut freed: Vec<Extent> = Vec::new();
     let mut rest = hashes.iter();
     loop {
-        let mut lock = FS.lock();
+        let mut lock = fs_lock();
         let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
         let mut more = false;
         for hash in rest.by_ref() {
