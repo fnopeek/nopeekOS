@@ -150,6 +150,31 @@ struct NvmeState {
 }
 
 static NVME: Mutex<Option<NvmeState>> = Mutex::new(None);
+
+/// `NVME`, waited for as a fiber should (as the store's `fs_lock`): one
+/// Dataset Management command of a trim holds it for many milliseconds,
+/// and a reader spinning meanwhile keeps the drivers pinned to its core
+/// from running. A holder never yields, it halts for its completion.
+fn nvme_lock() -> spin::MutexGuard<'static, Option<NvmeState>> {
+    if let Some(g) = NVME.try_lock() {
+        return g;
+    }
+    let t0 = crate::interrupts::rdtsc();
+    loop {
+        crate::smp::fiber::spin_or_yield();
+        if let Some(g) = NVME.try_lock() {
+            LONGEST_WAIT_TSC.fetch_max(crate::interrupts::rdtsc().saturating_sub(t0), Ordering::Relaxed);
+            return g;
+        }
+    }
+}
+
+/// The longest wait for the controller since the last call, in microseconds.
+pub fn take_longest_wait_us() -> u64 {
+    LONGEST_WAIT_TSC.swap(0, Ordering::Relaxed) / (crate::interrupts::tsc_freq() / 1_000_000).max(1)
+}
+
+static LONGEST_WAIT_TSC: AtomicU64 = AtomicU64::new(0);
 static AVAILABLE: AtomicBool = AtomicBool::new(false);
 
 // The Dataset Management ranges of `discard_ranges` (one 4 KB page).
@@ -867,7 +892,7 @@ fn setup_host_mem(state: &mut NvmeState, ask: HostMemAsk) {
 /// controller gives the host memory back, then shuts down normally
 /// (CC.SHN), which puts its volatile write cache on media. No I/O after.
 pub fn shutdown() {
-    let mut nvme = NVME.lock();
+    let mut nvme = nvme_lock();
     let Some(state) = nvme.as_mut() else { return };
     let _ = state.io_ready();
     AVAILABLE.store(false, Ordering::Relaxed);
@@ -904,7 +929,7 @@ pub fn is_available() -> bool {
 }
 
 pub fn capacity() -> Option<u64> {
-    NVME.lock().as_ref().map(|s| s.total_lbas)
+    nvme_lock().as_ref().map(|s| s.total_lbas)
 }
 
 pub fn block_count() -> Option<u64> {
@@ -956,7 +981,7 @@ fn read_lbas(stretches: &[(u64, usize)], out: &mut [u8]) -> Result<(), BlkError>
         });
     }
     let segs = segs_at(stretches, out.as_mut_ptr() as u64);
-    let mut nvme = NVME.lock();
+    let mut nvme = nvme_lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
     state.transfer(NVM_READ, 0, &segs)
 }
@@ -971,7 +996,7 @@ fn write_lbas(stretches: &[(u64, usize)], input: &[u8], flags: u32) -> Result<()
         });
     }
     let segs = segs_at(stretches, input.as_ptr() as u64);
-    let mut nvme = NVME.lock();
+    let mut nvme = nvme_lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
     state.transfer(NVM_WRITE, flags, &segs)
 }
@@ -1021,7 +1046,7 @@ pub fn write_blocks_batch(items: &[(u64, &[u8; BLOCK_SIZE])]) -> Result<(), BlkE
                 _ => segs.push(Seg { lba, addr, len: BLOCK_SIZE }),
             }
         }
-        let mut nvme = NVME.lock();
+        let mut nvme = nvme_lock();
         let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
         return state.transfer(NVM_WRITE, 0, &segs);
     }
@@ -1106,7 +1131,7 @@ fn record_drain(t0: u64, vector: crate::irq::Irq) {
 /// the npkFS commit ordering (superblock durable only after the data it points
 /// at). This is the durability barrier the 4-phase commit relies on.
 pub fn flush() -> Result<(), BlkError> {
-    let mut nvme = NVME.lock();
+    let mut nvme = nvme_lock();
     let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
     let mut cmd = SqEntry::zeroed();
     cmd.opcode = NVM_FLUSH;
@@ -1116,7 +1141,7 @@ pub fn flush() -> Result<(), BlkError> {
 }
 
 pub fn has_discard() -> bool {
-    match NVME.lock().as_ref() {
+    match nvme_lock().as_ref() {
         Some(state) => state.oncs & (1 << 2) != 0, // ONCS bit 2 = Dataset Management
         None => false,
     }
@@ -1141,7 +1166,7 @@ pub fn discard_ranges(ranges: &[(u64, u64)]) -> Result<(), BlkError> {
     }).peekable();
 
     while pieces.peek().is_some() {
-        let mut nvme = NVME.lock();
+        let mut nvme = nvme_lock();
         let state = nvme.as_mut().ok_or(BlkError::NotInitialized)?;
         if state.oncs & (1 << 2) == 0 {
             return Ok(()); // No DSM support, silent no-op (same as virtio)
@@ -1171,7 +1196,7 @@ pub fn discard_ranges(ranges: &[(u64, u64)]) -> Result<(), BlkError> {
 
 /// Return model name for display.
 pub fn model_name() -> Option<alloc::string::String> {
-    let nvme = NVME.lock();
+    let nvme = nvme_lock();
     let state = nvme.as_ref()?;
     let s = core::str::from_utf8(&state.model).unwrap_or("?").trim();
     Some(alloc::string::String::from(s))
@@ -1179,7 +1204,7 @@ pub fn model_name() -> Option<alloc::string::String> {
 
 /// Return serial number for display.
 pub fn serial_number() -> Option<alloc::string::String> {
-    let nvme = NVME.lock();
+    let nvme = nvme_lock();
     let state = nvme.as_ref()?;
     let s = core::str::from_utf8(&state.serial).unwrap_or("?").trim();
     Some(alloc::string::String::from(s))
@@ -1195,7 +1220,7 @@ pub fn max_blocks_per_cmd() -> u32 {
 /// if MSI-X isn't set up (poll-only). For the `disk` diagnostic — `fires > 0`
 /// proves the device-IRQ path works.
 pub fn msix_status() -> Option<(crate::irq::Irq, u64)> {
-    let guard = NVME.lock();
+    let guard = nvme_lock();
     let v = guard.as_ref()?.msix_vector;
     if v == 0 {
         return None;
@@ -1207,7 +1232,7 @@ pub fn msix_status() -> Option<(crate::irq::Irq, u64)> {
 /// Shows whether our programming stuck (entry unmasked, MSI-X enabled, addr/
 /// data correct), to tell "programmed but no IRQ" apart without the boot log.
 pub fn msix_debug() -> Option<crate::pci::MsixDebug> {
-    let dev = NVME.lock().as_ref().map(|s| s.pci_addr)?;
+    let dev = nvme_lock().as_ref().map(|s| s.pci_addr)?;
     crate::pci::msix_debug(dev, 0)
 }
 

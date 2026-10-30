@@ -525,8 +525,9 @@ pub fn gc() -> Result<GcStats, Error> {
     // tell which step a missed frame or a slow read falls into (#161).
     if removed > 0 {
         let ms = |a: u64, b: u64| b.saturating_sub(a) * 1000 / crate::interrupts::tsc_freq().max(1);
-        crate::kprintln!("[npk] gc: mark {} ms, sweep {} ms, trim {} ms; longest wait for the store {} us",
-            ms(t_mark, t_sweep), ms(t_sweep, t_trim), ms(t_trim, t_end), storage::take_longest_wait_us());
+        crate::kprintln!("[npk] gc: mark {} ms, sweep {} ms, trim {} ms; longest wait for the store {} us, for the disk {} us",
+            ms(t_mark, t_sweep), ms(t_sweep, t_trim), ms(t_trim, t_end), storage::take_longest_wait_us(),
+            crate::nvme::take_longest_wait_us());
     }
 
     // Reset pressure — this sweep covered everything orphaned so far.
