@@ -164,7 +164,7 @@ pub fn describe(der: &[u8]) -> Option<CertInfo> {
     let c = x509::parse_x509(der)?;
     let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
     Some(CertInfo {
-        subject: text(c.subject_cn),
+        subject: text(x509::display_name(c.subject_name)),
         issuer: text(c.issuer_cn),
         not_before: parse_asn1_time(c.not_before),
         not_after: parse_asn1_time(c.not_after),

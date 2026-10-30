@@ -38,6 +38,8 @@ pub struct X509Cert<'a> {
     pub tbs_raw: &'a [u8],
     pub issuer_cn: &'a [u8],
     pub subject_cn: &'a [u8],
+    /// The subject Name's contents, for `display_name`.
+    pub subject_name: &'a [u8],
     pub key_type: KeyType,
     /// RSA: modulus bytes. ECDSA: raw public key point (uncompressed).
     pub public_key: &'a [u8],
@@ -68,6 +70,8 @@ pub struct X509Cert<'a> {
 
 // OID: 2.5.4.3 (commonName)
 const OID_CN: &[u8] = &[0x55, 0x04, 0x03];
+const OID_O: &[u8] = &[0x55, 0x04, 0x0A];
+const OID_OU: &[u8] = &[0x55, 0x04, 0x0B];
 // OID: 1.2.840.113549.1.1.1 (rsaEncryption)
 const OID_RSA: &[u8] = &[0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
 // OID: 1.2.840.10045.2.1 (ecPublicKey)
@@ -170,7 +174,7 @@ pub fn parse_x509(der: &[u8]) -> Option<X509Cert<'_>> {
     }
 
     Some(X509Cert {
-        tbs_raw, issuer_cn, subject_cn,
+        tbs_raw, issuer_cn, subject_cn, subject_name: subject_tlv.value,
         key_type, public_key, rsa_exponent,
         sig_algo_oid, signature, not_before, not_after,
         is_ca, path_len_constraint,
@@ -186,13 +190,32 @@ fn extract_algo_oid(algo_seq: &[u8]) -> Option<&[u8]> {
 }
 
 fn extract_cn(name_data: &[u8]) -> &[u8] {
+    extract_attr(name_data, OID_CN)
+}
+
+/// What to call a Name: its CN, unless that is empty or only repeats the
+/// organization (GlobalSign names four roots "GlobalSign"), then its OU,
+/// then its O.
+pub fn display_name(name_data: &[u8]) -> &[u8] {
+    let (cn, o, ou) = (extract_attr(name_data, OID_CN), extract_attr(name_data, OID_O),
+                       extract_attr(name_data, OID_OU));
+    if !cn.is_empty() && (cn != o || ou.is_empty()) {
+        cn
+    } else if !ou.is_empty() {
+        ou
+    } else {
+        o
+    }
+}
+
+fn extract_attr<'a>(name_data: &'a [u8], attr: &[u8]) -> &'a [u8] {
     for set_tlv in asn1::parse_sequence_contents(name_data) {
         if set_tlv.tag != TAG_SET { continue; }
         for atv in asn1::parse_sequence_contents(set_tlv.value) {
             if atv.tag != TAG_SEQUENCE { continue; }
             let mut parts = asn1::parse_sequence_contents(atv.value);
             if let Some(oid) = parts.next() {
-                if asn1::oid_matches(&oid, OID_CN) {
+                if asn1::oid_matches(&oid, attr) {
                     if let Some(val) = parts.next() {
                         if val.tag == TAG_PRINTABLE_STRING
                             || val.tag == TAG_UTF8_STRING
