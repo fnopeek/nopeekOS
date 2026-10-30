@@ -10,8 +10,8 @@ set -euo pipefail
 
 # Bump both together. The sha256 comes from
 # https://cdn.kernel.org/pub/linux/kernel/v6.x/sha256sums.asc
-LINUX_VERSION="${LINUX_VERSION:-6.18.55}"
-LINUX_SHA256="${LINUX_SHA256:-f410638061a165c12f42ab871d2f3fcd525515359b5faeee80969cff84524df9}"
+LINUX_VERSION="${LINUX_VERSION:-6.18.60}"
+LINUX_SHA256="${LINUX_SHA256:-3c2f44ef6acc021a7ad444d9a2e6ec1ef488ff09368793d0004a6080f69d621e}"
 SRC_CACHE="${SRC_CACHE:-$HOME/.cache/nopeekos/linux-src}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
