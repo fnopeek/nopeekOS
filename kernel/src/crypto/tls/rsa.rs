@@ -3,14 +3,17 @@
 //! PKCS#1 v1.5 for certificate signatures, PSS for the TLS 1.3
 //! CertificateVerify. SHA-256 / SHA-384 only; SHA-1 is rejected.
 
-use rsa::{RsaPublicKey, BigUint};
+use rsa::{RsaPublicKey, BoxedUint};
 use rsa::signature::Verifier;
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use sha2::{Sha256, Sha384};
 
 fn build_pubkey(modulus: &[u8], exponent: &[u8]) -> Option<RsaPublicKey> {
-    let n = BigUint::from_bytes_be(modulus);
-    let e = BigUint::from_bytes_be(exponent);
+    // Public values, so variable time is fine. DER may prefix a zero byte,
+    // which would otherwise widen the integer's precision.
+    let strip = |b: &[u8]| -> usize { b.iter().take_while(|&&x| x == 0).count() };
+    let n = BoxedUint::from_be_slice_vartime(&modulus[strip(modulus)..]);
+    let e = BoxedUint::from_be_slice_vartime(&exponent[strip(exponent)..]);
     RsaPublicKey::new(n, e).ok()
 }
 

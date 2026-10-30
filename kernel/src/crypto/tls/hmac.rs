@@ -4,7 +4,7 @@
 //! SHA-384 variants for TLS_AES_256_GCM_SHA384.
 
 use alloc::vec::Vec;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Sha256, Sha384};
 
 type HmacSha256 = Hmac<Sha256>;

@@ -297,8 +297,8 @@ fn p384_keygen() -> P384KeyPair {
     };
 
     // Compute public key (uncompressed point)
-    use p384::elliptic_curve::sec1::ToEncodedPoint;
-    let pub_point = secret.public_key().to_encoded_point(false);
+    use p384::elliptic_curve::sec1::ToSec1Point;
+    let pub_point = secret.public_key().to_sec1_point(false);
     let pub_bytes = pub_point.as_bytes();
     let mut public_uncompressed = [0u8; 97];
     public_uncompressed.copy_from_slice(&pub_bytes[..97]);
@@ -307,13 +307,8 @@ fn p384_keygen() -> P384KeyPair {
 }
 
 fn p384_ecdh(secret: &p384::SecretKey, server_pub_bytes: &[u8]) -> Result<Vec<u8>, TlsError> {
-    use p384::elliptic_curve::sec1::FromEncodedPoint;
-
-    let server_point = p384::EncodedPoint::from_bytes(server_pub_bytes)
+    let server_pk = p384::PublicKey::from_sec1_bytes(server_pub_bytes)
         .map_err(|_| TlsError::HandshakeFailed("invalid P-384 point"))?;
-    let server_pk: Option<p384::PublicKey> = p384::PublicKey::from_encoded_point(&server_point).into();
-    let server_pk = server_pk
-        .ok_or(TlsError::HandshakeFailed("P-384 point not on curve"))?;
 
     let shared = p384::ecdh::diffie_hellman(
         secret.to_nonzero_scalar(),

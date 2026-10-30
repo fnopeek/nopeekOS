@@ -483,13 +483,8 @@ pub fn verify_certificate_verify(leaf_der: &[u8], scheme: u16, content: &[u8], s
 fn ecdsa_p256_verify_sha256(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool {
     use p256::ecdsa::{VerifyingKey, Signature as P256Sig};
     use p256::ecdsa::signature::hazmat::PrehashVerifier;
-    use p256::EncodedPoint;
 
-    let point = match EncodedPoint::from_bytes(pubkey) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let vk = match VerifyingKey::from_encoded_point(&point) {
+    let vk = match VerifyingKey::from_sec1_bytes(pubkey) {
         Ok(k) => k,
         Err(_) => return false,
     };
@@ -506,13 +501,8 @@ fn ecdsa_p256_verify_sha256(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool
 fn ecdsa_p384_verify_sha384(pubkey: &[u8], tbs: &[u8], signature: &[u8]) -> bool {
     use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
     use p384::ecdsa::signature::hazmat::PrehashVerifier;
-    use p384::EncodedPoint;
 
-    let point = match EncodedPoint::from_bytes(pubkey) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let vk = match VerifyingKey::from_encoded_point(&point) {
+    let vk = match VerifyingKey::from_sec1_bytes(pubkey) {
         Ok(k) => k,
         Err(_) => return false,
     };
@@ -540,13 +530,8 @@ pub fn verify_p384_sha384(pubkey: &[u8], data: &[u8], signature: &[u8]) -> bool 
 pub fn verify_p384_prehash_384(pubkey: &[u8], prehash: &[u8; 48], signature: &[u8]) -> bool {
     use p384::ecdsa::{VerifyingKey, Signature as P384Sig};
     use p384::ecdsa::signature::hazmat::PrehashVerifier;
-    use p384::EncodedPoint;
 
-    let point = match EncodedPoint::from_bytes(pubkey) {
-        Ok(p) => p,
-        Err(_) => return false,
-    };
-    let vk = match VerifyingKey::from_encoded_point(&point) {
+    let vk = match VerifyingKey::from_sec1_bytes(pubkey) {
         Ok(k) => k,
         Err(_) => return false,
     };

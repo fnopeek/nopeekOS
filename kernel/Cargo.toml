@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.785.0"
+version = "0.786.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["nopeek"]
@@ -42,63 +42,53 @@ default-features = false
 # X25519 are still hand-rolled (csprng.rs / aead.rs / tls/x25519.rs) and
 # could be replaced by the crates.
 #
-# Held back on purpose; do not update this block on its own.
-# RustCrypto split into two incompatible generations:
-#
-#   sha2 0.10 · hmac/hkdf 0.12 · ecdsa 0.16 · p256/p384 0.13 → digest 0.10, signature 2
-#   sha2 0.11 · hmac/hkdf 0.13 · ecdsa 0.17 · p256/p384 0.14 → digest 0.11, signature 3
-#
-# `rsa` has not released the new generation (it wants digest 0.10 /
-# sha2 0.10 / signature <2.3). We need RSA for X.509 chains, so moving
-# this block alone drags in both sha2 + digest versions and
-# breaks the type match where a Sha384 digest is fed to Pkcs1v15.
-# Move all of it together, once rsa ships the new generation.
-#
-# The symmetric side (aes/aes-gcm/ctr/ghash below) has no digest dep and
-# already moved.
+# The hash/signature block below moves as one RustCrypto generation
+# (digest 0.11, signature 3): sha2 0.11 · hmac/hkdf 0.13 · ecdsa 0.17 ·
+# p256/p384 0.14 · rsa 0.10. Mixing generations breaks the type match where
+# a Sha384 digest is fed to Pkcs1v15. argon2/blake2 stay on digest 0.10;
+# nothing passes digests between the two.
 [dependencies.sha2]
-version = "0.10"
+version = "0.11"
 default-features = false
 # `oid` feature exposes Sha256/Sha384 as `AssociatedOid`, required by
 # `rsa::Pkcs1v15Sign::new::<D>()` to build the DigestInfo prefix.
 features = ["oid"]
 
 [dependencies.hmac]
-version = "0.12"
+version = "0.13"
 default-features = false
 
 [dependencies.hkdf]
-version = "0.12"
+version = "0.13"
 default-features = false
 
 # ECDSA signature verification (for TLS certificate chain validation)
 [dependencies.p256]
-version = "0.13"
+version = "0.14"
 default-features = false
 features = ["ecdsa"]
 
 [dependencies.p384]
-version = "0.13"
+version = "0.14"
 default-features = false
 features = ["ecdsa", "ecdh"]
 
 [dependencies.ecdsa]
-version = "0.16"
+version = "0.17"
 default-features = false
-features = ["verifying"]
+features = ["der"]
 
-# RSA PKCS#1 v1.5 signature verification for X.509 chains.
-# Constant-time BigUint via `crypto-bigint`. This crate pins the whole
-# hash/signature block above to the old RustCrypto generation; watch it
-# for a release past 0.9.
+# RSA PKCS#1 v1.5 and PSS signature verification for X.509 chains and
+# CertificateVerify; only public-key operations are used. 0.10 is a
+# release candidate: move to the final release when it ships.
 [dependencies.rsa]
-version = "0.9"
+version = "0.10.0-rc.19"
 default-features = false
 
 # Argon2id for the disk keyslot: turns the passphrase into the key that
 # unwraps the data key (RFC 9106). Only the raw KDF is used; the
 # password-hash string format is left out. blake2 0.10 sits on digest 0.10,
-# the same generation as the sha2 block above.
+# the generation before the sha2 block above.
 [dependencies.argon2]
 version = "0.5"
 default-features = false
