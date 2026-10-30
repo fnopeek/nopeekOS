@@ -147,7 +147,15 @@ fn failed(status: Result<i32, &str>) {
     if SCENES_FAILED.fetch_add(1, Ordering::Relaxed) < FAILURES_LOGGED {
         match status {
             Err(why) => crate::kprintln!("[npk] gpu: scene on the CPU, {}", why),
-            Ok(-62) => crate::kprintln!("[npk] gpu: scene on the CPU, the module did not finish in time"),
+            Ok(-62) => match crate::gpu::gpudev::take_missed() {
+                Some((core, Some(task))) => crate::kprintln!(
+                    "[npk] gpu: scene on the CPU, the module did not take it: its core {} ran the task '{}'",
+                    core, task),
+                Some((core, None)) => crate::kprintln!(
+                    "[npk] gpu: scene on the CPU, the module did not take it (core {}, no native task there)",
+                    core),
+                None => crate::kprintln!("[npk] gpu: scene on the CPU, the module did not finish in time"),
+            },
             Ok(e) => crate::kprintln!("[npk] gpu: scene on the CPU, the module failed it ({})", e),
         }
     }

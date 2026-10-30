@@ -314,6 +314,18 @@ static AHEAD: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 /// that job (`STALL_SEQ`), nothing on the desktop's path waits for it and
 /// the CPU does its scenes and copies.
 static STALLED: AtomicBool = AtomicBool::new(false);
+
+/// The core the module last took jobs on (`poll`), and, for the last job it
+/// did not take before its deadline, the native task that held that core
+/// then: a task that runs to completion keeps a driver's fiber off its core.
+static MODULE_CORE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
+static MISSED: Mutex<Option<(usize, Option<&'static str>)>> = Mutex::new(None);
+
+/// Why the module did not take the last job it missed: its core, and the
+/// native task running there at the deadline. Once.
+pub fn take_missed() -> Option<(usize, Option<&'static str>)> {
+    MISSED.lock().take()
+}
 static STALL_SEQ: AtomicU32 = AtomicU32::new(0);
 static STALL_TSC: AtomicU64 = AtomicU64::new(0);
 static STALLS: AtomicU64 = AtomicU64::new(0);
@@ -601,6 +613,7 @@ pub fn poll(dev: PciAddr, out: &mut [u8]) -> i32 {
     if st.owner != Some(dev) {
         return -1;
     }
+    MODULE_CORE.store(crate::smp::per_core::current_core_id(), Ordering::Relaxed);
     let mut n = 0;
     while (n + 1) * JOB_BYTES <= out.len() {
         let Some(job) = st.queue.pop_front() else { break };
@@ -1170,6 +1183,10 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
         drop(st);
         if !taken {
             mark_done(seq);
+            let core = MODULE_CORE.load(Ordering::Relaxed);
+            if core != usize::MAX {
+                *MISSED.lock() = Some((core, crate::smp::per_core::native_task(core)));
+            }
         }
         if taken && READY.load(Ordering::Acquire) {
             stall(seq);
