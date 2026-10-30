@@ -467,17 +467,11 @@ fn current_terminal() -> u8 {
 
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering as AtOrd};
 
-const MAX_INTENT_JOBS: usize = 4;
-
 struct IntentJob {
     command: String,
     terminal_idx: u8,
     session_id: CapId,
 }
-
-static INTENT_JOBS: Mutex<[Option<IntentJob>; MAX_INTENT_JOBS]> = Mutex::new([
-    None, None, None, None,
-]);
 
 /// Maximum terminals (must match shade::terminal::MAX_TERMINALS).
 const MAX_TERMS: usize = 256;
@@ -498,37 +492,21 @@ pub fn has_running_intent(terminal_idx: u8) -> bool {
     INTENT_RUNNING[idx].load(AtOrd::Acquire)
 }
 
-/// Spawn an intent on a worker core. Returns true if dispatched.
-fn spawn_intent_on_worker(input: &str, terminal_idx: u8, session_id: CapId) -> bool {
-    let mut jobs = INTENT_JOBS.lock();
-    let slot = match jobs.iter().position(|j| j.is_none()) {
-        Some(i) => i,
-        None => return false,
-    };
-
-    jobs[slot] = Some(IntentJob { command: String::from(input), terminal_idx, session_id });
-    drop(jobs);
-
+/// Queue an intent for a worker core. The scheduler's inbox is the queue:
+/// every intent gets a worker, the later ones once one is free, and none
+/// falls back to running on Core 0.
+fn spawn_intent_on_worker(input: &str, terminal_idx: u8, session_id: CapId) {
+    let job = alloc::boxed::Box::new(IntentJob { command: String::from(input), terminal_idx, session_id });
     INTENT_RUNNING[terminal_idx as usize].store(true, AtOrd::Release);
-
-    crate::smp::scheduler::spawn(
-        "intent",
-        intent_worker_task,
-        slot as u64,
-    );
-
-    true
+    crate::smp::scheduler::spawn("intent", intent_worker_task,
+        alloc::boxed::Box::into_raw(job) as u64);
 }
 
 /// Worker-core entry: executes an intent, writes output to the terminal.
 fn intent_worker_task(arg: u64) {
-    let slot = arg as usize;
-    let job = {
-        let mut jobs = INTENT_JOBS.lock();
-        if slot >= MAX_INTENT_JOBS { return; }
-        jobs[slot].take()
-    };
-    let job = match job { Some(j) => j, None => return };
+    // SAFETY: `arg` is the `Box<IntentJob>` that `spawn_intent_on_worker`
+    // leaked for exactly this one task.
+    let job = unsafe { alloc::boxed::Box::from_raw(arg as *mut IntentJob) };
 
     let input = job.command.trim();
 
@@ -1811,11 +1789,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // Check if this intent can run on a worker core
         let verb = input.splitn(2, ' ').next().unwrap_or("");
         if !is_core0_intent(verb) && crate::shade::is_active() {
-            let term_idx = crate::shade::terminal::active_idx();
-            if spawn_intent_on_worker(input, term_idx, session_id) {
-                // Worker prints prompt when done via from_intent transition
-                continue;
-            }
+            // Worker prints prompt when done via from_intent transition
+            spawn_intent_on_worker(input, crate::shade::terminal::active_idx(), session_id);
+            continue;
         }
 
         // Core-0 intent output goes to the loop it was typed in (not the

@@ -432,7 +432,8 @@ const FUEL_SLICE: i64 = 2_000_000;
 /// instance's budget and, while some is left, let a runnable fiber of this
 /// core go first (`fiber::yield_if_contended`) — preemption of a computing
 /// module at a point the generator chose, so the kernel stays cooperative.
-/// A spent budget leaves `FUEL` non-positive, and generated code traps.
+/// A spent budget, or a Ctrl+C for a foreground run, leaves `FUEL`
+/// non-positive, and generated code traps.
 extern "C" fn refuel(ctx: *mut u64) {
     // SAFETY: `ctx` is the instance context of the running module, laid out
     // by `forge_core::vmctx`.
@@ -440,9 +441,9 @@ extern "C" fn refuel(ctx: *mut u64) {
         let fuel = *ctx.add(vmctx::FUEL as usize / 8) as i64;
         let reserve = *ctx.add(vmctx::FUEL_RESERVE as usize / 8) as i64;
         let total = reserve.saturating_add(fuel);
-        if total <= 0 {
+        if total <= 0 || crate::wasm::foreground_cancelled() {
             *ctx.add(vmctx::FUEL_RESERVE as usize / 8) = 0;
-            *ctx.add(vmctx::FUEL as usize / 8) = total as u64;
+            *ctx.add(vmctx::FUEL as usize / 8) = total.min(0) as u64;
             return;
         }
         crate::smp::fiber::yield_if_contended();

@@ -45,6 +45,46 @@ pub fn set_engine_default(forge: bool) {
     crate::config::set("wasm.engine", if forge { "forge" } else { "wasmi" });
 }
 
+/// Fuel for a run in the foreground of a terminal (`run`, `python`): no
+/// budget, as Linux has none unless `RLIMIT_CPU` is set; Ctrl+C ends it at
+/// the next fuel slice (`forge_rt::refuel`). wasmi, the fallback engine,
+/// has no such point and keeps a budget instead.
+pub const UNTIL_CANCELLED: u64 = u64::MAX;
+const WASMI_FOREGROUND_FUEL: u64 = 600_000_000_000;
+
+fn wasmi_fuel(fuel: u64) -> u64 {
+    if fuel == UNTIL_CANCELLED { WASMI_FOREGROUND_FUEL } else { fuel }
+}
+
+/// Per core, a foreground run is in progress there. Runs are native tasks,
+/// so they stay on their core.
+static FOREGROUND: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
+
+struct Foreground(usize);
+
+impl Drop for Foreground {
+    fn drop(&mut self) {
+        FOREGROUND[self.0].store(false, AtOrd::Release);
+    }
+}
+
+/// Mark this core's run as one Ctrl+C ends, for an `UNTIL_CANCELLED` budget.
+fn foreground(fuel: u64) -> Option<Foreground> {
+    let cid = crate::smp::per_core::current_core_id();
+    if fuel != UNTIL_CANCELLED || cid >= 256 {
+        return None;
+    }
+    crate::intent::clear_cancel();
+    FOREGROUND[cid].store(true, AtOrd::Release);
+    Some(Foreground(cid))
+}
+
+/// Ctrl+C asked to end the foreground run on this core.
+pub fn foreground_cancelled() -> bool {
+    let cid = crate::smp::per_core::current_core_id();
+    cid < 256 && FOREGROUND[cid].load(AtOrd::Acquire) && crate::intent::cancel_requested()
+}
+
 pub struct WasmResult {
     pub output: String,
 }
@@ -838,7 +878,7 @@ fn execute_inner(
         files: Vec::new(),
     });
     store.limiter(|s| &mut s.limits);
-    store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
+    store.set_fuel(wasmi_fuel(fuel)).map_err(|_| WasmError::ExecutionFailed)?;
 
     let mut linker = <Linker<HostState>>::new(&engine);
     register_host_functions(&mut linker)?;
@@ -923,7 +963,7 @@ pub fn execute_wasi(
         files: Vec::new(),
     });
     store.limiter(|s| &mut s.limits);
-    store.set_fuel(fuel).map_err(|_| WasmError::ExecutionFailed)?;
+    store.set_fuel(wasmi_fuel(fuel)).map_err(|_| WasmError::ExecutionFailed)?;
 
     let mut linker = <Linker<HostState>>::new(&engine);
     register_host_functions(&mut linker)?;
@@ -1003,11 +1043,15 @@ fn execute_inner_forge(
     inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
 
     let a = |i: usize| args.get(i).and_then(|v| v.i32()).unwrap_or(0) as u32;
+    let fg = foreground(fuel);
     let (_ret, trap) = inst.call(off, a(0), a(1), a(2));
+    let cancelled = fg.is_some() && crate::intent::cancel_requested();
+    drop(fg);
 
     cleanup_instance_state(&mut hs);
     Some(match trap {
         forge_core::trap::NONE => Ok(WasmResult { output: core::mem::take(&mut hs.output) }),
+        forge_core::trap::OUT_OF_FUEL if cancelled => Err(WasmError::Cancelled),
         forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
         other => {
             kprintln!("[npk] forge: {} endete mit {}", func_name, forge_core::trap::name(other));
@@ -1075,7 +1119,10 @@ pub fn execute_wasi_forge(
 
     crate::kdebug!("[npk]   forge: uebersetzen {} ms ({} B x86)", compile_ms, m.code.len());
     let t_r = crate::interrupts::ticks();
+    let fg = foreground(fuel);
     let (_ret, trap) = inst.call(entry, 0, 0, 0);
+    let cancelled = fg.is_some() && crate::intent::cancel_requested();
+    drop(fg);
     crate::kdebug!("[npk]   forge: laufen {} ms",
         crate::interrupts::ticks().saturating_sub(t_r) * 10);
     match trap {
@@ -1084,6 +1131,7 @@ pub fn execute_wasi_forge(
         forge_core::trap::NONE => Ok(crate::wasi::exit_status(&hs).unwrap_or(0)),
         // The normal exit: `proc_exit` has stored the status.
         forge_core::trap::EXIT => Ok(crate::wasi::exit_status(&hs).unwrap_or(0)),
+        forge_core::trap::OUT_OF_FUEL if cancelled => Err(WasmError::Cancelled),
         forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
         other => {
             kprintln!("[npk] forge: python endete mit {}", forge_core::trap::name(other));
@@ -1384,6 +1432,7 @@ pub enum WasmError {
     FunctionNotFound,
     ExecutionFailed,
     FuelExhausted,
+    Cancelled,
     HostFunctionError,
 }
 
@@ -1396,6 +1445,7 @@ impl core::fmt::Display for WasmError {
             WasmError::FunctionNotFound => write!(f, "function not found"),
             WasmError::ExecutionFailed => write!(f, "execution failed"),
             WasmError::FuelExhausted => write!(f, "execution limit exceeded (fuel exhausted)"),
+            WasmError::Cancelled => write!(f, "cancelled"),
             WasmError::HostFunctionError => write!(f, "host function error"),
         }
     }

@@ -20,14 +20,6 @@ const MODULE: &str = "sys/wasm/python";
 /// npkFS directory holding `lib/python313.zip` + `lib/python3.13/os.py`.
 const BUNDLE: &str = "sys/python";
 
-/// Fuel for one Python run.
-///
-/// Interpreter startup and stdlib imports alone cost several G, so the 10 G
-/// that `run` grants would stop almost any real script. 600 G leaves room
-/// for real computation while still being a ceiling (on the order of a
-/// minute).
-const PYTHON_FUEL: u64 = 600_000_000_000;
-
 pub fn intent_python(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {
     intent_python_on(args, vault, session, crate::wasm::forge_is_default())
 }
@@ -129,9 +121,9 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     crate::heap::reset_counters();
     let t0 = crate::interrupts::ticks();
     let r = if use_forge {
-        crate::wasm::execute_wasi_forge(&wasm, cap, PYTHON_FUEL, ctx, term)
+        crate::wasm::execute_wasi_forge(&wasm, cap, crate::wasm::UNTIL_CANCELLED, ctx, term)
     } else {
-        crate::wasm::execute_wasi(&wasm, cap, PYTHON_FUEL, ctx, term)
+        crate::wasm::execute_wasi(&wasm, cap, crate::wasm::UNTIL_CANCELLED, ctx, term)
     };
     // Timed here rather than inside the engine, so both engines are measured
     // the same way.

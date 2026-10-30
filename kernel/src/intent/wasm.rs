@@ -71,10 +71,6 @@ pub fn intent_run(args: &str) {
         None
     };
 
-    // Fuel for the blocking path below: 10 B. wasmi charges ~1 fuel per
-    // instruction, and bulk memory ops on 100+ MB buffers burn hundreds of
-    // millions in one call; 10 B covers that without making infinite loops
-    // free.
     // A window app belongs on a worker core, not in the shell loop. It is
     // recognised by declaring RENDER itself (the fixed set grants RENDER to
     // everyone). A blocking run would also have `pid: 0`, and
@@ -90,7 +86,7 @@ pub fn intent_run(args: &str) {
     }
 
     match wasm::execute_sandboxed_with_arg(
-        &wasm_bytes, func_name, &args_vec, module_cap, 10_000_000_000, launch_arg,
+        &wasm_bytes, func_name, &args_vec, module_cap, wasm::UNTIL_CANCELLED, launch_arg,
     ) {
         Ok(result) => {
             if !result.output.is_empty() {
