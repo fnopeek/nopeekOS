@@ -1,0 +1,101 @@
+# What nopeekOS ships or builds with, where each version is read from, and
+# where upstream releases and advisories come from. `tools/stack/check.py`
+# reads this file and writes `stack.json`.
+#
+# version: a literal, or `file` + `regex` (first group) read from the repo.
+# upstream: how to find the newest release on the same line.
+# cve: how to find known vulnerabilities for the version in use.
+#   osv-commit  OSV query by the commit of the release tag (git ranges)
+#   none        no feed; `note` says why
+
+[[component]]
+name = "Linux (microVM guest kernel)"
+area = "guest"
+file = "microvm-linux/build.sh"
+regex = 'LINUX_VERSION:-([0-9.]+)'
+upstream = { kind = "kernel-org", line = "6.18" }
+cve = { kind = "osv-commit", repo = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git", tag = "v{version}" }
+
+[[component]]
+name = "Linux (driver port base)"
+area = "kernel"
+version = "6.18.55"
+note = "Drivers are ported from this Linux release; a Linux fix in a ported driver has to be ported by hand."
+upstream = { kind = "kernel-org", line = "6.18" }
+cve = { kind = "osv-commit", repo = "https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git", tag = "v{version}" }
+
+[[component]]
+name = "CPython"
+area = "module"
+file = "release/modules/python.version"
+regex = '([0-9.]+)'
+upstream = { kind = "git-tags", repo = "https://github.com/python/cpython", tag = "v{line}.*", line_of = 2 }
+cve = { kind = "osv-commit", repo = "https://github.com/python/cpython", tag = "v{version}" }
+
+[[component]]
+name = "Expat (in CPython)"
+area = "module"
+version = "2.9.0"
+upstream = { kind = "git-tags", repo = "https://github.com/libexpat/libexpat", tag = "R_*", sep = "_" }
+cve = { kind = "osv-commit", repo = "https://github.com/libexpat/libexpat", tag = "R_{version_}" }
+
+[[component]]
+name = "Firefox (microVM guest)"
+area = "guest"
+file = "microvm-userspace/packages-firefox.txt"
+regex = '^firefox-([0-9.]+)-r'
+upstream = { kind = "mozilla", key = "LATEST_FIREFOX_VERSION" }
+cve = { kind = "none", note = "Covered by the Alpine security database below." }
+
+[[component]]
+name = "Alpine base (microVM guest)"
+area = "guest"
+file = "microvm-userspace/alpine.env"
+regex = 'ALPINE_VERSION:-([0-9]+)'
+note = "Edge minirootfs pinned by date; packages are checked one by one below."
+cve = { kind = "none", note = "Per package: see Alpine packages." }
+
+[[component]]
+name = "Mozilla root store"
+area = "kernel"
+version_cmd = "certs"
+note = "Roots under release/assets/certs, from NSS certdata.txt via tools/certs/mozilla.py."
+cve = { kind = "none", note = "Distrusts arrive by rerunning tools/certs/mozilla.py." }
+
+[[component]]
+name = "linux-firmware (GPU firmware)"
+area = "module"
+version_cmd = "pacman:linux-firmware"
+note = "Staged from the build host's /lib/firmware by tools/stage-module.sh."
+upstream = { kind = "git-tags", repo = "https://gitlab.com/kernel-firmware/linux-firmware.git", tag = "2*" }
+cve = { kind = "none", note = "No advisory feed for firmware blobs." }
+
+[[component]]
+name = "Rust toolchain"
+area = "build"
+file = "rust-toolchain.toml"
+regex = 'channel = "([^"]+)"'
+cve = { kind = "none", note = "Build tool; crates are checked below." }
+
+[[component]]
+name = "clang (wasi builds)"
+area = "build"
+version_cmd = "pacman:clang"
+cve = { kind = "none", note = "Build tool." }
+
+[[component]]
+name = "wasi-libc (CPython sysroot)"
+area = "build"
+version_cmd = "pacman:wasi-libc"
+cve = { kind = "none", note = "Build tool; linked into python.wasm." }
+
+# Every Cargo.lock in the repo is checked against RustSec through OSV. A lock
+# under one of these paths is development tooling, not shipped.
+[crates]
+dev_paths = ["forge/harness", "tools/regen-icons", "tools/hpack-test", "tools/wasi-path-test", "/harness"]
+
+# The guest's exact package list, checked against Alpine's security database.
+[alpine]
+packages = "microvm-userspace/packages-firefox.txt"
+branch = "edge"
+repos = ["main", "community"]
