@@ -279,6 +279,7 @@ pub fn tick_link_and_reconfigure() {
     let now = crate::interrupts::rdtsc();
     if now < NEXT_LINK_CHECK.load(Ordering::Relaxed) { return; }
     NEXT_LINK_CHECK.store(now + crate::interrupts::tsc_freq(), Ordering::Relaxed); // +~1 s
+    crate::time::tick();
 
     netdev::refresh_link_state();
     let act = netdev::active_id();

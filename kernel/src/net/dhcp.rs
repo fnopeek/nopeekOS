@@ -228,9 +228,13 @@ impl Inner {
 fn run(acts: Vec<Act>) {
     for a in acts {
         match a {
-            Act::Udp(Dest::Broadcast, b) =>
-                udp::send_from([0; 4], [255; 4], CLIENT_PORT, SERVER_PORT, &b),
-            Act::Udp(Dest::Server(s), b) => udp::send(s, CLIENT_PORT, SERVER_PORT, &b),
+            // A failed send is left to the retransmission, as in systemd.
+            Act::Udp(Dest::Broadcast, b) => {
+                let _ = udp::send_from([0; 4], [255; 4], CLIENT_PORT, SERVER_PORT, &b);
+            }
+            Act::Udp(Dest::Server(s), b) => {
+                let _ = udp::send(s, CLIENT_PORT, SERVER_PORT, &b);
+            }
             Act::Arp(acd::Send::Probe(a)) => arp::send_acd([0; 4], a),
             Act::Arp(acd::Send::Announcement(a)) => arp::send_acd(a, a),
             Act::Apply(cfg, quiet) => apply(&cfg, quiet),

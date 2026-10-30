@@ -283,10 +283,12 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> 
     matches!(transmit(dst_ip, protocol, payload, ttl, Tx::Wait, None, None), Ok(Handed::Card))
 }
 
-/// `send` from `src`, whatever our address is: the DHCP client's packet
-/// socket sends from 0.0.0.0.
+/// Send from `src`, whatever our address is (the DHCP client's packet
+/// socket sends from 0.0.0.0). True once it is on its way: taken by the
+/// card, or waiting for ARP, which `neigh_resolve_output` reports as sent.
 pub fn send_from(src: [u8; 4], dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
-    matches!(transmit(dst_ip, protocol, payload, 64, Tx::Wait, None, Some(src)), Ok(Handed::Card))
+    matches!(transmit(dst_ip, protocol, payload, 64, Tx::Wait, None, Some(src)),
+        Ok(Handed::Card | Handed::Queued))
 }
 
 /// Send a TCP segment of a connection: DF set (`IP_PMTUDISC_WANT`), its

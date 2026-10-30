@@ -229,7 +229,10 @@ fn send_udp(tx: u32, server: [u8; 4], bytes: &[u8], next: &mut Out) {
         with(|r| r.udp_error(tx, t, &mut crate::csprng::random_u64, next));
         return;
     };
-    udp::send(server, port, DNS_PORT, bytes);
+    if !udp::send(server, port, DNS_PORT, bytes) {
+        let t = now();
+        with(|r| r.udp_send_failed(tx, t, &mut crate::csprng::random_u64, next));
+    }
 }
 
 /// One query over TCP (RFC 1035 §4.2.2, RFC 7766): connect, the message
@@ -304,7 +307,11 @@ pub fn lookup(name: &str) -> Outcome {
                 r.tick(t, &mut crate::csprng::random_u64, &mut out);
             }
         });
-        core::hint::spin_loop();
+        // Halt until the next poll period instead of spinning: the wait can
+        // last two minutes.
+        if out.send.is_empty() {
+            crate::interrupts::worker_idle_hlt();
+        }
     }
 }
 

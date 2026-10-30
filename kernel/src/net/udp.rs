@@ -2,30 +2,49 @@
 //!
 //! Stateless, unreliable transport. Foundation for DNS and DHCP.
 
+use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use spin::Mutex;
 use super::ipv4;
 
 const HEADER_LEN: usize = 8;
 
-/// Registered UDP listeners: (port, callback buffer)
-/// Simple model: one listener per port, incoming data buffered.
-const MAX_LISTENERS: usize = 8;
-const MAX_RECV_BUF: usize = 2048;
+/// `net.core.rmem_default`: what a listener holds unread before arrivals
+/// are dropped (`__udp_enqueue_schedule_skb`), counted in payload bytes.
+const RCVBUF: usize = 212_992;
+
+/// Ephemeral ports (RFC 6056 §3.2: all of 1024-65535), without the range
+/// the microVM's masquerade uses.
+const EPHEMERAL: core::ops::RangeInclusive<u16> = 1024..=65535;
+const NAT_PORTS: core::ops::Range<u16> = 20000..40000;
+
+struct Datagram {
+    src_ip: [u8; 4],
+    src_port: u16,
+    data: Vec<u8>,
+}
 
 struct UdpListener {
     port: u16,
-    buf: Vec<u8>,
-    src_ip: [u8; 4],
-    src_port: u16,
-    has_data: bool,
+    queue: VecDeque<Datagram>,
+    queued: usize,
     /// A hard ICMP error for a datagram it sent: (to address, to port).
     err: Option<([u8; 4], u16)>,
 }
 
-static LISTENERS: Mutex<[Option<UdpListener>; MAX_LISTENERS]> = Mutex::new(
-    [const { None }; MAX_LISTENERS]
-);
+static LISTENERS: Mutex<Vec<UdpListener>> = Mutex::new(Vec::new());
+
+/// Datagrams dropped because their listener's buffer was full (Linux MIB
+/// `RcvbufErrors`).
+static RCVBUF_ERRORS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+pub fn rcvbuf_errors() -> u64 {
+    RCVBUF_ERRORS.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn new_listener(port: u16) -> UdpListener {
+    UdpListener { port, queue: VecDeque::new(), queued: 0, err: None }
+}
 
 pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
     if data.len() < HEADER_LEN { return; }
@@ -42,18 +61,16 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
         return;
     }
 
-    // Deliver to registered listener
+    // Deliver to the registered listener, in order, while its buffer has room.
     let mut listeners = LISTENERS.lock();
-    for slot in listeners.iter_mut().flatten() {
-        if slot.port == dst_port {
-            let copy_len = payload.len().min(MAX_RECV_BUF);
-            slot.buf.clear();
-            slot.buf.extend_from_slice(&payload[..copy_len]);
-            slot.src_ip = src_ip;
-            slot.src_port = src_port;
-            slot.has_data = true;
+    if let Some(l) = listeners.iter_mut().find(|l| l.port == dst_port) {
+        if l.queued + payload.len() > RCVBUF {
+            RCVBUF_ERRORS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             return;
         }
+        l.queued += payload.len();
+        l.queue.push_back(Datagram { src_ip, src_port, data: payload.to_vec() });
+        return;
     }
     drop(listeners);
     // Nobody was home: a reply that arrives one microsecond after its waiter
@@ -82,14 +99,14 @@ pub fn icmp_error(e: &net_core::ip::IcmpError) {
     let sport = u16::from_be_bytes([t[0], t[1]]);
     let dport = u16::from_be_bytes([t[2], t[3]]);
     let mut listeners = LISTENERS.lock();
-    if let Some(l) = listeners.iter_mut().flatten().find(|l| l.port == sport) {
+    if let Some(l) = listeners.iter_mut().find(|l| l.port == sport) {
         l.err = Some((e.inner_dst(), dport));
     }
 }
 
 /// The hard ICMP error a listener's datagram drew, once.
 pub fn take_error(port: u16) -> Option<([u8; 4], u16)> {
-    LISTENERS.lock().iter_mut().flatten().find(|l| l.port == port).and_then(|l| l.err.take())
+    LISTENERS.lock().iter_mut().find(|l| l.port == port).and_then(|l| l.err.take())
 }
 
 
@@ -101,13 +118,14 @@ pub fn checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp: &[u8]) -> u16 {
     if c == 0 { 0xFFFF } else { c }
 }
 
-/// Send a UDP datagram
-pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
-    send_from(super::arp::our_ip(), dst_ip, src_port, dst_port, payload);
+/// Send a UDP datagram. False when it could not go out: no route, larger
+/// than the path MTU, or refused by the card (`udp_sendmsg`'s error).
+pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) -> bool {
+    send_from(super::arp::our_ip(), dst_ip, src_port, dst_port, payload)
 }
 
-/// Send a UDP datagram from `src_ip`.
-pub fn send_from(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
+/// `send` from `src_ip`.
+pub fn send_from(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) -> bool {
     let udp_len = (HEADER_LEN + payload.len()) as u16;
     let mut pkt = alloc::vec![0u8; udp_len as usize];
 
@@ -119,72 +137,37 @@ pub fn send_from(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16,
     let c = checksum(src_ip, dst_ip, &pkt);
     pkt[6..8].copy_from_slice(&c.to_be_bytes());
 
-    let _ = ipv4::send_from(src_ip, dst_ip, ipv4::PROTO_UDP, &pkt);
+    ipv4::send_from(src_ip, dst_ip, ipv4::PROTO_UDP, &pkt)
 }
 
-/// Register a listener on a UDP port. Returns false if no slot available.
-#[allow(dead_code)]
-pub fn listen(port: u16) -> bool {
-    let mut listeners = LISTENERS.lock();
-    // Already listening?
-    if listeners.iter().flatten().any(|l| l.port == port) { return true; }
-    if let Some(slot) = listeners.iter_mut().find(|s| s.is_none()) {
-        *slot = Some(UdpListener {
-            port,
-            buf: Vec::with_capacity(MAX_RECV_BUF),
-            src_ip: [0; 4],
-            src_port: 0,
-            has_data: false,
-            err: None,
-        });
-        true
-    } else {
-        false
-    }
-}
-
-/// Check if data is available on a port. Returns (src_ip, src_port, data) or None.
+/// The oldest unread datagram on a port: (source address, source port, data).
 pub fn recv(port: u16) -> Option<([u8; 4], u16, Vec<u8>)> {
     let mut listeners = LISTENERS.lock();
-    for slot in listeners.iter_mut().flatten() {
-        if slot.port == port && slot.has_data {
-            slot.has_data = false;
-            let data = slot.buf.clone();
-            return Some((slot.src_ip, slot.src_port, data));
-        }
-    }
-    None
+    let l = listeners.iter_mut().find(|l| l.port == port)?;
+    let d = l.queue.pop_front()?;
+    l.queued -= d.data.len();
+    Some((d.src_ip, d.src_port, d.data))
 }
 
-/// Listen on a random free port in the ephemeral range (RFC 6056), for a
-/// client that waits for one reply. The port is the reply's first secret:
-/// a fixed one lets anyone aim forged answers at it. None if every try is
-/// taken or the table is full.
+/// Listen on a random free ephemeral port (RFC 6056 §3.3.1), for a client
+/// that waits for one reply. The port is the reply's first secret: a fixed
+/// one lets anyone aim forged answers at it. None when every port is taken.
 pub fn listen_ephemeral() -> Option<u16> {
     let mut listeners = LISTENERS.lock();
-    for _ in 0..16 {
-        let port = 49152 + (crate::csprng::random_u64() % 16384) as u16;
-        if listeners.iter().flatten().any(|l| l.port == port) { continue; }
-        let slot = listeners.iter_mut().find(|s| s.is_none())?;
-        *slot = Some(UdpListener {
-            port,
-            buf: Vec::with_capacity(MAX_RECV_BUF),
-            src_ip: [0; 4],
-            src_port: 0,
-            has_data: false,
-            err: None,
-        });
-        return Some(port);
+    let free = |p: u16, ls: &Vec<UdpListener>| !NAT_PORTS.contains(&p) && !ls.iter().any(|l| l.port == p);
+    let span = (*EPHEMERAL.end() - *EPHEMERAL.start()) as u32 + 1;
+    let start = (crate::csprng::random_u64() % span as u64) as u32;
+    for i in 0..span {
+        let p = (*EPHEMERAL.start() as u32 + (start + i) % span) as u16;
+        if free(p, &listeners) {
+            listeners.push(new_listener(p));
+            return Some(p);
+        }
     }
     None
 }
 
-/// Stop listening on a port.
+/// Stop listening on a port; what it had not read goes.
 pub fn unlisten(port: u16) {
-    let mut listeners = LISTENERS.lock();
-    for slot in listeners.iter_mut() {
-        if slot.as_ref().map_or(false, |l| l.port == port) {
-            *slot = None;
-        }
-    }
+    LISTENERS.lock().retain(|l| l.port != port);
 }

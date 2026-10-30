@@ -625,6 +625,17 @@ impl Resolver {
         self.tx_complete(tx, TxState::Failed(Failure::Unreachable), now, rnd, out);
     }
 
+    /// The transaction's datagram could not be sent: at once to the next
+    /// server (`dns_transaction_go`, "Couldn't send? Try immediately
+    /// again, with a new server").
+    pub fn udp_send_failed(&mut self, tx: u32, now: u64, rnd: &mut impl FnMut() -> u64, out: &mut Out) {
+        let Some(ti) = self.tx_index(tx) else { return };
+        if self.txs[ti].state != TxState::Pending {
+            return;
+        }
+        self.retry(tx, true, now, rnd, out);
+    }
+
     /// A datagram from the transaction's server to its port.
     pub fn udp_reply(&mut self, tx: u32, b: &[u8], now: u64, rnd: &mut impl FnMut() -> u64, out: &mut Out) {
         let Some(ti) = self.tx_index(tx) else { return };

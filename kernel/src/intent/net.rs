@@ -787,6 +787,9 @@ pub fn intent_net_info() {
             nmac[0], nmac[1], nmac[2], nmac[3], nmac[4], nmac[5], state, age);
     }
     kprintln!("  Dropped unresolved: {}", crate::net::arp::unresolved());
+    if crate::net::udp::rcvbuf_errors() > 0 {
+        kprintln!("  Dropped in (UDP buffer full): {}", crate::net::udp::rcvbuf_errors());
+    }
     let (ins, no_route) = crate::net::ipv4::drops();
     for (why, n) in ins {
         kprintln!("  Dropped in ({}): {}", why, n);

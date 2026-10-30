@@ -14,43 +14,47 @@ use super::udp;
 const NTP_PORT: u16 = 123;
 const NTP_EPOCH_OFFSET: u64 = 2_208_988_800; // seconds from 1900 to 1970
 
-/// The time from an NTP server, as Unix seconds. Blocking, 3 s at most.
-pub fn query(server_ip: [u8; 4]) -> Option<u64> {
-    // Build SNTP request (48 bytes)
-    let mut req = [0u8; 48];
-    req[0] = 0x23; // LI=0, Version=4, Mode=3 (client)
-    // Transmit timestamp: random, not the time. The server copies it into
-    // the reply's origin field; it is the nonce that ties the reply to us
-    // and says nothing about our clock.
-    let nonce = crate::csprng::random_u64().to_be_bytes();
-    req[40..48].copy_from_slice(&nonce);
+/// Waits of the three attempts, in ticks: 1 s, 2 s, 4 s.
+const ATTEMPT_TICKS: [u64; 3] = [100, 200, 400];
 
-    // Warm the next hop's MAC — see `dns::resolve`: a blind spin pays its
-    // timeout even when the entry is already cached.
+/// The time from an NTP server, as Unix seconds. Blocking, 7 s at most:
+/// three requests, each with a fresh nonce, waiting longer each time.
+pub fn query(server_ip: [u8; 4]) -> Option<u64> {
+    // Warm the next hop's MAC; a blind wait pays its timeout even when the
+    // entry is already cached.
     if let Some(hop) = super::ipv4::arp_target_for(server_ip) {
         let _ = super::arp::resolve(hop, 10);
     }
-
     let local_port = udp::listen_ephemeral()?;
-    udp::send(server_ip, local_port, NTP_PORT, &req);
-
-    let t0 = crate::interrupts::ticks();
     let mut result = None;
-
-    loop {
-        super::poll();
-        if let Some((src, port, data)) = udp::recv(local_port) {
-            if src == server_ip && port == NTP_PORT {
-                if let Some(unix) = parse_reply(&data, &nonce) {
-                    result = Some(unix);
-                    break;
+    'attempts: for wait in ATTEMPT_TICKS {
+        // SNTP request; the transmit timestamp is random, not the time.
+        // The server copies it into the reply's origin field; it is the
+        // nonce that ties the reply to us and says nothing about our clock.
+        let mut req = [0u8; 48];
+        req[0] = 0x23; // LI=0, Version=4, Mode=3 (client)
+        let nonce = crate::csprng::random_u64().to_be_bytes();
+        req[40..48].copy_from_slice(&nonce);
+        if !udp::send(server_ip, local_port, NTP_PORT, &req) {
+            break;
+        }
+        let t0 = crate::interrupts::ticks();
+        while crate::interrupts::ticks() - t0 <= wait {
+            super::poll();
+            while let Some((src, port, data)) = udp::recv(local_port) {
+                if src == server_ip && port == NTP_PORT {
+                    if let Some(unix) = parse_reply(&data, &nonce) {
+                        result = Some(unix);
+                        break 'attempts;
+                    }
                 }
             }
+            if udp::take_error(local_port) == Some((server_ip, NTP_PORT)) {
+                break 'attempts;
+            }
+            crate::interrupts::worker_idle_hlt();
         }
-        if crate::interrupts::ticks() - t0 > 300 { break; } // 3s timeout
-        core::hint::spin_loop();
     }
-
     udp::unlisten(local_port);
     result
 }

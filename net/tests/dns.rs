@@ -493,3 +493,15 @@ fn a_query_ends_after_two_minutes_even_while_tcp_hangs() {
     }
     panic!("no outcome");
 }
+
+#[test]
+fn a_datagram_that_cannot_be_sent_moves_to_the_next_server_at_once() {
+    let mut r = resolver(&[NS1, NS2]);
+    let mut out = Out::default();
+    r.query("x.example", 0, &mut rnd(), &mut out).unwrap();
+    let (tx, s, _) = udp(&mut out);
+    assert_eq!(s, NS1);
+    r.udp_send_failed(tx, 0, &mut rnd(), &mut out);
+    let (_, s, _) = udp(&mut out);
+    assert_eq!(s, NS2);
+}

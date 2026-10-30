@@ -1,7 +1,8 @@
 //! Wall clock: one system time for every reader, as Linux's
 //! `CLOCK_REALTIME`. Set from the CMOS RTC at boot, stepped by NTP whenever
-//! an interface gets an address, and written back to the RTC in UTC after
-//! each sync (`hwclock --systohc`). Local time goes through [`zone`].
+//! an interface gets an address and then periodically, and written back to
+//! the RTC in UTC after each sync (`hwclock --systohc`). Local time goes
+//! through [`zone`].
 
 pub mod zone;
 
@@ -17,6 +18,16 @@ static SYNCED: AtomicBool = AtomicBool::new(false);
 
 /// An NTP sync is queued or running.
 static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// When the next sync is due (ticks, 0 = none planned), and the wait after
+/// a failed one (ticks). After systemd-timesyncd: a good clock is checked
+/// again after its longest poll interval, 2048 s; a failure is retried after
+/// 15 s, growing by 4/3 up to 6 min.
+static NEXT_SYNC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RETRY_TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+const POLL_INTERVAL_MAX_TICKS: u64 = 2048 * 100;
+const RETRY_INTERVAL_MIN_TICKS: u64 = 15 * 100;
+const RETRY_INTERVAL_MAX_TICKS: u64 = 6 * 60 * 100;
 
 /// Separate lookups, so the answers come from separate servers.
 const NTP_HOSTS: [&str; 4] = ["0.pool.ntp.org", "1.pool.ntp.org", "2.pool.ntp.org", "3.pool.ntp.org"];
@@ -55,12 +66,15 @@ pub fn synced() -> bool {
 fn step(unix: u64) {
     let before = now();
     set(unix);
-    SYNCED.store(true, Ordering::Release);
+    let first = !SYNCED.swap(true, Ordering::AcqRel);
     if !crate::rtc::write_unix_time(unix) {
         crate::kprintln!("[npk] time: RTC write failed");
     }
     let off = before.map(|b| unix as i64 - b as i64).unwrap_or(0);
-    crate::kprintln!("[npk] NTP: {} (stepped {:+} s)", format(unix), off);
+    // The periodic check stays quiet while the clock holds.
+    if first || off != 0 {
+        crate::kprintln!("[npk] NTP: {} (stepped {:+} s)", format(unix), off);
+    }
 }
 
 /// Query NTP and step the clock. Blocks for up to the DNS and NTP
@@ -127,8 +141,30 @@ pub fn request_sync() {
 }
 
 fn sync_task(_: u64) {
-    sync_now();
+    let ok = sync_now();
+    let wait = if ok {
+        RETRY_TICKS.store(0, Ordering::Relaxed);
+        POLL_INTERVAL_MAX_TICKS
+    } else {
+        let r = match RETRY_TICKS.load(Ordering::Relaxed) {
+            0 => RETRY_INTERVAL_MIN_TICKS,
+            r => (r * 4 / 3).min(RETRY_INTERVAL_MAX_TICKS),
+        };
+        RETRY_TICKS.store(r, Ordering::Relaxed);
+        r
+    };
+    NEXT_SYNC.store(crate::interrupts::ticks() + wait, Ordering::Relaxed);
     SYNC_RUNNING.store(false, Ordering::Release);
+}
+
+/// Start the planned sync when it is due. Cheap; call it about once a
+/// second.
+pub fn tick() {
+    let due = NEXT_SYNC.load(Ordering::Relaxed);
+    if due != 0 && crate::interrupts::ticks() >= due && crate::net::arp::our_ip() != [0; 4] {
+        NEXT_SYNC.store(0, Ordering::Relaxed);
+        request_sync();
+    }
 }
 
 /// Local seconds (UTC plus the zone's offset at that instant).
