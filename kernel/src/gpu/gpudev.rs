@@ -332,6 +332,13 @@ pub struct Missed {
     /// Share of the time since the last poll the core spent halted.
     pub halted_pct: u64,
     pub fibers: u64,
+    /// The longest one fiber ran there since the poll, and whether it was
+    /// the module.
+    pub longest_run_ms: u64,
+    pub longest_was_module: bool,
+    /// The fiber running there at the deadline: how long, and whether it
+    /// is the module.
+    pub running: Option<(u64, bool)>,
 }
 
 /// Why the module did not take the last job it missed. Once.
@@ -629,6 +636,7 @@ pub fn poll(dev: PciAddr, out: &mut [u8]) -> i32 {
     MODULE_CORE.store(core, Ordering::Relaxed);
     POLL_HALTED_TSC.store(crate::smp::per_core::halt_snapshot(core).0, Ordering::Relaxed);
     POLL_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+    let _ = fiber::take_longest_run(core);
     let mut n = 0;
     while (n + 1) * JOB_BYTES <= out.len() {
         let Some(job) = st.queue.pop_front() else { break };
@@ -1203,12 +1211,19 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
                 let span = crate::interrupts::rdtsc().saturating_sub(POLL_TSC.load(Ordering::Relaxed));
                 let halted = crate::smp::per_core::halt_snapshot(core).0
                     .saturating_sub(POLL_HALTED_TSC.load(Ordering::Relaxed));
+                let (longest, longest_waker) = fiber::take_longest_run(core);
+                let module = WAKER.load(Ordering::Relaxed);
                 *MISSED.lock() = Some(Missed {
                     core,
                     task: crate::smp::per_core::native_task(core),
                     since_poll_ms: span * 1000 / crate::interrupts::tsc_freq().max(1),
                     halted_pct: (halted.min(span) * 100).checked_div(span).unwrap_or(0),
                     fibers: crate::smp::fiber::fiber_count(core),
+                    longest_run_ms: longest * 1000 / crate::interrupts::tsc_freq().max(1),
+                    longest_was_module: longest_waker == module,
+                    running: fiber::running_on(core).map(|(w, t0)| (
+                        crate::interrupts::rdtsc().saturating_sub(t0) * 1000 / crate::interrupts::tsc_freq().max(1),
+                        w == module)),
                 });
             }
         }

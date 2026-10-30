@@ -148,12 +148,19 @@ fn failed(status: Result<i32, &str>) {
         match status {
             Err(why) => crate::kprintln!("[npk] gpu: scene on the CPU, {}", why),
             Ok(-62) => match crate::gpu::gpudev::take_missed() {
-                Some(m) => crate::kprintln!(
-                    "[npk] gpu: scene on the CPU, the module did not take it: last poll {} ms before on core {}, \
-                     halted {}% since, {} fiber(s) there{}{}{}",
-                    m.since_poll_ms, m.core, m.halted_pct, m.fibers,
-                    if m.task.is_some() { ", task '" } else { "" }, m.task.unwrap_or(""),
-                    if m.task.is_some() { "'" } else { "" }),
+                Some(m) => {
+                    let (names, _) = crate::process::wasm_names_on_core(m.core);
+                    let who = |module: bool| if module { "the module" } else { "another fiber" };
+                    crate::kprintln!(
+                        "[npk] gpu: scene on the CPU, the module did not take it: last poll {} ms before on core {} \
+                         ({}), halted {}% since; longest run there {} ms by {}; {}{}",
+                        m.since_poll_ms, m.core, names, m.halted_pct, m.longest_run_ms, who(m.longest_was_module),
+                        match m.running {
+                            Some((ms, module)) => alloc::format!("{} running for {} ms", who(module), ms),
+                            None => alloc::string::String::from("no fiber running"),
+                        },
+                        m.task.map(|t| alloc::format!(", task '{}'", t)).unwrap_or_default());
+                }
                 None => crate::kprintln!("[npk] gpu: scene on the CPU, the module did not finish in time"),
             },
             Ok(e) => crate::kprintln!("[npk] gpu: scene on the CPU, the module failed it ({})", e),
