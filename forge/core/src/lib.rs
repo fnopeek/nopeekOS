@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 #[cfg(feature = "census")]
@@ -631,7 +632,15 @@ fn walk(
                         wasmparser::TypeRef::Global(g) => {
                             plan.global_types.push((g.content_type, g.mutable))
                         }
-                        _ => {}
+                        // The runtime only backs memories and tables the
+                        // module defines; an imported one would be addressed
+                        // from base 0.
+                        _ => {
+                            return Err(Error::Reject(format!(
+                                "import {}.{}: only functions and globals can be imported",
+                                imp.module, imp.name
+                            )));
+                        }
                     }
                 }
             }

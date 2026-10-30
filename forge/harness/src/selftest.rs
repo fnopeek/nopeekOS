@@ -400,6 +400,25 @@ fn run_with_stack(src: &str, arg: u32, fuel: Option<i64>, stack: Option<u64>) ->
     Some((r, inst.trap_code()))
 }
 
+/// Imported memories and tables have no backing in the runtime, so the
+/// compiler must refuse them.
+fn imported_storage_is_refused() -> bool {
+    let mut ok = true;
+    for src in [
+        "(module (import \"env\" \"memory\" (memory 1)) \
+            (func (export \"f\") (param i32) (result i32) local.get 0 i32.load))",
+        "(module (import \"env\" \"table\" (table 1 funcref)) \
+            (func (export \"f\") (param i32) (result i32) local.get 0))",
+    ] {
+        let wasm = wat::parse_str(src).expect("wat");
+        if forge_core::compile(&wasm).is_ok() {
+            println!("  Import: importierter Speicher/Tabelle wurde angenommen");
+            ok = false;
+        }
+    }
+    ok
+}
+
 /// Every trap the generator can raise, checked for the right reason.
 fn traps_report_themselves() -> bool {
     use forge_core::trap::*;
@@ -1558,7 +1577,7 @@ pub fn run() -> bool {
         }
     }
 
-    let traps = traps_report_themselves();
+    let traps = traps_report_themselves() && imported_storage_is_refused();
     println!(
         "\n{} Faelle, {checks} Vergleiche, {fails} abweichend\n\
          Traps: {} — Wachseite, Tabelle, Signatur, Bulk-Raender, Division, \
