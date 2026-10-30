@@ -1232,6 +1232,51 @@ fn pool_put(host: &str, tls: crate::tls::TlsSession) {
     }
 }
 
+/// Close the pooled connections that went stale: idle past
+/// `POOL_MAX_IDLE_TICKS` or no longer healthy, which is what a peer's FIN
+/// leaves (CLOSE_WAIT). Without this they wait for the next request to the
+/// same host, which may never come, with their buffers held. Core 0 asks
+/// about once a second; a TLS close sends close_notify and may wait on the
+/// send buffer, so the closing runs as a task (#164).
+pub fn reap_pools() {
+    static REAPING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if !pools_have_stale() || REAPING.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    fn task(_: u64) {
+        drain_before_reuse();
+        let now = crate::interrupts::ticks();
+        let stale = |idle_since: u64| now.wrapping_sub(idle_since) >= POOL_MAX_IDLE_TICKS;
+        let tls: alloc::vec::Vec<PooledConn> = take_where(&mut CONN_POOL.lock()[..],
+            |c| stale(c.idle_since) || !c.tls.is_healthy());
+        let h2: alloc::vec::Vec<(String, Http2, u64)> = take_where(&mut H2_POOL.lock()[..],
+            |c| stale(c.2) || !c.1.is_healthy());
+        let plain: alloc::vec::Vec<PlainConn> = take_where(&mut PLAIN_POOL.lock()[..],
+            |c| stale(c.idle_since) || !crate::net::tcp::conn_healthy(c.handle));
+        for mut c in tls { let _ = crate::tls::tls_close(&mut c.tls); }
+        for (_, mut c, _) in h2 { c.close(); }
+        for c in plain { let _ = crate::net::tcp::close(c.handle); }
+        REAPING.store(false, core::sync::atomic::Ordering::Release);
+    }
+    crate::smp::scheduler::spawn("http-reap", task, 0);
+}
+
+fn pools_have_stale() -> bool {
+    let now = crate::interrupts::ticks();
+    let stale = |idle_since: u64| now.wrapping_sub(idle_since) >= POOL_MAX_IDLE_TICKS;
+    CONN_POOL.try_lock().is_some_and(|p| p.iter().flatten()
+            .any(|c| stale(c.idle_since) || !c.tls.is_healthy()))
+        || H2_POOL.try_lock().is_some_and(|p| p.iter().flatten()
+            .any(|c| stale(c.2) || !c.1.is_healthy()))
+        || PLAIN_POOL.try_lock().is_some_and(|p| p.iter().flatten()
+            .any(|c| stale(c.idle_since) || !crate::net::tcp::conn_healthy(c.handle)))
+}
+
+/// The entries of `pool` that `pred` picks, taken out.
+fn take_where<T>(pool: &mut [Option<T>], pred: impl Fn(&T) -> bool) -> alloc::vec::Vec<T> {
+    pool.iter_mut().filter(|s| s.as_ref().is_some_and(&pred)).filter_map(Option::take).collect()
+}
+
 /// True if `value` (an HTTP list header) contains `token` as a
 /// comma-separated element, case-insensitively.
 fn header_has_token(value: &str, token: &str) -> bool {
