@@ -526,6 +526,16 @@ impl Mgr {
         }
     }
 
+    /// The network of the last link, from sys/config/wifid: the kernel's
+    /// address may still come from it, so a different network after a
+    /// restart of this module is still told as one.
+    fn last_ssid() -> Option<Ssid> {
+        let c = read_cfg(b"sys/config/wifid")?;
+        let mut raw = [0u8; SSID_MAX];
+        let n = hex_decode(cfg_get(&c, b"ssid")?, &mut raw)?;
+        Ssid::from(&raw[..n])
+    }
+
     /// The fast path: the last network, straight to its cell.
     fn try_last(&mut self) -> bool {
         let Some(c) = read_cfg(b"sys/config/wifid") else { return false };
@@ -572,6 +582,9 @@ impl Mgr {
             Some(EV_DRIVER_UP) => {
                 log("[wifid] driver up\n");
                 self.driver_up = true;
+                if self.linked.n == 0 {
+                    self.linked = Self::last_ssid().unwrap_or(Ssid::EMPTY);
+                }
                 self.sup = None;
                 self.scanning = false;
                 if self.state != State::Disconnected {

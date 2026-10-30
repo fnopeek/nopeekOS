@@ -388,27 +388,12 @@ pub fn forget() {
     dns::flush();
 }
 
-/// Renew a bound lease now (`networkctl renew`), or configure.
-pub fn renew() {
-    let mut acts = Vec::new();
-    let bound = {
-        let mut g = INNER.lock();
-        let now = now();
-        let mut cout = dhcp::Out::default();
-        let bound = match g.running() {
-            Some(c) if c.state() == State::Bound => {
-                c.send_renew(now, &mut rnd(), &mut cout);
-                true
-            }
-            _ => false,
-        };
-        g.drain(now, cout, acd::Out::default(), &mut acts);
-        bound
-    };
-    run(acts);
-    if !bound {
-        configure();
-    }
+/// Start the client over (`networkctl reconfigure`): it asks for its last
+/// address again with INIT-REBOOT, which a server of another network
+/// refuses, so a lease from the wrong network goes at once.
+pub fn restart() {
+    link_lost();
+    configure();
 }
 
 /// Take a datagram to port 68 for the client, if it listens. `to_us`: it
@@ -529,10 +514,10 @@ pub fn run_blocking(max_ms: u64) -> bool {
     wait(max_ms, || configured())
 }
 
-/// The `dhcp` command: renew or configure, and wait up to `max_ms` for a
-/// bound lease.
-pub fn renew_blocking(max_ms: u64) -> bool {
-    renew();
+/// The `dhcp` command: start over, and wait up to `max_ms` for a bound
+/// lease.
+pub fn restart_blocking(max_ms: u64) -> bool {
+    restart();
     wait(max_ms, || configured()
         && INNER.lock().running().is_some_and(|c| c.state() == State::Bound))
 }

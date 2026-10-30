@@ -1736,7 +1736,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("netstat", "Active connections");
             help_row("net", "Interface state");
             help_row("ifconfig", "Address, gateway, MAC");
-            help_row("dhcp", "Renew the lease");
+            help_row("dhcp", "Ask for a lease again");
             help_row("dns <host>", "Resolver detail");
             help_row("traceroute <host>", "Path trace");
             help_row("nic", "USB-NIC scan (link + speed)");

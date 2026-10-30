@@ -2411,11 +2411,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
 
         "dhcp" => {
             if require_cap(vault, &session, Rights::WRITE, "dhcp") {
-                // Renew the lease of the active NIC, or start asking for one.
-                // Typed by hand, so waiting for the answer is what the user
-                // asked for, unlike the ~1 Hz link tick, which must never take
-                // the terminal away. Same state machine either way.
-                if crate::net::dhcp::renew_blocking(5000) {
+                // Start the active NIC's lease over: typed by hand when the
+                // network misbehaves, so renewing with a server that may
+                // belong to another network would not help. Waiting for the
+                // answer is what the user asked for, unlike the ~1 Hz link
+                // tick, which must never take the terminal away.
+                if crate::net::dhcp::restart_blocking(5000) {
                     kprintln!("[npk] DHCP: lease bound - run `net` for the address");
                 } else if crate::net::dhcp::is_running() {
                     // Out of patience, not out of exchange: it keeps going on
