@@ -5,15 +5,16 @@
 //! what is being trusted — subject, validity, fingerprint — and asks
 //! before it takes effect.
 //!
-//! Anchors compiled into the kernel are shown but cannot be removed here:
-//! they are the floor that keeps the machine able to reach its own
-//! updates. See `crypto/tls/certstore.rs`.
+//! Only anchors added here can be removed here. The ones compiled into the
+//! kernel are the floor that keeps the machine able to reach its own
+//! updates; the shipped ones come and go with `update`. See
+//! `crypto/tls/certstore.rs`.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::kprintln;
-use crate::tls::certstore::{self, STORE_DIR};
+use crate::tls::certstore::{self, Origin, LOCAL_DIR};
 
 pub fn intent_cert(args: &str) {
     let mut it = args.split_whitespace();
@@ -49,28 +50,28 @@ fn list() {
     kprintln!("[npk]");
     kprintln!("[npk]   {:<10} {:<44} {}", "ORIGIN", "SUBJECT", "EXPIRES");
 
-    let mut builtin = 0usize;
-    let mut stored = 0usize;
-    certstore::for_each_anchor(|name, der| {
+    let (mut builtin, mut shipped, mut local) = (0usize, 0usize, 0usize);
+    certstore::for_each_anchor(|origin, der| {
         let info = match certstore::describe(der) {
             Some(i) => i,
             None => return,
         };
-        let origin = match name {
-            None => { builtin += 1; String::from("built-in") }
-            Some(_) => { stored += 1; String::from("stored") }
+        let label = match origin {
+            Origin::BuiltIn => { builtin += 1; "built-in" }
+            Origin::Shipped(_) => { shipped += 1; "update" }
+            Origin::Local(_) => { local += 1; "local" }
         };
-        kprintln!("[npk]   {:<10} {:<44} {}", origin, truncate(&info.subject, 44), expiry(&info));
+        kprintln!("[npk]   {:<10} {:<44} {}", label, truncate(&info.subject, 44), expiry(&info));
         // The filename is what `cert remove` takes, so it has to be visible
         // somewhere — indented under its own entry rather than in a column
         // that would push the subject out of the terminal.
-        if let Some(n) = name {
+        if let Origin::Local(n) = origin {
             kprintln!("[npk]   {:<10} {}", "", n);
         }
     });
 
     kprintln!("[npk]");
-    kprintln!("[npk]   {} built-in (not removable), {} stored in {}", builtin, stored, STORE_DIR);
+    kprintln!("[npk]   {} built-in, {} from updates, {} added here ({})", builtin, shipped, local, LOCAL_DIR);
 }
 
 fn show(path: &str) {
@@ -103,7 +104,7 @@ fn add(path: &str) {
         kprintln!("[npk]   ! '{}' is not a usable anchor name (A-Z a-z 0-9 . - _)", name);
         return;
     }
-    let dest = alloc::format!("{}/{}", STORE_DIR, name);
+    let dest = alloc::format!("{}/{}", LOCAL_DIR, name);
     if crate::npkfs::exists(&dest) {
         kprintln!("[npk]   ! {} already exists — remove it first", dest);
         return;
@@ -133,13 +134,13 @@ fn remove(name: &str) {
         kprintln!("[npk]   ! '{}' is not a valid anchor name", name);
         return;
     }
-    let dest = alloc::format!("{}/{}", STORE_DIR, name);
+    let dest = alloc::format!("{}/{}", LOCAL_DIR, name);
     if !crate::npkfs::exists(&dest) {
-        // Built-ins show up in `cert list` but live in the kernel binary, so
-        // this is the likely mistake — name the reason rather than "missing".
-        kprintln!("[npk]   ! no stored anchor '{}'", name);
-        kprintln!("[npk]     Built-in anchors cannot be removed; they are what keeps");
-        kprintln!("[npk]     this machine able to reach its own updates.");
+        // Built-in and shipped anchors show up in `cert list` too, so this
+        // is the likely mistake: name the reason rather than "missing".
+        kprintln!("[npk]   ! no anchor '{}' added on this machine", name);
+        kprintln!("[npk]     Built-in anchors keep this machine able to reach its updates,");
+        kprintln!("[npk]     and the ones from updates follow Mozilla's list.");
         return;
     }
 

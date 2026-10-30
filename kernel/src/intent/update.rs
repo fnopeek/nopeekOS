@@ -233,6 +233,8 @@ struct Plan {
     modules_current: usize,
     assets: Vec<AssetJob>,
     assets_current: usize,
+    /// Shipped root CAs the release no longer lists.
+    withdrawn_certs: Vec<String>,
 }
 
 impl Plan {
@@ -240,10 +242,11 @@ impl Plan {
         self.kernel.is_none()
             && self.modules.is_empty()
             && self.assets.is_empty()
+            && self.withdrawn_certs.is_empty()
     }
 
     fn count(&self) -> usize {
-        self.kernel.iter().count() + self.modules.len() + self.assets.len()
+        self.kernel.iter().count() + self.modules.len() + self.assets.len() + self.withdrawn_certs.len()
     }
 
     /// One summary line for everything that needs nothing (kernel, module
@@ -332,9 +335,9 @@ fn build_plan() -> Option<Plan> {
     };
 
     let (modules, modules_current) = super::install::plan_modules();
-    let (assets, assets_current) = plan_assets();
+    let (assets, assets_current, withdrawn_certs) = plan_assets();
 
-    Some(Plan { kernel, modules, modules_current, assets, assets_current })
+    Some(Plan { kernel, modules, modules_current, assets, assets_current, withdrawn_certs })
 }
 
 fn print_plan(plan: &Plan) {
@@ -351,6 +354,9 @@ fn print_plan(plan: &Plan) {
     for a in &plan.assets {
         let what = if a.present { "" } else { "  (new)" };
         kprintln!("[npk]   + asset    {:<28} {}{}", a.npkfs_path, fmt_size(a.entry.size), what);
+    }
+    for name in &plan.withdrawn_certs {
+        kprintln!("[npk]   - root CA  {:<28} no longer in Mozilla's list", name);
     }
 
     // One line for everything that needs nothing, so the few items that
@@ -378,6 +384,13 @@ fn apply_plan(plan: Plan) {
         if apply_asset(a) {
             assets += 1;
             certs_changed |= a.entry.section.starts_with("cert:");
+        }
+    }
+    for name in &plan.withdrawn_certs {
+        let path = alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name);
+        match crate::npkfs::delete(&path) {
+            Ok(()) => certs_changed = true,
+            Err(e) => kprintln!("[npk]   ! could not remove {}: {:?}", path, e),
         }
     }
     // New anchors are inert until reloaded — the store is held in memory so
@@ -493,17 +506,29 @@ struct AssetJob {
 }
 
 /// Diff release/assets/manifest against npkFS-resident assets. Reads only:
-/// returns the jobs to run and how many were already current.
-fn plan_assets() -> (Vec<AssetJob>, usize) {
+/// returns the jobs to run, how many were already current, and the shipped
+/// root CAs the manifest no longer lists.
+fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
     let manifest_path = alloc::format!("{}/assets/manifest", UPDATE_BASE);
     let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, ManifestKind::Assets) {
         Ok(d) => d,
-        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0); }
+        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0, Vec::new()); }
     };
 
     let entries = match parse_asset_manifest(&manifest_data) {
         Ok(e) => e,
-        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0); }
+        Err(e) => { kprintln!("[npk]   ! asset manifest: {}", e); return (Vec::new(), 0, Vec::new()); }
+    };
+
+    // A release that lists no root CA at all was built without them: that
+    // withdraws nothing.
+    let listed: Vec<&str> = entries.iter().filter_map(|e| e.section.strip_prefix("cert:")).collect();
+    let withdrawn: Vec<String> = if listed.is_empty() {
+        Vec::new()
+    } else {
+        crate::tls::certstore::shipped_names().into_iter()
+            .filter(|n| !listed.contains(&n.as_str()))
+            .collect()
     };
 
     let mut jobs = Vec::new();
@@ -538,7 +563,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize) {
         jobs.push(AssetJob { entry, npkfs_path, present });
     }
 
-    (jobs, current)
+    (jobs, current, withdrawn)
 }
 
 /// Download, verify and store one planned asset. Prints its own result line;

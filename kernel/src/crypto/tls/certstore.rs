@@ -15,166 +15,29 @@ use spin::Mutex;
 
 use super::x509::{self, X509Cert, KeyType, KU_DIGITAL_SIGNATURE, KU_KEY_CERT_SIGN};
 use super::sha256;
+use crate::storage::npkfs::object::EntryKind;
 
-/// ISRG Root X1 (Let's Encrypt).
+/// The update host's roots, the only ones compiled in. raw.githubusercontent.com
+/// and the release CDN chain to Let's Encrypt, github.com's release
+/// downloads to Sectigo; each CA's RSA and ECDSA root, since which one a
+/// certificate uses is the CA's choice. `./build.sh release` refuses to sign
+/// while a host no longer chains to one of these.
 const ISRG_ROOT_X1_DER: &[u8] = include_bytes!("../../../certs/isrg_root_x1.der");
-
-/// DigiCert Global Root G2 — covers Anthropic, Cloudflare, etc.
-const DIGICERT_GLOBAL_G2_DER: &[u8] = include_bytes!("../../../certs/digicert_global_g2.der");
-
-/// AAA Certificate Services (Comodo/Sectigo) — Cloudflare's older default root.
-const AAA_CERT_SERVICES_DER: &[u8] = include_bytes!("../../../certs/aaa_certificate_services.der");
-
-/// Google Trust Services Root R1 — covers Google services
-const GTS_ROOT_R1_DER: &[u8] = include_bytes!("../../../certs/gts_root_r1.der");
-
-/// USERTrust ECC Certification Authority — Sectigo's modern ECC root.
-/// Sectigo cross-signs newer roots (Public Server Authentication Root
-/// E46) under USERTrust ECC, so this anchor covers servers that send the
-/// cross-signed path (see the Sectigo roots below for servers that do not).
-const USERTRUST_ECC_DER: &[u8] = include_bytes!("../../../certs/usertrust_ecc.der");
-
-/// USERTrust RSA Certification Authority — Sectigo's modern RSA root.
-/// Counterpart to USERTrust ECC for RSA chains. Covers Sectigo
-/// Public Server Authentication Root R46 + a wide RSA customer base.
-const USERTRUST_RSA_DER: &[u8] = include_bytes!("../../../certs/usertrust_rsa.der");
-
-/// Amazon Root CA 1 — anchors CloudFront, which fronts a large share of
-/// the web.
-const AMAZON_ROOT_CA1_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca1.der");
-
-/// ISRG Root X2 — Let's Encrypt's ECDSA hierarchy, a separate anchor from
-/// X1. Servers that chain only to X2 are unreachable with X1 alone.
 const ISRG_ROOT_X2_DER: &[u8] = include_bytes!("../../../certs/isrg_root_x2.der");
-
-/// GTS Root R4 — Google Trust Services' ECDSA root, the counterpart to R1:
-/// R1 anchors Google's RSA intermediates (WR1/WR2), R4 the ECDSA ones
-/// (WE1/WE2). Cloudflare's default certificates also chain here, so major
-/// script CDNs (cdnjs, unpkg) depend on it.
-const GTS_ROOT_R4_DER: &[u8] = include_bytes!("../../../certs/gts_root_r4.der");
-
-/// GlobalSign Root CA - R3 — anchors `crates.io` (GlobalSign Atlas).
-/// RSA 2048, expires 2029-03-18, the earliest expiry in this list.
-const GLOBALSIGN_ROOT_R3_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_r3.der");
-
-/// SwissSign RSA TLS Root CA 2022 - 1 — the Swiss Post's anchor, used by
-/// much of Swiss public-sector TLS.
-const SWISSSIGN_RSA_2022_DER: &[u8] = include_bytes!("../../../certs/swisssign_rsa_2022.der");
-
-/// DigiCert Global Root G3 — the ECDSA twin of G2. Many DigiCert ECDSA
-/// chains (e.g. Akamai) end here, not at G2.
-const DIGICERT_GLOBAL_G3_DER: &[u8] = include_bytes!("../../../certs/digicert_global_g3.der");
-
-/// GlobalSign Root R46 — GlobalSign's 2019 RSA root, a different anchor
-/// from the 2009 "Root CA - R3" above.
-const GLOBALSIGN_ROOT_R46_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_r46.der");
-
-/// GlobalSign Root E46 — the ECDSA twin of R46, included by the twin rule
-/// below rather than for a known host.
-const GLOBALSIGN_ROOT_E46_DER: &[u8] = include_bytes!("../../../certs/globalsign_root_e46.der");
-
-/// Starfield Root Certificate Authority - G2 — GoDaddy/Starfield, and with
-/// it Fastly's certificates.
-const STARFIELD_G2_DER: &[u8] = include_bytes!("../../../certs/starfield_g2.der");
-
-/// DigiCert TLS RSA4096 Root G5 — DigiCert's 2021 hierarchy, separate from
-/// the Global Root G2/G3 pair.
-const DIGICERT_TLS_RSA4096_G5_DER: &[u8] = include_bytes!("../../../certs/digicert_tls_rsa4096_g5.der");
-
-/// DigiCert TLS ECC P384 Root G5 — the ECDSA twin of RSA4096 G5 (twin rule).
-const DIGICERT_TLS_ECC_P384_G5_DER: &[u8] = include_bytes!("../../../certs/digicert_tls_ecc_p384_g5.der");
-
-/// T-TeleSec GlobalRoot Class 2 — Deutsche Telekom, used by much of German
-/// public-sector TLS.
-const TTELESEC_GLOBALROOT_CLASS2_DER: &[u8] = include_bytes!("../../../certs/ttelesec_globalroot_class2.der");
-
-/// HARICA TLS RSA Root CA 2021 — the Greek academic CA; bund.de chains to it.
-const HARICA_TLS_RSA_2021_DER: &[u8] = include_bytes!("../../../certs/harica_tls_rsa_2021.der");
-
-/// Amazon Root CA 2/3/4 — the rest of the family around CA 1, covering the
-/// RSA-4096 and ECDSA-P384 hierarchies (see the twin rule below).
-const AMAZON_ROOT_CA2_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca2.der");
-const AMAZON_ROOT_CA3_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca3.der");
-const AMAZON_ROOT_CA4_DER: &[u8] = include_bytes!("../../../certs/amazon_root_ca4.der");
-
-/// IdenTrust Commercial Root CA 1 — its own hierarchy, not only the
-/// DST-Root cross-sign.
-const IDENTRUST_COMMERCIAL_CA1_DER: &[u8] = include_bytes!("../../../certs/identrust_commercial_root_ca1.der");
-
-/// D-TRUST (Bundesdruckerei) — German public-sector TLS. Two anchors because
-/// the hierarchy was renewed: the 2009 EV root (elster.de) and the 2023 BR
-/// root (bsi.bund.de). The 2009 one expires 2029-11-05.
-const DTRUST_CLASS3_EV_2009_DER: &[u8] = include_bytes!("../../../certs/dtrust_root_class3_ca2_ev_2009.der");
-const DTRUST_BR_2023_DER: &[u8] = include_bytes!("../../../certs/dtrust_br_root_ca2_2023.der");
-
-/// Certum (Asseco, PL), Buypass (NO) and Actalis (IT) — European CAs with a
-/// national customer base each (government and bank sites).
-const CERTUM_TRUSTED_ROOT_DER: &[u8] = include_bytes!("../../../certs/certum_trusted_root_ca.der");
-const BUYPASS_CLASS3_DER: &[u8] = include_bytes!("../../../certs/buypass_class3_root_ca.der");
-const ACTALIS_ROOT_DER: &[u8] = include_bytes!("../../../certs/actalis_authentication_root_ca.der");
-
-/// Sectigo Public Server Authentication Root E46 / R46 — anchored directly,
-/// although USERTrust ECC/RSA cross-sign them. A cross-signature only helps
-/// when the server sends the cross-signed path; the client cannot build a
-/// chain from certificates it was not given. Some servers send only their
-/// leaf and an intermediate issued by E46 (e.g. "Public Server
-/// Authentication CA EV E36"), which fails without this anchor.
-const SECTIGO_PSA_E46_DER: &[u8] = include_bytes!("../../../certs/sectigo_public_server_e46.der");
-const SECTIGO_PSA_R46_DER: &[u8] = include_bytes!("../../../certs/sectigo_public_server_r46.der");
+const USERTRUST_ECC_DER: &[u8] = include_bytes!("../../../certs/usertrust_ecc.der");
+const USERTRUST_RSA_DER: &[u8] = include_bytes!("../../../certs/usertrust_rsa.der");
 
 /// Built-in anchors. This set is the floor: it ships inside the signed
 /// kernel, cannot be removed by an update or by the user, and is what
 /// guarantees the update host stays reachable even when the npkFS store
-/// is empty, stale, or broken. Everything else is delivered as data —
-/// see [`store_roots`].
+/// is empty, stale, or broken. Everything else, Mozilla's list among it,
+/// is delivered as data.
 const ROOT_CERTS: &[&[u8]] = &[
     ISRG_ROOT_X1_DER,
     ISRG_ROOT_X2_DER,
-    DIGICERT_GLOBAL_G2_DER,
-    AAA_CERT_SERVICES_DER,
-    DIGICERT_GLOBAL_G3_DER,
-    DIGICERT_TLS_RSA4096_G5_DER,
-    DIGICERT_TLS_ECC_P384_G5_DER,
-    GTS_ROOT_R1_DER,
-    GTS_ROOT_R4_DER,
-    GLOBALSIGN_ROOT_R3_DER,
-    GLOBALSIGN_ROOT_R46_DER,
-    GLOBALSIGN_ROOT_E46_DER,
-    SWISSSIGN_RSA_2022_DER,
-    STARFIELD_G2_DER,
-    TTELESEC_GLOBALROOT_CLASS2_DER,
-    HARICA_TLS_RSA_2021_DER,
     USERTRUST_ECC_DER,
     USERTRUST_RSA_DER,
-    AMAZON_ROOT_CA1_DER,
-    AMAZON_ROOT_CA2_DER,
-    AMAZON_ROOT_CA3_DER,
-    AMAZON_ROOT_CA4_DER,
-    IDENTRUST_COMMERCIAL_CA1_DER,
-    DTRUST_CLASS3_EV_2009_DER,
-    DTRUST_BR_2023_DER,
-    CERTUM_TRUSTED_ROOT_DER,
-    BUYPASS_CLASS3_DER,
-    ACTALIS_ROOT_DER,
-    SECTIGO_PSA_E46_DER,
-    SECTIGO_PSA_R46_DER,
 ];
-
-// How this list is chosen: each anchor is the root OpenSSL actually uses
-// for real hosts (the highest `depth=` line), not the last certificate the
-// server sends, which is usually an intermediate.
-//
-// Twin rule: every large CA runs an RSA and an ECDSA root, and which one a
-// server uses is the server's choice. Having one of the pair covers only
-// half of that CA's hosts, so twins are included even where no host was
-// seen to need them (`GLOBALSIGN_ROOT_E46`, `DIGICERT_TLS_ECC_P384_G5`).
-//
-// `AAA_CERT_SERVICES` stays although few hosts still chain to it: the floor
-// exists for reachability, not minimality, and removing an anchor affects
-// machines in the field.
-//
-// Next expiries: `GLOBALSIGN_ROOT_R3` (expires 2029-03-18), then
-// `DTRUST_CLASS3_EV_2009` (expires 2029-11-05).
 
 /// npkFS directory holding the data-delivered anchors. Off limits to WASM
 /// apps — write access here is the power to mint a MITM anchor for the
@@ -182,9 +45,13 @@ const ROOT_CERTS: &[&[u8]] = &[
 /// path too (`wasm.rs::is_trust_critical_path`).
 pub const STORE_DIR: &str = "sys/certs";
 
+/// The anchors added on this machine (`cert add`), kept apart from the
+/// shipped ones so `update` can withdraw those without touching these.
+pub const LOCAL_DIR: &str = "sys/certs/local";
+
 /// A cap on the store, so a corrupt or hostile directory cannot exhaust
 /// kernel memory during the boot load.
-const MAX_STORE_ROOTS: usize = 64;
+const MAX_STORE_ROOTS: usize = 512;
 const MAX_ROOT_BYTES: usize = 8 * 1024;
 
 /// Anchors loaded from [`STORE_DIR`].
@@ -198,6 +65,17 @@ static STORE_ROOTS: Mutex<Vec<StoreRoot>> = Mutex::new(Vec::new());
 pub struct StoreRoot {
     pub name: String,
     pub der: Vec<u8>,
+    pub local: bool,
+}
+
+/// Where an anchor comes from.
+#[derive(Clone, Copy)]
+pub enum Origin<'a> {
+    BuiltIn,
+    /// Shipped with updates, under this file name.
+    Shipped(&'a str),
+    /// Added on this machine, under this file name.
+    Local(&'a str),
 }
 
 /// (Re)load `sys/certs/` into the in-memory anchor set. Call after
@@ -208,31 +86,40 @@ pub struct StoreRoot {
 /// than failing the load — one bad file must not take the rest of the
 /// store down with it.
 pub fn load_store() -> usize {
-    let entries = match crate::npkfs::fs::list(STORE_DIR) {
+    let mut loaded: Vec<StoreRoot> = Vec::new();
+    load_dir(STORE_DIR, false, &mut loaded);
+    load_dir(LOCAL_DIR, true, &mut loaded);
+    let n = loaded.len();
+    *STORE_ROOTS.lock() = loaded;
+    if n > 0 {
+        crate::kprintln!("[npk] certstore: {} built-in + {} stored anchor(s)", ROOT_CERTS.len(), n);
+    }
+    n
+}
+
+fn load_dir(dir: &str, local: bool, loaded: &mut Vec<StoreRoot>) {
+    let entries = match crate::npkfs::fs::list(dir) {
         Ok(Some(e)) => e,
         // No directory yet is the normal state on a fresh install, not an
         // error: the built-in floor carries the machine until assets land.
-        Ok(None) => { STORE_ROOTS.lock().clear(); return 0; }
+        Ok(None) => return,
         Err(_) => {
-            crate::kprintln!("[npk] certstore: {} unreadable, built-in anchors only", STORE_DIR);
-            STORE_ROOTS.lock().clear();
-            return 0;
+            crate::kprintln!("[npk] certstore: {} unreadable, skipped", dir);
+            return;
         }
     };
-
-    let mut loaded: Vec<StoreRoot> = Vec::new();
-    for entry in entries.iter() {
+    for entry in entries.iter().filter(|e| e.kind == EntryKind::File) {
         if loaded.len() >= MAX_STORE_ROOTS {
-            crate::kprintln!("[npk] certstore: more than {} anchors in {}, rest ignored",
-                MAX_STORE_ROOTS, STORE_DIR);
-            break;
+            crate::kprintln!("[npk] certstore: more than {} anchors, rest of {} ignored",
+                MAX_STORE_ROOTS, dir);
+            return;
         }
         if entry.size as usize > MAX_ROOT_BYTES {
             crate::kprintln!("[npk] certstore: '{}' too large ({} B), skipped",
                 entry.name, entry.size);
             continue;
         }
-        let path = alloc::format!("{}/{}", STORE_DIR, entry.name);
+        let path = alloc::format!("{}/{}", dir, entry.name);
         let der = match crate::npkfs::fs::read(&path) {
             Ok(Some(d)) => d,
             _ => continue,
@@ -244,15 +131,16 @@ pub fn load_store() -> usize {
             crate::kprintln!("[npk] certstore: '{}' is not a valid certificate, skipped", entry.name);
             continue;
         }
-        loaded.push(StoreRoot { name: entry.name.clone(), der });
+        loaded.push(StoreRoot { name: entry.name.clone(), der, local });
     }
+}
 
-    let n = loaded.len();
-    *STORE_ROOTS.lock() = loaded;
-    if n > 0 {
-        crate::kprintln!("[npk] certstore: {} built-in + {} stored anchor(s)", ROOT_CERTS.len(), n);
+/// The file names of the shipped anchors in [`STORE_DIR`], read from npkFS.
+pub fn shipped_names() -> Vec<String> {
+    match crate::npkfs::fs::list(STORE_DIR) {
+        Ok(Some(e)) => e.into_iter().filter(|e| e.kind == EntryKind::File).map(|e| e.name).collect(),
+        _ => Vec::new(),
     }
-    n
 }
 
 /// Number of built-in anchors — the floor that cannot be removed.
@@ -299,14 +187,15 @@ pub fn fingerprint_hex(fp: &[u8; 32]) -> String {
     s
 }
 
-/// Run `f` over every anchor: built-ins first (as `None`), then the stored
-/// ones with their filename. Used by `cert list` to show provenance.
-pub fn for_each_anchor(mut f: impl FnMut(Option<&str>, &[u8])) {
+/// Run `f` over every anchor: built-ins first, then the stored ones with
+/// their file name. Used by `cert list` to show provenance.
+pub fn for_each_anchor(mut f: impl FnMut(Origin, &[u8])) {
     for der in ROOT_CERTS {
-        f(None, der);
+        f(Origin::BuiltIn, der);
     }
     for root in STORE_ROOTS.lock().iter() {
-        f(Some(&root.name), &root.der);
+        let origin = if root.local { Origin::Local(&root.name) } else { Origin::Shipped(&root.name) };
+        f(origin, &root.der);
     }
 }
 
