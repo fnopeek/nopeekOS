@@ -6,6 +6,7 @@
 # upstream: how to find the newest release on the same line.
 # cve: how to find known vulnerabilities for the version in use.
 #   osv-commit  OSV query by the commit of the release tag (git ranges)
+#   mfsa        Mozilla advisories fixed in a later release of `product`
 #   none        no feed; `note` says why
 
 [[component]]
@@ -45,7 +46,8 @@ area = "guest"
 file = "microvm-userspace/packages-firefox.txt"
 regex = '^firefox-([0-9.]+)-r'
 upstream = { kind = "mozilla", key = "LATEST_FIREFOX_VERSION" }
-cve = { kind = "none", note = "Covered by the Alpine security database below." }
+note = "Alpine edge decides the version; it does not backport Firefox fixes."
+cve = { kind = "mfsa", product = "Firefox" }
 
 [[component]]
 name = "Alpine base (microVM guest)"

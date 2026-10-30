@@ -200,8 +200,48 @@ def osv_by_commit(commit):
             return ids
 
 
+MFSA_REPO = "https://github.com/mozilla/foundation-security-advisories"
+MFSA_CACHE = os.path.expanduser("~/.cache/nopeekos/mfsa")
+
+
+def mfsa_cves(version, product):
+    """Mozilla advisories fixed in a release after `version` of `product`."""
+    if not os.path.isdir(os.path.join(MFSA_CACHE, ".git")):
+        subprocess.run(["git", "clone", "-q", "--depth", "1", "--filter=blob:none", "--sparse",
+                        MFSA_REPO, MFSA_CACHE], check=True, timeout=300)
+        subprocess.run(["git", "-C", MFSA_CACHE, "sparse-checkout", "set", "announce"], check=True, timeout=300)
+    else:
+        subprocess.run(["git", "-C", MFSA_CACHE, "pull", "-q", "--depth", "1"], check=True, timeout=300)
+    ours = vkey(version)
+    year = dt.date.today().year
+    out = []
+    for f in sorted(glob.glob(os.path.join(MFSA_CACHE, "announce", f"{year - 1}", "*.yml")) +
+                    glob.glob(os.path.join(MFSA_CACHE, "announce", f"{year}", "*.yml"))):
+        text = open(f, encoding="utf-8").read()
+        if "fixed_in:" not in text:
+            continue
+        fixed = text.split("fixed_in:", 1)[1].split("\ntitle:", 1)[0]
+        vers = re.findall(rf"-\s*{re.escape(product)} ([0-9][0-9.]*)\s*$", fixed, re.M)
+        if not vers or not any(vkey(v) > ours for v in vers):
+            continue
+        announced = (re.search(r"^announced:\s*(.+)$", text, re.M) or [None, ""])[1].strip()
+        try:
+            announced = dt.datetime.strptime(announced, "%B %d, %Y").date().isoformat()
+        except ValueError:
+            pass
+        name = os.path.basename(f)[:-4]
+        for cve, title, impact in re.findall(
+                r"^  (CVE-\d+-\d+):\n    title: '?(.*?)'?\n(?:    .*\n)*?    impact: (\w+)", text, re.M):
+            out.append({"id": cve, "aliases": [], "summary": f"{title} (fixed in {product} {vers[0]})",
+                        "severity": impact.upper(), "published": announced,
+                        "url": f"https://www.mozilla.org/security/advisories/{name}/"})
+    return out
+
+
 def component_cves(c, version):
     cv = c.get("cve", {})
+    if cv.get("kind") == "mfsa" and version:
+        return mfsa_cves(version, cv["product"])
     if cv.get("kind") != "osv-commit" or not version:
         return None
     tag = cv["tag"].replace("{version}", version).replace("{version_}", version.replace(".", "_"))
