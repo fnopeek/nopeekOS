@@ -542,6 +542,12 @@ fn traps_report_themselves() -> bool {
     want(loopy, 1, Some(100_000), OUT_OF_FUEL, "Endlosschleife");
     want(loopy, 0, Some(100_000), NONE, "endlicher Lauf");
     want(loopy, 0, Some(0), OUT_OF_FUEL, "leeres Budget");
+
+    // Bulk memory pays by length: one 1 MiB fill is 16384 units.
+    let bulk = "(module (memory 16) (func (export \"f\") (param i32) (result i32) \
+        i32.const 0 i32.const 7 local.get 0 memory.fill i32.const 0))";
+    want(bulk, 1 << 20, Some(1_000), OUT_OF_FUEL, "grosses memory.fill");
+    want(bulk, 1 << 10, Some(1_000), NONE, "kleines memory.fill");
     ok && stack_ok
 }
 

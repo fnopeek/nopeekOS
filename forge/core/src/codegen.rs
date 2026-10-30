@@ -1132,8 +1132,8 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
     // format, not something that runs; the interpreter charges nothing for
     // them either. Matching its rule matters: the kernel's budgets (`run`,
     // PYTHON_FUEL) were calibrated against the interpreter and must keep
-    // meaning the same thing. Bulk memory is charged flat, like the
-    // interpreter, not per byte.
+    // meaning the same thing. Bulk memory also pays by length
+    // (`bulk_fuel`): one operator can move gigabytes.
     if f.reachable && !matches!(op, Block { .. } | Loop { .. } | Else | End | Nop) {
         f.fuel_pending += 1;
     }
@@ -1697,6 +1697,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             // `rep movsb` wants rsi/rdi/rcx, and two of those are cache
             // registers — so the cache goes to memory first.
             f.spill_all();
+            bulk_fuel(f);
             f.pop_to(B); // rcx = len
             f.pop_to(Reg::Rsi); // src
             f.pop_to(Reg::Rdi); // dst
@@ -1706,11 +1707,13 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             f.asm.add_rr64(Reg::Rdi, MEMBASE);
 
             // wasm's memory.copy is a memmove: overlapping ranges must come
-            // out right. Copying downwards is safe whenever the destination
-            // is at or below the source; otherwise the copy has to run
-            // backwards, which is what the direction flag is for.
-            f.asm.cmp_rr64(Reg::Rdi, Reg::Rsi);
-            let forward = f.asm.jcc(Cond::Be);
+            // out right. Only a destination inside `src..src+len` needs the
+            // backward copy; it runs in microcode, far slower than forward,
+            // so every other case goes forward.
+            f.asm.mov_rr64(T, Reg::Rdi);
+            f.asm.sub(true, T, Reg::Rsi);
+            f.asm.cmp_rr64(T, B);
+            let forward = f.asm.jcc(Cond::Ae);
             f.asm.add_rr64(Reg::Rsi, B);
             f.asm.sub_r64_imm32(Reg::Rsi, 1);
             f.asm.add_rr64(Reg::Rdi, B);
@@ -1728,6 +1731,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
                 return Err("multi-memory");
             }
             f.spill_all();
+            bulk_fuel(f);
             f.pop_to(B); // rcx = len
             f.pop_to(A); // al = the byte
             f.pop_to(Reg::Rdi); // dst
@@ -1942,6 +1946,17 @@ fn br_if(f: &mut Ctx, relative_depth: u32) -> Result<(), &'static str> {
 ///
 /// A zero length still traps when the start is past the end, which is what the
 /// specification says and what the interpreter does.
+/// Charge a bulk operation one unit per 64 bytes and check the budget, so a
+/// loop of large copies still reaches a refuel. Runs while every operand is
+/// in its slot, which the refuel stub needs.
+fn bulk_fuel(f: &mut Ctx) {
+    f.fuel_flush();
+    f.peek_to(A); // len
+    f.asm.shr_imm(true, A, 6);
+    f.asm.sub(true, FUEL, A);
+    f.fuel_check();
+}
+
 fn bulk_bounds(f: &mut Ctx, reg: Reg) -> Result<(), &'static str> {
     f.asm.load64(C, VMCTX, vmctx::MEM_SIZE);
     f.asm.mov_rr64(T, reg);
