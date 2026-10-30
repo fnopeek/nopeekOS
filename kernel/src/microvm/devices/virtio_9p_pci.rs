@@ -284,9 +284,6 @@ fn range_errno(e: &crate::npkfs::fs::Error) -> u32 {
 /// current write appended at the end. Small files (configs, editor saves) stay
 /// fully buffered; only big sequential downloads stream.
 const STREAM_PROMOTE_BYTES: usize = 4 * 1024 * 1024;
-/// Files streaming at once. Each holds a writer on the persist worker and
-/// keeps npkFS GC waiting; past this, a file stays in the buffered path.
-const MAX_STREAMS: usize = 8;
 
 impl Virtio9p {
     pub fn new() -> Self {
@@ -736,9 +733,14 @@ impl Virtio9p {
             .sum()
     }
 
-    /// May `fid` be bound? An existing one is rebound; a new one needs room.
+    /// May `fid` be bound? An existing one is rebound; a new one is charged
+    /// to the device budget with its path, as QEMU bounds fids by memory
+    /// only.
     fn fid_room(&self, fid: u32) -> bool {
-        self.fids.contains_key(&fid) || self.fids.len() < MAX_FIDS
+        if self.fids.contains_key(&fid) { return true; }
+        let held: usize = self.buffered_except(u32::MAX)
+            + self.fids.values().map(|f| FID_BYTES + f.path.len()).sum::<usize>();
+        held + FID_BYTES <= MAX_DEVICE_BUFFERED
     }
 
     fn t_attach(&mut self, tag: u16, body: &[u8]) -> Vec<u8> {
@@ -1029,7 +1031,6 @@ impl Virtio9p {
         let data = &body[16..body.len().min(16 + count)];
         if let Err(e) = self.materialize(fid) { return rlerror(tag, e); }
         let others = self.buffered_except(fid);
-        let streams = self.fids.values().filter(|f| f.async_stream).count();
         STAT_TWRITES.fetch_add(1, AtO::Relaxed);
         STAT_TWRITE_BYTES.fetch_add(data.len() as u64, AtO::Relaxed);
         let f = match self.fids.get_mut(&fid) { Some(f) if !f.is_dir => f, _ => return rlerror(tag, EINVAL) };
@@ -1092,7 +1093,7 @@ impl Virtio9p {
         // to the worker via Start (defer this reply); the worker owns the
         // StreamingWriter from here, so the vCPU never holds the whole file.
         let dlen = f.data.as_ref().map_or(0, |b| b.len());
-        if dlen >= STREAM_PROMOTE_BYTES && offset + data.len() == dlen && streams < MAX_STREAMS {
+        if dlen >= STREAM_PROMOTE_BYTES && offset + data.len() == dlen {
             let prefix = f.data.take().unwrap_or_default();
             f.async_stream = true;
             f.stream_next = dlen as u64;
@@ -1285,8 +1286,9 @@ const MAX_BUFFERED_BYTES: usize = 1 << 30;
 /// File bytes all fids together may hold in host memory, opened files and
 /// write buffers alike: the guest chooses how many fids it opens.
 const MAX_DEVICE_BUFFERED: usize = 1 << 30;
-/// Open fids per device. A Linux client uses a few hundred.
-const MAX_FIDS: usize = 4096;
+/// What one fid costs the device budget besides its path: the entry and
+/// the map node around it.
+const FID_BYTES: usize = core::mem::size_of::<Fid>() + 64;
 const EMFILE: u32 = 24;
 
 /// Grow `buf` to `len` zero-filled bytes, or say why not (an errno).

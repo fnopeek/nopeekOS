@@ -206,10 +206,10 @@ struct VirtQueue {
 
 /// Largest width or height of a 2D resource: 8K displays fit.
 const MAX_RESOURCE_DIM: u32 = 8192;
-/// Resources per device, and host pixel copies of all of them together.
-/// A Linux guest uses a handful (framebuffers, cursor); both numbers are
-/// the guest's to choose, and every byte of them is host memory.
-const MAX_RESOURCES: usize = 256;
+/// Host memory one device may hold for its guest: the pixel copies and the
+/// resource table together. How many resources there are and how large is
+/// the guest's choice, and every byte of it is host memory; their count is
+/// not limited otherwise (virglrenderer and crosvm keep an unbounded table).
 const MAX_HOST_PIXEL_BYTES: usize = 512 * 1024 * 1024;
 
 /// Most bytes of one control request the device reads from the guest.
@@ -1068,6 +1068,24 @@ impl VirtioGpu {
         }
     }
 
+    /// Host bytes of the resource table: the entries and their backing lists.
+    fn table_bytes(&self) -> usize {
+        self.resources.iter()
+            .map(|r| core::mem::size_of::<Resource>() + r.backing.capacity() * core::mem::size_of::<(u64, u32)>())
+            .sum()
+    }
+
+    /// Host bytes of the pixel copies.
+    fn pixel_bytes(&self) -> usize {
+        self.resources.iter().map(|r| r.host_pixels.as_ref().map_or(0, |p| p.len())).sum()
+    }
+
+    /// Whether one more resource fits the device's host memory.
+    fn room_for_resource(&mut self) -> bool {
+        self.table_bytes() + self.pixel_bytes() + core::mem::size_of::<Resource>() <= MAX_HOST_PIXEL_BYTES
+            && self.resources.try_reserve(1).is_ok()
+    }
+
     fn handle_resource_create_2d(&mut self, body: &[u8]) -> bool {
         if body.len() < 16 { return false; }
         let id     = u32::from_le_bytes([body[0],  body[1],  body[2],  body[3]]);
@@ -1085,7 +1103,7 @@ impl VirtioGpu {
             r.format = format; r.width = width; r.height = height;
             r.backing.clear(); r.host_pixels = None; r.frame = 0; r.flushed_frame = 0;
         } else {
-            if self.resources.len() >= MAX_RESOURCES { return false; }
+            if !self.room_for_resource() { return false; }
             self.resources.push(Resource {
                 id, format, width, height,
                 backing: Vec::new(), host_pixels: None, frame: 0, flushed_frame: 0,
@@ -1299,7 +1317,7 @@ impl VirtioGpu {
             return fail(&pages, VIRTIO_GPU_RESP_ERR_INVALID_PARAM);
         }
         self.resources.retain(|r| r.id != id);
-        if self.resources.len() >= MAX_RESOURCES {
+        if !self.room_for_resource() {
             return fail(&pages, VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY);
         }
         self.resources.push(Resource {
@@ -1726,7 +1744,7 @@ impl VirtioGpu {
 
         // Ensure host_pixels exists with the right size, without panicking
         // when the host cannot spare it.
-        if others + total_pixels_bytes > MAX_HOST_PIXEL_BYTES { return; }
+        if others + self.table_bytes() + total_pixels_bytes > MAX_HOST_PIXEL_BYTES { return; }
         {
             let host_buf = self.resources[ri].host_pixels.get_or_insert_with(Vec::new);
             if host_buf.len() != total_pixels_bytes {
