@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "nopeekos-kernel"
-version = "0.778.0"
+version = "0.779.0"
 dependencies = [
  "aes",
  "aes-gcm",

@@ -2386,10 +2386,7 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
     let start = crate::interrupts::ticks();
     loop {
         if super::cancel_requested() { return Err("cancelled"); }
-        // One poll per attempt: a single call drains the entire NIC ring,
-        // so polling repeatedly before each `tls_recv` only adds overhead
-        // (each MMIO read traps to the hypervisor on emulated NICs).
-        crate::net::poll_rx_only();
+        let since = crate::net::rx_gen();
         match crate::tls::tls_recv(tls, buf) {
             Ok(0) => {
                 // No app data yet (partial record, or a control
@@ -2398,7 +2395,7 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout"); // 15 seconds hard timeout
                 }
-                core::hint::spin_loop();
+                crate::net::rx_wait(since);
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
@@ -2418,12 +2415,10 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     let start = crate::interrupts::ticks();
     loop {
         if super::cancel_requested() { return Err("cancelled"); }
-        let t0 = crate::interrupts::rdtsc();
-        crate::net::poll_rx_only();
+        let since = crate::net::rx_gen();
         let t1 = crate::interrupts::rdtsc();
         let r = crate::net::tcp::recv(handle, buf);
         let t2 = crate::interrupts::rdtsc();
-        PROF_POLL_CYC.fetch_add(t1.wrapping_sub(t0), Relaxed);
         PROF_RECV_CYC.fetch_add(t2.wrapping_sub(t1), Relaxed);
         PROF_ITERS.fetch_add(1, Relaxed);
         match r {
@@ -2431,13 +2426,8 @@ fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
                 if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
                 }
-                // Busy-spin, do not HLT. The USB NIC has no IRQ; its RX ring is
-                // re-armed only by poll_rx_only() above. worker_idle_hlt() would
-                // park this core until the next 100 Hz worker tick (up to
-                // 10 ms), and in that gap the rtl8153 exhausts its buffers and
-                // drops frames. This only runs during an active download, so
-                // spinning is acceptable.
-                core::hint::spin_loop();
+                crate::net::rx_wait(since);
+                PROF_POLL_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t2), Relaxed);
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),

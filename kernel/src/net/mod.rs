@@ -131,6 +131,7 @@ pub fn poll_rx_only() {
         .is_ok()
     {
         let mut buf = [0u8; netdev::MTU];
+        let mut frames = 0u32;
         loop {
             let a = rd();
             let r = netdev::recv(&mut buf);
@@ -142,11 +143,15 @@ pub fn poll_rx_only() {
                     if len >= 14 { eth::handle_frame(&buf[..len], csum_ok); }
                     PROF_STACK.fetch_add(rd().wrapping_sub(b), Relaxed);
                     PROF_PKTS.fetch_add(1, Relaxed);
+                    frames += 1;
                 }
                 None => break,
             }
         }
         POLLING.store(false, Ordering::Release);
+        if frames > 0 {
+            rx_wake();
+        }
     } else {
         NIC_SKIPPED.fetch_add(1, Ordering::Relaxed);
     }
@@ -175,6 +180,63 @@ pub fn poll_rx_only() {
     // loops (tcp_recv_poll / recv_blocking), where poll_render would only pay
     // its core gate (VM-exits under virtualization) and bail. Core 0 renders
     // via its own run-loop / net::poll().
+}
+
+/// Bumped after received frames went through the stack; with the cores
+/// halted in `rx_wait` to wake.
+static RX_GEN: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RX_WAITERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// The receive generation, read before looking for data that `rx_wait`
+/// then waits for.
+pub fn rx_gen() -> u64 {
+    RX_GEN.load(Ordering::SeqCst)
+}
+
+fn rx_wake() {
+    RX_GEN.fetch_add(1, Ordering::SeqCst);
+    let mut waiting = RX_WAITERS.load(Ordering::SeqCst);
+    let me = crate::smp::per_core::current_core_id();
+    while waiting != 0 {
+        let c = waiting.trailing_zeros() as usize;
+        waiting &= waiting - 1;
+        if c != me {
+            if let Some(apic) = crate::smp::per_core::core_apic(c) {
+                crate::smp::send_wake_ipi(apic);
+            }
+        }
+    }
+}
+
+/// One idle step of a native receive loop (`sk_wait_data`). It drains the
+/// card once itself, which also gives this core's fibers a turn (the NAPI
+/// fiber may live here). With the card's RX interrupt on the NAPI fiber, the
+/// core then halts until frames arrive after `since` (`rx_gen`) or a 10 ms
+/// tick passes; a card drained only by polling (the USB NIC has no
+/// interrupt) is drained again at once, spinning, or its ring overflows
+/// between halts.
+pub fn rx_wait(since: u64) {
+    poll_rx_only();
+    let cid = crate::smp::per_core::current_core_id();
+    let rflags: u64;
+    // SAFETY: reads RFLAGS, no other effect.
+    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(preserves_flags)) };
+    // With interrupts off no IPI ends a halt.
+    if !napi::active() || cid == 0 || cid >= 64 || rflags & (1 << 9) == 0 {
+        core::hint::spin_loop();
+        return;
+    }
+    let bit = 1u64 << cid;
+    RX_WAITERS.fetch_or(bit, Ordering::SeqCst);
+    // The look and the halt with IF off: frames after the look leave their
+    // wake IPI pending, and that ends the halt.
+    crate::interrupts::without_interrupts(|| {
+        if RX_GEN.load(Ordering::SeqCst) == since {
+            let tick = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+            crate::interrupts::halt_until(Some(tick), crate::smp::per_core::WAKE_HLT_FALLBACK);
+        }
+    });
+    RX_WAITERS.fetch_and(!bit, Ordering::SeqCst);
 }
 
 /// A WASM NIC driver delivers a received Ethernet frame straight into the IP

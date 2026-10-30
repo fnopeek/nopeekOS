@@ -322,11 +322,7 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
 pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Result<usize, TcpError> {
     let t0 = crate::interrupts::ticks();
     loop {
-        // NIC-drain only (the TLS / OTA-https recv hot path). The full
-        // super::poll() at spin rate would contend the table's lock with
-        // actual packet processing; poll_rx_only throttles the TCP timers.
-        super::poll_rx_only();
-
+        let since = super::rx_gen();
         let n = recv(handle, buf)?;
         if n > 0 { return Ok(n); }
 
@@ -340,10 +336,7 @@ pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Resul
             // longer.
             return Err(TcpError::Timeout);
         }
-        // Timer-NAPI: HLT instead of spinning, so the core is not pegged.
-        // Records the halt so `cores` is accurate. Wakes on the per-core timer;
-        // the NIC re-fills the ring in the gap.
-        crate::interrupts::worker_idle_hlt();
+        super::rx_wait(since);
     }
 }
 
