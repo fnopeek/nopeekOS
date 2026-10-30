@@ -148,12 +148,12 @@ fn failed(status: Result<i32, &str>) {
         match status {
             Err(why) => crate::kprintln!("[npk] gpu: scene on the CPU, {}", why),
             Ok(-62) => match crate::gpu::gpudev::take_missed() {
-                Some((core, Some(task))) => crate::kprintln!(
-                    "[npk] gpu: scene on the CPU, the module did not take it: its core {} ran the task '{}'",
-                    core, task),
-                Some((core, None)) => crate::kprintln!(
-                    "[npk] gpu: scene on the CPU, the module did not take it (core {}, no native task there)",
-                    core),
+                Some(m) => crate::kprintln!(
+                    "[npk] gpu: scene on the CPU, the module did not take it: last poll {} ms before on core {}, \
+                     halted {}% since, {} fiber(s) there{}{}{}",
+                    m.since_poll_ms, m.core, m.halted_pct, m.fibers,
+                    if m.task.is_some() { ", task '" } else { "" }, m.task.unwrap_or(""),
+                    if m.task.is_some() { "'" } else { "" }),
                 None => crate::kprintln!("[npk] gpu: scene on the CPU, the module did not finish in time"),
             },
             Ok(e) => crate::kprintln!("[npk] gpu: scene on the CPU, the module failed it ({})", e),

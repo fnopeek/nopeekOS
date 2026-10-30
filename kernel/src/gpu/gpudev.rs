@@ -315,15 +315,27 @@ static AHEAD: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
 /// the CPU does its scenes and copies.
 static STALLED: AtomicBool = AtomicBool::new(false);
 
-/// The core the module last took jobs on (`poll`), and, for the last job it
-/// did not take before its deadline, the native task that held that core
-/// then: a task that runs to completion keeps a driver's fiber off its core.
+/// The core the module last took jobs on (`poll`), when, and that core's
+/// halted time then; for the last job it did not take before its deadline,
+/// what that core did since.
 static MODULE_CORE: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(usize::MAX);
-static MISSED: Mutex<Option<(usize, Option<&'static str>)>> = Mutex::new(None);
+static POLL_TSC: AtomicU64 = AtomicU64::new(0);
+static POLL_HALTED_TSC: AtomicU64 = AtomicU64::new(0);
+static MISSED: Mutex<Option<Missed>> = Mutex::new(None);
 
-/// Why the module did not take the last job it missed: its core, and the
-/// native task running there at the deadline. Once.
-pub fn take_missed() -> Option<(usize, Option<&'static str>)> {
+#[derive(Clone, Copy)]
+pub struct Missed {
+    pub core: usize,
+    /// The native task running there at the deadline.
+    pub task: Option<&'static str>,
+    pub since_poll_ms: u64,
+    /// Share of the time since the last poll the core spent halted.
+    pub halted_pct: u64,
+    pub fibers: u64,
+}
+
+/// Why the module did not take the last job it missed. Once.
+pub fn take_missed() -> Option<Missed> {
     MISSED.lock().take()
 }
 static STALL_SEQ: AtomicU32 = AtomicU32::new(0);
@@ -613,7 +625,10 @@ pub fn poll(dev: PciAddr, out: &mut [u8]) -> i32 {
     if st.owner != Some(dev) {
         return -1;
     }
-    MODULE_CORE.store(crate::smp::per_core::current_core_id(), Ordering::Relaxed);
+    let core = crate::smp::per_core::current_core_id();
+    MODULE_CORE.store(core, Ordering::Relaxed);
+    POLL_HALTED_TSC.store(crate::smp::per_core::halt_snapshot(core).0, Ordering::Relaxed);
+    POLL_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
     let mut n = 0;
     while (n + 1) * JOB_BYTES <= out.len() {
         let Some(job) = st.queue.pop_front() else { break };
@@ -1185,7 +1200,16 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
             mark_done(seq);
             let core = MODULE_CORE.load(Ordering::Relaxed);
             if core != usize::MAX {
-                *MISSED.lock() = Some((core, crate::smp::per_core::native_task(core)));
+                let span = crate::interrupts::rdtsc().saturating_sub(POLL_TSC.load(Ordering::Relaxed));
+                let halted = crate::smp::per_core::halt_snapshot(core).0
+                    .saturating_sub(POLL_HALTED_TSC.load(Ordering::Relaxed));
+                *MISSED.lock() = Some(Missed {
+                    core,
+                    task: crate::smp::per_core::native_task(core),
+                    since_poll_ms: span * 1000 / crate::interrupts::tsc_freq().max(1),
+                    halted_pct: (halted.min(span) * 100).checked_div(span).unwrap_or(0),
+                    fibers: crate::smp::fiber::fiber_count(core),
+                });
             }
         }
         if taken && READY.load(Ordering::Acquire) {
