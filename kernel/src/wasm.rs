@@ -589,6 +589,7 @@ fn wasm_worker_task(arg: u64) {
     // Register process in process table
     let name_str = job.name.as_str();
     let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
+    crate::smp::fiber::set_current_pid(pid);
 
     let mut store = Store::new(&engine, HostState {
         limits: guest_limits(),
@@ -675,6 +676,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
     let core_id = crate::smp::per_core::current_core_id();
     let name_str = job.name.as_str();
     let pid = crate::process::spawn(name_str, crate::process::KIND_WASM, terminal_idx, core_id as u8);
+    crate::smp::fiber::set_current_pid(pid);
 
     // From here every exit must clean up, otherwise a process is left behind
     // and the terminal stops accepting keys.

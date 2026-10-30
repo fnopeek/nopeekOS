@@ -336,9 +336,10 @@ pub struct Missed {
     /// the module.
     pub longest_run_ms: u64,
     pub longest_was_module: bool,
-    /// The fiber running there at the deadline: how long, and whether it
-    /// is the module.
-    pub running: Option<(u64, bool)>,
+    pub longest_pid: u32,
+    /// The fiber running there at the deadline: how long, whether it is
+    /// the module, and its process.
+    pub running: Option<(u64, bool, u32)>,
     /// What a fiber there halts the core waiting for the GPU from.
     pub halted_in: Option<&'static core::panic::Location<'static>>,
 }
@@ -1228,7 +1229,7 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
                 let span = crate::interrupts::rdtsc().saturating_sub(POLL_TSC.load(Ordering::Relaxed));
                 let halted = crate::smp::per_core::halt_snapshot(core).0
                     .saturating_sub(POLL_HALTED_TSC.load(Ordering::Relaxed));
-                let (longest, longest_waker) = fiber::take_longest_run(core);
+                let (longest, longest_waker, longest_pid) = fiber::take_longest_run(core);
                 let module = WAKER.load(Ordering::Relaxed);
                 *MISSED.lock() = Some(Missed {
                     core,
@@ -1238,9 +1239,10 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
                     fibers: crate::smp::fiber::fiber_count(core),
                     longest_run_ms: longest * 1000 / crate::interrupts::tsc_freq().max(1),
                     longest_was_module: longest_waker == module,
-                    running: fiber::running_on(core).map(|(w, t0)| (
+                    longest_pid,
+                    running: fiber::running_on(core).map(|(w, pid, t0)| (
                         crate::interrupts::rdtsc().saturating_sub(t0) * 1000 / crate::interrupts::tsc_freq().max(1),
-                        w == module)),
+                        w == module, pid)),
                     // SAFETY: HALT_SITE holds null or a `&'static Location`.
                     halted_in: HALT_SITE.get(core)
                         .and_then(|s| unsafe { s.load(Ordering::Relaxed).as_ref() }),

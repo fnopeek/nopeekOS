@@ -150,13 +150,17 @@ fn failed(status: Result<i32, &str>) {
             Ok(-62) => match crate::gpu::gpudev::take_missed() {
                 Some(m) => {
                     let (names, _) = crate::process::wasm_names_on_core(m.core);
-                    let who = |module: bool| if module { "the module" } else { "another fiber" };
+                    let who = |module: bool, pid: u32| if module {
+                        alloc::string::String::from("the module")
+                    } else {
+                        crate::process::name(pid).unwrap_or_else(|| alloc::string::String::from("a kernel fiber"))
+                    };
                     crate::kprintln!(
                         "[npk] gpu: scene on the CPU, the module did not take it: last poll {} ms before on core {} \
                          ({}), halted {}% since; longest run there {} ms by {}; {}{}",
-                        m.since_poll_ms, m.core, names, m.halted_pct, m.longest_run_ms, who(m.longest_was_module),
+                        m.since_poll_ms, m.core, names, m.halted_pct, m.longest_run_ms, who(m.longest_was_module, m.longest_pid),
                         match m.running {
-                            Some((ms, module)) => alloc::format!("{} running for {} ms", who(module), ms),
+                            Some((ms, module, pid)) => alloc::format!("{} running for {} ms", who(module, pid), ms),
                             None => alloc::string::String::from("no fiber running"),
                         },
                         m.task.map(|t| alloc::format!(", task '{}'", t)).unwrap_or_default());

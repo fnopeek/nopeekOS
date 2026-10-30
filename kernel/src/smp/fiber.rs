@@ -477,6 +477,7 @@ pub fn run_core_fibers(cid: usize) {
         let fptr: *mut Fiber = &mut *fiber;
         let waker = fiber.waker;
         RUN_WAKER[cid].store(waker, Ordering::Relaxed);
+        RUN_PID[cid].store(fiber.pid, Ordering::Relaxed);
         RUN_START[cid].store(crate::interrupts::rdtsc(), Ordering::Relaxed);
         // SAFETY: fptr is stable across the switch (the Box is this frame's
         // local). Save the loop ctx into SCHED_CTX[cid], switch into the
@@ -491,6 +492,7 @@ pub fn run_core_fibers(cid: usize) {
         if ran > LONGEST_RUN[cid].load(Ordering::Relaxed) {
             LONGEST_RUN[cid].store(ran, Ordering::Relaxed);
             LONGEST_RUN_WAKER[cid].store(waker, Ordering::Relaxed);
+            LONGEST_RUN_PID[cid].store(fiber.pid, Ordering::Relaxed);
         }
 
         if fiber.state == FiberState::Done {
@@ -511,19 +513,40 @@ static RUN_START: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_COR
 static RUN_WAKER: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NO_WAKER) }; MAX_CORES];
 static LONGEST_RUN: [AtomicU64; MAX_CORES] = [const { AtomicU64::new(0) }; MAX_CORES];
 static LONGEST_RUN_WAKER: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(NO_WAKER) }; MAX_CORES];
+static LONGEST_RUN_PID: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(0) }; MAX_CORES];
+static RUN_PID: [AtomicU32; MAX_CORES] = [const { AtomicU32::new(0) }; MAX_CORES];
 
-/// The fiber running on `cid` and since when (TSC), if any.
-pub fn running_on(cid: usize) -> Option<(Waker, u64)> {
+/// Name the process the running fiber runs, for `running_on` and
+/// `take_longest_run`.
+pub fn set_current_pid(pid: u32) {
+    let cid = crate::smp::per_core::current_core_id();
+    if cid >= MAX_CORES {
+        return;
+    }
+    // SAFETY: CURRENT_FIBER[cid] is non-null iff we run inside a fiber here,
+    // and only this core touches the fiber while it runs.
+    unsafe {
+        let f = CURRENT_FIBER[cid];
+        if !f.is_null() {
+            (*f).pid = pid;
+            RUN_PID[cid].store(pid, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The fiber running on `cid`, its process, and since when (TSC), if any.
+pub fn running_on(cid: usize) -> Option<(Waker, u32, u64)> {
     if cid >= MAX_CORES { return None; }
     let t = RUN_START[cid].load(Ordering::Relaxed);
-    (t != 0).then(|| (RUN_WAKER[cid].load(Ordering::Relaxed), t))
+    (t != 0).then(|| (RUN_WAKER[cid].load(Ordering::Relaxed), RUN_PID[cid].load(Ordering::Relaxed), t))
 }
 
 /// The longest run of one fiber on `cid` since the last call, in TSC
-/// cycles, and that fiber.
-pub fn take_longest_run(cid: usize) -> (u64, Waker) {
-    if cid >= MAX_CORES { return (0, NO_WAKER); }
-    (LONGEST_RUN[cid].swap(0, Ordering::Relaxed), LONGEST_RUN_WAKER[cid].load(Ordering::Relaxed))
+/// cycles, that fiber and its process.
+pub fn take_longest_run(cid: usize) -> (u64, Waker, u32) {
+    if cid >= MAX_CORES { return (0, NO_WAKER, 0); }
+    (LONGEST_RUN[cid].swap(0, Ordering::Relaxed), LONGEST_RUN_WAKER[cid].load(Ordering::Relaxed),
+     LONGEST_RUN_PID[cid].load(Ordering::Relaxed))
 }
 
 /// Whether `f` would run if its core picked it now.
@@ -947,6 +970,8 @@ pub struct Fiber {
     preemptible: bool,
     app_func: Option<fn(u64)>,
     app_arg: u64,
+    /// The process it runs (`set_current_pid`), 0 for none.
+    pid: u32,
     /// Switched into at least once. Until then its RFLAGS slot is a
     /// placeholder that the scheduler replaces with its own (`run_core_fibers`).
     started: bool,
@@ -987,6 +1012,7 @@ impl Fiber {
             preemptible: false,
             app_func: None,
             app_arg: 0,
+            pid: 0,
             started: false,
             stack,
         })

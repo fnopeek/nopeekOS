@@ -89,6 +89,11 @@ pub fn wasm_names_on_core(cid: usize) -> (alloc::string::String, u64) {
     (out, n)
 }
 
+/// The name of process `pid`, if it runs.
+pub fn name(pid: u32) -> Option<alloc::string::String> {
+    PROCS.lock().get(&pid).map(|p| p.name.clone())
+}
+
 /// Accumulate CPU busy cycles for a process.
 pub fn add_busy_tsc(pid: u32, cycles: u64) {
     if let Some(p) = PROCS.lock().get_mut(&pid) {
