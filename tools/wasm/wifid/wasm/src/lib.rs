@@ -672,9 +672,13 @@ impl Mgr {
                         return;
                     }
                 }
-                // The driver reconnects on its own (same network).
+                // The driver reconnects on its own (same network). A scan
+                // shows whether that network is still there; if not, another
+                // known one is joined (wpa_supplicant `wpa_supplicant_event_disassoc_finish`
+                // requests a scan and selects among all enabled networks).
                 self.state = State::Reconnecting;
                 self.deadline = now_ms() + CONNECT_TIMEOUT_MS;
+                self.start_scan();
             }
             // CONNECT_FAILED: [op][reason]
             Some(EV_CONNECT_FAILED) => {
@@ -730,6 +734,16 @@ impl Mgr {
         }
         if self.state == State::Scanning {
             self.state = State::Idle;
+        }
+        // The lost network is gone: the best other known one, if any is in
+        // range; otherwise the driver keeps trying the old one.
+        if self.state == State::Reconnecting && self.pick_cell(&self.target, 0).is_none() {
+            self.read_default_band();
+            if let Some(s) = self.pick_auto() {
+                log("[wifid] the network is gone - joining another known one\n");
+                self.connect_ssid(s);
+            }
+            return;
         }
         self.auto_connect();
     }
@@ -858,8 +872,10 @@ impl Mgr {
             send_cmd(&[CMD_DISCONNECT]);
             self.state = State::Idle;
         } else {
-            // Reconnecting: the driver keeps trying; just stop counting.
+            // Reconnecting: the driver keeps trying; look again whether the
+            // network is still there.
             self.deadline = now_ms() + CONNECT_TIMEOUT_MS;
+            self.start_scan();
         }
     }
 
