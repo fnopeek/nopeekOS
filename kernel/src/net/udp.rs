@@ -39,6 +39,10 @@ pub fn handle_udp(ip_packet: &[u8], data: &[u8]) {
     let src_ip = <[u8; 4]>::try_from(&ip_packet[12..16]).unwrap();
     RX_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
+    if dst_port == 68 && super::dhcp::deliver(payload, ip_packet[16..20] == super::arp::our_ip()) {
+        return;
+    }
+
     // Deliver to registered listener
     let mut listeners = LISTENERS.lock();
     for slot in listeners.iter_mut().flatten() {
@@ -121,6 +125,11 @@ pub fn checksum(src_ip: [u8; 4], dst_ip: [u8; 4], udp: &[u8]) -> u16 {
 
 /// Send a UDP datagram
 pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
+    send_from(super::arp::our_ip(), dst_ip, src_port, dst_port, payload);
+}
+
+/// Send a UDP datagram from `src_ip`.
+pub fn send_from(src_ip: [u8; 4], dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
     let udp_len = (HEADER_LEN + payload.len()) as u16;
     let mut pkt = alloc::vec![0u8; udp_len as usize];
 
@@ -129,10 +138,10 @@ pub fn send(dst_ip: [u8; 4], src_port: u16, dst_port: u16, payload: &[u8]) {
     pkt[4..6].copy_from_slice(&udp_len.to_be_bytes());
     pkt[HEADER_LEN..].copy_from_slice(payload);
     // RFC 1122 4.1.3.4: checksumming defaults to on (Linux `udp_send_skb`).
-    let c = checksum(super::arp::our_ip(), dst_ip, &pkt);
+    let c = checksum(src_ip, dst_ip, &pkt);
     pkt[6..8].copy_from_slice(&c.to_be_bytes());
 
-    let _ = ipv4::send(dst_ip, ipv4::PROTO_UDP, &pkt);
+    let _ = ipv4::send_from(src_ip, dst_ip, ipv4::PROTO_UDP, &pkt);
 }
 
 /// Register a listener on a UDP port. Returns false if no slot available.

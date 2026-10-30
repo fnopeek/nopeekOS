@@ -482,3 +482,55 @@ impl IcmpLimit {
         ok
     }
 }
+
+/// A route: `dst/len` via `gw`, on-link when `gw` is 0.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Route {
+    pub dst: [u8; 4],
+    pub len: u8,
+    pub gw: [u8; 4],
+}
+
+impl Route {
+    fn covers(&self, a: [u8; 4]) -> bool {
+        let mask = if self.len == 0 { 0 } else { u32::MAX << (32 - self.len as u32) };
+        u32_of(a) & mask == u32_of(self.dst) & mask
+    }
+}
+
+/// The routes of our one interface (`fib_table_lookup`): the longest
+/// prefix that covers a destination wins, the first of equals.
+#[derive(Clone, Default)]
+pub struct Routes {
+    list: alloc::vec::Vec<Route>,
+}
+
+impl Routes {
+    pub const fn new() -> Self { Routes { list: alloc::vec::Vec::new() } }
+
+    pub fn set(&mut self, routes: &[Route]) {
+        self.list.clear();
+        self.list.extend_from_slice(routes);
+    }
+
+    pub fn clear(&mut self) { self.list.clear(); }
+
+    pub fn list(&self) -> &[Route] { &self.list }
+
+    /// The address the frame for `dst` goes to: `dst` itself on-link, the
+    /// route's gateway otherwise; `None` without a route.
+    pub fn next_hop(&self, dst: [u8; 4]) -> Option<[u8; 4]> {
+        let mut best: Option<&Route> = None;
+        for r in &self.list {
+            if r.covers(dst) && best.is_none_or(|b| r.len > b.len) {
+                best = Some(r);
+            }
+        }
+        best.map(|r| if r.gw == [0; 4] { dst } else { r.gw })
+    }
+
+    /// The gateway of the default route.
+    pub fn default_gateway(&self) -> Option<[u8; 4]> {
+        self.list.iter().find(|r| r.len == 0 && r.gw != [0; 4]).map(|r| r.gw)
+    }
+}

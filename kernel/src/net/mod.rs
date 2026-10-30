@@ -214,11 +214,10 @@ pub fn wasm_deliver_rx(frame: &[u8]) {
 /// associated) triggers a fresh IP config. 0xff = not yet seeded.
 static LAST_ACTIVE: AtomicU8 = AtomicU8::new(0xff);
 static NEXT_LINK_CHECK: AtomicU64 = AtomicU64::new(0);
-static NEXT_DHCP_RETRY: AtomicU64 = AtomicU64::new(0);
 
-/// How long a carrier has to stay down before it counts as a link change.
-/// Covers a reconnect (scan + auth + assoc + 4-way) that succeeds — the address
-/// and the gateway are unchanged across it, so there is nothing to reconfigure.
+/// How long a carrier has to stay down before its configuration goes
+/// (networkd `IgnoreCarrierLoss=`). Covers a reconnect (scan + auth + assoc
+/// + 4-way) that succeeds: the lease holds across it.
 const LINK_DOWN_GRACE_S: u64 = 5;
 /// TSC at which the current carrier-down started, 0 = carrier is up.
 static DOWN_SINCE: AtomicU64 = AtomicU64::new(0);
@@ -242,26 +241,23 @@ fn link_state_id() -> u8 {
     netdev::active_id() | if netdev::active_link_up() { 0x10 } else { 0 }
 }
 
-/// Seed the active-interface tracker without reconfiguring — call once after the
-/// boot-time DHCP so the first tick doesn't redundantly re-DHCP the same link.
-/// Warms the gateway's MAC too: with the tracker seeded correctly nothing else
-/// runs on this path at boot, and a cold ARP cache makes the first DNS query
-/// look like a broken resolver.
+/// Seed the active-interface tracker without reconfiguring: call once after
+/// the boot-time configuration so the first tick does not repeat it. Warms
+/// the gateway's MAC too: a cold ARP cache makes the first DNS query look
+/// like a broken resolver.
 pub fn seed_active() {
     netdev::refresh_link_state();
     LAST_ACTIVE.store(link_state_id(), Ordering::Relaxed);
-    if arp::our_ip() != [0, 0, 0, 0] {
-        prime_gateway_arp();
-    }
+    prime_gateway_arp();
 }
 
 /// Does the network need Core 0's loop within the next frame? While a TCP
-/// connection runs a timer, a DHCP exchange is in flight, or the active card
+/// connection runs a timer, a DHCP or probe timer is near, or the active card
 /// is drained only by polling (`net::poll`) — every card but the WASM NIC,
 /// whose driver fiber delivers frames itself.
 pub fn needs_tick() -> bool {
     tcp::has_timers()
-        || dhcp::is_running()
+        || dhcp::needs_tick()
         // A polled card needs Core 0's cadence; one with an RX interrupt is
         // drained by the NAPI fiber.
         || (!matches!(netdev::active(), netdev::Active::Wasm | netdev::Active::None)
@@ -269,14 +265,13 @@ pub fn needs_tick() -> bool {
 }
 
 /// Core 0, ~1 Hz: refresh the wired carrier cache, and when the active interface
-/// changes, reconfigure IP — a static config if set, else DHCP. Pull the LAN
+/// changes, reconfigure IP: a static config if set, else DHCP. Pull the LAN
 /// cable and WiFi takes over with a fresh lease automatically. Must not run in
 /// IRQ context (it does USB reads); call from the Core 0 shell loop.
 pub fn tick_link_and_reconfigure() {
     if crate::smp::per_core::current_core_id() != 0 { return; }
-    // Before the throttle: a lease in flight is stepped on every pass, not once
-    // a second. It is a `udp::recv` peek and a deadline compare, and nothing at
-    // all when no exchange is running.
+    // Before the throttle: replies and timers are stepped on every pass,
+    // which is an inbox check and a deadline compare when nothing is due.
     dhcp::tick();
     // Also before the throttle: one queued name per pass — only on a machine
     // without workers. Otherwise `dns::want` hands the queue to a worker task.
@@ -325,37 +320,21 @@ pub fn tick_link_and_reconfigure() {
             {
                 LAST_ACTIVE.store(state, Ordering::Relaxed);
                 DOWN_SINCE.store(0, Ordering::Relaxed);
-                crate::kprintln!("[npk] net: link {} down for {} s — giving up on it",
+                crate::kprintln!("[npk] net: link {} down for {} s - giving up on it",
                     netdev::active_name(), LINK_DOWN_GRACE_S);
+                dhcp::link_lost();
             }
         }
     } else {
         DOWN_SINCE.store(0, Ordering::Relaxed);
     }
-    // Belt and braces: a usable link but still no address means the edge was
-    // missed or the lease attempt failed. Keep asking on a slow retry instead
-    // of waiting for an edge that has already gone by — this is what a real
-    // DHCP client does, and it makes the outcome independent of boot ordering.
-    //
-    // The backoff keeps a link that answers nothing from being broadcast at
-    // every second for as long as the fault lasts.
-    if up && act != 0 {
-        if arp::our_ip() == [0, 0, 0, 0] {
-            if !dhcp::is_running() && now >= NEXT_DHCP_RETRY.load(Ordering::Relaxed) {
-                let wait = DHCP_RETRY_S.load(Ordering::Relaxed);
-                NEXT_DHCP_RETRY.store(
-                    now + crate::interrupts::tsc_freq().saturating_mul(wait), Ordering::Relaxed);
-                DHCP_RETRY_S.store((wait * 2).min(DHCP_RETRY_MAX_S), Ordering::Relaxed);
-                crate::kprintln!("[npk] net: link up but no address - retrying DHCP (next in {} s)",
-                    DHCP_RETRY_S.load(Ordering::Relaxed));
-                reconfigure();
-            }
-        } else {
-            // An address arrived — the lease may have landed a second or a
-            // minute after the call that asked for it, so the reset belongs
-            // here rather than at a return value nobody waits for.
-            DHCP_RETRY_S.store(DHCP_RETRY_MIN_S, Ordering::Relaxed);
-        }
+    // A usable link without a running DHCP client (the edge was missed) gets
+    // one; the client itself retries forever. A static address is configured
+    // on edges only, so a conflict is not probed again every second.
+    if up && act != 0 && !dhcp::is_running() && !dhcp::configured()
+        && crate::config::get("static_ip").is_none_or(|s| s.trim().is_empty())
+    {
+        reconfigure();
     }
 }
 
@@ -369,36 +348,12 @@ pub fn network_changed() {
         return;
     }
     dhcp::forget();
-    DHCP_RETRY_S.store(DHCP_RETRY_MIN_S, Ordering::Relaxed);
     reconfigure();
 }
 
-/// Seconds until the next unsolicited DHCP attempt, doubled per failure.
-static DHCP_RETRY_S: AtomicU64 = AtomicU64::new(DHCP_RETRY_MIN_S);
-const DHCP_RETRY_MIN_S: u64 = 10;
-const DHCP_RETRY_MAX_S: u64 = 120;
-
-/// Apply a static IP config if `static_ip` is set, else run DHCP. Sets gateway
-/// (`static_gw`) + DNS (`static_dns`) when given.
+/// Configure IP on the active interface: `static_ip` if set, else DHCP.
 fn reconfigure() {
-    if let Some(ip) = crate::config::get("static_ip").and_then(|s| parse_ipv4(s.trim())) {
-        arp::set_ip(ip);
-        if let Some(gw) = crate::config::get("static_gw").and_then(|s| parse_ipv4(s.trim())) {
-            ipv4::set_gateway(gw);
-        }
-        if let Some(d) = crate::config::get("static_dns").and_then(|s| parse_ipv4(s.trim())) {
-            dns::set_server(d);
-        }
-        crate::kprintln!("[npk] net: static IP {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
-        crate::time::request_sync();
-        return;
-    }
-    crate::kprintln!("[npk] net: link changed -> requesting DHCP lease...");
-    // Returns at once. The ARP announcement and the gateway warm-up happen in
-    // the exchange itself (dhcp::succeed), where the lease lands.
-    if let dhcp::Start::Kept = dhcp::start() {
-        DHCP_RETRY_S.store(DHCP_RETRY_MIN_S, Ordering::Relaxed);
-    }
+    dhcp::configure();
 }
 
 /// Resolve the gateway's MAC right after a lease instead of leaving it to
@@ -407,17 +362,14 @@ fn reconfigure() {
 /// ARP round trip — or fails outright, which reads as "name resolution is
 /// broken" rather than "the ARP cache was cold".
 fn prime_gateway_arp() {
-    let gw = ipv4::gateway();
-    if gw == [0, 0, 0, 0] {
-        return;
-    }
+    let Some(gw) = ipv4::default_gateway() else { return };
     if arp::resolve(gw, 50).is_none() { // 100 Hz ticks → 500 ms
         crate::kprintln!("[npk] net: gateway {}.{}.{}.{} did not answer ARP yet",
             gw[0], gw[1], gw[2], gw[3]);
     }
 }
 
-fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     let mut it = s.split('.');
     let a = it.next()?.parse::<u8>().ok()?;
     let b = it.next()?.parse::<u8>().ok()?;

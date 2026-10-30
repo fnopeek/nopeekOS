@@ -108,6 +108,8 @@ pub fn load() {
             CONFIG.lock().deserialize(&data);
             bump();
             crate::time::zone::load_from_config();
+            // A static address is only known from here on.
+            crate::net::dhcp::configure();
         }
         Err(_) => {
             // No config yet — fresh system
@@ -134,6 +136,7 @@ pub fn set(key: &str, value: &str) {
     if key == "bootlog" { crate::serial::set_verbose(bootlog_verbose()); }
     if key == "keyboard" { crate::keyboard::cache_layout(); }
     if key == "timezone" { crate::time::zone::load_from_config(); }
+    if key.starts_with("static_") { crate::net::dhcp::configure(); }
 }
 
 /// Remove a config value and persist.
@@ -166,7 +169,8 @@ pub const KNOWN_KEYS: &[(&str, &str)] = &[
     ("lang", "UI language (en, de); apps carry the catalogs"),
     ("theme", "dark, light or auto (follows the wallpaper luminance)"),
     ("accent", "auto (from the wallpaper), rose, sage, blue, amber, or #RRGGBB"),
-    ("static_ip", "Static IPv4 (e.g. 192.168.1.50); unset = DHCP"),
+    ("static_ip", "Static IPv4 (e.g. 192.168.1.50/24); unset = DHCP"),
+    ("static_mask", "Netmask for a static_ip without /len (default: classful)"),
     ("static_gw", "Static default gateway (with static_ip)"),
     ("static_dns", "Static DNS server (with static_ip)"),
     ("net_prefer", "Preferred NIC: 'wifi' or 'lan' (default lan); falls back if no link"),

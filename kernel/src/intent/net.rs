@@ -30,7 +30,10 @@ pub fn intent_ping(args: &str) {
     };
 
     // Resolve the next hop before the first echo so it is not lost to ARP.
-    let hop = crate::net::ipv4::arp_target_for(ip);
+    let Some(hop) = crate::net::ipv4::arp_target_for(ip) else {
+        kprintln!("[npk] ping: no route to {}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]);
+        return;
+    };
     if crate::net::arp::resolve(hop, 50).is_none() {
         kprintln!("[npk] ping: {}.{}.{}.{} did not answer ARP yet - the echoes wait for it",
             hop[0], hop[1], hop[2], hop[3]);
@@ -109,8 +112,9 @@ pub fn intent_traceroute(args: &str) {
     };
 
     // The first hop answers ARP before the first probe, not during it.
-    let hop = crate::net::ipv4::arp_target_for(ip);
-    let _ = crate::net::arp::resolve(hop, 50);
+    if let Some(hop) = crate::net::ipv4::arp_target_for(ip) {
+        let _ = crate::net::arp::resolve(hop, 50);
+    }
 
     kprintln!("[npk] Traceroute to {}.{}.{}.{} (max 20 hops)", ip[0], ip[1], ip[2], ip[3]);
 
@@ -736,12 +740,35 @@ pub fn intent_net_info() {
 
     kprintln!("  Routing");
     kprintln!("  ───────");
-    if ip == [0, 0, 0, 0] {
-        kprintln!("  Default  (none)");
-    } else {
-        kprintln!("  Default  {}.{}.{}.{} via {}", gw[0], gw[1], gw[2], gw[3], primary_name);
+    let routes = crate::net::ipv4::routes();
+    if routes.is_empty() {
+        kprintln!("  (none)");
     }
-    kprintln!("  DNS      {}.{}.{}.{}", dns[0], dns[1], dns[2], dns[3]);
+    for r in routes {
+        let d = r.dst;
+        if r.gw == [0; 4] {
+            kprintln!("  {}.{}.{}.{}/{}  on {}", d[0], d[1], d[2], d[3], r.len, primary_name);
+        } else {
+            let g = r.gw;
+            kprintln!("  {}.{}.{}.{}/{}  via {}.{}.{}.{}", d[0], d[1], d[2], d[3], r.len,
+                g[0], g[1], g[2], g[3]);
+        }
+    }
+    let servers = crate::net::dns::servers();
+    if servers.is_empty() {
+        kprintln!("  DNS      (none)");
+    }
+    for d in servers {
+        kprintln!("  DNS      {}.{}.{}.{}{}", d[0], d[1], d[2], d[3],
+            if d == dns { "" } else { "  (not queried)" });
+    }
+    match crate::net::dhcp::status() {
+        Some((state, srv, Some((t1, t2, exp)))) => kprintln!(
+            "  DHCP     {} from {}.{}.{}.{}, renew in {} s, rebind in {} s, expires in {} s",
+            state, srv[0], srv[1], srv[2], srv[3], t1, t2, exp),
+        Some((state, _, None)) => kprintln!("  Address  {}", state),
+        None => {}
+    }
     kprintln!();
 
     // The next-hop table. A wrong gateway MAC looks like the far end being

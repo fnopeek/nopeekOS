@@ -1220,7 +1220,7 @@ fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
     const ETH: usize = 14;
     let ip_total = IPV4_HDR_LEN + l4.len();
     if ip_total > u16::MAX as usize { return false; }
-    let Some(dst_mac) = crate::net::arp::lookup(crate::net::ipv4::arp_target_for(dst_ip)) else {
+    let Some(dst_mac) = crate::net::ipv4::arp_target_for(dst_ip).and_then(crate::net::arp::lookup) else {
         return false;
     };
     let src_mac = crate::netdev::mac().unwrap_or([0; 6]);

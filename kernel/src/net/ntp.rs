@@ -27,7 +27,9 @@ pub fn query(server_ip: [u8; 4]) -> Option<u64> {
 
     // Warm the next hop's MAC — see `dns::resolve`: a blind spin pays its
     // timeout even when the entry is already cached.
-    let _ = super::arp::resolve(super::ipv4::arp_target_for(server_ip), 10);
+    if let Some(hop) = super::ipv4::arp_target_for(server_ip) {
+        let _ = super::arp::resolve(hop, 10);
+    }
 
     let local_port = udp::listen_ephemeral()?;
     udp::send(server_ip, local_port, NTP_PORT, &req);

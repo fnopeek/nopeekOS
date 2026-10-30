@@ -40,8 +40,8 @@ static TABLE: Mutex<Table<Pkt>> = Mutex::new(Table::new());
 /// host unreachable to the sender; `ipv4` counts them).
 static UNRESOLVED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// Our IP address (set during network init)
-static OUR_IP: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 15]); // QEMU user-mode default
+/// Our IP address, 0.0.0.0 while unconfigured.
+static OUR_IP: Mutex<[u8; 4]> = Mutex::new([0; 4]);
 
 /// A new address: the neighbours learned under the old one go, as Linux's
 /// `arp_ifdown` when the interface loses its address.
@@ -89,6 +89,7 @@ pub fn output(hop: [u8; 4], p: Pkt) -> Result<bool, crate::virtio_net::NetError>
 
 /// `arp_rcv` for the frame `frame` (Ethernet header included).
 pub fn handle_arp(frame: &[u8]) {
+    super::dhcp::arp_input(&frame[eth::HEADER_LEN..]);
     let our_mac = netdev::mac().unwrap_or([0; 6]);
     let to_us = frame[0..6] == our_mac;
     let our_ip = our_ip();
@@ -148,22 +149,11 @@ pub fn request(target_ip: [u8; 4]) {
     }
 }
 
-/// Announce our address on the current interface (gratuitous ARP: an ARP
-/// request for our own address, so everyone on the segment refreshes the
-/// IP→MAC binding).
-///
-/// The address is global state while the MAC belongs to whichever interface is
-/// active. Switching from wired to WiFi keeps the address and silently changes
-/// the MAC — but the router still has the old one cached and keeps sending our
-/// traffic to an interface we are no longer listening on, for as long as its
-/// ARP entry lives. Announcing is what makes the handover take effect.
-pub fn announce() {
-    let our_ip = our_ip();
-    if our_ip == [0, 0, 0, 0] {
-        return;
-    }
+/// An ARP request by broadcast from `spa` for `tpa` (`arp_send_packet`):
+/// an RFC 5227 probe when `spa` is 0.0.0.0, an announcement when both are
+/// our address.
+pub fn send_acd(spa: [u8; 4], tpa: [u8; 4]) {
     let our_mac = netdev::mac().unwrap_or([0; 6]);
-
     let mut pkt = [0u8; 28];
     pkt[0..2].copy_from_slice(&HTYPE_ETH.to_be_bytes());
     pkt[2..4].copy_from_slice(&PTYPE_IPV4.to_be_bytes());
@@ -171,9 +161,8 @@ pub fn announce() {
     pkt[5] = 4;
     pkt[6..8].copy_from_slice(&ARP_REQUEST.to_be_bytes());
     pkt[8..14].copy_from_slice(&our_mac);
-    pkt[14..18].copy_from_slice(&our_ip);
-    pkt[18..24].copy_from_slice(&[0; 6]);
-    pkt[24..28].copy_from_slice(&our_ip); // target = ourselves
+    pkt[14..18].copy_from_slice(&spa);
+    pkt[24..28].copy_from_slice(&tpa);
     let _ = eth::send_frame(&eth::BROADCAST, eth::ETHERTYPE_ARP, &pkt);
 }
 
@@ -195,6 +184,7 @@ const RETRANS_TICKS: u64 = 5; // 50 ms
 /// etc.) — `super::poll` dispatches through the same locks and would
 /// deadlock.
 pub fn resolve(ip: [u8; 4], timeout_ticks: u64) -> Option<[u8; 6]> {
+    if ip == [0; 4] { return None; }
     if let Some(mac) = lookup(ip) { return Some(mac); }
     let t0 = ticks();
     let mut next_try = t0;

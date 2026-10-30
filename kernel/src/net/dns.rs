@@ -23,7 +23,10 @@ const MAX_CNAME_HOPS: usize = 8;
 /// must hold more than one page load or nothing is ever used twice.
 const CACHE_SIZE: usize = 64;
 
-static DNS_SERVER: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 3]); // QEMU user-mode DNS
+/// The server queries go to, 0.0.0.0 without one.
+static DNS_SERVER: Mutex<[u8; 4]> = Mutex::new([0; 4]);
+/// Every server the configuration names, in order of preference.
+static DNS_SERVERS: Mutex<Vec<[u8; 4]>> = Mutex::new(Vec::new());
 
 
 struct DnsEntry {
@@ -72,9 +75,17 @@ pub enum Cached {
     Unknown,
 }
 
+/// The servers of a new configuration; queries go to the first (#100).
+pub fn set_servers(list: &[[u8; 4]]) {
+    *DNS_SERVERS.lock() = list.to_vec();
+    set_server(list.first().copied().unwrap_or([0; 4]));
+}
+
+pub fn servers() -> Vec<[u8; 4]> { DNS_SERVERS.lock().clone() }
+
 /// A different server answers for a different network: what the old one said
 /// goes (split-horizon names, its SERVFAILs).
-pub fn set_server(ip: [u8; 4]) {
+fn set_server(ip: [u8; 4]) {
     let old = core::mem::replace(&mut *DNS_SERVER.lock(), ip);
     if old != ip {
         flush();
@@ -217,13 +228,16 @@ pub fn resolve(name: &str) -> Option<[u8; 4]> {
     // 300 ms: the window is paid only on a cold cache, since every name shares
     // the same next hop, and it must survive a lost frame over WiFi.
     let dns_server = *DNS_SERVER.lock();
-    let hop = super::ipv4::arp_target_for(dns_server);
+    if dns_server == [0; 4] {
+        return None;
+    }
+    let Some(hop) = super::ipv4::arp_target_for(dns_server) else { return None };
     if super::arp::resolve(hop, 30).is_none() {
         // Say it: from the outside "no MAC for the next hop" and "the resolver
         // did not answer" are the same silence, with opposite causes. Only the
         // failing case prints, so a warm cache stays quiet.
-        crate::kprintln!("[npk] dns: next hop {}.{}.{}.{} did not answer ARP in 300 ms \
-                          - query goes out to L2 broadcast", hop[0], hop[1], hop[2], hop[3]);
+        crate::kprintln!("[npk] dns: next hop {}.{}.{}.{} did not answer ARP in 300 ms",
+            hop[0], hop[1], hop[2], hop[3]);
     }
 
     // Eight listener slots exist, and a full table means we would send

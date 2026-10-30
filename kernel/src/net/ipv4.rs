@@ -8,8 +8,8 @@ pub const PROTO_UDP: u8  = 17;
 pub const PROTO_TCP: u8  = 6;
 const HEADER_LEN: usize  = 20; // no options
 
-static GATEWAY: Mutex<[u8; 4]> = Mutex::new([10, 0, 2, 2]); // QEMU default
-static SUBNET:  Mutex<[u8; 4]> = Mutex::new([255, 255, 255, 0]);
+static SUBNET: Mutex<[u8; 4]> = Mutex::new([0; 4]);
+static ROUTES: Mutex<net_core::ip::Routes> = Mutex::new(net_core::ip::Routes::new());
 
 /// Datagrams dropped by the receive checks, by `net_core::ip::Drop`.
 static IN_DROPS: [core::sync::atomic::AtomicU64; net_core::ip::Drop::COUNT] =
@@ -93,7 +93,7 @@ pub fn icmp_send(orig: &[u8], kind: u8, code: u8, info: u32) {
     }
     let src = arp::our_ip();
     let head = Forwarded { tos: net_core::ip::TOS_INTERNETCONTROL, id: select_ident(dst, src, PROTO_ICMP), df: false };
-    let _ = transmit(dst, PROTO_ICMP, &msg, 64, Tx::Wait, Some(head));
+    let _ = transmit(dst, PROTO_ICMP, &msg, 64, Tx::Wait, Some(head), None);
 }
 
 /// The identification counters for datagrams that may be fragmented.
@@ -139,11 +139,18 @@ pub fn tick() {
     }
 }
 
-pub fn set_gateway(ip: [u8; 4]) { *GATEWAY.lock() = ip; }
 pub fn set_subnet(mask: [u8; 4]) { *SUBNET.lock() = mask; }
-pub fn gateway() -> [u8; 4] { *GATEWAY.lock() }
-#[allow(dead_code)]
 pub fn subnet() -> [u8; 4] { *SUBNET.lock() }
+
+pub fn set_routes(routes: &[net_core::ip::Route]) { ROUTES.lock().set(routes); }
+pub fn clear_routes() { ROUTES.lock().clear(); }
+pub fn routes() -> alloc::vec::Vec<net_core::ip::Route> { ROUTES.lock().list().to_vec() }
+
+/// The gateway of the default route.
+pub fn default_gateway() -> Option<[u8; 4]> { ROUTES.lock().default_gateway() }
+
+/// The default gateway, 0.0.0.0 without one.
+pub fn gateway() -> [u8; 4] { default_gateway().unwrap_or([0; 4]) }
 
 pub fn prefix_len() -> u8 {
     let m = *SUBNET.lock();
@@ -151,17 +158,11 @@ pub fn prefix_len() -> u8 {
     bits.count_ones() as u8
 }
 
-/// Pick the IP whose MAC the next-hop frame is addressed to: the destination
-/// itself if it's link-local (or broadcast), otherwise the configured gateway.
-/// Public so `tcp::connect` can pre-resolve the same hop ARP-wise before
-/// taking any network-stack lock.
-pub fn arp_target_for(dst_ip: [u8; 4]) -> [u8; 4] {
-    if dst_ip == [255, 255, 255, 255] { return dst_ip; }
-    let src = arp::our_ip();
-    let mask = *SUBNET.lock();
-    let src_masked = [src[0] & mask[0], src[1] & mask[1], src[2] & mask[2], src[3] & mask[3]];
-    let dst_masked = [dst_ip[0] & mask[0], dst_ip[1] & mask[1], dst_ip[2] & mask[2], dst_ip[3] & mask[3]];
-    if src_masked == dst_masked { dst_ip } else { *GATEWAY.lock() }
+/// The IP whose MAC the frame to `dst_ip` is addressed to: the limited
+/// broadcast itself, else the route's next hop; `None` without a route.
+pub fn arp_target_for(dst_ip: [u8; 4]) -> Option<[u8; 4]> {
+    if dst_ip == [255, 255, 255, 255] { return Some(dst_ip); }
+    ROUTES.lock().next_hop(dst_ip)
 }
 
 pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
@@ -221,7 +222,7 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     let payload = &data[ihl..total_len];
     let dhcp_reply = protocol == PROTO_UDP && payload.len() >= 4
         && u16::from_be_bytes([payload[2], payload[3]]) == 68
-        && super::dhcp::is_running();
+        && super::dhcp::accepts_any_dst();
     let dest = match iface().input_route(l2, src_ip, dst_ip, dhcp_reply) {
         Ok(d) => d,
         Err(d) => { drop_in(d); return; }
@@ -279,7 +280,13 @@ pub fn send(dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
 
 /// Send an IPv4 packet with custom TTL (for traceroute)
 pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> bool {
-    matches!(transmit(dst_ip, protocol, payload, ttl, Tx::Wait, None), Ok(Handed::Card))
+    matches!(transmit(dst_ip, protocol, payload, ttl, Tx::Wait, None, None), Ok(Handed::Card))
+}
+
+/// `send` from `src`, whatever our address is: the DHCP client's packet
+/// socket sends from 0.0.0.0.
+pub fn send_from(src: [u8; 4], dst_ip: [u8; 4], protocol: u8, payload: &[u8]) -> bool {
+    matches!(transmit(dst_ip, protocol, payload, 64, Tx::Wait, None, Some(src)), Ok(Handed::Card))
 }
 
 /// Send a TCP segment of a connection: DF set (`IP_PMTUDISC_WANT`), its
@@ -289,7 +296,7 @@ pub fn send_with_ttl(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8) -> 
 /// refused it or it has no route (`tcp_transmit_skb` reporting an error), so
 /// the connection keeps it for later.
 pub fn send_tcp(dst_ip: [u8; 4], segment: &[u8], id: u16) -> bool {
-    matches!(transmit(dst_ip, PROTO_TCP, segment, 64, Tx::Wait, Some(Forwarded { tos: 0, id, df: true })),
+    matches!(transmit(dst_ip, PROTO_TCP, segment, 64, Tx::Wait, Some(Forwarded { tos: 0, id, df: true }), None),
         Ok(Handed::Card | Handed::Queued))
 }
 
@@ -309,7 +316,7 @@ pub struct Forwarded {
 pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    transmit(dst_ip, protocol, payload, 64, Tx::Try, Some(head)).map(|h| h == Handed::Card)
+    transmit(dst_ip, protocol, payload, 64, Tx::Try, Some(head), None).map(|h| h == Handed::Card)
 }
 
 /// `try_send` for a TCP or UDP payload whose check field holds the
@@ -317,7 +324,7 @@ pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
 pub fn try_send_partial(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
     -> Result<bool, crate::virtio_net::NetError>
 {
-    transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, Some(head)).map(|h| h == Handed::Card)
+    transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, Some(head), None).map(|h| h == Handed::Card)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -344,9 +351,10 @@ enum Handed {
 /// Build and hand over one packet: where it went, or the card's refusal. `head`: the
 /// fields of a TCP segment or a forwarded packet; `None` for a datagram of
 /// ours that no connection sends, which gets them as
-/// `ip_select_ident_segs` does for an unconnected socket.
+/// `ip_select_ident_segs` does for an unconnected socket. `src`: the source
+/// address, ours by default.
 fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
-            head: Option<Forwarded>)
+            head: Option<Forwarded>, src: Option<[u8; 4]>)
     -> Result<Handed, crate::virtio_net::NetError>
 {
     // __mkroute_output: no loopback device, and 0/8 and 240/4 lead nowhere.
@@ -360,7 +368,7 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
         TOO_BIG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return Ok(Handed::Nowhere);
     }
-    let src_ip = arp::our_ip();
+    let src_ip = src.unwrap_or_else(arp::our_ip);
     let total_len = (HEADER_LEN + payload.len()) as u16;
     let head = head.unwrap_or_else(|| if protocol == PROTO_UDP {
         // DF set (`IP_PMTUDISC_WANT`): an atomic datagram needs no unique
@@ -395,7 +403,10 @@ fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
         Tx::Try => arp::Mode::Try,
         Tx::TryPartial => arp::Mode::Partial { tcp: protocol == PROTO_TCP },
     };
-    let hop = arp_target_for(dst_ip);
+    let Some(hop) = arp_target_for(dst_ip) else {
+        OUT_NO_ROUTES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        return Ok(Handed::Nowhere);
+    };
     if hop == [255, 255, 255, 255] {
         // A broadcast destination is the broadcast MAC; asking ARP who owns
         // 255.255.255.255 can only ever get no answer.
