@@ -250,12 +250,14 @@ impl Run {
     }
 
     /// Move the clock to `to_us`, running the tick at every 10 ms boundary
-    /// on the way, as the kernel's loops do.
+    /// on the way where `next_deadline` says one is due, as the kernel's
+    /// loops do: a timer it misses fails the script.
     fn advance(&mut self, to_us: u64) {
         while self.env.now_us < to_us {
             let next = (self.env.now_us / 10_000 + 1) * 10_000;
             self.env.now_us = next.min(to_us);
-            if self.env.now_us == next {
+            let now = self.env.now_us / 10_000;
+            if self.env.now_us == next && self.stack.next_deadline(now).is_some_and(|d| d <= now) {
                 let pending = self.stack.tick(&mut self.env);
                 for p in &pending {
                     tcp::send_pending(&mut self.env, self.stack.stats(), p);

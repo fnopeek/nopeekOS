@@ -256,6 +256,14 @@ fn us_to_ticks(us: u64) -> u64 { us.div_ceil(TICK_US) }
 /// The ACK timers on a tick: SACK compression (`tcp_compressed_ack_kick`)
 /// and the delayed ACK (`tcp_delack_timer_handler`). True when an ACK is
 /// due now.
+/// When `timer_due` next has something to do (`icsk_delack_timer`, the
+/// SACK compression timer).
+pub(super) fn timer_at(c: &TcpConn) -> Option<u64> {
+    let comp = (c.ack.comp_at != 0).then_some(c.ack.comp_at);
+    let delack = (c.ack.pending & ACK_TIMER != 0).then_some(c.ack.timeout);
+    comp.into_iter().chain(delack).min()
+}
+
 pub(super) fn timer_due(c: &mut TcpConn, now: u64) -> bool {
     if c.ack.comp_at != 0 && now >= c.ack.comp_at {
         c.ack.comp_at = 0;

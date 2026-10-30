@@ -251,6 +251,15 @@ pub fn seed_active() {
     prime_gateway_arp();
 }
 
+/// Milliseconds until a TCP timer is due, at most `cap`: how long a loop
+/// that drives `tcp::tick_connections` may park.
+pub fn timer_park_ms(cap: u64) -> u64 {
+    match tcp::next_deadline() {
+        Some(d) => (d.saturating_sub(crate::interrupts::ticks()) * 10).clamp(10, cap.max(10)),
+        None => cap,
+    }
+}
+
 /// Does the network need Core 0's loop within the next frame? While a TCP
 /// connection runs a timer, a DHCP or probe timer is near, or the active card
 /// is drained only by polling (`net::poll`) — every card but the WASM NIC,

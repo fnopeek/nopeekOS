@@ -26,8 +26,8 @@ pub fn start() {
     crate::smp::scheduler::spawn_fiber(napi_fiber, 0);
 }
 
-/// Park bound while TCP timers are pending (delayed ACK, RTO): the timers run
-/// on the 10 ms `ticks()` grid, so waking more often buys nothing.
+/// The shortest park, for a TCP timer due at once: the timers run on the
+/// 10 ms `ticks()` grid, so waking more often buys nothing.
 const TIMER_PARK_MS: u64 = 10;
 /// Park bound otherwise — only a card switch (cable pulled, WiFi took over)
 /// needs a re-check without an interrupt.
@@ -46,7 +46,7 @@ fn napi_fiber(_arg: u64) {
         // snapshot, so the wait below returns at once — no lost wakeup.
         let since = crate::irq::arm(vector);
         crate::net::poll_rx_only();
-        let park = if super::tcp::has_timers() { TIMER_PARK_MS } else { IDLE_PARK_MS };
+        let park = super::timer_park_ms(IDLE_PARK_MS).max(TIMER_PARK_MS);
         crate::irq::wait(vector, since, park);
     }
 }

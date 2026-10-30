@@ -703,10 +703,8 @@ fn worker_entry(_arg: u64) {
         }
         let cap_ms = if polled {
             PARK_POLLED_MS
-        } else if crate::net::tcp::has_timers() {
-            PARK_TCP_TIMERS_MS
         } else {
-            PARK_SAFETY_MS
+            crate::net::timer_park_ms(PARK_SAFETY_MS).max(PARK_TCP_TIMERS_MS)
         };
         let freq = crate::interrupts::tsc_freq();
         let parked_at = crate::interrupts::rdtsc();

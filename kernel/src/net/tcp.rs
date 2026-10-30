@@ -379,8 +379,13 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
     stack().input(&mut KernelEnv, src_ip, data);
 }
 
-/// Periodic tick: retransmit, delayed ACKs, timeouts
+/// Run the connections' timers that are due: retransmit, delayed ACKs,
+/// timeouts. Cheap when none is.
 pub fn tick_connections() {
+    let now = crate::interrupts::ticks();
+    if !next_deadline().is_some_and(|d| d <= now) {
+        return;
+    }
     // The segments go out after the table is let go: holding it across the
     // TX doorbell would block worker-core `recv` behind Core-0's periodic
     // ACKs/retries.
@@ -390,11 +395,16 @@ pub fn tick_connections() {
     }
 }
 
-/// Does any connection run a timer (retransmit, delayed ACK, SYN retry,
-/// TIME_WAIT, FIN timeout)? The shell loop drives `tick_connections` and
-/// must keep coming back while this holds.
+/// The tick (100 Hz) at which a connection's timer is next due.
+pub fn next_deadline() -> Option<u64> {
+    stack().next_deadline(crate::interrupts::ticks())
+}
+
+/// Is a connection's timer due within the next tick? The loops that drive
+/// `tick_connections` keep a 10 ms cadence while this holds and otherwise
+/// wait until `next_deadline`.
 pub fn has_timers() -> bool {
-    stack().has_timers()
+    next_deadline().is_some_and(|d| d <= crate::interrupts::ticks() + 1)
 }
 
 /// Every connection, with `tcp_get_info` for the full ones.

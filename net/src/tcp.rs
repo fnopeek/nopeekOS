@@ -2462,16 +2462,50 @@ impl Stack {
         Ok(())
     }
 
-    /// Does any connection run a timer (retransmit, delayed ACK, SYN retry,
-    /// TIME_WAIT, FIN timeout)? The shell loop drives `tick` and
-    /// must keep coming back while this holds. As in Linux, an idle established
-    /// connection has none: only data in flight or unsent, or an ACK held back.
-    pub fn has_timers(&self) -> bool {
-        !self.conns.tw.is_empty() || !self.conns.reqs.is_empty() || self.conns.iter().any(|c| match c.state {
-            State::Closed | State::Listen => false,
-            State::Established | State::CloseWait => c.ack.pending != 0 || !c.send_buf.is_empty(),
-            _ => true,
-        })
+    /// The tick at which `tick` next has something to do, as Linux's
+    /// per-socket timers (`icsk_retransmit_timer`, `icsk_delack_timer`, the
+    /// probe timer, `tcp_fin_timeout`, `tw_timer`, the request timer); `now`
+    /// for data waiting to go out. An idle established connection has none.
+    pub fn next_deadline(&self, now: u64) -> Option<u64> {
+        let mut d: Option<u64> = None;
+        let mut at = |t: u64| d = Some(d.map_or(t, |x| x.min(t)));
+        for c in self.conns.iter() {
+            if let Some(t) = ack::timer_at(c) {
+                at(t);
+            }
+            if c.sends()
+                && (c.snd_nxt != c.snd_una.wrapping_add(c.send_buf.len() as u32)
+                    || (c.fin_queued && !c.fin_sent))
+            {
+                at(now);
+            }
+            if c.state == State::SynSent {
+                at(c.last_send_tick.saturating_add(c.rto));
+            }
+            if c.sends() && c.tx.packets_out != 0 {
+                at(c.rtx_at);
+            }
+            if c.probe_at != 0 {
+                at(c.probe_at);
+            }
+            if matches!(c.state, State::FinWait1 | State::FinWait2 | State::Closing | State::LastAck) {
+                at(c.last_send_tick + FIN_TIMEOUT_TICKS + 1);
+            }
+            if c.state == State::Closed {
+                if c.released {
+                    at(now);
+                } else if c.owner == KERNEL {
+                    at(c.last_send_tick + FIN_TIMEOUT_TICKS + 1);
+                }
+            }
+        }
+        if let Some(t) = self.conns.tw.values().map(|tw| tw.expires).min() {
+            at(t);
+        }
+        if let Some(t) = listen::timers_at(&self.conns) {
+            at(t);
+        }
+        d
     }
 
     /// Every connection with what `tcp_get_info` reports for it; TIME-WAIT

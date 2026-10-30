@@ -1289,6 +1289,8 @@ fn core0_wait() {
         || !crate::shade::is_active()
         || crate::microvm::vm_active();
     let mut d = crate::interrupts::rdtsc() + if busy { freq / 100 } else { freq };
+    // A TCP timer due before the second is up is served on time.
+    d = d.min(crate::interrupts::rdtsc() + crate::net::timer_park_ms(1000) * (freq / 1000));
     if let Some(due) = crate::shade::surface_due_tsc() {
         d = d.min(due);
     }

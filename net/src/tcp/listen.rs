@@ -481,6 +481,11 @@ pub(super) fn cookie_check<E: Env + ?Sized>(conns: &mut Table, io: &mut Io<E>, s
 /// `reqsk_timer_handler` for every request sock whose timer ran out: the
 /// SYN-ACK again, with backoff, up to `tcp_synack_retries`; fewer when the
 /// queue fills with old requests.
+/// When `timers` next has a request to retransmit or drop.
+pub(super) fn timers_at(conns: &Table) -> Option<u64> {
+    conns.reqs.values().map(|r| r.expires).min()
+}
+
 pub(super) fn timers<E: Env + ?Sized>(conns: &mut Table, io: &mut Io<E>) {
     let now = io.ticks();
     let due: Vec<Tuple> = conns.reqs.iter().filter(|(_, r)| now >= r.expires).map(|(k, _)| *k).collect();
