@@ -839,6 +839,7 @@ pub fn https_get_resumable(host: &str, path: &str, size: usize)
         let mut part: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
         let mut info = FetchInfo::default();
         let r = https_request_streaming(host, path, &req, size, &mut |chunk: &[u8]| {
+            part.try_reserve(chunk.len()).map_err(|_| "out of memory")?;
             part.extend_from_slice(chunk);
             if have + part.len() >= next_report {
                 crate::kprintln!("[npk]     {} / {} KiB ({}%)",
@@ -853,6 +854,7 @@ pub fn https_get_resumable(host: &str, path: &str, size: usize)
         if r.is_ok() && info.status == 200 {
             out = part;
         } else {
+            out.try_reserve(part.len()).map_err(|_| "out of memory")?;
             out.extend_from_slice(&part);
         }
         match r {
@@ -950,11 +952,9 @@ fn https_get_req(host: &str, path: &str, max_size: usize, req: &HttpRequest)
             &hop,
             max_size,
             &mut |chunk: &[u8]| -> Result<(), &'static str> {
-                if out.len().saturating_add(chunk.len()) > max_size {
-                    out.extend_from_slice(&chunk[..max_size.saturating_sub(out.len())]);
-                } else {
-                    out.extend_from_slice(chunk);
-                }
+                let take = chunk.len().min(max_size.saturating_sub(out.len()));
+                out.try_reserve(take).map_err(|_| "out of memory")?;
+                out.extend_from_slice(&chunk[..take]);
                 if out.len() >= next_report && max_size > 0 {
                     crate::kprintln!("[npk]     {} / {} KiB ({}%)",
                         out.len() / 1024, max_size / 1024,
