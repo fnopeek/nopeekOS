@@ -439,11 +439,6 @@ const TCP_INIT_CWND: u32 = 10;
 // Host TCP only ever has a handful of live connections (OTA/https/dns), so the
 // worst-case footprint is small; the guest browser uses its own (microvm) TCP.
 const RECV_BUF_SIZE: usize = 8 * 1024 * 1024;
-// Cap on buffered out-of-order data per connection. Beyond this, new
-// ahead-segments are dropped (the sender will retransmit) so a lossy link
-// can't blow up the heap.
-const OOO_MAX_BYTES: usize = 2 * 1024 * 1024;
-
 /// `sysctl_tcp_mem[2]` in bytes, from the memory free when first asked:
 /// tcp.c `tcp_init_mem`, `limit = nr_free_buffer_pages() / 16` (at least
 /// 128 pages), `tcp_mem[0] = limit / 4 * 3`, `tcp_mem[2] = tcp_mem[0] * 2`.
@@ -537,8 +532,9 @@ struct TcpConn {
     // Out-of-order reassembly: segments received ahead of a gap, keyed by
     // stream offset (see `rcv_off`). Without it a single lost packet forces
     // the sender into go-back-N (retransmit the whole window), and the re-burst
-    // can overflow small NIC FIFOs again. Bounded by OOO_MAX_BYTES (else
-    // dropped → the sender retransmits).
+    // can overflow small NIC FIFOs again. Bounded as Linux bounds it by
+    // `sk_rcvbuf`: only what lies in the window we offered is kept, and
+    // all of it is charged to `tcp_mem`.
     ooo: BTreeMap<u64, Vec<u8>>,
     ooo_bytes: usize,
     // Coalesced [start,end) runs of `ooo`, kept in sync — so building SACK
@@ -2092,10 +2088,7 @@ impl Stack {
                                 if conn.sack_ok {
                                     conn.dsack = Some((seq, seq.wrapping_add(payload.len() as u32)));
                                 }
-                            } else if in_window
-                                && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
-                                && mem_charge(&io, payload.len())
-                            {
+                            } else if in_window && mem_charge(&io, payload.len()) {
                                 crate::mib::inc(crate::mib::Mib::TcpExtTCPOFOQueue);
                                 let inside: Vec<(u64, usize)> = conn.ooo.range(off..end)
                                     .filter(|&(&k, v)| k + v.len() as u64 <= end)
