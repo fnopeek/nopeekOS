@@ -98,6 +98,7 @@ impl FbConsole {
 }
 
 /// Execute a closure with exclusive access to the framebuffer console.
+#[track_caller]
 pub fn with_fb<F, R>(f: F) -> Option<R>
 where
     F: FnOnce(&mut FbConsole) -> R,
@@ -739,6 +740,7 @@ pub fn write_byte(byte: u8) {
 }
 
 /// Clear the framebuffer screen (both shadow buffers + MMIO).
+#[track_caller]
 pub fn clear() {
     let mut console = CONSOLE.lock();
     // As in `with_fb`: a GPU copy still writing the framebuffer would put

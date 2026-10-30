@@ -59,6 +59,7 @@ impl PixelBuffer {
     /// Physical address of the first pixel (also its kernel address).
     pub fn phys(&self) -> u64 { self.phys }
     /// The pixels for writing through `gui::render`; waits for the GPU.
+    #[track_caller]
     pub fn ptr(&self) -> *mut u8 {
         crate::gpu::gpudev::wait_cpu_access(self.phys);
         self.phys() as *mut u8
@@ -66,6 +67,7 @@ impl PixelBuffer {
 
     /// The buffer as a render target for the `gui::render` and `gui::font`
     /// helpers, which address it in the buffer's own coordinates.
+    #[track_caller]
     pub fn info(&self) -> FbInfo {
         crate::gpu::gpudev::wait_cpu_access(self.phys);
         FbInfo { addr: self.phys, pitch: self.width * 4, width: self.width, height: self.height, bpp: 32 }
@@ -90,6 +92,7 @@ impl Deref for PixelBuffer {
 }
 
 impl DerefMut for PixelBuffer {
+    #[track_caller]
     fn deref_mut(&mut self) -> &mut [u32] {
         if self.phys == 0 {
             return &mut [];

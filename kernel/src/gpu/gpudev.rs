@@ -339,6 +339,8 @@ pub struct Missed {
     /// The fiber running there at the deadline: how long, and whether it
     /// is the module.
     pub running: Option<(u64, bool)>,
+    /// What a fiber there halts the core waiting for the GPU from.
+    pub halted_in: Option<&'static core::panic::Location<'static>>,
 }
 
 /// Why the module did not take the last job it missed. Once.
@@ -1129,17 +1131,32 @@ fn halt_for(seq: u32, deadline: u64) {
 
 /// Wait until job `seq` is completed, at most until `deadline` (TSC). Its
 /// status: 0, the module's error, or -ETIME (62).
+#[track_caller]
 fn wait_seq(seq: u32, deadline: u64) -> i32 {
-    loop {
+    let cid = crate::smp::per_core::current_core_id();
+    let site = HALT_SITE.get(cid);
+    if let Some(s) = site {
+        s.store(core::panic::Location::caller() as *const _ as *mut _, Ordering::Relaxed);
+    }
+    let r = loop {
         if let Some(s) = seq_done(seq, deadline) {
-            return s;
+            break s;
         }
         if stalled() {
-            return -62;
+            break -62;
         }
         halt_for(seq, deadline);
+    };
+    if let Some(s) = site {
+        s.store(core::ptr::null_mut(), Ordering::Relaxed);
     }
+    r
 }
+
+/// Per core, the caller of a `wait_seq` in progress there: it halts the
+/// core, and on the module's own core no job can finish meanwhile.
+static HALT_SITE: [core::sync::atomic::AtomicPtr<core::panic::Location<'static>>; 64] =
+    [const { core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()) }; 64];
 
 /// Signal the parked fibers whose job is done, or all of them (`all`: the
 /// module is gone).
@@ -1224,6 +1241,9 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
                     running: fiber::running_on(core).map(|(w, t0)| (
                         crate::interrupts::rdtsc().saturating_sub(t0) * 1000 / crate::interrupts::tsc_freq().max(1),
                         w == module)),
+                    // SAFETY: HALT_SITE holds null or a `&'static Location`.
+                    halted_in: HALT_SITE.get(core)
+                        .and_then(|s| unsafe { s.load(Ordering::Relaxed).as_ref() }),
                 });
             }
         }
@@ -1263,6 +1283,7 @@ fn deadline() -> u64 {
 /// Before the CPU writes the buffer whose first pixel is at `addr`: wait
 /// for the GPU job that last read it. Cheap when no job on a dynamic buffer
 /// is in flight.
+#[track_caller]
 pub fn wait_cpu_access(addr: u64) {
     if seq_ge(COMPLETED.load(Ordering::Acquire), DYN_FENCE.load(Ordering::Acquire)) {
         return;
@@ -1318,6 +1339,7 @@ fn submit_copy(src_gpu: u64, src_pitch: u32, dst_gpu: u64, dst_pitch: u32,
 /// Wait for the fences of the framebuffer and both shadows. False when the
 /// last copy failed, timed out or its module died: the framebuffer may not
 /// show the last frame, and the caller copies it on the CPU.
+#[track_caller]
 pub fn wait_framebuffer() -> bool {
     let fences: [u32; FIXED_BOS as usize] = {
         let st = STATE.lock();
@@ -1436,6 +1458,7 @@ pub fn cursor_move(x: i32, y: i32, shown: bool) -> bool {
 }
 
 /// Wait for scene job `seq`: 0 when the module composed it, else why not.
+#[track_caller]
 pub fn wait_scene(seq: u32) -> i32 {
     let t0 = crate::interrupts::rdtsc();
     let r = wait_seq(seq, deadline());
@@ -1452,6 +1475,7 @@ fn note_scene_wait(t0: u64) {
 
 /// `wait_scene` for a scene queued behind new buffers: binding them is a
 /// page walk per 4 KB page in the module, once.
+#[track_caller]
 pub fn wait_scene_bound(seq: u32) -> i32 {
     let t0 = crate::interrupts::rdtsc();
     let r = wait_seq(seq, t0 + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000));

@@ -160,6 +160,9 @@ fn failed(status: Result<i32, &str>) {
                             None => alloc::string::String::from("no fiber running"),
                         },
                         m.task.map(|t| alloc::format!(", task '{}'", t)).unwrap_or_default());
+                    if let Some(l) = m.halted_in {
+                        crate::kprintln!("[npk] gpu: core {} halted waiting for the GPU in {}:{}", m.core, l.file(), l.line());
+                    }
                 }
                 None => crate::kprintln!("[npk] gpu: scene on the CPU, the module did not finish in time"),
             },
