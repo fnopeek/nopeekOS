@@ -67,6 +67,9 @@ mib! {
     TcpExtTCPTimeouts = "TcpExtTCPTimeouts",
     TcpExtTCPLossProbes = "TcpExtTCPLossProbes",
     TcpExtTCPRcvQDrop = "TcpExtTCPRcvQDrop",
+    TcpExtTCPOFOQueue = "TcpExtTCPOFOQueue",
+    TcpExtTCPOFODrop = "TcpExtTCPOFODrop",
+    TcpExtTCPOFOMerge = "TcpExtTCPOFOMerge",
 }
 
 const N: usize = Mib::ALL.len();

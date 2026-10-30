@@ -2088,6 +2088,7 @@ impl Stack {
                             let covered = conn.ooo_runs.range(..=off).next_back()
                                 .is_some_and(|(_, &e)| e >= end);
                             if covered {
+                                crate::mib::inc(crate::mib::Mib::TcpExtTCPOFOMerge);
                                 if conn.sack_ok {
                                     conn.dsack = Some((seq, seq.wrapping_add(payload.len() as u32)));
                                 }
@@ -2095,6 +2096,7 @@ impl Stack {
                                 && conn.ooo_bytes + payload.len() <= OOO_MAX_BYTES
                                 && mem_charge(&io, payload.len())
                             {
+                                crate::mib::inc(crate::mib::Mib::TcpExtTCPOFOQueue);
                                 let inside: Vec<(u64, usize)> = conn.ooo.range(off..end)
                                     .filter(|&(&k, v)| k + v.len() as u64 <= end)
                                     .map(|(&k, v)| (k, v.len())).collect();
@@ -2105,6 +2107,9 @@ impl Stack {
                                 conn.ooo_bytes += payload.len();
                                 conn.ooo.insert(off, payload.to_vec());
                                 ooo_runs_add(&mut conn.ooo_runs, off, end);
+                            } else if in_window {
+                                // tcp_data_queue_ofo: no memory for it.
+                                crate::mib::inc(crate::mib::Mib::TcpExtTCPOFODrop);
                             }
                             if !in_window {
                                 // Past the window, a zero window probe for one.

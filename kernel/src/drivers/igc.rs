@@ -324,6 +324,11 @@ pub fn tx_stats() -> (u64, u64, u64) {
      STAT_HTDPMC.load(Ordering::Relaxed))
 }
 
+/// Whether an igc card is driven.
+pub fn is_present() -> bool {
+    DEVICE.lock().is_some()
+}
+
 /// (missed RX frames, XOFF received, XON received) since boot.
 pub fn link_stats() -> (u64, u64, u64) {
     if let Some(d) = DEVICE.lock().as_ref() {

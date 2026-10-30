@@ -832,5 +832,13 @@ fn netstat_counters() {
             kprintln!("  {:<28} {}", "TcpCurrEstab", estab);
         }
     }
+    // The card's own counters, under the names `ethtool -S` gives them.
+    if crate::drivers::igc::is_present() {
+        let (missed, xoff, xon) = crate::drivers::igc::link_stats();
+        kprintln!();
+        kprintln!("  {:<28} {}", "igc rx_missed_errors", missed);
+        kprintln!("  {:<28} {}", "igc rx_flow_control_xoff", xoff);
+        kprintln!("  {:<28} {}", "igc rx_flow_control_xon", xon);
+    }
     kprintln!();
 }
