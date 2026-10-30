@@ -4,7 +4,7 @@
 
 [package]
 name = "microvm-init"
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 description = "nopeekOS microVM PID-1: mounts the app bundle and the profile, runs the Wayland session and the app"
 

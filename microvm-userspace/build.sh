@@ -2,80 +2,85 @@
 # microvm-userspace/build.sh: build a Linux userspace bundle for the
 # nopeekOS MicroVM.
 #
-# Output: release/apps/<name>/<name>-<ver>.cpio.gz (signed in
-# release/apps/<name>/<name>-<ver>.cpio.gz.sig by `./build.sh release`).
+# Output: release/apps/<name>/<name>-<ver>.{cpio.gz,sqfs,manifest} (signed
+# by `./build.sh release` / `./build.sh release-large`).
 #
 # The bundle is not embedded in the regular kernel binary. `install
 # <name>` fetches it OTA-style, verifies ECDSA P-384 and stores it in
 # npkFS; `microvm <name>` loads it from there.
 #
-# Contents: Alpine minirootfs + our PID-1 as /init + the apks below.
+# Contents: Arch Linux packages from the pinned snapshot + our PID-1 as
+# /init.
 #
 # Trust split:
 #   - Kernel + microvm-init: compiled + signed by us.
-#   - Alpine minirootfs: pinned tarball + pinned sha256.
-#   - apks: package names here, versions from the pinned Alpine branch;
-#     apk verifies them against the signed index.
+#   - Arch bootstrap tarball: pinned sha256 + Arch's release signature.
+#   - Packages: names here, versions from the pinned Arch Linux Archive
+#     snapshot; pacman verifies each against Arch's keyring.
+#
+# The version is the main client's own plus the snapshot, e.g.
+# firefox-159.0-arch20261029: what the bundle runs, and on which base.
 
 set -euo pipefail
 
 # ── Configuration ─────────────────────────────────────────────────
 
-# Alpine release tracking: the pins live in alpine.env.
-source "$(dirname "$0")/alpine.env"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$REPO_ROOT/microvm/linux/arch.sh"
 
-# Output naming; the bundle is named after its main client.
+# The bundle is named after its main client.
 BUNDLE_NAME="${BUNDLE_NAME:-firefox}"
-BUNDLE_VERSION="${BUNDLE_VERSION:-${ALPINE_VERSION}}"
 
-# Apks to add on top of minirootfs. Package names only; versions come
-# from the pinned Alpine branch and are recorded in packages-<bundle>.txt.
-#   firefox   - the browser (pulls gtk/nss/fontconfig/freetype/... via
-#               apk deps)
-#   seatd     - libseat daemon (Alpine libseat has no builtin backend)
+# Packages on top of the bootstrap's base.
+#   firefox   - the browser (pulls gtk/nss/fontconfig/freetype/... as deps)
+#   seatd     - libseat and its daemon (the guest runs no logind)
 #   libinput  - wlroots evdev input
-#   eudev     - udevd + udevadm + libudev. wlroots' libinput and
-#               DRM/session backends discover devices via the udev
-#               monitor; without udev they find no input devices and
+#   systemd   - systemd-udevd + udevadm only; PID-1 is ours. wlroots'
+#               libinput and DRM/session backends discover devices via the
+#               udev monitor; without udev they find no input devices and
 #               never see the DRM connector hotplug raised on a tile
-#               resize. launch_wayland runs udevd, `udevadm trigger`
-#               and `settle` before npkwm.
-#   mesa-gbm  - wlroots DRM backend buffer alloc (pixman SW renderer,
-#               no GL driver)
-# font-dejavu + font-noto: the minirootfs ships no fonts, so without them
-# all GTK and web text renders as tofu. dejavu covers Latin UI/body;
-# noto adds broad Unicode and a sans default.
-# libseat, wayland-libs-server, libdisplay-info: libraries npkwm links
-# (it carries wlroots itself); checked against its NEEDED list below.
+#               resize. The session runs udevd, `udevadm trigger` and
+#               `settle` before npkwm.
+#   mesa, vulkan-intel - GBM/EGL for wlroots and the GPU drivers; their
+#               files are replaced by our build (microvm/linux/mesa).
+# ttf-dejavu + noto-fonts: the base ships no fonts, so without them all GTK
+# and web text renders as tofu. dejavu covers Latin UI/body; noto adds
+# broad Unicode and a sans default.
+# wayland, libdisplay-info: libraries npkwm links (it carries wlroots
+# itself); checked against its NEEDED list below.
 # alsa-lib: libasound for Firefox's cubeb ALSA backend (no PulseAudio /
 # PipeWire in the bundle). cubeb opens the ALSA "default" PCM, which is
 # the virtio-snd card (card 0) backed by the host audio path.
-# mesa-demos: es2gears_wayland and friends, GL test clients the session
+# mesa-utils: es2gears_wayland and friends, GL test clients the session
 # runs instead of the browser with npkapp= on the guest command line.
-# Video decodes through VA-API: libva, Intel's media driver (replaced by
-# our build over the native context, below), libva-utils for `vainfo`,
-# ffmpeg for Firefox's decoder and `ffmpeg -hwaccel vaapi`.
+# Video decodes through VA-API: libva, intel-gmmlib for our build of Intel's
+# media driver (below), libva-utils for `vainfo`, ffmpeg for Firefox's
+# decoder and `ffmpeg -hwaccel vaapi`.
 # gdb stays while the GPU paths are new (`npkgdb`).
-COMMON_APKS="seatd libseat libinput eudev mesa-gbm wayland-libs-server libdisplay-info font-dejavu font-noto alsa-lib mesa-demos ffmpeg gdb"
+# busybox: the session scripts in PID-1 are written for its applets (wget,
+# nc, su without PAM, halt -f); linked in /usr/libexec/npk/bb, which the
+# session puts first in PATH.
+COMMON_PACKAGES="busybox seatd libinput systemd mesa vulkan-intel vulkan-icd-loader wayland libdisplay-info ttf-dejavu noto-fonts alsa-lib mesa-utils ffmpeg gdb"
 case "$BUNDLE_NAME" in
-    firefox) DEFAULT_APKS="firefox libva libva-utils intel-media-driver $COMMON_APKS" ;;
+    firefox) DEFAULT_PACKAGES="firefox libva libva-utils intel-gmmlib $COMMON_PACKAGES" ;;
     *)       echo "unknown bundle: $BUNDLE_NAME" >&2; exit 1 ;;
 esac
-APK_PACKAGES="${APK_PACKAGES:-$DEFAULT_APKS}"
-PKG_LIST="$(dirname "$0")/packages-${BUNDLE_NAME}.txt"
+PACKAGES="${PACKAGES:-$DEFAULT_PACKAGES}"
+PKG_LIST="$SCRIPT_DIR/packages-${BUNDLE_NAME}.txt"
 # The OTA asset name, section microvm:<name>-sqfs.
 ASSET_NAME="microvm-${BUNDLE_NAME}"
+SNAPSHOT_TAG="arch${ARCH_SNAPSHOT//\//}"
 
-# ── Paths ────────────────────────────────────────────────────────
-
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CACHE="${HOME}/.cache/nopeekos/alpine"
 OUT_DIR="$REPO_ROOT/release/apps/${BUNDLE_NAME}"
-OUT="$OUT_DIR/${BUNDLE_NAME}-${BUNDLE_VERSION}.cpio.gz"
 
 PID1_DIR="$REPO_ROOT/microvm/linux/init"
 PID1_BIN="$PID1_DIR/target/x86_64-unknown-linux-gnu/release/microvm-init"
+
+source "$REPO_ROOT/microvm/linux/mesa/mesa.env"
+MESA_OVERLAY="${HOME}/.cache/nopeekos/mesa/mesa-${MESA_VERSION}-npk.tar.gz"
+source "$REPO_ROOT/microvm/linux/ihd/ihd.env"
+IHD_OVERLAY="${HOME}/.cache/nopeekos/ihd/ihd-${IHD_VERSION}-npk.tar.gz"
 
 cyan()  { printf '\033[0;36m[npk]\033[0m %s\n' "$1"; }
 green() { printf '\033[0;32m[npk]\033[0m %s\n' "$1"; }
@@ -83,28 +88,14 @@ red()   { printf '\033[0;31m[npk]\033[0m %s\n' "$1" >&2; }
 
 # ── Sanity ───────────────────────────────────────────────────────
 
-for t in curl sha256sum tar bsdtar gzip cargo unshare chroot readelf; do
+for t in curl sha256sum gpg bsdtar gzip cargo unshare readelf mksquashfs; do
     command -v "$t" >/dev/null 2>&1 || { red "missing: $t"; exit 1; }
 done
+[ -f "$MESA_OVERLAY" ] || { red "missing $MESA_OVERLAY — run microvm/linux/mesa/build.sh"; exit 1; }
+[ -f "$IHD_OVERLAY" ]  || { red "missing $IHD_OVERLAY — run microvm/linux/mesa/build.sh"; exit 1; }
 
-# ── Download Alpine minirootfs (cached, integrity-checked) ───────
-
-mkdir -p "$CACHE"
-TARBALL="alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
-
-if [ ! -f "$CACHE/$TARBALL" ]; then
-    cyan "downloading $TARBALL"
-    curl -L --fail --max-time 60 \
-        -o "$CACHE/$TARBALL.part" \
-        "https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/x86_64/${TARBALL}"
-    mv "$CACHE/$TARBALL.part" "$CACHE/$TARBALL"
-fi
-
-# Verify against pinned hash. Mismatch = either upstream tampering or
-# our pin drifted past available retention; bail either way.
-echo "${ALPINE_MINIROOTFS_SHA256}  $CACHE/$TARBALL" | sha256sum -c - >/dev/null \
-    || { red "sha256 mismatch on $TARBALL"; exit 1; }
-green "verified $TARBALL ($(stat -c%s "$CACHE/$TARBALL") bytes)"
+arch_fetch
+green "verified $ARCH_TARBALL, packages from snapshot $ARCH_SNAPSHOT"
 
 # ── Build PID-1 (idempotent; `cargo build --release` no-ops if fresh)
 
@@ -112,289 +103,191 @@ cyan "building PID-1 (microvm-init)"
 (cd "$PID1_DIR" && cargo build --release --locked >/dev/null 2>&1)
 [ -f "$PID1_BIN" ] || { red "PID-1 build did not produce $PID1_BIN"; exit 1; }
 
-# ── Stage rootfs ─────────────────────────────────────────────────
-
-STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
-
-cyan "staging Alpine minirootfs"
-tar -xzf "$CACHE/$TARBALL" -C "$STAGE"
-
-# Resolv.conf for apk's CDN lookups inside the chroot. Without this
-# `apk add` fails at DNS resolution (no resolver inside the bare
-# rootfs).
-echo "nameserver 1.1.1.1" > "$STAGE/etc/resolv.conf"
-
-# ── Add apks via unshared-namespace chroot ───────────────────────
+# ── Stage rootfs and pack, all inside the namespace ──────────────
 #
-# Run Alpine's own apk binary inside a chroot via `unshare -r` so
-# we don't need real root on the host. apk handles trust-chain
-# verification (signed indexes + signed apks against /etc/apk/keys
-# which the minirootfs already populated).
-#
-# `--pid --fork --mount-proc` gives apk a fresh /proc inside the
-# chroot (some post-install scripts need it). `--mount` isolates
-# mount changes from the host namespace.
-if [ -n "$APK_PACKAGES" ]; then
-    cyan "apk add: $APK_PACKAGES"
-    APK_CACHE_DIR="$CACHE/apks"
-    mkdir -p "$APK_CACHE_DIR"
-    # Bind the host cache dir into the chroot so apk reuses
-    # downloaded .apks across builds.
-    mkdir -p "$STAGE/var/cache/apk"
+# The root's files belong to sub-ids on the host (microvm/linux/arch.sh),
+# so everything that reads them, packing included, runs in `arch_run`.
 
-    unshare --user --map-root-user --mount --pid --fork --mount-proc \
-        sh -c "
-            set -e
-            mount --bind '$APK_CACHE_DIR' '$STAGE/var/cache/apk'
-            chroot '$STAGE' /sbin/apk update 2>&1 | tail -3
-            chroot '$STAGE' /sbin/apk upgrade --no-progress --available 2>&1 | tail -5
-            chroot '$STAGE' /sbin/apk add --no-progress $APK_PACKAGES 2>&1 | tail -20
-            # Pre-build the fontconfig cache inside the image. A cache is
-            # valid only while its recorded directory mtime matches, and
-            # the image is packed with every mtime at the epoch (see
-            # mksquashfs below): the font dirs are set to the epoch first,
-            # or every app start rescans all fonts into a tmpfs cache.
-            find '$STAGE/usr/share/fonts' -type d -exec touch -h -d @0 {} +
-            chroot '$STAGE' /usr/bin/fc-cache -f 2>&1 | tail -3 || true
-            chroot '$STAGE' /sbin/apk info -v 2>/dev/null | LC_ALL=C sort > '$PKG_LIST'
-        "
-
-    # Apk leaves /var/cache/apk populated with symlinks/copies; wipe
-    # it so the cpio doesn't carry duplicate-of-host-cache bytes.
-    rm -rf "$STAGE/var/cache/apk"/*
-
-    # Drop the temporary resolver; the guest sets its own.
-    : > "$STAGE/etc/resolv.conf"
-fi
-
-# Mesa with the Intel native-context backend (microvm/linux/mesa/build.sh)
-# replaces the runtime files of Alpine's mesa packages. Same release only:
-# libEGL, libgbm and libgallium share an internal ABI.
-source "$REPO_ROOT/microvm/linux/mesa/mesa.env"
-MESA_OVERLAY="${HOME}/.cache/nopeekos/mesa/mesa-${MESA_VERSION}-npk.tar.gz"
-[ -f "$MESA_OVERLAY" ] \
-    || { red "missing $MESA_OVERLAY — run microvm/linux/mesa/build.sh"; exit 1; }
-APK_DB="$STAGE/lib/apk/db/installed"
-ALPINE_MESA="$(awk '/^P:mesa$/{f=1} f&&/^V:/{print substr($0,3); exit}' "$APK_DB")"
-case "$ALPINE_MESA" in
-    "${MESA_VERSION}"-r*) ;;
-    *) red "Alpine mesa is $ALPINE_MESA, mesa.env pins $MESA_VERSION"; exit 1 ;;
-esac
-awk '/^P:/{p=substr($0,3)} /^F:/{d=substr($0,3)} /^R:/{if(p ~ /^mesa(-egl|-gl|-gles|-gbm)?$/) print d"/"substr($0,3)}' "$APK_DB" \
-    | while read -r f; do rm -f "$STAGE/$f"; done
-tar -xzf "$MESA_OVERLAY" -C "$STAGE"
-for so in $(tar -tzf "$MESA_OVERLAY" | grep -E '\.so|^usr/bin/'); do
-    [ -L "$STAGE/$so" ] && continue
-    [ "$(head -c 4 "$STAGE/$so")" = "$(printf '\177ELF')" ] || continue
-    for lib in $(readelf -d "$STAGE/$so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
-        [ -e "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] \
-            || { red "mesa ($so) needs $lib, not in the image"; exit 1; }
-    done
-done
-cyan "mesa ${MESA_VERSION} with intel-virtio over Alpine's ${ALPINE_MESA}"
-
-# Intel's media driver built against that Mesa's libnpk_intel_virtio
-# (microvm/linux/mesa/build.sh) replaces Alpine's intel-media-driver files,
-# same release only.
-if grep -q '^P:intel-media-driver$' "$APK_DB"; then
-    source "$REPO_ROOT/microvm/linux/ihd/ihd.env"
-    IHD_OVERLAY="${HOME}/.cache/nopeekos/ihd/ihd-${IHD_VERSION}-npk.tar.gz"
-    [ -f "$IHD_OVERLAY" ] \
-        || { red "missing $IHD_OVERLAY — run microvm/linux/mesa/build.sh"; exit 1; }
-    ALPINE_IHD="$(awk '/^P:intel-media-driver$/{f=1} f&&/^V:/{print substr($0,3); exit}' "$APK_DB")"
-    case "$ALPINE_IHD" in
-        "${IHD_VERSION}"-r*) ;;
-        *) red "Alpine intel-media-driver is $ALPINE_IHD, ihd.env pins $IHD_VERSION"; exit 1 ;;
-    esac
-    awk '/^P:/{p=substr($0,3)} /^F:/{d=substr($0,3)} /^R:/{if(p == "intel-media-driver") print d"/"substr($0,3)}' "$APK_DB" \
-        | while read -r f; do rm -f "$STAGE/$f"; done
-    tar -xzf "$IHD_OVERLAY" -C "$STAGE"
-    for so in $(tar -tzf "$IHD_OVERLAY" | grep -E '\.so'); do
-        [ -L "$STAGE/$so" ] && continue
-        for lib in $(readelf -d "$STAGE/$so" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
-            [ -e "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] \
-                || { red "iHD ($so) needs $lib, not in the image"; exit 1; }
-        done
-    done
-    cyan "intel-media-driver ${IHD_VERSION} with intel-virtio over Alpine's ${ALPINE_IHD}"
-fi
-
-# Firefox's autoconfig, which the session extends with `npkstats` and
-# `npksupport`.
-if [ -x "$STAGE/usr/lib/firefox/firefox" ]; then
-    mkdir -p "$STAGE/usr/lib/firefox/defaults/pref"
-    printf '%s\n' 'pref("general.config.filename", "firefox.cfg");' 'pref("general.config.obscure_value", 0);' \
-        > "$STAGE/usr/lib/firefox/defaults/pref/autoconfig.js"
-    printf '%s\n' '// nopeekOS: the session appends its probes here.' > "$STAGE/usr/lib/firefox/firefox.cfg"
-fi
-
-# The compositor for a guest with a GPU (microvm/linux/npkwm/build.sh gles2);
-# the init runs it instead of PID-1's npkwm when the host offers native
-# contexts.
-mkdir -p "$STAGE/usr/libexec/npk"
-install -m 0755 "$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2" "$STAGE/usr/libexec/npk/npkwm-gles2"
-
-# npkwm is embedded in PID-1 and loads its libraries from this image, as
-# does npkwm-gles2: every library they need must be here, or the session
-# never starts.
-for lib in $(readelf -d "$REPO_ROOT/microvm/linux/npkwm/npkwm" "$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u); do
-    [ -e "$STAGE/usr/lib/$lib" ] || [ -L "$STAGE/usr/lib/$lib" ] || [ -e "$STAGE/lib/$lib" ] || [ -L "$STAGE/lib/$lib" ] \
-        || { red "npkwm needs $lib, not in the image"; exit 1; }
-done
-
-# No set-uid or set-gid binaries: the app's processes are the attacker in
-# this guest, and nothing it runs needs to gain privileges.
-find "$STAGE" -xdev -type f -perm /6000 -exec chmod ug-s {} +
-
-# Install our PID-1 as /init: Linux execs /init as PID-1 when an
-# initramfs is in use. Overrides anything Alpine ships (openrc lives
-# at /sbin/init).
-cp "$PID1_BIN" "$STAGE/init"
-chmod +x "$STAGE/init"
-
-# /etc/motd so an interactive shell shows it is inside the microvm.
-cat > "$STAGE/etc/motd" <<'MOTD'
-
-   nopeekOS MicroVM — Alpine userspace iteration 1
-
-   You are inside a hardware-isolated Linux microvm.
-   Substrate: VMX/SVM + EPT/NPT, 1 GB RAM, virtio-blk/net/gpu/input.
-
-MOTD
-
-# /etc/machine-id: the browser's a11y stack spawns a DBus session bus,
-# which refuses to start without one ("Cannot spawn a message bus
-# without a machine-id") and costs a startup timeout. dbus also checks
-# /var/lib/dbus/machine-id. A fixed 32-hex value (not dbus-uuidgen):
-# the squashfs is signed over its bytes, so the image must be
-# byte-reproducible, and with a single VM a constant id is correct.
-MACHINE_ID="2d8b9f1c4e6a7d0b3f5c8e1a9d4b7c0e"
-printf '%s\n' "$MACHINE_ID" > "$STAGE/etc/machine-id"
-mkdir -p "$STAGE/var/lib/dbus"
-ln -sfn /etc/machine-id "$STAGE/var/lib/dbus/machine-id"
-
-# ── Pack as cpio.gz (newc format = what Linux's initramfs unpacker
-#    expects). Strip uid/gid noise to keep the cpio reproducible
-#    across rebuilds; the sig is over the bytes.
-
-cyan "packing bundle ($(find "$STAGE" -type f | wc -l) files)"
+WORK="$(mktemp -d)"
+trap 'arch_rm "$WORK"' EXIT
 mkdir -p "$OUT_DIR"
 
-(
-    cd "$STAGE"
-    # `--uid 0 --gid 0` forces all entries to root-owned (we're not root
-    # on the host, but inside the microvm everything wants root).
-    # `--mtime` zeros timestamps for reproducibility.
-    find . -mindepth 1 | LC_ALL=C sort | \
-        bsdtar --format newc \
-               --uid 0 --gid 0 \
-               --mtime '1970-01-01 00:00:00 UTC' \
-               -cf - -T -
-) | gzip -9n > "$OUT.tmp"
+export MESA_VERSION MESA_OVERLAY IHD_OVERLAY PKG_LIST PID1_BIN REPO_ROOT OUT_DIR
+export BUNDLE_NAME SNAPSHOT_TAG ARCH_SNAPSHOT WORK
+arch_run "$WORK/root" "
+    cyan()  { printf '\033[0;36m[npk]\033[0m %s\n' \"\$1\"; }
+    red()   { printf '\033[0;31m[npk]\033[0m %s\n' \"\$1\" >&2; exit 1; }
+    cyan 'pacman: $PACKAGES'
+    in_root pacman -Syu --noconfirm --needed $PACKAGES > \$WORK/pacman.log 2>&1 \
+        || { tail -20 \$WORK/pacman.log; red 'pacman failed'; }
+    in_root pacman -Q | LC_ALL=C sort > \$PKG_LIST
+    FIREFOX_VERSION=\$(in_root pacman -Q $BUNDLE_NAME | awk '{print \$2}' | sed 's/^[0-9]*://; s/-[0-9.]*\$//')
+    echo \"\$FIREFOX_VERSION\" > \$WORK/client-version
 
-mv "$OUT.tmp" "$OUT"
+    # Mesa with nopeekOS's native-context patches (microvm/linux/mesa)
+    # replaces the files of Arch's mesa and vulkan-intel. Same release only:
+    # libEGL_mesa, libgbm and libgallium share an internal ABI.
+    arch_mesa=\$(in_root pacman -Q mesa | awk '{print \$2}' | sed 's/^[0-9]*://; s/-[0-9.]*\$//')
+    [ \"\$arch_mesa\" = \"\$MESA_VERSION\" ] || red \"Arch mesa is \$arch_mesa, mesa.env pins \$MESA_VERSION\"
+    in_root pacman -Qlq mesa vulkan-intel | grep -v '/\$' | while read -r f; do rm -f \"\$R\$f\"; done
+    tar -xzf \"\$MESA_OVERLAY\" -C \$R
+    # Intel's media driver built against that Mesa's libnpk_intel_virtio;
+    # Arch's intel-media-driver is not installed.
+    tar -xzf \"\$IHD_OVERLAY\" -C \$R
+    for so in \$(tar -tzf \"\$MESA_OVERLAY\"; tar -tzf \"\$IHD_OVERLAY\"); do
+        [ -L \"\$R/\$so\" ] || [ ! -f \"\$R/\$so\" ] && continue
+        [ \"\$(head -c 4 \"\$R/\$so\")\" = \"\$(printf '\177ELF')\" ] || continue
+        for lib in \$(readelf -d \"\$R/\$so\" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+            [ -e \"\$R/usr/lib/\$lib\" ] || red \"\$so needs \$lib, not in the image\"
+        done
+    done
+    cyan \"mesa \$MESA_VERSION and iHD with intel-virtio over Arch's packages\"
 
-SIZE=$(stat -c%s "$OUT")
-SHA=$(sha256sum "$OUT" | awk '{print $1}')
+    mkdir -p \$R/usr/libexec/npk/bb
+    in_root /usr/bin/busybox --install -s /usr/libexec/npk/bb
+
+    # Noto as the browser needs it: Sans, Serif and Mono for Latin, Greek
+    # and Cyrillic, plus math and symbols. Arch packages every script in
+    # one package; the others are left out.
+    find \$R/usr/share/fonts/noto -type f ! \( -name 'NotoSans-*' -o -name 'NotoSerif-*' \
+        -o -name 'NotoSansMono-*' -o -name 'NotoSansMath-*' -o -name 'NotoSansSymbols-*' \
+        -o -name 'NotoSansSymbols2-*' \) -delete
+
+    # Pre-build the fontconfig cache inside the image. A cache is valid only
+    # while its recorded directory mtime matches, and the image is packed
+    # with every mtime at the epoch (see mksquashfs below): the font dirs
+    # are set to the epoch first, or every app start rescans all fonts into
+    # a tmpfs cache.
+    find \$R/usr/share/fonts -type d -exec touch -h -d @0 {} +
+    in_root fc-cache -f > /dev/null 2>&1 || true
+
+    # Firefox's autoconfig, which the session extends with npkstats and
+    # npksupport.
+    if [ -x \$R/usr/lib/firefox/firefox ]; then
+        mkdir -p \$R/usr/lib/firefox/defaults/pref
+        printf '%s\n' 'pref(\"general.config.filename\", \"firefox.cfg\");' 'pref(\"general.config.obscure_value\", 0);' \
+            > \$R/usr/lib/firefox/defaults/pref/autoconfig.js
+        printf '%s\n' '// nopeekOS: the session appends its probes here.' > \$R/usr/lib/firefox/firefox.cfg
+    fi
+
+    # The compositor for a guest with a GPU (microvm/linux/npkwm/build.sh
+    # gles2); the init runs it instead of PID-1's npkwm when the host offers
+    # native contexts.
+    install -D -m 0755 \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2 \$R/usr/libexec/npk/npkwm-gles2
+    # npkwm is embedded in PID-1 and loads its libraries from this image, as
+    # does npkwm-gles2: every library they need must be here, or the session
+    # never starts.
+    for lib in \$(readelf -d \$REPO_ROOT/microvm/linux/npkwm/npkwm \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2 | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u); do
+        [ -e \$R/usr/lib/\$lib ] || red \"npkwm needs \$lib, not in the image\"
+    done
+
+    # Only what runs: no package manager state, keys, headers, static
+    # libraries, documentation, introspection data or translations (the
+    # session is English; Firefox carries its own strings), and no locale
+    # sources (glibc's built-in C.UTF-8 is used).
+    rm -rf \$R/etc/pacman.d/gnupg \$R/var/lib/pacman/sync \$R/var/log/* \
+           \$R/usr/include \$R/usr/share/man \$R/usr/share/doc \$R/usr/share/info \$R/usr/share/gtk-doc \
+           \$R/usr/lib/pkgconfig \$R/usr/share/pkgconfig \$R/usr/share/gir-1.0 \
+           \$R/usr/share/locale \$R/usr/share/i18n
+    find \$R/usr/lib -maxdepth 1 -name '*.a' -delete
+    : > \$R/etc/resolv.conf
+
+    # No set-uid or set-gid binaries: the app's processes are the attacker
+    # in this guest, and nothing it runs needs to gain privileges.
+    find \$R -xdev -type f -perm /6000 -exec chmod ug-s {} +
+
+    # PID-1 as /init: Linux execs /init when an initramfs is in use.
+    install -m 0755 \$PID1_BIN \$R/init
+
+    printf '%s\n' '' '   nopeekOS MicroVM: Arch Linux userspace' '' \
+        '   You are inside a hardware-isolated Linux microvm.' \
+        '   Substrate: VMX/SVM + EPT/NPT, virtio-blk/net/gpu/input.' '' > \$R/etc/motd
+
+    # /etc/machine-id: the browser's a11y stack spawns a DBus session bus,
+    # which refuses to start without one and costs a startup timeout. dbus
+    # also checks /var/lib/dbus/machine-id. A fixed value: with a single VM
+    # a constant id is correct, and the image stays byte-reproducible.
+    printf '%s\n' 2d8b9f1c4e6a7d0b3f5c8e1a9d4b7c0e > \$R/etc/machine-id
+    mkdir -p \$R/var/lib/dbus
+    ln -sfn /etc/machine-id \$R/var/lib/dbus/machine-id
+
+    # Detached before packing, or the image would carry the host's /dev.
+    for d in dev proc tmp; do umount -l \$R/\$d; done
+    umount \$R/var/cache/pacman/pkg
+    for d in dev proc tmp; do [ -z \"\$(ls -A \$R/\$d)\" ] || { ls -A \$R/\$d | head -5; red \"\$d is still mounted\"; }; done
+    rm -rf \$R/var/cache/pacman
+    VERSION=\"\$(cat \$WORK/client-version)-\$SNAPSHOT_TAG\"
+    OUT=\$OUT_DIR/\$BUNDLE_NAME-\$VERSION
+
+    cyan \"packing \$BUNDLE_NAME \$VERSION (\$(find \$R -type f | wc -l) files)\"
+    # newc is what Linux's initramfs unpacker expects; owners and mtimes
+    # zeroed so the bytes, which the signature covers, are reproducible.
+    (cd \$R && find . -mindepth 1 | LC_ALL=C sort | \
+        bsdtar --format newc --uid 0 --gid 0 --mtime '1970-01-01 00:00:00 UTC' -cf - -T -) \
+        | gzip -9n > \$OUT.cpio.gz.tmp
+    mv \$OUT.cpio.gz.tmp \$OUT.cpio.gz
+
+    # The squashfs is what PID-1 loads: try_switch_to_sqfs mounts it
+    # read-only from /dev/vdb and chroots into it. lz4 (high compression):
+    # the guest inflates every block on first touch, and that is most of an
+    # app's start. -all-time/-mkfs-time 0: the guest has no RTC, and real
+    # mtimes look in the future to it, which makes fontconfig refuse to scan
+    # the font dirs; the epoch is in the past for any guest clock.
+    mksquashfs \$R \$OUT.sqfs.tmp -comp lz4 -Xhc -all-root -noappend -no-xattrs \
+        -all-time 0 -mkfs-time 0 -quiet > /dev/null
+    mv \$OUT.sqfs.tmp \$OUT.sqfs
+    echo \"\$VERSION\" > \$WORK/version
+"
+
+VERSION="$(cat "$WORK/version")"
+CLIENT_VERSION="$(cat "$WORK/client-version")"
+OUT="$OUT_DIR/${BUNDLE_NAME}-${VERSION}"
+SIZE=$(stat -c%s "$OUT.cpio.gz")
+SHA=$(sha256sum "$OUT.cpio.gz" | awk '{print $1}')
+SQFS_SIZE=$(stat -c%s "$OUT.sqfs")
+SQFS_SHA=$(sha256sum "$OUT.sqfs" | awk '{print $1}')
 
 # ── Manifest ─────────────────────────────────────────────────────
 #
 # Stored alongside the bundle so `install` knows what version it's
 # fetching and `microvm <name>` knows the expected format. ECDSA sig
 # happens later in `build.sh release`.
-
-cat > "$OUT_DIR/${BUNDLE_NAME}-${BUNDLE_VERSION}.manifest" <<MANIFEST
+cat > "$OUT.manifest" <<MANIFEST
 name      = "${BUNDLE_NAME}"
-version   = "${BUNDLE_VERSION}"
+version   = "${VERSION}"
+client    = "${BUNDLE_NAME} ${CLIENT_VERSION}"
+base      = "Arch Linux ${ARCH_SNAPSHOT}"
 format    = "cpio.gz"
 size      = ${SIZE}
 sha256    = "${SHA}"
-alpine    = "${ALPINE_VERSION}"
 MANIFEST
 
-# ── 'current' pointer: symlink to the latest version for OTA.
-ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.cpio.gz"      "$OUT_DIR/current.cpio.gz"
-ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.manifest"     "$OUT_DIR/current.manifest"
+# 'current' pointers: the latest version for OTA.
+ln -sfn "${BUNDLE_NAME}-${VERSION}.cpio.gz"  "$OUT_DIR/current.cpio.gz"
+ln -sfn "${BUNDLE_NAME}-${VERSION}.manifest" "$OUT_DIR/current.manifest"
+ln -sfn "${BUNDLE_NAME}-${VERSION}.sqfs"     "$OUT_DIR/current.sqfs"
 
-green "built ${BUNDLE_NAME} ${BUNDLE_VERSION}: ${SIZE} bytes → ${OUT}"
-cyan  "       sha256: ${SHA}"
+green "built ${BUNDLE_NAME} ${VERSION}: cpio ${SIZE} bytes, squashfs ${SQFS_SIZE} bytes"
+cyan  "       sha256 (sqfs): ${SQFS_SHA}"
 
-# Stage as OTA asset. The AssetSpec section `microvm:userspace`
-# (kernel/src/intent/update.rs) maps to `sys/microvm/userspace.cpio.gz`
-# in npkFS. `microvm linux` picks it up on next launch.
+# ── Stage as OTA assets ──────────────────────────────────────────
 #
 # Two distribution lanes, depending on size:
-#   * < ~30 MB → release/assets/microvm-userspace.cpio.gz
-#                (raw.githubusercontent.com via main, signed by `./build.sh release`).
-#   * ≥ ~30 MB → release/assets/large/microvm-userspace.cpio.gz
-#                (GitHub Releases via `./build.sh release-large <tag>`).
-#
-# The kernel asset manifest carries a `url=` line for the large
-# lane; `https_get_streaming` follows the 302 redirect chain to
-# objects.githubusercontent.com transparently. This script stages to
-# the small lane; if the bundle is too large for raw, move the file
-# into `large/` and use `release-large`.
-SIZE_BYTES=$(stat -c%s "$OUT")
-if [ "$SIZE_BYTES" -lt $((30 * 1024 * 1024)) ]; then
-    OTA_SLOT="$REPO_ROOT/release/assets/${ASSET_NAME}.cpio.gz"
-    cp "$OUT" "$OTA_SLOT"
-    cyan  "       staged to OTA (small lane): ${OTA_SLOT}"
-    cyan  "       sign with: ./build.sh release"
-else
-    LARGE_DIR="$REPO_ROOT/release/assets/large"
-    mkdir -p "$LARGE_DIR"
-    OTA_SLOT="$LARGE_DIR/${ASSET_NAME}.cpio.gz"
-    cp "$OUT" "$OTA_SLOT"
-    cyan  "       staged to OTA (large lane, ${SIZE_BYTES} bytes): ${OTA_SLOT}"
-    cyan  "       upload with: ./build.sh release-large assets/<your-tag>"
-fi
-
-# ── Squashfs form: the path PID-1 actually loads ─────────────────
-#
-# PID-1's `try_switch_to_sqfs` mounts the bundle read-only from
-# /dev/vdb (slot-5 RO virtio-blk) and chroots into it; decompress-on-read
-# is cheaper in RAM than unpacking the cpio into a tmpfs.
-#
-# lz4 (high compression): the guest inflates every block on first touch,
-# and that is most of an app's start. lz4 inflates several times faster
-# than zstd at 1.3x its size; uncompressed is 2.5x zstd's size, and reading
-# that from npkFS becomes the cost instead.
-SQFS_OUT="$OUT_DIR/${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs"
-cyan "building squashfs (lz4) — PID-1's load path"
-# -all-root: everything root-owned inside the guest. -noappend:
-# fresh image. -no-xattrs: our minimal guest doesn't carry them.
-# -all-time/-mkfs-time 0: epoch (1970) timestamps. The guest has
-# no RTC; real mtimes look "in the future" to it, which makes
-# fontconfig refuse to scan the font dirs ("mtime in the future. New
-# fonts may not be detected", tofu). Epoch is in the past for any
-# guest clock, and it makes the image reproducible (the .sig is over
-# the bytes).
-mksquashfs "$STAGE" "$SQFS_OUT.tmp" \
-    -comp lz4 -Xhc -all-root -noappend -no-xattrs \
-    -all-time 0 -mkfs-time 0 -quiet \
-    >/dev/null
-mv "$SQFS_OUT.tmp" "$SQFS_OUT"
-
-SQFS_SIZE=$(stat -c%s "$SQFS_OUT")
-SQFS_SHA=$(sha256sum "$SQFS_OUT" | awk '{print $1}')
-ln -sfn "${BUNDLE_NAME}-${BUNDLE_VERSION}.sqfs" "$OUT_DIR/current.sqfs"
-green "built squashfs: ${SQFS_SIZE} bytes → ${SQFS_OUT}"
-cyan  "       sha256: ${SQFS_SHA}"
-
-# Same two-lane staging as the cpio. `microvm-userspace.sqfs` maps to
-# AssetSpec [microvm:userspace-sqfs], `microvm-firefox.sqfs` to
-# [microvm:firefox-sqfs] (build.sh release signs it).
-if [ "$SQFS_SIZE" -lt $((30 * 1024 * 1024)) ]; then
-    SQFS_SLOT="$REPO_ROOT/release/assets/${ASSET_NAME}.sqfs"
-    cp "$SQFS_OUT" "$SQFS_SLOT"
-    cyan  "       staged to OTA (small lane): ${SQFS_SLOT}"
-    cyan  "       sign with: ./build.sh release"
-else
-    LARGE_DIR="$REPO_ROOT/release/assets/large"
-    mkdir -p "$LARGE_DIR"
-    SQFS_SLOT="$LARGE_DIR/${ASSET_NAME}.sqfs"
-    cp "$SQFS_OUT" "$SQFS_SLOT"
-    cyan  "       staged to OTA (large lane, ${SQFS_SIZE} bytes): ${SQFS_SLOT}"
-    cyan  "       upload with: ./build.sh release-large assets/<your-tag>"
-fi
+#   * < ~30 MB → release/assets/ (raw.githubusercontent.com via main,
+#                signed by `./build.sh release`).
+#   * ≥ ~30 MB → release/assets/large/ (GitHub Releases via
+#                `./build.sh release-large guest/<name>-<version>`).
+# The kernel asset manifest carries a `url=` line for the large lane;
+# `https_get_streaming` follows the 302 redirect chain.
+for ext in cpio.gz sqfs; do
+    f="$OUT.$ext"
+    if [ "$(stat -c%s "$f")" -lt $((30 * 1024 * 1024)) ]; then
+        cp "$f" "$REPO_ROOT/release/assets/${ASSET_NAME}.$ext"
+        cyan "       staged ${ASSET_NAME}.$ext (small lane): sign with ./build.sh release"
+    else
+        mkdir -p "$REPO_ROOT/release/assets/large"
+        cp "$f" "$REPO_ROOT/release/assets/large/${ASSET_NAME}.$ext"
+        cyan "       staged ${ASSET_NAME}.$ext (large lane)"
+    fi
+done
+cyan "       upload with: ./build.sh release-large guest/${BUNDLE_NAME}-${VERSION} ${ASSET_NAME}.sqfs"

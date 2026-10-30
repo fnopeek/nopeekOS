@@ -92,7 +92,7 @@ unsafe extern "C" fn rust_main() -> ! {
     // comes up empty until the OTA bundle lands).
     if try_switch_to_sqfs(kmsg_fd) {
         // Re-establish /proc /sys /dev /tmp inside the new root. The
-        // mountpoints exist in the Alpine image; squashfs is RO so the
+        // mountpoints exist in the bundle image; squashfs is RO so the
         // mkdirs no-op harmlessly.
         mount_essentials();
         say(kmsg_fd, b"[microvm-init] switched to squashfs bundle root\n");
@@ -145,7 +145,7 @@ unsafe extern "C" fn rust_main() -> ! {
 ///     or it tries X11 (there is no X).
 /// Renderer = pixman (software, no GL/Mesa driver). Backend = wlroots
 /// DRM on /dev/dri/card0 (virtio-gpu KMS) → our Surface tile. Seat =
-/// the seatd daemon (Alpine's libseat has no builtin backend), its
+/// the seatd daemon (the guest runs no logind for libseat), its
 /// socket on a tmpfs over /run (RO sqfs root). XDG_RUNTIME_DIR on
 /// tmpfs for the same reason. Output → /dev/kmsg (8250 TX is never
 /// flushed: cmdline is `noapic nolapic`, no IRQ4). npkwm starts as soon as
@@ -174,7 +174,7 @@ fn launch_wayland(kmsg_fd: i64) {
     let arg0 = b"/bin/sh\0".as_ptr();
     let arg1 = b"-c\0".as_ptr();
     // XDG_RUNTIME_DIR + seatd socket on tmpfs (sqfs root is RO); seatd
-    // daemon because Alpine libseat has no builtin backend; pixman
+    // daemon because the guest runs no logind for libseat; pixman
     // renderer (no GL); WLR DRM backend on virtio-gpu KMS. seatd.log is
     // kept as the one thing worth seeing if the seat breaks.
     // udevd + `udevadm trigger`/`settle` must run before npkwm:
@@ -185,7 +185,7 @@ fn launch_wayland(kmsg_fd: i64) {
     // hotplug raised on a tile resize. `trigger` replays uevents for
     // already-present devices (event0, card0); `settle` waits for
     // /run/udev/data to be populated before npkwm enumerates. Degrades
-    // with a WARN if eudev is absent — npkwm still starts, just
+    // with a WARN if udev is absent — npkwm still starts, just
     // input/hotplug-blind.
     // The browser's allocator (scudo) keeps freed memory instead of handing
     // it back with madvise/munmap every few seconds: each hand-back is a TLB
@@ -269,7 +269,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  mount -t tmpfs -o mode=0755,nosuid,nodev,noexec tmpfs /run 2>/dev/null; \
                  mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm 2>/dev/null; \
                  mkdir -p /run/udev; \
-                 udevd --daemon 2>/dev/null; \
+                 /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null; \
                  udevadm trigger --type=devices --action=add --subsystem-match=drm --subsystem-match=input --subsystem-match=sound 2>/dev/null; \
                  udevadm settle --timeout=10 2>/dev/null; \
                  W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
@@ -287,7 +287,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  WM=/tmp/npkwm; \
                  if [ $GPU = 1 ] && [ -x /usr/libexec/npk/npkwm-gles2 ]; then WM=/usr/libexec/npk/npkwm-gles2; unset WLR_RENDERER; fi; \
                  seatd -g wl > /tmp/seatd.log 2>&1 & \
-                 i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do usleep 5000; i=$((i+1)); done; \
+                 i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do sleep 0.005; i=$((i+1)); done; \
                  echo \"<0>[wl] ${WM##*/} start (seatd after ${i}x5ms)\" > /dev/kmsg; \
                  WMENV=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkwmenv=//p' | tr '\\n' ' '); \
                  [ -n \"$WMENV\" ] && echo \"<0>[wl] npkwm env $WMENV\" > /dev/kmsg; \
@@ -393,7 +393,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    head -c 200000000 /dev/zero | gzip -1 > /dev/null; f=$(t); \
                    echo \"<0>[bench] cpu=$(( (b-a)*10 ))ms syscalls=$(( (c-b)*10 ))ms fork-exec1000=$(( (d-c)*10 ))ms memtouch1G=$(( (e-d)*10 ))ms gzip200M=$(( (f-e)*10 ))ms\" > /dev/kmsg; \
                  fi; \
-                 i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do usleep 5000; i=$((i+1)); done; \
+                 i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  LOGPAT=$(sed -n 's/.*npklogs=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
                  ALL=0; grep -qE 'npklogs( |$)' /proc/cmdline && ALL=1; \
@@ -434,11 +434,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ $rc = 0 ] || tail -n 20 /tmp/app.log /tmp/npkwm.log | while read -r l; do echo \"<0>[wl] $l\" > /dev/kmsg; done; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
-    let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
+    let env0 = SESSION_PATH.as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
+    let env2 = SESSION_LANG.as_ptr();
 
     let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
-    let envp = [env0, env1, core::ptr::null::<u8>()];
+    let envp = [env0, env1, env2, core::ptr::null::<u8>()];
 
     // Fork the RT-promoter before becoming the shell. The child loops on
     // /proc promoting cubeb/AudioIPC threads to SCHED_RR from outside the
@@ -546,10 +547,11 @@ fn launch_bench(kmsg_fd: i64) {
                  echo \"<0>[netbench-vm] done -- halting\" > /dev/kmsg; \
                  sync 2>/dev/null; halt -f 2>/dev/null; poweroff -f 2>/dev/null; \
                  while true; do sleep 3600; done\0".as_ptr();
-    let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
+    let env0 = SESSION_PATH.as_ptr();
     let env1 = b"TERM=linux\0".as_ptr();
+    let env2 = SESSION_LANG.as_ptr();
     let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
-    let envp = [env0, env1, core::ptr::null::<u8>()];
+    let envp = [env0, env1, env2, core::ptr::null::<u8>()];
     // Fork the guest-side probe so [gdiag] runs alongside the bench, to tell
     // whether during a slow transfer the guest is CPU-bound or idle and
     // waiting on the host.
@@ -722,6 +724,13 @@ const APP_LOG_AWK: &[u8] = include_bytes!("app_log.awk");
 
 /// Backtraces of crashing or hanging media decoder processes (`npkgdb`).
 const RDD_GDB: &[u8] = include_bytes!("rdd_gdb.sh");
+
+/// The session scripts are written for busybox's applets (wget, nc, su
+/// without PAM, `halt -f`); the bundle links them in /usr/libexec/npk/bb,
+/// ahead of the distribution's tools.
+const SESSION_PATH: &[u8] = b"PATH=/usr/libexec/npk/bb:/usr/bin:/usr/sbin\0";
+/// glibc without LANG is ASCII; GTK and the browser expect UTF-8.
+const SESSION_LANG: &[u8] = b"LANG=C.UTF-8\0";
 
 /// The guest compositor, built by `microvm/linux/npkwm/build.sh`.
 const NPKWM: &[u8] = include_bytes!("../../npkwm/npkwm");
@@ -911,7 +920,7 @@ unsafe fn spawn_gdiag(kmsg_fd: i64) {
                    echo \"<0>[gdiag] sock: $(ss -tin 2>/dev/null | grep -oE 'cwnd:[0-9]+|rtt:[0-9.]+|retrans:[0-9/]+|bytes_acked:[0-9]+' | tr '\\n' ' ')\"; \
                    echo \"<0>[gdiag] softnet(proc/drop/squeeze): $(tr '\\n' '|' < /proc/net/softnet_stat)\"; \
                  done\0".as_ptr();
-    let env0 = b"PATH=/usr/bin:/bin:/usr/sbin:/sbin\0".as_ptr();
+    let env0 = SESSION_PATH.as_ptr();
     let argv = [arg0, arg1, arg2, core::ptr::null::<u8>()];
     let envp = [env0, core::ptr::null::<u8>()];
     unsafe {

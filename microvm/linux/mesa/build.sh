@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
-# Build the guest's Mesa with the Intel native-context backend, inside a
-# throwaway chroot of the pinned Alpine release (no root needed:
-# `unshare --map-root-user`).
+# Build the guest's Mesa with nopeekOS's native-context patches, inside a
+# throwaway root of the pinned Arch snapshot (microvm/linux/arch.sh, no
+# root needed).
 #
-# Alpine's mesa is built without `-Dintel-virtio-experimental`, so iris in
-# the guest never asks virtio-gpu for the DRM capset and the guest stays on
-# llvmpipe. This builds the same release from the same tarball with
-# Alpine's meson options (main/mesa/APKBUILD) plus that option, limited to
-# the drivers a virtio-gpu guest can reach: iris, anv (Vulkan, and with it
-# Vulkan Video) and radeonsi through native context, virgl as the name the
-# kernel driver reports, llvmpipe as the fallback. The userspace bundle replaces the files of Alpine's mesa
-# packages with this output, and only if the versions match: libEGL, libgbm
+# Arch's mesa already enables the Intel and AMD virtio backends; this
+# builds the same release from the same tarball with Arch's layout (glvnd,
+# one Vulkan manifest) plus microvm/linux/mesa/patches: the backend as a
+# library for drivers outside Mesa (libnpk_intel_virtio) and anv fixes.
+# The drivers are limited to what a virtio-gpu guest can reach: iris, anv
+# (Vulkan, and with it Vulkan Video) and radeonsi through native context,
+# virgl as the name the kernel driver reports, llvmpipe as the fallback.
+# The userspace bundle replaces the files of Arch's mesa and vulkan-intel
+# with this output, and only if the versions match: libEGL_mesa, libgbm
 # and libgallium share an internal ABI and must come from one build.
 #
 # With it radeonsi's VA-API driver (radeonsi_drv_video.so), through which
@@ -20,7 +21,7 @@
 # session with the driver the guest got; and installs npk-vkprobe
 # (vkprobe.sh), which checks Vulkan Video decoding per codec.
 #
-# Then, in the same chroot, Intel's media driver (iHD, microvm/linux/ihd)
+# Then, in the same root, Intel's media driver (iHD, microvm/linux/ihd)
 # against this Mesa's libnpk_intel_virtio: the patch sends its i915 ioctls
 # through the same virtio backend iris and anv use.
 #
@@ -31,47 +32,38 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-source "$REPO_ROOT/microvm-userspace/alpine.env"
+source "$SCRIPT_DIR/../arch.sh"
 source "$SCRIPT_DIR/mesa.env"
 IHD_DIR="$SCRIPT_DIR/../ihd"
 source "$IHD_DIR/ihd.env"
 
-ALPINE_CACHE="${HOME}/.cache/nopeekos/alpine"
 CACHE="${HOME}/.cache/nopeekos/mesa"
-TARBALL="alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
 MESA_TARBALL="mesa-${MESA_VERSION}.tar.xz"
 OUT="$CACHE/mesa-${MESA_VERSION}-npk.tar.gz"
 IHD_CACHE="${HOME}/.cache/nopeekos/ihd"
 IHD_TARBALL="intel-media-driver-${IHD_VERSION}.tar.gz"
 IHD_OUT="$IHD_CACHE/ihd-${IHD_VERSION}-npk.tar.gz"
 
-# Alpine's makedepends without rust (rusticl is off) and the Vulkan loader.
+# Arch's makedepends for these drivers, without rust (rusticl is off).
 # clang, libclc and spirv-llvm-translator build mesa-clc, which iris needs
 # for its precompiled internal shaders.
-BUILD_PACKAGES="build-base pkgconf meson bison flex python3 py3-mako py3-packaging py3-ply py3-yaml py3-cparser
-    libdrm-dev libxdamage-dev libxshmfence-dev libx11-dev libxfixes-dev libxrandr-dev libxxf86vm-dev xorgproto
-    elfutils-dev eudev-dev expat-dev libdisplay-info-dev libxml2-dev zlib-dev zstd-dev
-    wayland-dev wayland-protocols glslang-dev libva-dev
-    llvm${MESA_LLVM}-dev clang${MESA_LLVM}-dev libclc-dev spirv-llvm-translator-dev
-    cmake samurai intel-gmmlib-dev libpciaccess-dev"
+BUILD_PACKAGES="base-devel meson cmake bison flex python-mako python-packaging python-ply python-yaml python-pycparser
+    libdrm libglvnd libxdamage libxshmfence libx11 libxext libxfixes libxrandr libxxf86vm libxcb xcb-util-keysyms xorgproto
+    libelf systemd-libs expat libdisplay-info libxml2 zlib zstd libpng
+    wayland wayland-protocols glslang spirv-tools libva vulkan-icd-loader
+    llvm clang libclc spirv-llvm-translator intel-gmmlib libpciaccess mesa vulkan-intel"
 
-# Alpine's options (APKBUILD build()), except: the driver lists, Vulkan only
-# for Intel, no rusticl, and the Intel virtio backend.
-MESON_OPTS="--prefix=/usr --libdir=lib --sysconfdir=/etc --localstatedir=/var
-    --buildtype=plain --wrap-mode=nodownload
-    -Db_ndebug=true -Db_lto=false
-    -Dallow-kcmp=enabled -Dexpat=enabled -Dshader-cache=enabled
-    -Dxlib-lease=enabled -Dxmlconfig=enabled -Dzstd=enabled
-    -Dbackend_max_links=2 -Dbuild-tests=false
-    -Ddri-drivers-path=/usr/lib/dri
+# Arch's options (mesa PKGBUILD build()), except: the driver lists, Vulkan
+# only for Intel, no rusticl, no layers.
+MESON_OPTS="--optimization 2 -Db_ndebug=true
     -Dgallium-drivers=iris,radeonsi,virgl,llvmpipe
     -Dvulkan-drivers=intel -Dvulkan-layers=[] -Dintel-rt=disabled
     -Damdgpu-virtio=true -Dintel-virtio-experimental=true
-    -Dplatforms=x11,wayland
-    -Dllvm=enabled -Dshared-llvm=enabled
-    -Dgbm=enabled -Dglx=dri -Dopengl=true -Dgles1=enabled -Dgles2=enabled -Degl=enabled
-    -Dgallium-extra-hud=true -Dgallium-rusticl=false -Dgallium-va=enabled
-    -Dvideo-codecs=all"
+    -Dgallium-extra-hud=true -Dgallium-rusticl=false -Dgles1=disabled
+    -Dlibunwind=disabled -Dvalgrind=disabled -Dandroid-libbacktrace=disabled
+    -Dmicrosoft-clc=disabled -Dhtml-docs=disabled
+    -Dgallium-mediafoundation=disabled
+    -Dvideo-codecs=all -Dvulkan-manifest-per-architecture=false"
 
 fetch() {
     [ -f "$2" ] && return
@@ -79,25 +71,21 @@ fetch() {
     mv "$2.part" "$2"
 }
 
-mkdir -p "$ALPINE_CACHE/apks" "$CACHE" "$IHD_CACHE"
-fetch "https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/x86_64/${TARBALL}" "$ALPINE_CACHE/$TARBALL"
+mkdir -p "$CACHE" "$IHD_CACHE"
+arch_fetch
 fetch "https://archive.mesa3d.org/${MESA_TARBALL}" "$CACHE/$MESA_TARBALL"
 fetch "https://github.com/intel/media-driver/archive/intel-media-${IHD_VERSION}.tar.gz" "$IHD_CACHE/$IHD_TARBALL"
-echo "${ALPINE_MINIROOTFS_SHA256}  $ALPINE_CACHE/$TARBALL" | sha256sum -c - >/dev/null \
-    || { echo "sha256 mismatch on $TARBALL" >&2; exit 1; }
 echo "${MESA_SHA512}  $CACHE/$MESA_TARBALL" | sha512sum -c - >/dev/null \
     || { echo "sha512 mismatch on $MESA_TARBALL" >&2; exit 1; }
 echo "${IHD_SHA512}  $IHD_CACHE/$IHD_TARBALL" | sha512sum -c - >/dev/null \
     || { echo "sha512 mismatch on $IHD_TARBALL" >&2; exit 1; }
 
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
-tar -xzf "$ALPINE_CACHE/$TARBALL" -C "$STAGE"
-echo "nameserver 1.1.1.1" > "$STAGE/etc/resolv.conf"
-mkdir -p "$STAGE/src" "$STAGE/var/cache/apk" "$STAGE/out"
+trap 'arch_rm "$STAGE"' EXIT
+mkdir -p "$STAGE/src" "$STAGE/out/usr/bin"
 tar -xJf "$CACHE/$MESA_TARBALL" -C "$STAGE/src"
 cp "$SCRIPT_DIR/gpuprobe.c" "$STAGE/src/"
-install -D -m 0755 "$SCRIPT_DIR/vkprobe.sh" "$STAGE/out/usr/bin/npk-vkprobe"
+install -m 0755 "$SCRIPT_DIR/vkprobe.sh" "$STAGE/out/usr/bin/npk-vkprobe"
 for p in "$SCRIPT_DIR"/patches/*.patch; do
     patch -d "$STAGE/src/mesa-${MESA_VERSION}" -p1 -s < "$p"
 done
@@ -108,57 +96,49 @@ for p in "$IHD_DIR"/patches/*.patch; do
 done
 
 JOBS="$(nproc)"
-mkdir -p "$STAGE/ihd"
-unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
-    set -e
-    mount --bind '$ALPINE_CACHE/apks' '$STAGE/var/cache/apk'
-    chroot '$STAGE' /sbin/apk update >/dev/null
-    chroot '$STAGE' /sbin/apk upgrade --no-progress --available >/dev/null
-    chroot '$STAGE' /sbin/apk add --no-progress $(echo $BUILD_PACKAGES) >/dev/null
-    chroot '$STAGE' /bin/sh -c '
+arch_run "$STAGE/root" "
+    in_root pacman -Syu --noconfirm --needed $(echo $BUILD_PACKAGES) >/dev/null 2>&1
+    arch_mesa=\$(in_root pacman -Q mesa | awk '{print \$2}')
+    case \"\$arch_mesa\" in
+        ${MESA_VERSION}-*|*:${MESA_VERSION}-*) ;;
+        *) echo \"Arch has mesa \$arch_mesa, mesa.env pins ${MESA_VERSION}\" >&2; exit 1 ;;
+    esac
+    mkdir -p \$R/src \$R/out \$R/ihd
+    mount --bind '$STAGE/src' \$R/src
+    mount --bind '$STAGE/out' \$R/out
+    in_root /bin/bash -c '
         set -e
-        alpine_mesa=\$(apk search -x mesa 2>/dev/null | head -1)
-        case \"\$alpine_mesa\" in
-            mesa-${MESA_VERSION}-r*) ;;
-            *) echo \"Alpine has \$alpine_mesa, mesa.env pins ${MESA_VERSION}\" >&2; exit 1 ;;
-        esac
+        source /etc/makepkg.conf
+        export CFLAGS CXXFLAGS LDFLAGS
         cd /src/mesa-${MESA_VERSION}
-        export CFLAGS=\"-O2 -fstack-clash-protection -Wformat -Werror=format-security\"
-        export CXXFLAGS=\"\$CFLAGS\"
-        PATH=\"\$PATH:/usr/lib/llvm${MESA_LLVM}/bin\" meson setup output $(echo $MESON_OPTS) >/dev/null
+        arch-meson . output $(echo $MESON_OPTS) > /tmp/setup.log 2>&1 || { grep -E \"ERROR|error\" -A3 /tmp/setup.log | head -20; exit 1; }
         meson compile -C output -j $JOBS > /tmp/build.log 2>&1 || { grep -B2 -A12 -E \"error|Error\" /tmp/build.log | head -80; exit 1; }
         DESTDIR=/out meson install --no-rebuild -C output >/dev/null
-        mkdir -p /out/usr/bin
         cc -std=c11 -O2 -Wall -Wextra -Werror -I/out/usr/include \$(pkg-config --cflags libdrm) \
             /src/gpuprobe.c -o /out/usr/bin/npk-gpuprobe -L/out/usr/lib -Wl,-rpath-link,/out/usr/lib -lEGL -lGLESv2 -lgbm -ldrm
 
-        alpine_ihd=\$(apk search -x intel-media-driver 2>/dev/null | head -1)
-        case \"\$alpine_ihd\" in
-            intel-media-driver-${IHD_VERSION}-r*) ;;
-            *) echo \"Alpine has \$alpine_ihd, ihd.env pins ${IHD_VERSION}\" >&2; exit 1 ;;
-        esac
-        # The options of Alpine (community/intel-media-driver APKBUILD); the
-        # virtio backend from the Mesa just built.
+        # The options of Arch (intel-media-driver PKGBUILD); the virtio
+        # backend from the Mesa just built.
         cd /src/${IHD_SRC}
         export CFLAGS=\"\$CFLAGS -I/out/usr/include\" CXXFLAGS=\"\$CXXFLAGS -I/out/usr/include\"
-        export LDFLAGS=\"-L/out/usr/lib -Wl,-rpath-link,/out/usr/lib\"
-        cmake3.5 -B build -G Ninja -Wno-dev \\
+        export LDFLAGS=\"\$LDFLAGS -L/out/usr/lib -Wl,-rpath-link,/out/usr/lib\"
+        cmake -B build -G Ninja -Wno-dev -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \\
             -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_INSTALL_LIBDIR=lib \\
-            -DBUILD_SHARED_LIBS=True -DINSTALL_DRIVER_SYSCONF=OFF -DMEDIA_BUILD_FATAL_WARNINGS=OFF >/dev/null
-        cmake3.5 --build build -j $JOBS > /tmp/build.log 2>&1 || { grep -B2 -A12 -E \"error|Error\" /tmp/build.log | head -80; exit 1; }
-        DESTDIR=/ihd cmake3.5 --install build >/dev/null
+            -DINSTALL_DRIVER_SYSCONF=OFF -DMEDIA_BUILD_FATAL_WARNINGS=OFF >/dev/null
+        cmake --build build -j $JOBS > /tmp/build.log 2>&1 || { grep -B2 -A12 -E \"error|Error\" /tmp/build.log | head -80; exit 1; }
+        DESTDIR=/out/ihd cmake --install build >/dev/null
     '
 "
 
-# Exactly the runtime files of Alpine's mesa, mesa-egl, mesa-gl, mesa-gles,
-# mesa-gbm and mesa-vulkan-intel, radeonsi's of mesa-va-gallium, plus the
-# probe; headers, pkg-config files and dev symlinks stay out.
+# Exactly the runtime files of Arch's mesa and vulkan-intel that this build
+# makes, plus the probes; headers, pkg-config files and dev symlinks stay
+# out.
 (
     cd "$STAGE/out"
     find usr/lib/libgallium-*.so usr/lib/gbm/dri_gbm.so usr/share/drirc.d \
-         usr/lib/libEGL.so.1* usr/lib/libGL.so.1* usr/lib/libGLESv1_CM.so.1* \
-         usr/lib/libGLESv2.so.2* usr/lib/libgbm.so.1* usr/bin/npk-gpuprobe usr/bin/npk-vkprobe \
-         usr/lib/libvulkan_intel.so usr/share/vulkan/icd.d/intel_icd.x86_64.json \
+         usr/lib/libEGL_mesa.so.0* usr/lib/libGLX_mesa.so.0* usr/share/glvnd/egl_vendor.d/50_mesa.json \
+         usr/lib/libgbm.so.1* usr/bin/npk-gpuprobe usr/bin/npk-vkprobe \
+         usr/lib/libvulkan_intel.so usr/share/vulkan/icd.d/intel_icd.json \
          usr/lib/libnpk_intel_virtio.so.* usr/lib/dri/radeonsi_drv_video.so \
          \( -type f -o -type l \) -print | LC_ALL=C sort > "$STAGE/files"
     # Unstripped copies stay in the cache, to name the frames of a backtrace
@@ -172,10 +152,10 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
 mv "$OUT.tmp" "$OUT"
 echo "mesa ${MESA_VERSION} (intel-virtio): $(stat -c%s "$OUT") bytes -> $OUT"
 
-# The runtime files of Alpine's intel-media-driver: the VA-API driver and
-# the C-for-Media runtime library.
+# The runtime files of intel-media-driver: the VA-API driver and the
+# C-for-Media runtime library.
 (
-    cd "$STAGE/ihd"
+    cd "$STAGE/out/ihd"
     find usr/lib/dri/iHD_drv_video.so usr/lib/libigfxcmrt.so.* \( -type f -o -type l \) -print \
         | LC_ALL=C sort > "$STAGE/ihd-files"
     rm -rf "$IHD_CACHE/symbols" && mkdir -p "$IHD_CACHE/symbols"

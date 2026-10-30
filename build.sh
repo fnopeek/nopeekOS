@@ -982,7 +982,7 @@ Installer / release:
                        manifest.large with url= overrides. The next
                        `release` merges those into the canonical asset
                        manifest. Use for files too big for raw-content
-                       (Alpine+Mesa userspace bundles, >30 MB).
+                       (microVM guest bundles, >30 MB).
 
 Without argument: build + qemu
 
@@ -1428,7 +1428,7 @@ ${MOD_FW:+$MOD_FW
         ONLY="$*"
         if [ -z "$TAG" ]; then
             err "usage: ./build.sh release-large <tag> [file...]"
-            err "example: ./build.sh release-large assets/alpine-wayland-mesa-0.1.0"
+            err "example: ./build.sh release-large guest/firefox-159.0-arch20261029 microvm-firefox.sqfs"
             exit 1
         fi
         # Set in the `release)` arm too; this arm runs under `set -u`.

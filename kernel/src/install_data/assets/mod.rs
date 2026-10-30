@@ -100,8 +100,8 @@ pub static BUNDLED_ASSETS: &[BundledAsset] = &[
     },
 
     // ── MicroVM Linux bzImage ─────────────────────────────────────
-    // Alpine linux-virt kernel, extracted from the apk's
-    // boot/vmlinuz-virt and placed in release/assets/.
+    // Built by microvm-linux/build.sh from kernel.org source and placed in
+    // release/assets/.
     // Loaded on demand by `microvm linux` via npkfs::fetch.
     BundledAsset {
         fs_path: "sys/microvm/linux-virt.bzImage",

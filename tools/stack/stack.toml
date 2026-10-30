@@ -44,18 +44,34 @@ cve = { kind = "osv-commit", repo = "https://github.com/libexpat/libexpat", tag 
 name = "Firefox (microVM guest)"
 area = "guest"
 file = "microvm-userspace/packages-firefox.txt"
-regex = '^firefox-([0-9.]+)-r'
+regex = '^firefox ([0-9.]+)-'
 upstream = { kind = "mozilla", key = "LATEST_FIREFOX_VERSION" }
-note = "Alpine edge decides the version; it does not backport Firefox fixes."
+note = "From the pinned Arch snapshot; a newer snapshot brings Mozilla's release."
 cve = { kind = "mfsa", product = "Firefox" }
 
 [[component]]
-name = "Alpine base (microVM guest)"
+name = "Arch Linux snapshot (microVM guest)"
 area = "guest"
-file = "microvm-userspace/alpine.env"
-regex = 'ALPINE_VERSION:-([0-9]+)'
-note = "Edge minirootfs pinned by date; packages are checked one by one below."
-cve = { kind = "none", note = "Per package: see Alpine packages." }
+file = "microvm-userspace/arch.env"
+regex = 'ARCH_SNAPSHOT:-([0-9/]+)'
+note = "Arch Linux Archive date the guest's packages come from; they are checked one by one below."
+cve = { kind = "none", note = "Per package: see guest packages." }
+
+[[component]]
+name = "Mesa (microVM guest, own build)"
+area = "guest"
+file = "microvm/linux/mesa/mesa.env"
+regex = 'MESA_VERSION=([0-9.]+)'
+upstream = { kind = "git-tags", repo = "https://gitlab.freedesktop.org/mesa/mesa.git", tag = "mesa-{line}.*", line_of = 2 }
+cve = { kind = "none", note = "Follows the Arch snapshot's mesa." }
+
+[[component]]
+name = "Intel media driver (microVM guest, own build)"
+area = "guest"
+file = "microvm/linux/ihd/ihd.env"
+regex = 'IHD_VERSION=([0-9.]+)'
+upstream = { kind = "git-tags", repo = "https://github.com/intel/media-driver", tag = "intel-media-2*" }
+cve = { kind = "none", note = "Pinned to the release its virtio patch applies to." }
 
 [[component]]
 name = "Mozilla root store"
@@ -96,8 +112,8 @@ cve = { kind = "none", note = "Build tool; linked into python.wasm." }
 [crates]
 dev_paths = ["forge/harness", "tools/regen-icons", "tools/hpack-test", "tools/wasi-path-test", "/harness"]
 
-# The guest's exact package list, checked against Alpine's security database.
-[alpine]
+# The guest's exact package list (pacman -Q), checked against Arch's current
+# repositories and its security tracker.
+[guest]
 packages = "microvm-userspace/packages-firefox.txt"
-branch = "edge"
-repos = ["main", "community"]
+repos = ["core", "extra"]

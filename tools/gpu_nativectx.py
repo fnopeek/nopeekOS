@@ -23,20 +23,13 @@ and a count of the virtio-gpu commands QEMU saw (trace in --work).
 import argparse
 import collections
 import gzip
-import hashlib
 import os
 import re
 import shutil
 import subprocess
 import sys
-import tarfile
-import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-# eglinfo/glxinfo, same Alpine branch as the bundle (microvm-userspace/alpine.env).
-MESA_UTILS_URL = "https://dl-cdn.alpinelinux.org/alpine/edge/community/x86_64/mesa-utils-9.0.0-r6.apk"
-MESA_UTILS_SHA256 = "6bb47020b321ae8e3170fac621eb3b6d3e3467e0df48c7a7a5303e4933009496"
 
 QEMU_MODULES = {
     "drm": ["hw-display-virtio-gpu.so", "hw-display-virtio-gpu-gl.so",
@@ -65,10 +58,9 @@ if $B mount -t squashfs -o ro /dev/vda /root; then
   $B mount -t sysfs sys /root/sys
   $B mount -o bind /dev /root/dev
   $B mount -t tmpfs tmpfs /root/tmp
-  $B cp /probe/eglinfo /probe/glxinfo /root/tmp/
   $B chroot /root /bin/sh -c '
     echo "[probe] /dev/dri: $(ls /dev/dri 2>&1 | tr "\n" " ")"
-    timeout 60 env EGL_LOG_LEVEL=info /tmp/eglinfo -B 2>&1 | sed "s/^/[probe] egl: /"
+    timeout 60 env EGL_LOG_LEVEL=info eglinfo -B 2>&1 | sed "s/^/[probe] egl: /"
   '
 else
   echo "[probe] sqfs mount failed"
@@ -85,37 +77,15 @@ def need_modules(mode):
     return [m for m in QEMU_MODULES[mode] if not os.path.exists(os.path.join(base, m))]
 
 
-def fetch_mesa_utils(cache):
-    os.makedirs(cache, exist_ok=True)
-    apk = os.path.join(cache, os.path.basename(MESA_UTILS_URL))
-    if not os.path.exists(apk):
-        print(f"[kit] fetching {MESA_UTILS_URL}", flush=True)
-        urllib.request.urlretrieve(MESA_UTILS_URL, apk + ".part")
-        os.replace(apk + ".part", apk)
-    digest = hashlib.sha256(open(apk, "rb").read()).hexdigest()
-    if digest != MESA_UTILS_SHA256:
-        os.unlink(apk)
-        sys.exit(f"{apk}: sha256 {digest} does not match the pin")
-    return apk
-
-
-def build_initramfs(work, sqfs, apk):
+def build_initramfs(work, sqfs):
     tree = os.path.join(work, "initramfs")
     shutil.rmtree(tree, ignore_errors=True)
-    os.makedirs(os.path.join(tree, "probe"))
-    # busybox and the musl loader come from the bundle itself.
-    subprocess.run(["unsquashfs", "-q", "-n", "-f", "-d", tree, sqfs,
-                    "bin/busybox", "lib/ld-musl-x86_64.so.1"],
-                   check=True, stdout=subprocess.DEVNULL)
-    # An apk is concatenated gzip streams of one tar; only the two binaries
-    # are taken out, and only by name.
-    with gzip.open(apk) as gz, tarfile.open(fileobj=gz, mode="r|") as tf:
-        for m in tf:
-            name = os.path.basename(m.name)
-            if m.isfile() and m.name in ("usr/bin/eglinfo", "usr/bin/glxinfo"):
-                with tf.extractfile(m) as src, open(os.path.join(tree, "probe", name), "wb") as dst:
-                    shutil.copyfileobj(src, dst)
-                os.chmod(os.path.join(tree, "probe", name), 0o755)
+    os.makedirs(os.path.join(tree, "bin"))
+    # The bundle's static busybox runs the probe; eglinfo runs inside the
+    # bundle itself.
+    subprocess.run(["unsquashfs", "-q", "-n", "-f", "-d", os.path.join(work, "bb"), sqfs,
+                    "usr/bin/busybox"], check=True, stdout=subprocess.DEVNULL)
+    shutil.copy(os.path.join(work, "bb", "usr", "bin", "busybox"), os.path.join(tree, "bin", "busybox"))
     with open(os.path.join(tree, "init"), "w") as f:
         f.write(PROBE_INIT)
     os.chmod(os.path.join(tree, "init"), 0o755)
@@ -133,9 +103,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=sorted(GPU_DEVICE), default="drm")
     ap.add_argument("--bzimage", default=os.path.join(ROOT, "release/assets/linux-virt.bzImage"))
-    ap.add_argument("--sqfs", default=os.path.join(ROOT, "release/assets/large/microvm-userspace.sqfs"))
+    ap.add_argument("--sqfs", default=os.path.join(ROOT, "release/assets/large/microvm-firefox.sqfs"))
     ap.add_argument("--work", default="/tmp/gpu-nativectx")
-    ap.add_argument("--cache", default=os.path.expanduser("~/.cache/nopeekos/gpu-probe"))
     ap.add_argument("--mem", default="2G")
     ap.add_argument("--qemu", default="qemu-system-x86_64")
     a = ap.parse_args()
@@ -149,7 +118,7 @@ def main():
         sys.exit(f"QEMU lacks {', '.join(missing)} (Arch: sudo pacman -S {pkgs})")
 
     os.makedirs(a.work, exist_ok=True)
-    initramfs = build_initramfs(a.work, a.sqfs, fetch_mesa_utils(a.cache))
+    initramfs = build_initramfs(a.work, a.sqfs)
     serial_log = os.path.join(a.work, f"serial-{a.mode}.log")
     trace_log = os.path.join(a.work, f"trace-{a.mode}.log")
 

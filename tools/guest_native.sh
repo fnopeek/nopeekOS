@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Run the microVM's Firefox natively on this Linux host: the same Alpine
-# userspace bundle (musl, scudo), no VM, no guest kernel, on the host's
+# Run the microVM's Firefox natively on this Linux host: the same Arch
+# userspace bundle, no VM, no guest kernel, on the host's
 # Wayland session and network. Separates what the guest userspace costs from
 # what virtualization costs.
 #
-#   tools/alpine_native.sh                      # https://www.speedtest.net
-#   tools/alpine_native.sh https://example.org
-#   PRELOAD=/usr/lib/libjemalloc.so.2 tools/alpine_native.sh   # path inside the bundle
-#   SQFS=path/to/other.sqfs DIR=/tmp/other tools/alpine_native.sh
-#   PROFILE=1 tools/alpine_native.sh            # Gecko profile, as npkprofile in the guest
+#   tools/guest_native.sh                      # https://www.speedtest.net
+#   tools/guest_native.sh https://example.org
+#   PRELOAD=/usr/lib/libjemalloc.so.2 tools/guest_native.sh   # path inside the bundle
+#   SQFS=path/to/other.sqfs DIR=/tmp/other tools/guest_native.sh
+#   PROFILE=1 tools/guest_native.sh            # Gecko profile, as npkprofile in the guest
 #
 # With PROFILE=1 the profile is written on exit as app-prof.json in the bundle's
 # home directory ($DIR/tmp/home),
@@ -16,13 +16,13 @@
 # memory map after 20 s as app-maps.txt beside it: the profile's own library
 # list can be overwritten by a child process writing the same file.
 #
-# The bundle is unpacked once to $DIR (default /tmp/npk-alpine-native) and is
-# writable there, so `tools/alpine_native.sh --apk add jemalloc` installs into it.
+# The bundle is unpacked once to $DIR (default /tmp/npk-guest-native) and is
+# writable there.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SQFS="${SQFS:-$ROOT/release/assets/large/microvm-firefox.sqfs}"
-DIR="${DIR:-/tmp/npk-alpine-native}"
+DIR="${DIR:-/tmp/npk-guest-native}"
 WL="${WAYLAND_DISPLAY:-wayland-0}"
 : "${XDG_RUNTIME_DIR:?needs a Wayland session}"
 
@@ -33,13 +33,6 @@ if [ ! -x "$DIR/usr/bin/firefox" ]; then
 fi
 cp /etc/resolv.conf "$DIR/etc/resolv.conf"
 mkdir -p "$DIR/tmp/xrt" "$DIR/tmp/home"
-
-if [ "${1:-}" = "--apk" ]; then
-    shift
-    exec unshare --map-root-user --mount sh -c '
-        mount --rbind /dev "$0/dev" && mount --rbind /proc "$0/proc" && mount --rbind /sys "$0/sys"
-        exec chroot "$0" /sbin/apk "$@"' "$DIR" "$@"
-fi
 
 URL="${1:-https://www.speedtest.net}"
 PROF_ENV=

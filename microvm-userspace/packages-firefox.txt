@@ -1,241 +1,334 @@
-alpine-baselayout-3.7.2-r1
-alpine-baselayout-data-3.7.2-r1
-alpine-keys-2.6-r0
-alpine-release-3.25.0_alpha20260805-r0
-alsa-lib-1.2.16.1-r0
-aom-libs-3.15.2-r0
-apk-tools-3.0.8-r0
-at-spi2-core-2.62.1-r0
-at-spi2-core-libs-2.62.1-r0
-avahi-libs-0.9_rc5-r1
-brotli-libs-1.2.1-r0
-bubblewrap-0.13.1-r0
-busybox-1.38.0-r7
-busybox-binsh-1.38.0-r7
-c-ares-1.34.9-r0
-ca-certificates-bundle-20261020-r0
-cairo-1.18.4-r1
-cairo-gobject-1.18.4-r1
-cjson-1.7.19-r1
-cups-libs-2.4.20-r0
-dbus-libs-1.16.2-r4
-encodings-1.1.0-r0
-eudev-3.2.14-r8
-eudev-libs-3.2.14-r8
-ffmpeg-8.1.2-r3
-ffmpeg-libavcodec-8.1.2-r3
-ffmpeg-libavdevice-8.1.2-r3
-ffmpeg-libavfilter-8.1.2-r3
-ffmpeg-libavformat-8.1.2-r3
-ffmpeg-libavutil-8.1.2-r3
-ffmpeg-libswresample-8.1.2-r3
-ffmpeg-libswscale-8.1.2-r3
-firefox-154.0-r0
-font-dejavu-2.37-r6
-font-noto-2026.10.01-r0
-font-noto-common-2026.10.01-r0
-font-noto-math-2026.10.01-r0
-font-noto-symbols-2026.10.01-r0
-fontconfig-2.18.1-r0
-freeglut-3.8.0-r0
-freetype-2.14.3-r0
-fribidi-1.0.17-r0
-gdb-16.3-r4
-gdk-pixbuf-2.44.8-r0
-glib-2.90.0-r0
-glslang-libs-1.4.341.0-r0
-glu-9.0.3-r4
-glycin-image-rs-2.2.3-r0
-glycin-svg-2.2.3-r0
-gmp-6.3.0-r4
-gnutls-3.8.13-r0
-gobject-introspection-1.86.0-r2
-graphite2-1.3.15-r0
-gtk+3.0-3.24.52-r0
-harfbuzz-14.2.1-r0
-hwdata-pci-0.412-r0
-icu-data-en-78.1-r0
-icu-libs-78.1-r0
-intel-gmmlib-22.10.1-r0
-intel-media-driver-26.2.4-r0
-json-c-0.19-r1
-kmod-libs-34.2-r1
-lame-libs-3.100-r5
-lcms2-2.19.1-r0
-libSvtAv1Enc-4.2.0-r0
-libapk-3.0.8-r0
-libass-0.17.5-r0
-libasyncns-0.8-r5
-libatk-1.0-2.62.1-r0
-libatk-bridge-2.0-2.62.1-r0
-libblkid-2.42.4-r3
-libbluray-1.5.0-r0
-libbsd-0.12.2-r0
-libbz2-1.0.8-r6
-libcap2-2.78-r1
-libcrypto3-3.5.9-r0
-libcurl-8.23.0-r0
-libdav1d-1.5.4-r0
-libdebuginfod-0.195-r0
-libdecor-0.2.5-r0
-libdisplay-info-0.3.0-r1
-libdovi-3.3.2-r0
-libdrm-2.4.134-r0
-libdvdcss-1.4.3-r0
-libdvdnav-6.1.1-r1
-libdvdread-6.1.3-r2
-libdw-0.195-r0
-libeconf-0.8.4-r0
-libelf-0.195-r0
-libelogind-255.24-r2
-libepoxy-1.5.10-r1
-libevdev-1.13.6-r0
-libevent-2.1.13-r0
-libexpat-2.9.0-r0
-libffi-3.8.0-r0
-libflac-1.5.0-r0
-libfontenc-1.1.9-r0
-libgcc-15.2.0-r9
-libglycin-2.2.3-r0
-libgomp-15.2.0-r9
-libhwy-1.4.0-r1
-libidn2-2.3.8-r0
-libinput-1.32.0-r0
-libinput-libs-1.32.0-r0
-libinput-udev-1.32.0-r0
-libintl-1.0-r0
-libjpeg-turbo-3.1.3-r0
-libjxl-0.11.2-r4
-libltdl-2.6.2-r1
-libmd-1.3.0-r0
-libmount-2.42.4-r3
-libncursesw-6.6_p20260822-r0
-libogg-1.3.6-r0
-libopenmpt-0.8.9-r0
-libpanelw-6.6_p20260822-r0
-libpciaccess-0.19-r0
-libplacebo-7.360.1-r0
-libpng-1.6.59-r0
-libpsl-0.21.5-r3
-libpulse-17.0-r9
-librist-0.2.15-r0
-librsvg-2.63.3-r0
-libseat-0.9.3-r1
-libseccomp-2.6.1-r0
-libsharpyuv-1.6.0-r0
-libsndfile-1.2.2-r3
-libsodium-1.0.22-r0
-libsrt-1.5.5-r0
-libssh-0.12.2-r0
-libssl3-3.5.9-r0
-libstdc++-15.2.0-r9
-libtasn1-4.21.0-r0
-libtheora-1.2.0-r1
-libudfread-1.2.0-r1
-libunibreak-6.1-r0
-libunistring-1.4.2-r0
-libunwind-1.8.3-r0
-libuv-1.52.1-r0
-libva-2.24.1-r0
-libva-utils-2.24.0-r0
-libvdpau-1.5-r4
-libvorbis-1.3.7-r2
-libvpl-2.17.0-r0
-libvpx-1.17.0-r0
-libwebp-1.6.0-r0
-libwebpdemux-1.6.0-r0
-libwebpmux-1.6.0-r0
-libx11-1.8.14-r0
-libxau-1.0.12-r0
-libxcb-1.17.0-r2
-libxcomposite-0.4.7-r0
-libxcursor-1.2.3-r0
-libxdamage-1.1.7-r0
-libxdmcp-1.1.5-r1
-libxext-1.3.7-r0
-libxfixes-6.0.2-r0
-libxft-2.3.9-r0
-libxi-1.8.4-r0
-libxinerama-1.1.6-r0
-libxkbcommon-1.13.2-r0
-libxkbcommon-x11-1.13.2-r0
-libxml2-2.13.9-r2
-libxrandr-1.5.5-r0
-libxrender-0.9.13-r0
-libxshmfence-1.3.3-r0
-libxtst-1.2.6-r0
-libxxf86vm-1.1.7-r0
-libzmq-4.3.5-r2
-lilv-libs-0.28.0-r0
-llvm23-libs-23.1.3-r0
-mbedtls3-3.6.7-r0
-mesa-26.2.5-r0
-mesa-demos-9.0.0-r6
-mesa-egl-26.2.5-r0
-mesa-gbm-26.2.5-r0
-mesa-gl-26.2.5-r0
-mesa-gles-26.2.5-r0
-mesa-utils-9.0.0-r6
-mkfontscale-1.2.4-r0
-mpdecimal-4.0.1-r0
-mpfr4-4.2.2-r0
-mpg123-libs-1.33.7-r0
-mtdev-1.1.7-r0
-musl-1.2.6-r6
-musl-dbg-1.2.6-r6
-musl-fts-1.2.7-r7
-musl-utils-1.2.6-r6
-ncurses-terminfo-base-6.6_p20260822-r0
-nettle-3.10.2-r0
-nghttp2-libs-1.70.0-r0
-nspr-4.38.2-r0
-nss-3.131-r0
-numactl-2.0.19-r0
-opus-1.6.1-r0
-orc-0.4.42-r1
-p11-kit-0.26.2-r1
-pango-1.58.2-r0
-pciutils-libs-3.15.0-r0
-pcre2-10.49-r0
-pipewire-libs-1.6.9-r0
-pixman-0.46.4-r0
-pkgconf-3.0.10-r0
-pyc-3.14.8-r0
-python3-3.14.8-r0
-python3-pyc-3.14.8-r0
-python3-pycache-pyc0-3.14.8-r0
-rav1e-libs-0.8.1-r0
-readline-8.3.3-r1
-roc-toolkit-libs-0.4.0-r1
-scanelf-1.3.11-r0
-scudo-malloc-23.1.3-r0
-seatd-0.9.3-r1
-serd-libs-0.32.10-r0
-shaderc-2026.1-r0
-shared-mime-info-2.4-r7
-sndio-libs-1.10.0-r7
-sord-libs-0.16.22-r0
-soxr-0.1.3-r7
-speexdsp-1.2.1-r2
-spirv-tools-1.4.357.0-r0
-sqlite-libs-3.54.1-r0
-sratom-0.6.22-r0
-ssl_client-1.38.0-r7
-tdb-libs-1.4.15-r1
-udev-init-scripts-35-r1
-v4l-utils-libs-1.32.0-r1
-vidstab-1.1.2-r0
-vulkan-loader-1.4.360-r0
-wayland-libs-client-1.26.0-r0
-wayland-libs-cursor-1.26.0-r0
-wayland-libs-egl-1.26.0-r0
-wayland-libs-server-1.26.0-r0
-x264-libs-0.164.3108-r1
-x265-libs-4.2-r0
-xkeyboard-config-2.49-r0
-xvidcore-1.3.7-r2
-xz-libs-5.8.4-r0
-zimg-3.0.6-r0
-zix-libs-0.8.2-r0
-zlib-1.3.2-r1
-zstd-libs-1.5.7-r2
+acl 2.4.0-1
+adwaita-cursors 51.0-1
+adwaita-fonts 51.0-2
+adwaita-icon-theme 51.0-1
+adwaita-icon-theme-legacy 46.2-3
+alsa-lib 1.2.16.1-1
+alsa-topology-conf 1.2.5.1-4
+alsa-ucm-conf 1.2.16.1-1
+aom 3.15.2-1
+arch-install-scripts 32-1
+archlinux-keyring 20260909-1
+at-spi2-core 2.62.1-1
+attr 2.6.0-1
+audit 4.2.1-1
+avahi 1:0.9rc5-2
+base 3-3
+bash 5.3.20-1
+binutils 2.47-4
+boost-libs 1.92.0-1
+brotli 1.2.1-1
+bubblewrap 0.13.1-1
+busybox 1.36.1-4
+bzip2 1.0.8-6
+ca-certificates 20240618-1
+ca-certificates-mozilla 3.132-1
+ca-certificates-utils 20240618-1
+cairo 1.18.6-1
+coreutils 9.12-2
+cryptsetup 2.8.8-1
+curl 8.23.0-1
+dav1d 1.5.4-1
+db5.3 5.3.28-7
+dbus 1.16.2-2
+dbus-broker 37-3
+dbus-broker-units 37-3
+dbus-units 37-3
+dconf 51.0-1
+default-cursors 3-1
+desktop-file-utils 0.28-1
+device-mapper 2.03.43-2
+duktape 2.7.0-7
+e2fsprogs 1.47.4-1
+expat 2.9.0-1
+ffmpeg 2:9.0.2-2
+fftw 3.3.11-1
+file 5.48-1
+filesystem 2025.10.12-1
+findutils 4.11.0-1
+firefox 159.0-1
+flac 1.5.0-1
+fontconfig 2:2.18.3-2
+freetype2 2.15.0-1
+fribidi 1.0.17-1
+gawk 5.4.1-1
+gc 8.2.12-1
+gcc-libs 16.2.1+r23+gd564253eb6c8-1
+gdb 18.1-1
+gdb-common 18.1-1
+gdbm 1.26-2
+gdk-pixbuf2 2.44.8-1
+gettext 1.0-2
+giflib 6.1.3-2
+glib-networking 1:2.90.1-1
+glib2 2.90.1-1
+glibc 2.44+r50+g1848099f063e-1
+glslang 1:1.4.363.0-1
+glycin 2.2.5-1
+gmp 6.3.0-3
+gnulib-l10n 20241231-1
+gnupg 2.4.9-3
+gnutls 3.8.13-3
+gperftools 2.19.1-1
+gpgme 2.2.0-1
+graphite 1:1.3.15-1
+grep 3.12-2
+gsettings-desktop-schemas 51.0-1
+gsettings-system-schemas 51.0-1
+gsm 1.0.24-1
+gtest 1.18.0-1
+gtk-update-icon-cache 1:4.24.1-1
+gtk3 1:3.24.52-2
+guile 3.0.11-1
+gzip 1.15-1
+harfbuzz 15.0.0-1
+hicolor-icon-theme 0.18-1
+hidapi 0.15.0-1
+highway 1.4.0-1
+hwdata 0.412-1
+iana-etc 20260617-1
+icu 78.3-1
+intel-gmmlib 22.10.0-1
+iproute2 7.3.0-1
+iptables 1:1.8.13-1
+iputils 20250605-1
+iso-codes 4.20.1-1
+jack2 1.9.22-2
+jansson 2.15.1-1
+jbigkit 2.2-1
+json-c 0.19-1
+json-glib 1.10.8-1
+kbd 2.10.0-1
+keyutils 1.6.3-4
+kmod 34.2-1
+krb5 1.22.2-1
+l-smash 2.14.5-4
+lame 4.0-1
+lcms2 2.19.1-1
+leancrypto 1.9.1-1
+libarchive 3.8.10-1
+libasan 16.2.1+r23+gd564253eb6c8-1
+libass 0.17.5-1
+libassuan 3.0.0-1
+libasyncns 1:0.8+r3+g68cd5af-3
+libatomic 16.2.1+r23+gd564253eb6c8-1
+libavc1394 0.5.4-7
+libbluray 1.5.1-1
+libbpf 1.7.0-1
+libbs2b 3.1.0-11
+libbsd 0.12.2-2
+libcap 2.78-1
+libcap-ng 0.9.6-1
+libcloudproviders 0.4.1-1
+libcolord 1.4.8-2
+libcups 2:2.4.20-1
+libdaemon 0.14-6
+libdatrie 0.2.14-1
+libdecor 0.2.5-1
+libdeflate 1.26-1
+libdisplay-info 0.3.0-1
+libdovi 3.4.0-1
+libdrm 2.4.134-1
+libdvdnav 7.0.0-1
+libdvdread 7.1.1-1
+libedit 20260512_3.1-1
+libelf 0.197-1
+libepoxy 1.5.10-3
+libevdev 1.14.0-1
+libevent 2.1.13-2
+libffi 3.8.0-1
+libgcc 16.2.1+r23+gd564253eb6c8-1
+libgcrypt 1.12.4-1
+libgfortran 16.2.1+r23+gd564253eb6c8-1
+libglvnd 1.7.0-3
+libgomp 16.2.1+r23+gd564253eb6c8-1
+libgpg-error 1.61-1
+libgudev 238-4
+libhwasan 16.2.1+r23+gd564253eb6c8-1
+libice 1.1.2-1
+libidn2 2.3.8-1
+libiec61883 1.2.0-9
+libinput 1.32.0-1
+libjpeg-turbo 3.2.0-2
+libjxl 0.12.0-1
+libksba 1.8.1-1
+libldap 2.7.2-2
+liblsan 16.2.1+r23+gd564253eb6c8-1
+libmakepkg-dropins 20-2
+libmd 1.3.0-1
+libmnl 1.0.5-2
+libmodplug 0.8.9.0-7
+libnetfilter_conntrack 1.1.1-1
+libnfnetlink 1.0.2-2
+libnftnl 1.3.2-1
+libnghttp2 1.70.0-1
+libnghttp3 1.18.0-1
+libngtcp2 1.25.0-1
+libnl 3.12.0-1
+libnsl 2.0.1-2
+libobjc 16.2.1+r23+gd564253eb6c8-1
+libogg 1.3.6-1
+libopenmpt 0.8.9-1
+libp11-kit 0.26.5-1
+libpcap 1.11.0-1
+libpciaccess 0.19-1
+libpgm 5.3.128-4
+libplacebo 7.360.1-7
+libpng 1.6.59-1
+libproxy 0.5.12-1
+libpsl 0.21.5-2
+libpulse 17.0+r134+g77d25a1e6-1
+libquadmath 16.2.1+r23+gd564253eb6c8-1
+libraw1394 2.1.2-4
+librsvg 2:2.63.4-1
+libsamplerate 0.2.2-3
+libsasl 2.1.28-5
+libseccomp 2.6.0-1
+libsecret 0.21.8.2-1
+libsm 1.2.6-1
+libsndfile 1.2.2-4
+libsodium 1.0.22-1
+libsoup3 3.8.1-1
+libsoxr 0.1.3-5
+libssh 0.12.2-1
+libssh2 1.11.1-7
+libstdc++ 16.2.1+r23+gd564253eb6c8-1
+libstemmer 3.1.1-1
+libsysprof-capture 51.0-1
+libtasn1 4.21.0-1
+libthai 0.1.30-1
+libtheora 1.2.0-1
+libtiff 4.7.2-2
+libtirpc 1.3.8-1
+libtsan 16.2.1+r23+gd564253eb6c8-1
+libubsan 16.2.1+r23+gd564253eb6c8-1
+libunibreak 7.0-1
+libunistring 1.4.2-1
+libunwind 1.8.3-1
+libusb 1.0.30-1
+libva 2.24.1-1
+libva-utils 2.24.0-1
+libvdpau 1.5-4
+libverto 0.3.2-6
+libvorbis 1.3.7-4
+libvpl 2.17.0-1
+libvpx 1.17.0-1
+libwacom 2.20.0-1
+libwebp 1.6.0-2
+libx11 1.8.14-1
+libxau 1.0.12-1
+libxcb 1.17.0-1
+libxcomposite 0.4.7-1
+libxcrypt 4.5.2-1
+libxcursor 1.2.3-1
+libxdamage 1.1.7-1
+libxdmcp 1.1.5-2
+libxext 1.3.7-1
+libxfixes 6.0.2-1
+libxft 2.3.9-1
+libxi 1.8.4-1
+libxinerama 1.1.6-1
+libxkbcommon 1.13.2-1
+libxkbcommon-x11 1.13.2-1
+libxml2 2.15.4-1
+libxrandr 1.5.5-1
+libxrender 0.9.13-1
+libxshmfence 1.3.3-1
+libxss 1.2.5-1
+libxt 1.3.1-1
+libxtst 1.2.6-1
+libxv 1.0.13-1
+libxxf86vm 1.1.7-1
+licenses 20240728-1
+linux-api-headers 7.3-1
+llvm-libs 23.1.4-1
+lm_sensors 1:3.6.2-1
+lmdb 0.9.35-1
+lua54 5.4.9-1
+lz4 1:1.10.0-2
+lzo 2.10-5
+mailcap 2.1.54-3
+mesa 1:26.2.6-1
+mesa-utils 9.0.0-7
+mpdecimal 4.0.1-3
+mpfr 4.2.2-1
+mpg123 1.33.7-1
+mtdev 1.1.7-1
+ncurses 6.6-2
+nettle 4.0-1
+nftables 1:1.1.7-3
+noto-fonts 1:2026.10.01-1
+npth 1.8-1
+nspr 4.40-1
+nss 3.132-1
+ocl-icd 2.3.5-1
+opencore-amr 0.1.6-2
+openjpeg2 2.5.4-1
+openssl 3.6.5-1
+opus 1.6.1-1
+p11-kit 0.26.5-1
+pacman 7.1.0.r9.g54d9411-3
+pacman-mirrorlist 20260610-1
+pam 1.7.3-1
+pambase 20260616-1
+pango 1:1.58.2-1
+pciutils 3.15.0-1
+pcre2 10.49-1
+pinentry 1.3.3-1
+pixman 0.46.4-1
+popt 1.19-2
+portaudio 1:19.7.0-4
+procps-ng 4.0.7-1
+psmisc 23.7-2
+python 3.14.8-1
+rav1e 0.8.1-3
+readline 8.3.6-1
+rubberband 4.0.0-2
+sdl2-compat 2.32.74-1
+sdl3 3.4.18-1
+seatd 0.9.3-1
+sed 4.10-2
+shaderc 2026.4-1
+shadow 4.20.0.arch1-1
+shared-mime-info 2.5.1-2
+snappy 1.3.1-1
+sndio 1.10.0-1
+source-highlight 3.1.9-19
+speex 1.2.1-3
+speexdsp 1.2.1-3
+spirv-tools 1:1.4.363.0-1
+sqlite 3.54.0-1
+srt 1.5.7-2
+svt-av1 4.2.0-1
+systemd 262.1-1
+systemd-libs 262.1-1
+systemd-sysvcompat 262.1-1
+tar 1.35-5
+tinysparql 3.12.0-1
+tpm2-tss 4.2.0-2
+ttf-dejavu 2.37+18+g9b5d1b2f-8
+tzdata 2026e-1
+util-linux 2.42.4-1
+util-linux-libs 2.42.4-1
+v4l-utils 1.32.0-2
+vapoursynth 81-1
+vid.stab 1.1.2-1
+vmaf 3.2.1-1
+vulkan-icd-loader 1.4.363.0-1
+vulkan-intel 1:26.2.6-1
+vulkan-mesa-implicit-layers 1:26.2.6-1
+wayland 1.26.0-1
+x264 3:0.165.r3222.b35605a-2
+x265 4.3-1
+xcb-proto 1.17.0-4
+xcb-util-keysyms 0.4.1-5
+xkeyboard-config 2.48-1
+xorg-xprop 1.2.8-1
+xorgproto 2026.1-1
+xvidcore 1.3.7-4
+xxhash 0.8.4-1
+xz 5.8.4-1
+zeromq 4.3.5-3
+zimg 3.0.6-2
+zlib 1:1.3.2-4
+zstd 1.5.7-3

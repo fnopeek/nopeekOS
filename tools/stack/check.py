@@ -6,8 +6,8 @@
 For each component: the version in use (read from the repo), the newest
 upstream release on the same line, and known vulnerabilities. Also every
 crate in every Cargo.lock (RustSec through OSV) and every package of the
-microVM guest image (Alpine's security database). Only reads from the
-network; writes one JSON file, and with --rows flat tables for a dashboard.
+microVM guest image (Arch's repositories and security tracker). Only reads
+from the network; writes one JSON file, and with --rows flat tables for a dashboard.
 """
 
 import argparse
@@ -301,65 +301,56 @@ def check_crates(cfg):
     return {"crates": len(keys), "lockfiles": len(lockfiles()), "vulns": vulns}
 
 
-# --- alpine ----------------------------------------------------------------
+# --- arch ------------------------------------------------------------------
 
-def apk_key(v):
-    m = re.fullmatch(r"(.+?)(?:-r(\d+))?", v)
-    base, rel = m.group(1), int(m.group(2) or 0)
-    suf_rank = {"alpha": -4, "beta": -3, "pre": -2, "rc": -1, "cvs": 1, "svn": 1, "git": 1, "hg": 1, "p": 2}
-    main, *sufs = base.split("_")
-    parts = [int(x) if x.isdigit() else x for x in re.findall(r"\d+|[a-z]+", main)]
-    sk = []
-    for s in sufs:
-        m2 = re.fullmatch(r"([a-z]+)(\d*)", s)
-        if m2:
-            sk.append((suf_rank.get(m2.group(1), 0), int(m2.group(2) or 0)))
-    sk.append((0, 0))
-    return ([(0, p) if isinstance(p, int) else (1, p) for p in parts], sk, rel)
+def vercmp(a, b):
+    """pacman's version order: <0, 0, >0."""
+    r = subprocess.run(["vercmp", a, b], capture_output=True, text=True)
+    return int(r.stdout.strip() or 0)
 
 
-def apk_lt(a, b):
-    try:
-        return apk_key(a) < apk_key(b)
-    except Exception:
-        return False
-
-
-def check_alpine(cfg):
-    lines = open(os.path.join(ROOT, cfg["packages"]), encoding="utf-8").read().split()
-    ours = {}
-    for l in lines:
-        m = re.fullmatch(r"(.+)-([0-9][^-]*-r[0-9]+)", l)
-        if m:
-            ours[m.group(1)] = m.group(2)
-    index, origin = {}, {}
-    secfix = {}
-    for repo in cfg["repos"]:
-        raw = get(f"https://dl-cdn.alpinelinux.org/alpine/{cfg['branch']}/{repo}/x86_64/APKINDEX.tar.gz", timeout=120)
+def arch_repo_versions(repos):
+    """Current versions in Arch's repositories, from the mirror databases."""
+    out = {}
+    for repo in repos:
+        raw = get(f"https://geo.mirror.pkgbuild.com/{repo}/os/x86_64/{repo}.db", timeout=180)
         with tarfile.open(fileobj=io.BytesIO(raw)) as t:
-            text = t.extractfile("APKINDEX").read().decode()
-        for block in text.split("\n\n"):
-            f = dict(l.split(":", 1) for l in block.splitlines() if len(l) > 2 and l[1] == ":")
-            if "P" in f:
-                index[f["P"]] = f.get("V")
-                origin[f["P"]] = f.get("o", f["P"])
-        db = get_json(f"https://secdb.alpinelinux.org/{cfg['branch']}/{repo}.json")
-        for p in db.get("packages", []):
-            secfix.setdefault(p["pkg"]["name"], {}).update(p["pkg"].get("secfixes") or {})
-    behind, vulns, seen = [], [], set()
-    for name, v in sorted(ours.items()):
-        latest = index.get(name)
-        if latest and apk_lt(v, latest):
-            behind.append({"package": name, "version": v, "latest": latest})
-        o = origin.get(name, name)
-        if o in seen:
+            for m in t.getmembers():
+                if not m.name.endswith("/desc"):
+                    continue
+                text = t.extractfile(m).read().decode()
+                f = dict(re.findall(r"%(\w+)%\n([^\n]*)", text))
+                if "NAME" in f:
+                    out[f["NAME"]] = f.get("VERSION")
+    return out
+
+
+def check_arch(cfg):
+    """The bundle's packages (pacman -Q) against Arch's repositories and its
+    security tracker (groups with affected/fixed versions and CVEs)."""
+    ours = {}
+    for line in open(os.path.join(ROOT, cfg["packages"]), encoding="utf-8"):
+        parts = line.split()
+        if len(parts) == 2:
+            ours[parts[0]] = parts[1]
+    current = arch_repo_versions(cfg["repos"])
+    behind = [{"package": n, "version": v, "latest": current[n]}
+              for n, v in sorted(ours.items()) if current.get(n) and vercmp(v, current[n]) < 0]
+    vulns = []
+    for g in get_json("https://security.archlinux.org/issues/all.json"):
+        if g.get("status") not in ("Vulnerable", "Fixed", "Unknown"):
             continue
-        seen.add(o)
-        for fixed, cves in (secfix.get(o) or {}).items():
-            if fixed != "0" and apk_lt(v, fixed):
-                for c in cves:
-                    vulns.append({"package": o, "version": v, "fixed": fixed, "id": c.split()[0],
-                                  "url": f"https://security.alpinelinux.org/vuln/{c.split()[0]}"})
+        for pkg in g.get("packages", []):
+            v = ours.get(pkg)
+            if not v or vercmp(v, g["affected"]) < 0:
+                continue
+            if g.get("fixed") and vercmp(v, g["fixed"]) >= 0:
+                continue
+            for cve in g.get("issues", []):
+                vulns.append({"package": pkg, "version": v, "fixed": g.get("fixed") or "",
+                              "id": cve, "group": g["name"],
+                              "severity": (g.get("severity") or "").upper() or None,
+                              "url": f"https://security.archlinux.org/{g['name']}"})
     return {"packages": len(ours), "behind": behind, "vulns": vulns}
 
 
@@ -412,13 +403,13 @@ def write_rows(out, d):
                     "id": v["id"], "severity": label(v["severity"]) or ("INFO" if v["informational"] else None),
                     "summary": v["summary"], "published": v["published"], "url": v["url"],
                     "where": ", ".join(v["locks"])})
-    for v in out["alpine"]["vulns"]:
-        adv.append({"key": f"alpine|{v['package']}|{v['id']}", "source": "Alpine secdb",
+    for v in out["guest"]["vulns"]:
+        adv.append({"key": f"arch|{v['package']}|{v['id']}", "source": "Arch security tracker",
                     "component": "microVM guest packages", "area": "guest", "package": v["package"],
-                    "version": v["version"], "fixed": v["fixed"], "id": v["id"], "severity": None,
-                    "summary": "", "published": "", "url": v["url"]})
+                    "version": v["version"], "fixed": v["fixed"], "id": v["id"], "severity": v["severity"],
+                    "summary": v["group"], "published": "", "url": v["url"]})
     stamp = {"generated": out["generated"]}
-    for name, rows in (("components", comps), ("advisories", adv), ("guest_behind", out["alpine"]["behind"])):
+    for name, rows in (("components", comps), ("advisories", adv), ("guest_behind", out["guest"]["behind"])):
         with open(os.path.join(d, f"{name}.json"), "w", encoding="utf-8") as f:
             json.dump({"rows": rows, **stamp}, f, indent=1)
 
@@ -433,12 +424,12 @@ def main():
     with cf.ThreadPoolExecutor(8) as ex:
         comps = list(ex.map(check_component, cfg["component"]))
         crates_f = ex.submit(check_crates, cfg["crates"])
-        alpine_f = ex.submit(check_alpine, cfg["alpine"])
-        crates, alpine = crates_f.result(), alpine_f.result()
+        guest_f = ex.submit(check_arch, cfg["guest"])
+        crates, guest = crates_f.result(), guest_f.result()
 
     out = {
         "generated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-        "components": comps, "crates": crates, "alpine": alpine,
+        "components": comps, "crates": crates, "guest": guest,
     }
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump(out, f, indent=1)
@@ -448,7 +439,7 @@ def main():
         print(f"{c['status']:10s} {c['name']:32s} {c['version'] or '?':>14s} -> {c['latest'] or '-':<12s} "
               f"{len(c['cves'])} known{'  ' + '; '.join(c['errors']) if c['errors'] else ''}")
     print(f"crates: {crates['crates']} in {crates['lockfiles']} locks, {len(crates['vulns'])} advisories")
-    print(f"alpine: {alpine['packages']} packages, {len(alpine['behind'])} behind edge, {len(alpine['vulns'])} open CVEs")
+    print(f"guest: {guest['packages']} packages, {len(guest['behind'])} behind Arch, {len(guest['vulns'])} open CVEs")
     print(f"wrote {os.path.relpath(args.out, ROOT)}")
 
 

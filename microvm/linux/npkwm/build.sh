@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build npkwm, the guest's Wayland compositor, inside a throwaway chroot of
-# the pinned Alpine release (no root needed: `unshare --map-root-user`).
+# Build npkwm, the guest's Wayland compositor, inside a throwaway root of
+# the pinned Arch snapshot (microvm/linux/arch.sh, no root needed).
 #
 # wlroots is built here from source and linked in statically, with only what
 # the guest uses: the DRM and libinput backends and the pixman renderer.
-# Alpine's libwlroots carries the GLES2 and Vulkan renderers, and through
-# them Mesa and LLVM; musl resolves every relocation at load time, so that
-# alone cost about half a second before main(). The libraries npkwm still
+# A distribution's libwlroots carries the GLES2 and Vulkan renderers, and
+# through them Mesa and LLVM, which the dynamic loader has to map and
+# relocate before main(). The libraries npkwm still
 # links (libdrm, libinput, libudev, libseat, pixman, xkbcommon, wayland,
 # libdisplay-info) are in the userspace bundle.
 #
@@ -24,26 +24,24 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-source "$REPO_ROOT/microvm-userspace/alpine.env"
+source "$SCRIPT_DIR/../arch.sh"
 
-CACHE="${HOME}/.cache/nopeekos/alpine"
-TARBALL="alpine-minirootfs-${ALPINE_VERSION}-x86_64.tar.gz"
+CACHE="${HOME}/.cache/nopeekos/wlroots"
 VARIANT="${1:-}"
 case "$VARIANT" in
     "")    NAME=npkwm;       WLR_RENDER="-Drenderers=[] -Dallocators=[]"; EXTRA_PACKAGES="" ;;
-    gles2) NAME=npkwm-gles2; WLR_RENDER="-Drenderers=gles2 -Dallocators=gbm"; EXTRA_PACKAGES="mesa-dev" ;;
+    gles2) NAME=npkwm-gles2; WLR_RENDER="-Drenderers=gles2 -Dallocators=gbm"; EXTRA_PACKAGES="mesa" ;;
     *) echo "usage: $0 [gles2]" >&2; exit 1 ;;
 esac
 OUT="$SCRIPT_DIR/$NAME"
 
-# The wlroots of the pinned Alpine branch, from the URL and with the sha512
-# of its APKBUILD (community/wlroots0.20).
+# wlroots from its release tarball, pinned by sha512.
 WLR_VERSION=0.20.2
 WLR_TARBALL="wlroots-${WLR_VERSION}.tar.gz"
 WLR_URL="https://gitlab.freedesktop.org/wlroots/wlroots/-/archive/${WLR_VERSION}/${WLR_TARBALL}"
 WLR_SHA512=e96523a2b215e7d1f36bbe5e7fa3e65d15cb87e2f0d9c304d3c2fdc81b0ac0c7202cd955635c01072b34e70f08c6c00fa2cde8c277bd73fcabdcb19f7b579a12
 
-BUILD_PACKAGES="build-base pkgconf meson wayland-dev wayland-protocols libxkbcommon-dev libdrm-dev pixman-dev libinput-dev eudev-dev libseat-dev hwdata-dev libdisplay-info-dev $EXTRA_PACKAGES"
+BUILD_PACKAGES="base-devel meson wayland wayland-protocols libxkbcommon libdrm pixman libinput systemd-libs seatd hwdata libdisplay-info $EXTRA_PACKAGES"
 
 fetch() {
     [ -f "$CACHE/$2" ] && return
@@ -51,29 +49,20 @@ fetch() {
     mv "$CACHE/$2.part" "$CACHE/$2"
 }
 
-mkdir -p "$CACHE/apks"
-fetch "https://dl-cdn.alpinelinux.org/alpine/${ALPINE_BRANCH}/releases/x86_64/${TARBALL}" "$TARBALL"
+mkdir -p "$CACHE"
+arch_fetch
 fetch "$WLR_URL" "$WLR_TARBALL"
-echo "${ALPINE_MINIROOTFS_SHA256}  $CACHE/$TARBALL" | sha256sum -c - >/dev/null \
-    || { echo "sha256 mismatch on $TARBALL" >&2; exit 1; }
 echo "${WLR_SHA512}  $CACHE/$WLR_TARBALL" | sha512sum -c - >/dev/null \
     || { echo "sha512 mismatch on $WLR_TARBALL" >&2; exit 1; }
 
 STAGE="$(mktemp -d)"
-trap 'rm -rf "$STAGE"' EXIT
-tar -xzf "$CACHE/$TARBALL" -C "$STAGE"
-echo "nameserver 1.1.1.1" > "$STAGE/etc/resolv.conf"
-mkdir -p "$STAGE/src" "$STAGE/var/cache/apk"
-tar -xzf "$CACHE/$WLR_TARBALL" -C "$STAGE/src"
-cp "$SCRIPT_DIR/npkwm.c" "$STAGE/src/"
-
-unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
-    set -e
-    mount --bind '$CACHE/apks' '$STAGE/var/cache/apk'
-    chroot '$STAGE' /sbin/apk update >/dev/null
-    chroot '$STAGE' /sbin/apk upgrade --no-progress --available >/dev/null
-    chroot '$STAGE' /sbin/apk add --no-progress $BUILD_PACKAGES >/dev/null
-    chroot '$STAGE' /bin/sh -c '
+trap 'arch_rm "$STAGE"' EXIT
+arch_run "$STAGE/root" "
+    in_root pacman -Syu --noconfirm --needed $BUILD_PACKAGES >/dev/null
+    mkdir -p \$R/src
+    tar -xzf '$CACHE/$WLR_TARBALL' -C \$R/src
+    cp '$SCRIPT_DIR/npkwm.c' \$R/src/
+    in_root /bin/sh -c '
         set -e
         cd /src/wlroots-${WLR_VERSION}
         meson setup build --prefix=/opt/wlr --buildtype=release \
@@ -92,7 +81,8 @@ unshare --user --map-root-user --mount --pid --fork --mount-proc sh -c "
             \$(pkg-config --static --cflags --libs wlroots-0.20 wayland-server xkbcommon)
         strip $NAME
     '
+    cp \$R/src/$NAME '$STAGE/$NAME'
 "
-cp "$STAGE/src/$NAME" "$OUT"
+cp "$STAGE/$NAME" "$OUT"
 touch -d @0 "$OUT"
 echo "$NAME: $(stat -c%s "$OUT") bytes"

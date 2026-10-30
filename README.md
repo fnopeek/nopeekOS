@@ -314,7 +314,7 @@ the user tier. No generic file call reaches either, only the vault.
 
 **MicroVM:** a per-app hypervisor inside the kernel (Intel VT-x + EPT
 and AMD-V + NPT, vendor-symmetric), running a custom **Linux 6.18** build
-with an Alpine userspace. virtio-blk / -net / -gpu / -input / -snd /
+with an Arch Linux userspace. virtio-blk / -net / -gpu / -input / -snd /
 -console / -balloon backends (freed guest pages go back to the host), a
 9p bridge that mounts npkFS into the guest, a persistent home image,
 guest SMP (vCPUs on the host's free worker cores), and speculation
@@ -471,7 +471,7 @@ nopeekOS/
 │   └── wasm/                 # host_core.rs (npk_* calls), forge_glue.rs (import list)
 ├── microvm/linux/            # Guest init, Mesa, compositor and iHD builds
 ├── microvm-linux/            # Guest kernel build (Linux 6.18 + config)
-├── microvm-userspace/        # Guest userspace bundle (Alpine + Firefox)
+├── microvm-userspace/        # Guest userspace bundle (Arch Linux + Firefox)
 ├── release/                  # Signed OTA tree that devices update from
 └── tools/wasm/               # WASM apps & drivers
     ├── beak/ + beak-engine/  #   Native browser + portable engine

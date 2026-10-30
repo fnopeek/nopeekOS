@@ -2679,7 +2679,7 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     //
     // `earlycon=uart8250,io,0x3f8,115200n8`: early console straight to COM1,
     // without the 8250 detection probe (which fails against our minimal UART
-    // emulation). Alpine's virt kernel has CONFIG_SERIAL_EARLYCON but not
+    // emulation). The guest kernel has CONFIG_SERIAL_EARLYCON but not
     // CONFIG_EARLY_PRINTK, so `earlyprintk=` would be ignored.
     // `console=ttyS0,115200`: the regular 8250 console once full init runs.
     // `panic=1`: halt on panic, no reboot loop. `acpi=off tsc=reliable`: skip probes
