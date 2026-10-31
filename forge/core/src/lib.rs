@@ -533,8 +533,12 @@ impl Linker {
         {
             let salt = LAYOUT_SALT.load(core::sync::atomic::Ordering::Relaxed);
             if salt != 0 {
-                let mut h = (salt ^ self.offsets.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                h ^= h >> 29;
+                // splitmix64 over (salt, function): neighbouring salts must not
+                // give neighbouring layouts.
+                let mut h = (salt << 32 | self.offsets.len() as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+                h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+                h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+                h ^= h >> 31;
                 // Never executed; `int3` makes a stray jump into it stop.
                 for _ in 0..h % 128 {
                     self.code.push(0xCC);

@@ -41,6 +41,7 @@ pub fn arm_report(fd: i32, start: std::time::Instant) {
 /// to the parent. Both engines leave through here, so both are measured the
 /// same way and their output can be compared byte for byte.
 pub fn report(ctx: &WasiCtx, code: i32) {
+    crate::prof::finish();
     let (fd, start) = REPORT.with(|r| r.get());
     if fd < 0 {
         return;

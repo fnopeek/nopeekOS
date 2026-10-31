@@ -651,11 +651,20 @@ impl Gen {
         if let Some(t) = result {
             self.expr(t);
         }
-        if self.rng.chance(50) {
-            self.expr(T::I32);
-        } else {
-            let v = self.rng.below(n + 3);
-            self.emit(&format!("i32.const {v}"));
+        match self.rng.below(3) {
+            0 => self.expr(T::I32),
+            // A masked index: below the table size forge drops the range
+            // check, at or above it must keep it.
+            1 => {
+                self.expr(T::I32);
+                let k = if self.rng.chance(90) { self.rng.below(n + 2) as i64 } else { -1 - self.rng.below(4) as i64 };
+                self.emit(&format!("i32.const {k}"));
+                self.emit("i32.and");
+            }
+            _ => {
+                let v = self.rng.below(n + 3);
+                self.emit(&format!("i32.const {v}"));
+            }
         }
         self.emit(&format!("br_table{names}"));
     }
@@ -763,7 +772,10 @@ impl Gen {
         let nh = 1 + rng.below(5) as usize;
         let mut helpers = Vec::new();
         for _ in 0..nh {
-            let np = rng.below(4) as usize;
+            // Mostly few parameters; sometimes enough that arguments overlap
+            // the operand registers (cycles in the argument moves) and spill
+            // onto the stack.
+            let np = if rng.chance(30) { 4 + rng.below(6) } else { rng.below(4) } as usize;
             let params = (0..np).map(|_| *rng.pick(&ALL)).collect();
             let result = *rng.pick(&ALL);
             helpers.push(Sig { params, result });

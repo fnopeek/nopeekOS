@@ -5,6 +5,7 @@
 //!
 //!   forge_harness --app <file.wasm>
 //!   forge_harness --dump <file.wasm|file.wat> [function index]
+//!   forge_harness --ops <file.wasm|file.wat> <function index>
 
 use crate::selftest::{Exec, Inst};
 use std::sync::OnceLock;
@@ -172,4 +173,40 @@ pub fn dump(args: &[String]) -> bool {
     }
     let _ = std::fs::remove_file(&tmp);
     true
+}
+
+/// Print one function's wasm operators with their offset in the body.
+pub fn ops(args: &[String]) -> bool {
+    let (Some(path), Some(want)) = (args.first(), args.get(1).and_then(|a| a.parse::<u32>().ok())) else {
+        eprintln!("usage: forge_harness --ops <file.wasm|file.wat> <function index>");
+        return false;
+    };
+    let Ok(wasm) = wat::parse_file(path) else { return false };
+    let mut n_imp = 0u32;
+    let mut idx = 0u32;
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        match payload {
+            Ok(wasmparser::Payload::ImportSection(r)) => {
+                n_imp = r.into_iter().filter(|i| matches!(i.as_ref().map(|i| i.ty), Ok(wasmparser::TypeRef::Func(_)))).count() as u32;
+            }
+            Ok(wasmparser::Payload::CodeSectionEntry(body)) => {
+                if n_imp + idx == want {
+                    let start = body.range().start;
+                    let Ok(mut r) = body.get_operators_reader() else { return false };
+                    while !r.eof() {
+                        let pos = r.original_position() - start;
+                        match r.read() {
+                            Ok(op) => println!("{pos:6x}  {op:?}"),
+                            Err(_) => return false,
+                        }
+                    }
+                    return true;
+                }
+                idx += 1;
+            }
+            Err(_) => return false,
+            _ => {}
+        }
+    }
+    false
 }

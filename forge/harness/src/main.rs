@@ -15,6 +15,7 @@ mod faults;
 mod fuzz;
 mod wasi_core;
 mod pybench;
+mod prof;
 mod wasi_glue;
 mod selftest;
 
@@ -50,6 +51,10 @@ fn main() {
     if args.first().map(|a| a == "--app").unwrap_or(false) {
         args.remove(0);
         std::process::exit(if app::run(&args) { 0 } else { 1 });
+    }
+    if args.first().map(|a| a == "--ops").unwrap_or(false) {
+        args.remove(0);
+        std::process::exit(if app::ops(&args) { 0 } else { 1 });
     }
     if args.first().map(|a| a == "--dump").unwrap_or(false) {
         args.remove(0);

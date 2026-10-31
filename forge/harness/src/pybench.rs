@@ -112,6 +112,7 @@ fn forge_run(wasm: &[u8], root: &PathBuf, argv: &[String]) -> Option<(Run, f64)>
         let mut ctx = ctx_for(&root, &argv);
         wasi_glue::install(&mut ctx);
         wasi_core::arm_report(wr, Instant::now());
+        crate::prof::start(&m, exec.base());
         exec.call_entry(m.entry_offset, off, inst.ptr(), 0, 0, 0);
         // Returned without `proc_exit` — report anyway.
         wasi_core::report(&ctx, 0);

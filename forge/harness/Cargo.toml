@@ -17,6 +17,7 @@ forge_core = { path = "../core", features = ["census", "layout-salt"] }
 # disagreement.
 wat = "1.239"
 libc = "0.2"
+wasmparser = { version = "0.239.0", default-features = false, features = ["validate", "features"] }
 
 [dependencies.wasmi]
 version = "1.1"
