@@ -63,15 +63,21 @@ const FUEL: Reg = Reg::R15;
 /// is fixed for the instance's life.
 const MEMBASE: Reg = Reg::R13;
 
-/// Where the hottest integer locals live instead of their frame slots. The
-/// two general registers nothing else uses, and callee-saved in SysV: a call
-/// leaves them alone, so a local in one never has to be written back, and a
-/// function pays for one only with a save and a restore of its own.
+/// Where the hottest integer locals live instead of their frame slots.
+/// `rbx` and `r12` are callee-saved in SysV: a call leaves them alone, so a
+/// local in one never has to be written back, and a function pays for one
+/// only with a save and a restore of its own. The frame saves the caller's
+/// value in the first slots below `rbp`; the entry trampoline saves them too,
+/// because a trap leaves without running any epilogue.
 ///
-/// The frame saves the caller's value in the first slots below `rbp`; the
-/// entry trampoline saves them too, because a trap leaves without running any
-/// epilogue.
-const HOMES: [Reg; 2] = [Reg::Rbx, Reg::R12];
+/// `r10` is the third, taken from the operand cache. It is caller-saved, so
+/// a local in it goes to its slot around each call instead.
+const HOMES: [Reg; 3] = [Reg::Rbx, Reg::R12, Reg::R10];
+
+/// How many of `HOMES`, from the front, are callee-saved. The rest are
+/// caller-saved: a function need not keep them for its caller, but around
+/// every call of its own the locals in them go to their slots and back.
+const CALLEE_SAVED_HOMES: usize = 2;
 
 /// Where the hottest float locals live. forge uses no other register from
 /// `xmm8` up, so all eight are free for this. Between wasm functions they are
@@ -343,7 +349,7 @@ struct Val {
 /// `rbx` and `r12` stay out rather than being saved in every prologue.
 /// `rsi`/`rdi` are in the pool even though `rep movsb` needs them, because
 /// bulk memory spills everything first anyway.
-const GPRS: [Reg; 5] = [Reg::Rsi, Reg::Rdi, Reg::R8, Reg::R9, Reg::R10];
+const GPRS: [Reg; 4] = [Reg::Rsi, Reg::Rdi, Reg::R8, Reg::R9];
 
 const XMMS: [Xmm; 5] = [Xmm::X3, Xmm::X4, Xmm::X5, Xmm::X6, Xmm::X7];
 
@@ -370,7 +376,7 @@ struct Ctx<'a> {
     /// `k < n_homes`. Always integer locals, and an i32 in one has a zero
     /// upper half like any other 32-bit register write. The caller's values
     /// of those registers are saved in the same order below `rbp`.
-    homed: [u32; 2],
+    homed: [u32; 3],
     n_homes: usize,
     /// The same for float locals in `FHOMES`, saved below the integer ones.
     fhomed: [u32; 8],
@@ -504,6 +510,23 @@ impl<'a> Ctx<'a> {
 
     fn fhome(&self, i: u32) -> Option<Xmm> {
         (0..self.n_fhomes).find(|&k| self.fhomed[k] == i).map(|k| FHOMES[k])
+    }
+
+    /// Before any call: the integer locals in caller-saved homes go to their
+    /// slots, since the callee may use those registers freely.
+    fn vhomes_out(&mut self) {
+        for k in CALLEE_SAVED_HOMES..self.n_homes {
+            let off = self.local(self.homed[k]);
+            self.asm.store64(Reg::Rbp, off, HOMES[k]);
+        }
+    }
+
+    /// After it: back into their registers.
+    fn vhomes_in(&mut self) {
+        for k in CALLEE_SAVED_HOMES..self.n_homes {
+            let off = self.local(self.homed[k]);
+            self.asm.load64(HOMES[k], Reg::Rbp, off);
+        }
     }
 
     /// Before a call into native code: every float local in a register goes
@@ -1160,7 +1183,9 @@ impl<'a> Ctx<'a> {
             self.asm.store64(VMCTX, vmctx::FUEL, FUEL);
             self.asm.mov_rr64(Reg::Rdi, VMCTX);
             self.fhomes_out();
+            self.vhomes_out();
             self.asm.call_reg(T);
+            self.vhomes_in();
             self.fhomes_in();
             self.asm.load64(FUEL, VMCTX, vmctx::FUEL);
             self.asm.test(true, FUEL, FUEL);
@@ -1213,8 +1238,8 @@ fn block_out(ty: BlockType) -> Result<(u32, ValType), &'static str> {
 /// Give the integer locals used most a register each (`HOMES`). A use inside
 /// a loop counts eight times as much per level of nesting, which is a rough
 /// guess at how often it runs, and all a single pass can know in advance.
-fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; 2], usize, [u32; 8], usize) {
-    let mut homed = [0u32; 2];
+fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; 3], usize, [u32; 8], usize) {
+    let mut homed = [0u32; 3];
     let mut fhomed = [0u32; 8];
     if local_types.is_empty() {
         return (homed, 0, fhomed, 0);
@@ -1317,7 +1342,7 @@ pub fn compile_func(
         traps: Vec::new(),
         trap_relocs: Vec::new(),
         n_locals,
-        homed: [0; 2],
+        homed: [0; 3],
         n_homes: 0,
         fhomed: [0; 8],
         n_fhomes: 0,
@@ -1361,7 +1386,7 @@ pub fn compile_func(
     f.asm.cmp_rr64(Reg::Rsp, A);
     f.trap_if(Cond::B, trap::STACK_EXHAUSTED);
     (f.homed, f.n_homes, f.fhomed, f.n_fhomes) = choose_homes(&f.local_types, ops);
-    for k in 0..f.n_homes {
+    for k in 0..f.n_homes.min(CALLEE_SAVED_HOMES) {
         f.asm.store64(Reg::Rbp, -8 * (k as i32 + 1), HOMES[k]);
     }
     for k in 0..f.n_fhomes {
@@ -1449,7 +1474,7 @@ pub fn compile_func(
 
     // Epilogue. Every path arrives with the result, if any, already in `A`
     // or `FA`, which is where the caller looks for it.
-    for k in 0..f.n_homes {
+    for k in 0..f.n_homes.min(CALLEE_SAVED_HOMES) {
         f.asm.load64(HOMES[k], Reg::Rbp, -8 * (k as i32 + 1));
     }
     for k in 0..f.n_fhomes {
@@ -2107,7 +2132,9 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             f.asm.mov_rr64(Reg::Rdi, VMCTX);
             f.asm.load64(T, VMCTX, vmctx::BUILTIN_GROW);
             f.fhomes_out();
+            f.vhomes_out();
             f.asm.call_reg(T);
+            f.vhomes_in();
             f.fhomes_in();
             f.push_from_ty(A, ValType::I32);
         }
@@ -2603,15 +2630,19 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
         f.asm.load64(T, VMCTX, vmctx::HOST_FNS);
         f.asm.load64(T, T, 8 * function_index as i32);
         f.fhomes_out();
+        f.vhomes_out();
         f.asm.call_reg(T);
+        f.vhomes_in();
         f.fhomes_in();
         f.asm.load64(FUEL, VMCTX, vmctx::FUEL);
     } else {
+        f.vhomes_out();
         let at = f.asm.call_rel32_blank();
         f.relocs.push(Reloc {
             at,
             target: function_index,
         });
+        f.vhomes_in();
     }
     after_call(f, n, results, arg_bytes);
     Ok(())
@@ -2657,7 +2688,9 @@ fn call_indirect(f: &mut Ctx, type_index: u32) -> Result<(), &'static str> {
     f.asm.load64_scaled(T, T, B, 3, 0);
 
     let arg_bytes = load_args(f, params, &places, n_stack);
+    f.vhomes_out();
     f.asm.call_reg(T);
+    f.vhomes_in();
     after_call(f, n, results, arg_bytes);
     Ok(())
 }
