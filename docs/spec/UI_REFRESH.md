@@ -425,7 +425,7 @@ popups and `Surface` windows.
 | Limits | at least 240 x 160; at least 64 px of it and its bar stay on screen |
 | Back | Float again (Mod+V) puts it back where it was in the tiling |
 | Double click on the free bar | floating: the whole work area, again: back to where it was; tile: fullscreen |
-| Snap | moved to the left or right screen edge: that half as a tile, the rest shares the other half; to the top edge: the whole work area. While it is held there an `Accent` fill at 70/255 shows where it lands |
+| Snap | moved to the left or right screen edge: that half as a tile, the rest shares the other half; to the top edge: the whole work area. Touching the edge sets the target, which holds until the pointer is 48 px away from that edge again. An `Accent` fill at 70/255 shows where it lands |
 | Pulled off when maximized | takes its own size back under the pointer, at the same share of its width |
 
 `shade.controls` sets how much is shown: `full` (default) all four,

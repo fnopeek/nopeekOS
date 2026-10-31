@@ -872,6 +872,7 @@ impl Compositor {
     }
 
     pub(super) fn start_float_drag(&mut self, id: WindowId, mode: DragMode, mx: i32, my: i32) {
+        self.snap = None;
         // A maximized window pulled away takes its own size back, under the
         // pointer at the same share of its width; a resized one forgets it.
         let restore = self.window(id).and_then(|w| w.restore);
@@ -928,11 +929,22 @@ impl Compositor {
             win.dirty = true;
         }
         if drag.mode == DragMode::Move {
+            // Reached by touching the edge, kept until the pointer clearly
+            // leaves it: lifting a finger off a touchpad moves the pointer a
+            // few px before the release arrives.
             let edge = scale::len(2) as i32;
-            self.snap = if mx < edge { Some(Snap::Left) }
+            let leave = scale::len(48) as i32;
+            let touched = if mx < edge { Some(Snap::Left) }
                 else if mx >= sw - edge { Some(Snap::Right) }
                 else if my < edge { Some(Snap::Max) }
                 else { None };
+            let kept = match self.snap {
+                Some(Snap::Left) if mx < leave => self.snap,
+                Some(Snap::Right) if mx >= sw - leave => self.snap,
+                Some(Snap::Max) if my < leave => self.snap,
+                _ => None,
+            };
+            self.snap = touched.or(kept);
         }
     }
 
