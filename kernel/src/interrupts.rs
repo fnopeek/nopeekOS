@@ -48,6 +48,14 @@ pub fn uptime_us() -> u64 {
     rdtsc().saturating_sub(boot) / per_us
 }
 
+/// Nanoseconds since boot, from the TSC (Linux `CLOCK_MONOTONIC`).
+pub fn uptime_ns() -> u64 {
+    let freq = TSC_FREQ.load(Ordering::Relaxed).max(1);
+    let boot = BOOT_TSC.load(Ordering::Relaxed);
+    let cycles = rdtsc().saturating_sub(boot) as u128;
+    (cycles * 1_000_000_000 / freq as u128) as u64
+}
+
 /// TSC cycles converted to nanoseconds, for measurements below a microsecond.
 pub fn tsc_to_ns(cycles: u64) -> u64 {
     let freq = TSC_FREQ.load(Ordering::Relaxed).max(1);

@@ -48,18 +48,22 @@ write_string_vec(mem, ep, buf, &items)
 
 pub(crate) fn clock_res_get(mem: &mut [u8], st: &mut HS, _id: i32, out: i32) -> i32 {
 let _ = wasi_of!(st);
-// The tick is 100 Hz, and saying so beats claiming nanoseconds
-// we cannot deliver.
-match w64(mem, out, 10_000_000) { Ok(()) => SUCCESS, Err(e) => e }
+match w64(mem, out, CLOCK_RES_NS) { Ok(()) => SUCCESS, Err(e) => e }
 }
+
+/// What a module's clocks resolve: a microsecond is finer than any
+/// measurement a program makes, and no finer than that is handed to code
+/// that could time its own speculation.
+const CLOCK_RES_NS: u64 = 1_000;
 
 pub(crate) fn clock_time_get(mem: &mut [u8], st: &mut HS, id: i32, _p: i64, out: i32) -> i32 {
 // 0 = realtime, everything else treated as monotonic.
-let now = if id == 0 {
-    crate::time::now_or_zero().saturating_mul(1_000_000_000)
+let ns = if id == 0 {
+    crate::time::now_ns().unwrap_or(0)
 } else {
-    crate::interrupts::ticks().saturating_mul(10_000_000)
+    crate::interrupts::uptime_ns()
 };
+let now = ns - ns % CLOCK_RES_NS;
 let _ = wasi_of!(st);
 match w64(mem, out, now) { Ok(()) => SUCCESS, Err(e) => e }
 }

@@ -10,7 +10,7 @@ use alloc::string::String;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-/// UTC seconds at the tick they were taken (`interrupts::ticks`, 100 Hz).
+/// UTC seconds and the `interrupts::uptime_ns` they were taken at.
 static WALL: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 /// True once NTP has set the clock in this boot.
@@ -42,13 +42,19 @@ pub fn init_from_rtc() -> Option<u64> {
 }
 
 fn set(unix: u64) {
-    *WALL.lock() = Some((unix, crate::interrupts::ticks()));
+    *WALL.lock() = Some((unix, crate::interrupts::uptime_ns()));
 }
 
 /// Current UTC seconds, or `None` before any source set the clock.
 pub fn now() -> Option<u64> {
+    now_ns().map(|ns| ns / 1_000_000_000)
+}
+
+/// Current UTC in nanoseconds, or `None` before any source set the clock.
+pub fn now_ns() -> Option<u64> {
     let (base, at) = (*WALL.lock())?;
-    Some(base + crate::interrupts::ticks().saturating_sub(at) / 100)
+    let since = crate::interrupts::uptime_ns().saturating_sub(at);
+    Some(base.saturating_mul(1_000_000_000).saturating_add(since))
 }
 
 /// [`now`], or 0 when the clock is unset.
