@@ -1,0 +1,20 @@
+[package]
+name = "fbench"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
+
+# Same settings natively and as wasm, so the two builds differ only in the
+# target: what forge loses against native is then forge's share alone.
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
+codegen-units = 1
+panic = "abort"

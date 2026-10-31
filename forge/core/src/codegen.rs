@@ -1816,6 +1816,8 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         I64TruncSatF64S => trunc_sat_s(f, Fw::Double, true),
         I32TruncSatF32U => trunc_sat_u32(f, Fw::Single),
         I32TruncSatF64U => trunc_sat_u32(f, Fw::Double),
+        I64TruncSatF32U => trunc_sat_u64(f, Fw::Single),
+        I64TruncSatF64U => trunc_sat_u64(f, Fw::Double),
 
         I32ReinterpretF32 => {
             f.fpop_to(FA);
@@ -2692,6 +2694,44 @@ fn trunc_sat_u32(f: &mut Ctx, fw: Fw) {
     f.asm.bind(done_neg);
     f.asm.bind(done_big);
     f.push_from_ty(A, ValType::I32);
+}
+
+/// Unsigned saturating truncation to i64. Below 2^63 the signed conversion
+/// is exact. From 2^63 on, 2^63 is taken off first, the rest converted, and
+/// the top bit set again; a rest that is itself 2^63 or more means the value
+/// was at least 2^64 and saturates.
+fn trunc_sat_u64(f: &mut Ctx, fw: Fw) {
+    // 2^63, as the bits of the respective float.
+    let two63 = if fw.is_double() { 0x43E0_0000_0000_0000u64 } else { 0x5F00_0000 };
+    f.fpop_to(FA);
+    f.asm.xor(false, A, A); // NaN and everything at or below zero answer 0
+    f.asm.fucomi(fw, FA, FA);
+    let done_nan = f.asm.jcc(Cond::P);
+    f.asm.fxor(fw, FB, FB);
+    f.asm.fucomi(fw, FA, FB);
+    let done_neg = f.asm.jcc(Cond::Be);
+
+    f.asm.mov_r64_imm64(B, two63 as i64);
+    f.asm.gpr_to_xmm(true, FB, B);
+    f.asm.fucomi(fw, FA, FB);
+    let high = f.asm.jcc(Cond::Ae);
+    f.asm.float_to_int(fw, true, A, FA);
+    let done_low = f.asm.jmp();
+
+    f.asm.bind(high);
+    f.asm.fsub(fw, FA, FB);
+    f.asm.fucomi(fw, FA, FB);
+    f.asm.mov_r64_imm64(A, -1); // saturates; `mov` leaves flags alone
+    let done_big = f.asm.jcc(Cond::Ae);
+    f.asm.float_to_int(fw, true, A, FA);
+    f.asm.mov_r64_imm64(B, i64::MIN);
+    f.asm.or(true, A, B);
+
+    f.asm.bind(done_nan);
+    f.asm.bind(done_neg);
+    f.asm.bind(done_low);
+    f.asm.bind(done_big);
+    f.push_from_ty(A, ValType::I64);
 }
 
 /// One ALU operation in its three encodings: against a register, against

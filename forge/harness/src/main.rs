@@ -4,10 +4,14 @@
 //!   forge_harness <file.wasm>...              census per module
 //!   forge_harness --roadmap <file.wasm>       how far are we, and what next
 //!   forge_harness --selftest                  generated code vs wasmi
+//!   forge_harness --fuzz [start] [count]      random modules vs wasmi
+//!   forge_harness --app <file.wasm>           an SDK app's _start (fbench)
 //!   forge_harness --run <wasm> [page w h n]   run it, and time it
 
+mod app;
 mod bench;
 mod faults;
+mod fuzz;
 mod wasi_core;
 mod pybench;
 mod wasi_glue;
@@ -41,6 +45,18 @@ fn main() {
     if args.first().map(|a| a == "--run").unwrap_or(false) {
         args.remove(0);
         std::process::exit(if bench::run(&args) { 0 } else { 1 });
+    }
+    if args.first().map(|a| a == "--app").unwrap_or(false) {
+        args.remove(0);
+        std::process::exit(if app::run(&args) { 0 } else { 1 });
+    }
+    if args.first().map(|a| a == "--fuzz").unwrap_or(false) {
+        args.remove(0);
+        std::process::exit(if fuzz::run(&args) { 0 } else { 1 });
+    }
+    if args.first().map(|a| a == "--fuzz-one").unwrap_or(false) {
+        let seed = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(0);
+        std::process::exit(if fuzz::one(seed) { 0 } else { 1 });
     }
     if args.first().map(|a| a == "--selftest").unwrap_or(false) {
         std::process::exit(if selftest::run() { 0 } else { 1 });

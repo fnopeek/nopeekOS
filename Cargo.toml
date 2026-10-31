@@ -26,6 +26,7 @@ exclude = [
     "tools/wasm/beak",
     "tools/wasm/beak-engine",
     "tools/wasm/testdisk",
+    "tools/wasm/fbench",
     "tools/wasm/acpi/core",
     "tools/wasm/acpi/harness",
     "tools/wasm/acpi/wasm",

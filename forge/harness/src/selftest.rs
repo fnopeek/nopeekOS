@@ -219,6 +219,7 @@ impl Inst {
             .map(|(module, name)| {
                 host_fn(module, name)
                     .or_else(|| crate::bench::host_for(module, name))
+                    .or_else(|| crate::app::host_for(module, name))
                     .or_else(|| crate::pybench::wasi_host(module, name))
                     .unwrap_or(code_base + m.trap_offset as u64)
             })
@@ -262,6 +263,19 @@ impl Inst {
     /// only meaningful after a call has returned.
     pub(crate) fn fuel_left(&self) -> i64 {
         self.ctx[forge_core::vmctx::FUEL as usize / 8] as i64
+    }
+
+    /// Global `i` as stored, the full eight-byte slot.
+    pub(crate) fn global(&self, i: usize) -> u64 {
+        self.globals[i]
+    }
+
+    /// The readable part of linear memory, as large as it has grown.
+    pub(crate) fn memory_bytes(&self) -> &[u8] {
+        let size = self.ctx[forge_core::vmctx::MEM_SIZE as usize / 8] as usize;
+        // SAFETY: the first `size` bytes of the reservation are mapped
+        // readable; `memory.grow` keeps `MEM_SIZE` and the mapping in step.
+        unsafe { std::slice::from_raw_parts(self.memory.base, size) }
     }
 
     pub(crate) fn fuel_used(&self) -> i64 {
@@ -1520,6 +1534,36 @@ const CASES: &[Case] = &[
         "local.get 0 f32.convert_i32_s f32.const 3.0 f32.div i32.trunc_sat_f32_s ", params: 2 },
     Case { name: "ts_i32f32u_big", decl: "", body:
         "f32.const 1e30 i32.trunc_sat_f32_u local.get 0 i32.add ", params: 2 },
+    Case { name: "ts_i64u_nan", decl: "", body:
+        "(local f64) (local i64) f64.const nan i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_neg", decl: "", body:
+        "(local f64) (local i64) f64.const -1.5 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_half", decl: "", body:
+        "(local f64) (local i64) f64.const 0.75 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_below63", decl: "", body:
+        "(local f64) (local i64) f64.const 9223372036854774784.0 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_at63", decl: "", body:
+        "(local f64) (local i64) f64.const 9223372036854775808.0 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_mid", decl: "", body:
+        "(local f64) (local i64) f64.const 12345678901234567890.0 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_below64", decl: "", body:
+        "(local f64) (local i64) f64.const 18446744073709549568.0 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_at64", decl: "", body:
+        "(local f64) (local i64) f64.const 18446744073709551616.0 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_huge", decl: "", body:
+        "(local f64) (local i64) f64.const 1e300 i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_inf", decl: "", body:
+        "(local f64) (local i64) f64.const inf i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_f32_63", decl: "", body:
+        "(local f64) (local i64) f32.const 9223372036854775808.0 i64.trunc_sat_f32_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_f32_big", decl: "", body:
+        "(local f64) (local i64) f32.const 1e19 i64.trunc_sat_f32_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_f32_over", decl: "", body:
+        "(local f64) (local i64) f32.const 1e20 i64.trunc_sat_f32_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_f32_nan", decl: "", body:
+        "(local f64) (local i64) f32.const nan i64.trunc_sat_f32_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
+    Case { name: "ts_i64u_arg", decl: "", body:
+        "(local f64) (local i64) local.get 0 f64.convert_i32_u f64.const 4294967296.0 f64.mul f64.const 3.0 f64.mul i64.trunc_sat_f64_u local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
     Case { name: "ts_i64f64s", decl: "", body:
         "(local f64) (local i64) local.get 0 f64.convert_i32_s f64.const 3.0 f64.div i64.trunc_sat_f64_s local.set 3 local.get 3 i64.const 32 i64.shr_u i32.wrap_i64 local.get 3 i32.wrap_i64 i32.xor", params: 2 },
     Case { name: "ts_i64f64s_big", decl: "", body:
