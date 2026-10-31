@@ -99,6 +99,16 @@ git add release/ && git commit -m "release: sign + publish vX.Y.Z"
 git push
 ```
 
+Which number to bump (kernel and modules alike):
+
+| Bump | When | Example |
+|---|---|---|
+| `Y` (0.794.0 to 0.795.0) | something new: a feature, a new optimisation step, a security fix | locals in registers |
+| `Z` (0.794.0 to 0.794.1) | a follow-up to the last release that adds nothing new: a bug in it, a side effect, a forgotten piece | the new step allocated too much |
+
+A follow-up and a new step go out as two releases, so a device
+measurement can tell which change did what.
+
 `./build.sh release` does not compile WASM: stage changed modules first.
 For a module-only change, `./build.sh sign-modules` re-signs only the
 modules whose hash changed and leaves the kernel untouched.
