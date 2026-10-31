@@ -351,6 +351,10 @@ enum Loc {
 struct Val {
     ty: ValType,
     loc: Loc,
+    /// An upper bound on the value as u32, `u32::MAX` when nothing is known.
+    /// It describes the wasm value, not its location, so it holds however
+    /// the value moves between registers and slots.
+    max: u32,
 }
 
 /// The registers the operand stack may live in — deliberately disjoint from
@@ -583,13 +587,13 @@ impl<'a> Ctx<'a> {
 
     /// A constant, remembered rather than emitted.
     fn push_imm(&mut self, v: i64, t: ValType) {
-        self.stack.push(Val { ty: t, loc: Loc::Imm(v) });
+        self.stack.push(Val { ty: t, loc: Loc::Imm(v), max: u32::MAX });
         self.note_depth();
     }
 
     /// A copy of a local, remembered rather than loaded.
     fn push_local(&mut self, idx: u32, t: ValType) {
-        self.stack.push(Val { ty: t, loc: Loc::Local(idx) });
+        self.stack.push(Val { ty: t, loc: Loc::Local(idx), max: u32::MAX });
         self.note_depth();
     }
 
@@ -606,7 +610,7 @@ impl<'a> Ctx<'a> {
     /// Note a value that is already in its slot — what a block end leaves
     /// behind, since everything is spilled before control can join.
     fn push_slot(&mut self, t: ValType) {
-        self.stack.push(Val { ty: t, loc: Loc::Slot });
+        self.stack.push(Val { ty: t, loc: Loc::Slot, max: u32::MAX });
         self.note_depth();
     }
 
@@ -735,7 +739,7 @@ impl<'a> Ctx<'a> {
     }
 
     fn push_flags(&mut self, cc: Cond) {
-        self.stack.push(Val { ty: ValType::I32, loc: Loc::Flags(cc) });
+        self.stack.push(Val { ty: ValType::I32, loc: Loc::Flags(cc), max: u32::MAX });
         self.note_depth();
     }
 
@@ -838,7 +842,7 @@ impl<'a> Ctx<'a> {
 
     /// The float equivalents of `push_reg` / `pop_to_pool`.
     fn fpush_reg(&mut self, x: Xmm, t: ValType) {
-        self.stack.push(Val { ty: t, loc: Loc::Xmm(x) });
+        self.stack.push(Val { ty: t, loc: Loc::Xmm(x), max: u32::MAX });
         self.note_depth();
     }
 
@@ -857,7 +861,13 @@ impl<'a> Ctx<'a> {
     /// The value is already in a cache register and stays there. What the hot
     /// operators use, so that an arithmetic result costs no move at all.
     fn push_reg(&mut self, r: Reg, t: ValType) {
-        self.stack.push(Val { ty: t, loc: Loc::Gpr(r) });
+        self.stack.push(Val { ty: t, loc: Loc::Gpr(r), max: u32::MAX });
+        self.note_depth();
+    }
+
+    /// `push_reg` for an i32 known to be at most `max`.
+    fn push_reg_bounded(&mut self, r: Reg, max: u32) {
+        self.stack.push(Val { ty: ValType::I32, loc: Loc::Gpr(r), max });
         self.note_depth();
     }
 
@@ -889,7 +899,7 @@ impl<'a> Ctx<'a> {
                 self.asm.mov_rr32(d, r);
             }
         }
-        self.stack.push(Val { ty: t, loc: Loc::Gpr(d) });
+        self.stack.push(Val { ty: t, loc: Loc::Gpr(d), max: u32::MAX });
         self.note_depth();
     }
 
@@ -898,7 +908,7 @@ impl<'a> Ctx<'a> {
         if d != x {
             self.asm.fmov(d, x);
         }
-        self.stack.push(Val { ty: t, loc: Loc::Xmm(d) });
+        self.stack.push(Val { ty: t, loc: Loc::Xmm(d), max: u32::MAX });
         self.note_depth();
     }
 
@@ -1743,7 +1753,9 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         BrTable { targets } => {
             f.fuel_flush();
             if f.reachable {
-                f.spill_all();
+                // Everything a target may carry goes to its slot; the index
+                // stays where it is, `br_table` takes it straight into `rcx`.
+                f.spill_below(1);
                 br_table(f, targets)?;
                 f.reachable = false;
             }
@@ -2359,11 +2371,17 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
     let frame = |f: &Ctx, d: u32| f.ctrl.len().checked_sub(1 + d as usize).ok_or("br-depth");
     let default_idx = frame(f, default)?;
 
+    // An index known to be below `n` (`x & c`, `c < n`) needs neither the
+    // range check nor the clamp: the bound comes from an instruction the
+    // index depends on, so it holds on a mispredicted path too.
+    let in_range = f.stack.last().is_some_and(|v| (v.max as u64) < n as u64);
     f.pop_to(B);
-    f.asm.cmp_r32_imm32(B, n as i32);
     // Out of range goes to the default. A default that carries no value is
     // jumped to directly; one that does gets a stub below.
-    let to_default_stub = if f.ctrl[default_idx].branch_arity == 0 {
+    let to_default_stub = if in_range {
+        None
+    } else if f.ctrl[default_idx].branch_arity == 0 {
+        f.asm.cmp_r32_imm32(B, n as i32);
         if f.ctrl[default_idx].kind == Kind::Loop {
             let start = f.ctrl[default_idx].start;
             f.asm.jcc_back(Cond::Ae, start);
@@ -2373,6 +2391,7 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
         }
         None
     } else {
+        f.asm.cmp_r32_imm32(B, n as i32);
         Some(f.asm.jcc(Cond::Ae))
     };
     // Clamp the index on a mispredicted path: the jump table is read with it,
@@ -2380,7 +2399,9 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
     // power of two with entries for the default, so a constant mask keeps
     // the index inside it without waiting for the compare.
     let slots = n.max(1).next_power_of_two();
-    f.asm.and_r_imm32(false, B, (slots - 1) as i32);
+    if !in_range {
+        f.asm.and_r_imm32(false, B, (slots - 1) as i32);
+    }
 
     let lea_at = f.asm.lea_rip_blank(T);
     f.asm.movsxd_scaled(A, T, B, 2, 0);
@@ -3273,7 +3294,11 @@ fn bin(f: &mut Ctx, w: bool, op: AluOp) {
         Rhs::Reg(r) | Rhs::Owned(r) => f.asm.alu_raw(w, op.rr, d, r),
     }
     release_rhs(f, &rhs);
-    f.push_reg(d, if w { ValType::I64 } else { ValType::I32 });
+    match rhs {
+        // `x & c` is at most `c`, which `br_table` uses to drop its range check.
+        Rhs::Imm(c) if !w && op.rr == AND.rr => f.push_reg_bounded(d, c as u32),
+        _ => f.push_reg(d, if w { ValType::I64 } else { ValType::I32 }),
+    }
 }
 
 fn mul(f: &mut Ctx, w: bool) {
