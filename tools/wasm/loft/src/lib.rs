@@ -254,6 +254,16 @@ struct Strings {
     bm_up:          &'static str,
     /// `{}` = the folder's name.
     bm_added:       &'static str,
+    // Renaming several items.
+    /// `{}` = the number of items.
+    br_title:       &'static str,
+    br_find:        &'static str,
+    br_replace:     &'static str,
+    br_hint:        &'static str,
+    /// `{}` = how many more are not shown.
+    br_more:        &'static str,
+    br_clash:       &'static str,
+    renamed:        &'static str,
 }
 
 const EN: Strings = Strings {
@@ -343,6 +353,11 @@ const EN: Strings = Strings {
     bm_here: "Bookmark this folder", bm_item: "Add bookmark",
     bm_remove: "Remove bookmark", bm_up: "Move up",
     bm_added: "Bookmarked: {}",
+    br_title: "Rename {} items", br_find: "Find:", br_replace: "Replace with:",
+    br_hint: "Enter renames · Esc cancels",
+    br_more: "… and {} more",
+    br_clash: "Two items would get the same name, or a name is taken or invalid",
+    renamed: "Renamed: {}",
 };
 
 
@@ -532,6 +547,10 @@ const NODE_MENU_HELP: u32 = 104;
 const NODE_SEARCH:    u32 = 110;
 const NODE_LOCATION:  u32 = 111;
 const NODE_NAME:      u32 = 112;
+const NODE_FIND:      u32 = 113;
+const NODE_REPL:      u32 = 114;
+/// Rows of new names shown in the batch-rename preview.
+const PREVIEW_ROWS: usize = 8;
 
 const QUERY_CAP: usize = 127;
 
@@ -711,6 +730,9 @@ enum Dialog {
     OpenWith { target: Target, apps: Vec<(String, String)>, always: bool },
     /// A paste hit an existing name; the job waits in `Loft::paste`.
     Clash { name: String },
+    /// Find and replace in the names of `targets` (`Loft::find_buf`,
+    /// `Loft::repl_buf`).
+    BatchRename(Vec<Target>),
 }
 
 struct Status {
@@ -804,6 +826,8 @@ struct Loft {
     active:         usize,
     /// Bookmarked folders, in sidebar order.
     bookmarks:      Vec<String>,
+    find_buf:       String,
+    repl_buf:       String,
 }
 
 impl Loft {
@@ -849,6 +873,8 @@ impl Loft {
             tabs:          Vec::new(),
             active:        0,
             bookmarks:     Vec::new(),
+            find_buf:      String::new(),
+            repl_buf:      String::new(),
         };
         lf.load_settings();
         lf.rebuild_sidebar();
@@ -1621,8 +1647,17 @@ impl Loft {
         self.name_buf.push_str(nopeek_widgets::rt::str_clamp(value, cap));
     }
 
-    /// Open the rename dialog for the cursor item.
+    /// Open the rename dialog for the cursor item, or the find-and-replace
+    /// dialog when several items are marked.
     fn open_rename(&mut self) {
+        let targets = self.targets();
+        if targets.len() > 1 {
+            self.close_menus();
+            self.find_buf.clear();
+            self.repl_buf.clear();
+            self.dialog = Some(Dialog::BatchRename(targets));
+            return;
+        }
         let Some(t) = self.cursor_target() else { return };
         self.close_menus();
         self.set_name_buf(basename(&t.name));
@@ -1672,6 +1707,7 @@ impl Loft {
             Some(Dialog::ConfirmDelete(targets)) => self.delete_permanently(targets),
             // Enter on a clash keeps both, the choice that loses nothing.
             Some(Dialog::Clash { .. }) => self.run_paste(Some(Clash::Keep)),
+            Some(Dialog::BatchRename(targets)) => self.commit_batch_rename(targets),
             Some(Dialog::OpenWith { .. }) | Some(Dialog::Properties(_)) | None => {}
         }
     }
@@ -1732,6 +1768,51 @@ impl Loft {
         } else {
             self.say(s().path_failed.to_string(), true);
         }
+    }
+
+    /// New names for a batch rename, in target order. `None` for a name
+    /// that does not change.
+    fn batch_names(&self, targets: &[Target]) -> Vec<Option<String>> {
+        targets.iter().map(|t| {
+            let old = basename(&t.name);
+            if self.find_buf.is_empty() { return None; }
+            let new = old.replace(self.find_buf.as_str(), &self.repl_buf);
+            (new != old).then_some(new)
+        }).collect()
+    }
+
+    /// Apply a batch rename. Nothing moves unless every new name is valid,
+    /// free, and unique within the batch.
+    fn commit_batch_rename(&mut self, targets: Vec<Target>) {
+        let names = self.batch_names(&targets);
+        let mut dests: Vec<(usize, String)> = Vec::new();
+        let mut ok = true;
+        for (i, n) in names.iter().enumerate() {
+            let Some(n) = n else { continue };
+            let bad = n.trim().is_empty() || n.contains('/') || n == "." || n == "..";
+            let dest = join(&parent_path(&targets[i].full), n);
+            if bad || path_exists(&dest) || dests.iter().any(|(_, d)| *d == dest) { ok = false; break; }
+            dests.push((i, dest));
+        }
+        if !ok {
+            self.say(s().br_clash.to_string(), true);
+            self.dialog = Some(Dialog::BatchRename(targets));
+            return;
+        }
+        let (mut done, mut failed) = (0usize, 0usize);
+        let mut steps = Vec::new();
+        for (i, dest) in dests {
+            if fs_rename(&targets[i].full, &dest) {
+                done += 1;
+                steps.push(Step::Move { from: targets[i].full.clone(), to: dest });
+            } else {
+                failed += 1;
+            }
+        }
+        self.record(steps);
+        self.marks.clear();
+        self.refresh();
+        self.report(done, failed, s().renamed, s().rename_failed);
     }
 
     // ── Duplicate ─────────────────────────────────────────────────────
@@ -2282,7 +2363,7 @@ fn target_items(lf: &Loft, m: &mut MenuBuf, with_open: bool) {
             m.add(s().paste, ACT_EDIT_PASTE, "Ctrl+V");
         }
         if !lf.in_trash_tree() { m.add(s().duplicate, ACT_EDIT_DUPLICATE, "Ctrl+D"); }
-        if n == 1 && !lf.in_trash_tree() { m.add(s().rename, ACT_EDIT_RENAME, "F2"); }
+        if !lf.in_trash_tree() { m.add(s().rename, ACT_EDIT_RENAME, "F2"); }
         if lf.in_trash_tree() {
             m.add(s().delete_perm, ACT_EDIT_DELETE, "Del");
         } else {
@@ -2414,6 +2495,7 @@ fn render_dialog(lf: &Loft, d: &Dialog) -> Widget {
         Dialog::Properties(p) => properties_dialog(p),
         Dialog::OpenWith { target, apps, always } => open_with_dialog(target, apps, *always),
         Dialog::Clash { name } => clash_dialog(lf, name),
+        Dialog::BatchRename(targets) => batch_rename_dialog(lf, targets),
     };
     Widget::Column {
         children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
@@ -2521,6 +2603,42 @@ fn open_with_dialog(target: &Target, apps: &[(String, String)], always: bool) ->
     }
     rows.push(dialog_buttons(None, s().cancel));
     prefab::dialog(s().ow_title, dialog_body(rows), Some(s().ow_hint), 360)
+}
+
+fn batch_rename_dialog(lf: &Loft, targets: &[Target]) -> Widget {
+    let field = |value: &str, node: u32, focus: bool| {
+        let mut mods = alloc::vec![Modifier::NodeId(NodeId(node))];
+        if focus { mods.push(Modifier::Autofocus); }
+        Widget::Input {
+            value:       value.to_string(),
+            placeholder: String::new(),
+            on_submit:   ActionId(ACT_DIALOG_SUBMIT),
+            modifiers:   mods,
+        }
+    };
+    let muted = |t: &str| Widget::Text { content: t.to_string(), style: TextStyle::Muted, modifiers: alloc::vec![] };
+    let mut rows = alloc::vec![
+        muted(s().br_find),
+        field(&lf.find_buf, NODE_FIND, true),
+        muted(s().br_replace),
+        field(&lf.repl_buf, NODE_REPL, false),
+    ];
+    let names = lf.batch_names(targets);
+    let changed: Vec<(&Target, &String)> = targets.iter().zip(names.iter())
+        .filter_map(|(t, n)| n.as_ref().map(|n| (t, n)))
+        .collect();
+    for (t, n) in changed.iter().take(PREVIEW_ROWS) {
+        rows.push(Widget::Text {
+            content:   alloc::format!("{}  ->  {}", basename(&t.name), n),
+            style:     TextStyle::Caption,
+            modifiers: alloc::vec![],
+        });
+    }
+    if changed.len() > PREVIEW_ROWS {
+        rows.push(muted(&fill(s().br_more, &[&num(changed.len() - PREVIEW_ROWS)])));
+    }
+    rows.push(dialog_buttons(Some((s().confirm_rename, prefab::ButtonStyle::Primary)), s().cancel));
+    prefab::dialog(&fill(s().br_title, &[&num(targets.len())]), dialog_body(rows), Some(s().br_hint), 420)
 }
 
 fn clash_dialog(lf: &Loft, name: &str) -> Widget {
@@ -3268,6 +3386,8 @@ fn handle_dialog(lf: &mut Loft, ev: Event) -> Outcome {
             lf.set_name_buf(&value);
             Outcome::Rerender
         }
+        Event::InputChangeAt { node: NODE_FIND, value } => { lf.find_buf = value; Outcome::Rerender }
+        Event::InputChangeAt { node: NODE_REPL, value } => { lf.repl_buf = value; Outcome::Rerender }
         Event::Action(ActionId(ACT_OW_ALWAYS)) => {
             if let Some(Dialog::OpenWith { always, .. }) = &mut lf.dialog { *always = !*always; }
             Outcome::Rerender
