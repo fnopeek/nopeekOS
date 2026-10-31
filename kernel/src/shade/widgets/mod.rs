@@ -1941,6 +1941,117 @@ fn indent_lines(edit: &mut InputEditState, rule: IndentRule, indent: bool) -> bo
     changed
 }
 
+/// The closer `AutoClose` pairs with `b`, if its bit is set.
+fn closer_for(b: u8, bits: u8) -> Option<u8> {
+    match b {
+        b'(' if bits & 1 != 0 => Some(b')'),
+        b'[' if bits & 1 != 0 => Some(b']'),
+        b'{' if bits & 1 != 0 => Some(b'}'),
+        b'"' if bits & 2 != 0 => Some(b'"'),
+        b'\'' if bits & 4 != 0 => Some(b'\''),
+        b'`' if bits & 8 != 0 => Some(b'`'),
+        _ => None,
+    }
+}
+
+fn is_closer(b: u8, bits: u8) -> bool {
+    match b {
+        b')' | b']' | b'}' => bits & 1 != 0,
+        b'"' | b'\'' | b'`' => closer_for(b, bits).is_some(),
+        _ => false,
+    }
+}
+
+/// Typing closer `b` right in front of the same character steps over it.
+fn steps_over(s: &str, cursor: usize, b: u8, bits: u8) -> bool {
+    is_closer(b, bits) && s.as_bytes().get(cursor) == Some(&b)
+}
+
+/// Whether typing opener `b` at `cursor` inserts the pair: the next
+/// character is a space, a closer or the end of the line, and a quote
+/// does not follow a word character (`don't`).
+fn opens_pair(s: &str, cursor: usize, b: u8, bits: u8) -> bool {
+    if closer_for(b, bits).is_none() { return false; }
+    let bytes = s.as_bytes();
+    let next_ok = match bytes.get(cursor) {
+        None => true,
+        Some(&n) => n.is_ascii_whitespace() || matches!(n, b')' | b']' | b'}' | b',' | b';'),
+    };
+    let quote = matches!(b, b'"' | b'\'' | b'`');
+    let prev_word = cursor > 0 && {
+        let p = bytes[cursor - 1];
+        p.is_ascii_alphanumeric() || p == b'_' || p >= 0x80
+    };
+    next_ok && !(quote && prev_word)
+}
+
+/// The caret sits between an opener and its closer: `(|)`.
+fn in_empty_pair(s: &str, cursor: usize, bits: u8) -> bool {
+    let bytes = s.as_bytes();
+    if cursor == 0 || cursor >= bytes.len() { return false; }
+    closer_for(bytes[cursor - 1], bits) == Some(bytes[cursor])
+}
+
+/// The lines the selection or caret covers, as `[start, end)` without the
+/// final line break. A selection ending at the start of a line leaves
+/// that line out.
+fn covered_lines(edit: &InputEditState) -> (usize, usize) {
+    let (a, mut b) = edit.selection().unwrap_or((edit.cursor, edit.cursor));
+    if b > a && b == line_start(&edit.value, b) { b -= 1; }
+    (line_start(&edit.value, a), line_end(&edit.value, b))
+}
+
+/// Shift caret and anchor by `delta` bytes.
+fn shift_caret(edit: &mut InputEditState, delta: isize) {
+    let f = |p: usize| (p as isize + delta).max(0) as usize;
+    edit.cursor = clamp_boundary(&edit.value, f(edit.cursor));
+    edit.sel_anchor = edit.sel_anchor.map(|a| clamp_boundary(&edit.value, f(a)));
+}
+
+/// Alt+Up/Down: swap the covered lines with the line above or below.
+fn move_lines(edit: &mut InputEditState, up: bool) -> bool {
+    let (ls, le) = covered_lines(edit);
+    let block = String::from(&edit.value[ls..le]);
+    if up {
+        if ls == 0 { return false; }
+        let pls = line_start(&edit.value, ls - 1);
+        let prev = String::from(&edit.value[pls..ls - 1]);
+        let mut new = block;
+        new.push('\n');
+        new.push_str(&prev);
+        edit.value.replace_range(pls..le, &new);
+        shift_caret(edit, -((prev.len() + 1) as isize));
+    } else {
+        if le >= edit.value.len() { return false; }
+        let nle = line_end(&edit.value, le + 1);
+        let next = String::from(&edit.value[le + 1..nle]);
+        let mut new = next.clone();
+        new.push('\n');
+        new.push_str(&block);
+        edit.value.replace_range(ls..nle, &new);
+        shift_caret(edit, (next.len() + 1) as isize);
+    }
+    true
+}
+
+/// Shift+Alt+Up/Down: copy the covered lines above or below; the caret
+/// stays on the upper or moves to the lower copy.
+fn dup_lines(edit: &mut InputEditState, up: bool) -> bool {
+    let (ls, le) = covered_lines(edit);
+    let block = String::from(&edit.value[ls..le]);
+    if up {
+        let mut ins = block;
+        ins.push('\n');
+        edit.value.insert_str(ls, &ins);
+    } else {
+        let mut ins = String::from("\n");
+        ins.push_str(&block);
+        edit.value.insert_str(le, &ins);
+        shift_caret(edit, ins.len() as isize);
+    }
+    true
+}
+
 /// 0 whitespace, 1 word character, 2 punctuation: a word jump crosses one
 /// run of a class.
 fn char_class(c: char) -> u8 {
@@ -2800,6 +2911,8 @@ pub fn handle_input_key(
         End,
         DocStart,
         DocEnd,
+        MoveLines(bool),
+        DupLines(bool),
         Up,
         Down,
         PageUp,
@@ -2825,6 +2938,13 @@ pub fn handle_input_key(
         K::End   if ctrl && is_textarea          => Op::DocEnd,
         K::Home                                  => Op::Home,
         K::End                                   => Op::End,
+        // Alt+Up/Down moves the lines, with Shift it copies them.
+        K::Up   if is_textarea && mods.alt && mods.shift => Op::DupLines(true),
+        K::Down if is_textarea && mods.alt && mods.shift => Op::DupLines(false),
+        K::Up   if is_textarea && mods.alt   => Op::MoveLines(true),
+        K::Down if is_textarea && mods.alt   => Op::MoveLines(false),
+        // Ctrl+PageUp/Down belongs to the app (an editor switches tabs).
+        K::PageUp | K::PageDown if ctrl      => return false,
         K::Up       if is_textarea               => Op::Up,
         K::Down     if is_textarea               => Op::Down,
         K::PageUp   if is_textarea               => Op::PageUp,
@@ -2851,8 +2971,15 @@ pub fn handle_input_key(
             Some(s) => s,
             None    => return false,
         };
-        let rule = widget_at_path(&scene.tree, &scene.focus_path)
-            .map(|w| IndentRule::of(modifiers_of_ref(w)))
+        let (rule, pairs) = widget_at_path(&scene.tree, &scene.focus_path)
+            .map(|w| {
+                let mods = modifiers_of_ref(w);
+                let pairs = mods.iter().find_map(|m| match m {
+                    abi::Modifier::AutoClose(bits) => Some(*bits),
+                    _ => None,
+                }).unwrap_or(0);
+                (IndentRule::of(mods), if is_textarea { pairs } else { 0 })
+            })
             .unwrap_or_default();
         let edit = match scene.input_edit.as_mut() {
             Some(e) => e,
@@ -2886,7 +3013,12 @@ pub fn handle_input_key(
         let is_move = matches!(op,
             Op::Left | Op::Right | Op::WordLeft | Op::WordRight | Op::Home | Op::End |
             Op::DocStart | Op::DocEnd | Op::Up | Op::Down | Op::PageUp | Op::PageDown);
-        let is_edit = !block && matches!(op,
+        // An opener typed over a selection wraps it instead of replacing it.
+        let wrap = match (&op, sel) {
+            (Op::Insert(b), Some(_)) => closer_for(*b, pairs).is_some(),
+            _ => false,
+        };
+        let is_edit = !block && !wrap && matches!(op,
             Op::Insert(_) | Op::Newline | Op::Indent | Op::Backspace | Op::Delete |
             Op::DeleteWordBack | Op::DeleteWordFwd);
         if is_move {
@@ -2905,6 +3037,28 @@ pub fn handle_input_key(
         }
 
         match op {
+            Op::Insert(b) if wrap => {
+                if let (Some((s, e)), Some(close)) = (sel, closer_for(b, pairs)) {
+                    edit.value.insert(e, close as char);
+                    edit.value.insert(s, b as char);
+                    edit.sel_anchor = Some(s + 1);
+                    edit.cursor = e + 1;
+                    changed = true;
+                }
+            }
+            Op::Insert(b) if b < 0x80 && pairs != 0 && steps_over(&edit.value, edit.cursor, b, pairs) => {
+                edit.pending_len = 0;
+                edit.cursor += 1;
+            }
+            Op::Insert(b) if b < 0x80 && pairs != 0 && opens_pair(&edit.value, edit.cursor, b, pairs) => {
+                edit.pending_len = 0;
+                if let Some(close) = closer_for(b, pairs) {
+                    edit.value.insert(edit.cursor, close as char);
+                }
+                edit.value.insert(edit.cursor, b as char);
+                edit.cursor += 1;
+                changed = true;
+            }
             Op::Insert(b) => {
                 if b < 0x80 {
                     edit.pending_len = 0;
@@ -2953,6 +3107,11 @@ pub fn handle_input_key(
             Op::Outdent => {
                 changed |= indent_lines(edit, rule, false);
             }
+            Op::Backspace if !had_sel && pairs != 0 && in_empty_pair(&edit.value, edit.cursor, pairs) => {
+                edit.value.replace_range(edit.cursor - 1..edit.cursor + 1, "");
+                edit.cursor -= 1;
+                changed = true;
+            }
             Op::Backspace => {
                 if !had_sel && edit.cursor > 0 {
                     let n = if is_textarea { rule.backspace_len(&edit.value, edit.cursor) } else { 0 };
@@ -2999,6 +3158,8 @@ pub fn handle_input_key(
             Op::WordRight => edit.cursor = word_right(&edit.value, edit.cursor),
             Op::Home  => edit.cursor = if is_textarea { line_start(&edit.value, edit.cursor) } else { 0 },
             Op::End   => edit.cursor = if is_textarea { line_end(&edit.value, edit.cursor) } else { edit.value.len() },
+            Op::MoveLines(up) => changed |= move_lines(edit, up),
+            Op::DupLines(up)  => changed |= dup_lines(edit, up),
             Op::DocStart => edit.cursor = 0,
             Op::DocEnd   => edit.cursor = edit.value.len(),
             Op::Up    => edit.cursor = cursor_up(&edit.value, edit.cursor),

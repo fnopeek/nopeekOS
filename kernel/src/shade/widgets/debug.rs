@@ -231,6 +231,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::Indent { width, tabs, colon } => {
                 let _ = write!(s, "Indent({} tabs={} colon={})", width, tabs, colon);
             }
+            Modifier::AutoClose(bits) => { let _ = write!(s, "AutoClose({:#x})", bits); }
         }
     }
     s.push(']');

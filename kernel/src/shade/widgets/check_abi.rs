@@ -218,6 +218,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::Mask                => 36,
         Modifier::Select { .. }       => 37,
         Modifier::Indent { .. }       => 38,
+        Modifier::AutoClose(_)        => 39,
     }
 }
 

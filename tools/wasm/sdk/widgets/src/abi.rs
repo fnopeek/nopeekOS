@@ -481,6 +481,12 @@ pub enum Modifier {
     /// keeps the line's indent, one level more after `{`, `(`, `[` and,
     /// when `colon`, after `:`. Without it: width 4, spaces, no colon.
     Indent { width: u8, tabs: bool, colon: bool },
+    /// Typing an opener in a `Widget::TextArea` also inserts its closer,
+    /// when the next character is a space, a closer or the end of the
+    /// line; typing the closer in front of the same closer steps over it,
+    /// Backspace between an empty pair removes both, and an opener typed
+    /// over a selection wraps it. Bits: 1 `( [ {`, 2 `"`, 4 `'`, 8 `` ` ``.
+    AutoClose(u8),
     // Appended only.
 }
 
