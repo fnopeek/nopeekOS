@@ -581,6 +581,13 @@ impl Linker {
     }
 }
 
+/// Slots an instance allocates for a table of `min` entries: the next power
+/// of two, so generated code can clamp an index with a constant mask. The
+/// slots past `min` hold the trap stub and a signature id no type has.
+pub fn table_slots(min: u32) -> usize {
+    (min as usize).max(1).next_power_of_two()
+}
+
 /// Validate a module against `features()` and collect what the code generator
 /// needs. One pass — read an operator, hand it to the validator, then emit —
 /// so nothing is walked twice.
@@ -775,6 +782,7 @@ fn generate_one(
         n_imported: plan.imported_funcs.len() as u32,
         sig_id: &plan.sig_id,
         globals: &plan.global_types,
+        table_len: plan.table.map(|(min, _)| min).unwrap_or(0),
     };
     codegen::compile_func(params, results, &decls, ops, &m)
 }

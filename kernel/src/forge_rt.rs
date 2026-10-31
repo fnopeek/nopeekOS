@@ -571,16 +571,18 @@ impl Instance {
                 slots, MAX_TABLE_ENTRIES);
             return None;
         }
+        // Padded to `table_slots`: generated code masks every index into it.
+        let padded = forge_core::table_slots(slots as u32);
         let mut table: Vec<u64> = Vec::new();
         let mut table_sigs: Vec<u32> = Vec::new();
-        table.try_reserve_exact(slots.max(1)).ok()?;
-        table_sigs.try_reserve_exact(slots.max(1)).ok()?;
-        table.resize(slots.max(1), trap_stub);
-        table_sigs.resize(slots.max(1), u32::MAX);
+        table.try_reserve_exact(padded).ok()?;
+        table_sigs.try_reserve_exact(padded).ok()?;
+        table.resize(padded, trap_stub);
+        table_sigs.resize(padded, u32::MAX);
         for (off, funcs) in &m.plan.elem_init {
             for (i, fi) in funcs.iter().enumerate() {
                 let slot = *off as usize + i;
-                if slot >= table.len() {
+                if slot >= slots {
                     return None;
                 }
                 table[slot] = match m.offset_of(*fi) {

@@ -87,6 +87,8 @@ pub struct ModuleCtx<'a> {
     /// Canonical signature id per type index.
     pub sig_id: &'a [u32],
     pub globals: &'a [(ValType, bool)],
+    /// Entries of table 0. It cannot grow, so this is fixed at compile time.
+    pub table_len: u32,
 }
 
 /// Where a trap lands: name the reason, put the stack back the way the entry
@@ -1879,6 +1881,12 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
     f.pop_to(B);
     f.asm.cmp_r32_imm32(B, n as i32);
     let to_default = f.asm.jcc(Cond::Ae);
+    // Clamp the index on a mispredicted path: the jump table is read with it,
+    // and what follows the table is not a target. The table is padded to a
+    // power of two with entries for the default, so a constant mask keeps
+    // the index inside it without waiting for the compare.
+    let slots = n.max(1).next_power_of_two();
+    f.asm.and_r_imm32(false, B, (slots - 1) as i32);
 
     let lea_at = f.asm.lea_rip_blank(T);
     f.asm.movsxd_scaled(A, T, B, 2, 0);
@@ -1893,6 +1901,7 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
         branch_to(f, d)?;
     }
     f.asm.bind(to_default);
+    let dflt = f.asm.pos();
     branch_to(f, default)?;
 
     let table = f.asm.pos();
@@ -1900,6 +1909,9 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
         .patch_i32(lea_at, (table as i64 - (lea_at as i64 + 4)) as i32);
     for p in stubs {
         f.asm.emit_i32((p as i64 - table as i64) as i32);
+    }
+    for _ in n..slots {
+        f.asm.emit_i32((dflt as i64 - table as i64) as i32);
     }
     Ok(())
 }
@@ -2149,9 +2161,15 @@ fn call_indirect(f: &mut Ctx, type_index: u32) -> Result<(), &'static str> {
     f.pop_to(B); // table index, zero-extended by the 32-bit move
     let base = f.stack.len() - n;
     f.spill_arg_conflicts(&places, base);
-    f.asm.load64(C, VMCTX, vmctx::TABLE_LEN);
-    f.asm.cmp_rr64(B, C);
+    f.asm.cmp_r32_imm32(B, f.m.table_len as i32);
     f.trap_if(Cond::Ae, trap::TABLE_OUT_OF_BOUNDS);
+    // The trap is a predicted branch, so the loads below may still run with
+    // an index past the table, and past the table is kernel memory. The table
+    // is padded to a power of two (`table_slots`), so a constant mask keeps
+    // every index inside it whatever was predicted, without waiting for the
+    // compare.
+    let mask = crate::table_slots(f.m.table_len) - 1;
+    f.asm.and_r_imm32(false, B, mask as i32);
 
     f.asm.load64(T, VMCTX, vmctx::TABLE_SIGS);
     f.asm.load32_scaled(T, T, B, 2, 0);

@@ -192,12 +192,13 @@ impl Inst {
         // beside it. A slot whose function did not compile points at the trap
         // stub rather than at nothing.
         let slots = plan.table.map(|(min, _)| min as usize).unwrap_or(0);
-        let mut table = vec![code_base + m.trap_offset as u64; slots.max(1)];
-        let mut table_sigs = vec![u32::MAX; slots.max(1)];
+        let padded = forge_core::table_slots(slots as u32);
+        let mut table = vec![code_base + m.trap_offset as u64; padded];
+        let mut table_sigs = vec![u32::MAX; padded];
         for (off, funcs) in &plan.elem_init {
             for (i, fi) in funcs.iter().enumerate() {
                 let slot = *off as usize + i;
-                if slot >= table.len() {
+                if slot >= slots {
                     return None;
                 }
                 table[slot] = match m.offset_of(*fi) {
@@ -458,6 +459,18 @@ fn traps_report_themselves() -> bool {
     want(ind, 1, None, BAD_SIGNATURE, "leerer Tabellenplatz");
     want(ind, 2, None, TABLE_OUT_OF_BOUNDS, "Index genau daneben");
     want(ind, 99, None, TABLE_OUT_OF_BOUNDS, "Index weit daneben");
+
+    // Three entries are allocated as four (`table_slots`); the padding slot
+    // is past the table, not an empty entry.
+    let ind3 = "(module \
+        (type $t (func (param i32) (result i32))) \
+        (func $a (type $t) local.get 0 i32.const 5 i32.add) \
+        (table 3 funcref) (elem (i32.const 2) $a) \
+        (func (export \"f\") (param i32) (result i32) \
+           i32.const 7 local.get 0 call_indirect (type $t)))";
+    want(ind3, 2, None, NONE, "letzter Platz einer Tabelle von drei");
+    want(ind3, 3, None, TABLE_OUT_OF_BOUNDS, "Index im Auffuellplatz");
+    want(ind3, 0xFFFF_FFFF, None, TABLE_OUT_OF_BOUNDS, "Index an der Spitze");
 
     let mism = "(module \
         (type $t1 (func (param i32) (result i32))) \
