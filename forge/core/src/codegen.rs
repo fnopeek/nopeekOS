@@ -1032,6 +1032,27 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Pop a float operand that will only be read, without copying it: a
+    /// cache register or a float home is handed out as it is, anything else
+    /// is loaded into `scratch`. `true` means a cache register now belongs to
+    /// the caller, who frees it once the read is done.
+    fn fpop_in_place(&mut self, scratch: Xmm) -> (Xmm, bool) {
+        match self.stack.last().map(|v| v.loc) {
+            Some(Loc::Xmm(x)) => {
+                self.stack.pop();
+                (x, true)
+            }
+            Some(Loc::Local(i)) if let Some(h) = self.fhome(i) => {
+                self.stack.pop();
+                (h, false)
+            }
+            _ => {
+                self.fpop_to(scratch);
+                (scratch, false)
+            }
+        }
+    }
+
     /// Put a float constant into `x`: positive zero by clearing the register,
     /// anything else from the function's constant pool.
     fn fconst(&mut self, fw: Fw, x: Xmm, bits: u64) {
@@ -1717,13 +1738,26 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         }
         LocalSet { local_index } => {
             f.settle_local(*local_index);
-            // Only the bits move, so a general register does for floats too.
-            let t = f.pop_to(A).ok_or("stack-empty")?;
             let off = f.local(*local_index);
-            if wide(t) {
-                f.asm.store64(Reg::Rbp, off, A);
-            } else {
-                f.asm.store32(Reg::Rbp, off, A);
+            let v = *f.stack.last().ok_or("stack-empty")?;
+            match v.loc {
+                // Stored from the register it is in.
+                Loc::Gpr(r) => {
+                    f.stack.pop();
+                    if wide(v.ty) { f.asm.store64(Reg::Rbp, off, r) } else { f.asm.store32(Reg::Rbp, off, r) }
+                    f.free_gpr(r);
+                }
+                Loc::Xmm(x) => {
+                    f.stack.pop();
+                    f.asm.fstore_slot(fw_of(v.ty), Reg::Rbp, off, x);
+                    f.free_xmm(x);
+                }
+                _ => {
+                    // Only the bits move, so a general register does for
+                    // floats too.
+                    let t = f.pop_to(A).ok_or("stack-empty")?;
+                    if wide(t) { f.asm.store64(Reg::Rbp, off, A) } else { f.asm.store32(Reg::Rbp, off, A) }
+                }
             }
         }
         LocalTee { local_index } if let Some(h) = f.fhome(*local_index) => {
@@ -1738,13 +1772,17 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         }
         LocalTee { local_index } => {
             f.settle_local(*local_index);
-            let t = f.peek_ty().ok_or("stack-empty")?;
-            f.peek_to(A);
             let off = f.local(*local_index);
-            if wide(t) {
-                f.asm.store64(Reg::Rbp, off, A);
-            } else {
-                f.asm.store32(Reg::Rbp, off, A);
+            let v = *f.stack.last().ok_or("stack-empty")?;
+            match v.loc {
+                Loc::Gpr(r) => {
+                    if wide(v.ty) { f.asm.store64(Reg::Rbp, off, r) } else { f.asm.store32(Reg::Rbp, off, r) }
+                }
+                Loc::Xmm(x) => f.asm.fstore_slot(fw_of(v.ty), Reg::Rbp, off, x),
+                _ => {
+                    f.peek_to(A);
+                    if wide(v.ty) { f.asm.store64(Reg::Rbp, off, A) } else { f.asm.store32(Reg::Rbp, off, A) }
+                }
             }
         }
 
@@ -2651,35 +2689,36 @@ fn sign_mask(fw: Fw) -> i64 {
 fn fload(f: &mut Ctx, memarg: &wasmparser::MemArg, ty: ValType) -> Result<(), &'static str> {
     f.pop_to(B);
     let disp = mem_disp(f, memarg, B, C)?;
-    f.asm.fload_idx(fw_of(ty), FA, MEMBASE, B, disp);
-    f.fpush_from(FA, ty);
+    // Straight into the register the value will live in.
+    let d = f.alloc_xmm();
+    f.asm.fload_idx(fw_of(ty), d, MEMBASE, B, disp);
+    f.fpush_reg(d, ty);
     Ok(())
 }
 
 fn fstore(f: &mut Ctx, memarg: &wasmparser::MemArg, fw: Fw) -> Result<(), &'static str> {
-    f.fpop_to(FA);
+    // Stored from wherever the value already is. A cache register stays
+    // marked used until the store is out, so nothing in between can take it.
+    let (src, owned) = f.fpop_in_place(FA);
     f.pop_to(B);
     let disp = mem_disp(f, memarg, B, C)?;
-    f.asm.fstore_idx(fw, MEMBASE, B, disp, FA);
+    f.asm.fstore_idx(fw, MEMBASE, B, disp, src);
+    if owned {
+        f.free_xmm(src);
+    }
     Ok(())
 }
 
 fn fbin(f: &mut Ctx, fw: Fw, mut go: impl FnMut(&mut Asm, Fw, Xmm, Xmm)) {
     // A right operand in a float home is read where it lives: the operation
     // writes only its left operand.
-    let rhs = match f.stack.last().map(|v| v.loc) {
-        Some(Loc::Local(i)) if let Some(h) = f.fhome(i) => {
-            f.stack.pop();
-            h
-        }
-        _ => {
-            f.fpop_to(FB);
-            FB
-        }
-    };
+    let (rhs, owned) = f.fpop_in_place(FB);
     // The left operand is worked on where it lies and stays there.
     let d = f.fpop_to_pool();
     go(&mut f.asm, fw, d, rhs);
+    if owned {
+        f.free_xmm(rhs);
+    }
     f.fpush_reg(d, if fw.is_double() { ValType::F64 } else { ValType::F32 });
 }
 
