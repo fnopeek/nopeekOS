@@ -135,6 +135,56 @@ pub fn emit_trap_routine(asm: &mut Asm) {
     asm.jmp_mem(VMCTX, vmctx::TRAP_RESUME);
 }
 
+/// `Reloc::target` of a call to the module's `emit_native_call` routine.
+pub const NATIVE_CALL: u32 = u32::MAX;
+/// `Reloc::target` of a call to the module's `emit_refuel` routine.
+pub const REFUEL: u32 = u32::MAX - 1;
+
+/// Stores of all of `FHOMES` below `rsp`, and the loads back. `room` keeps
+/// `rsp` aligned for the call made in between: 72 inside a routine, entered
+/// eight off alignment, 64 in a function body.
+fn save_fhomes(asm: &mut Asm, room: i32) {
+    asm.sub_r64_imm32(Reg::Rsp, room);
+    for (k, &x) in FHOMES.iter().enumerate() {
+        asm.fstore_slot(Fw::Double, Reg::Rsp, 8 * k as i32, x);
+    }
+}
+fn restore_fhomes(asm: &mut Asm, room: i32) {
+    for (k, &x) in FHOMES.iter().enumerate() {
+        asm.fload_slot(Fw::Double, x, Reg::Rsp, 8 * k as i32);
+    }
+    asm.add_r64_imm32(Reg::Rsp, room);
+}
+
+/// Call the native function in `r11`, arguments already in place. Native
+/// code may change every xmm register, but between wasm functions `FHOMES`
+/// are callee-saved: any caller further up may hold float locals in them,
+/// not only the calling function. So all eight are kept here, once per
+/// module instead of at every call site.
+pub fn emit_native_call(asm: &mut Asm) {
+    save_fhomes(asm, 72);
+    asm.call_reg(T);
+    restore_fhomes(asm, 72);
+    asm.ret();
+}
+
+/// Where a fuel check lands when the counter has run out: hand the counter
+/// to `BUILTIN_FUEL` and take it back. Without a routine the counter stays
+/// spent, and the check's stub traps on it.
+pub fn emit_refuel(asm: &mut Asm) {
+    asm.store64(VMCTX, vmctx::FUEL, FUEL);
+    asm.load64(T, VMCTX, vmctx::BUILTIN_FUEL);
+    asm.test(true, T, T);
+    let none = asm.jcc(Cond::E);
+    save_fhomes(asm, 72);
+    asm.mov_rr64(Reg::Rdi, VMCTX);
+    asm.call_reg(T);
+    restore_fhomes(asm, 72);
+    asm.load64(FUEL, VMCTX, vmctx::FUEL);
+    asm.bind(none);
+    asm.ret();
+}
+
 /// The bridge between native code and a module's functions. Native callers
 /// have their own idea of `r13`/`r14`, so somebody has to save them, set up
 /// the instance's, make the call and put them back — and doing that once at
@@ -555,24 +605,10 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Before a call into native code, which may change every xmm register.
-    /// All of `FHOMES` go below `rsp`, not only this function's: between wasm
-    /// functions they are callee-saved, so any caller further up may hold
-    /// float locals in the ones this function leaves alone. 64 bytes keep
-    /// `rsp` 16-byte aligned for the call.
-    fn fhomes_out(&mut self) {
-        self.asm.sub_r64_imm32(Reg::Rsp, 8 * FHOMES.len() as i32);
-        for (k, &x) in FHOMES.iter().enumerate() {
-            self.asm.fstore_slot(Fw::Double, Reg::Rsp, 8 * k as i32, x);
-        }
-    }
-
-    /// After it: back into their registers.
-    fn fhomes_in(&mut self) {
-        for (k, &x) in FHOMES.iter().enumerate() {
-            self.asm.fload_slot(Fw::Double, x, Reg::Rsp, 8 * k as i32);
-        }
-        self.asm.add_r64_imm32(Reg::Rsp, 8 * FHOMES.len() as i32);
+    /// Call the module routine `target` (`NATIVE_CALL`, `REFUEL`).
+    fn call_routine(&mut self, target: u32) {
+        let at = self.asm.call_rel32_blank();
+        self.relocs.push(Reloc { at, target });
     }
 
     fn mov_ty(&mut self, t: ValType, dst: Reg, src: Reg) {
@@ -1203,18 +1239,9 @@ impl<'a> Ctx<'a> {
         let refuels = core::mem::take(&mut self.refuels);
         for (p, resume) in refuels {
             self.asm.bind(p);
-            self.asm.load64(T, VMCTX, vmctx::BUILTIN_FUEL);
-            self.asm.test(true, T, T);
-            let none = self.asm.jcc(Cond::E);
-            self.trap_patch(trap::OUT_OF_FUEL, none);
-            self.asm.store64(VMCTX, vmctx::FUEL, FUEL);
-            self.fhomes_out();
             self.vhomes_out();
-            self.asm.mov_rr64(Reg::Rdi, VMCTX);
-            self.asm.call_reg(T);
+            self.call_routine(REFUEL);
             self.vhomes_in();
-            self.fhomes_in();
-            self.asm.load64(FUEL, VMCTX, vmctx::FUEL);
             self.asm.test(true, FUEL, FUEL);
             let spent = self.asm.jcc(Cond::Le);
             self.trap_patch(trap::OUT_OF_FUEL, spent);
@@ -2175,14 +2202,12 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             }
             f.spill_all();
             f.pop_to(A);
-            f.fhomes_out();
             f.vhomes_out();
             f.asm.mov_rr64(Reg::Rsi, A);
             f.asm.mov_rr64(Reg::Rdi, VMCTX);
             f.asm.load64(T, VMCTX, vmctx::BUILTIN_GROW);
-            f.asm.call_reg(T);
+            f.call_routine(NATIVE_CALL);
             f.vhomes_in();
-            f.fhomes_in();
             f.push_from_ty(A, ValType::I32);
         }
         MemorySize { mem } => {
@@ -2755,9 +2780,11 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
     f.spill_arg_conflicts(&places, base);
 
     let import = function_index < f.m.n_imported;
-    // Below the stack arguments, which must sit at `rsp` for the call.
-    if import {
-        f.fhomes_out();
+    // The routine's own frame would sit between `rsp` and stack arguments,
+    // so an import that takes any keeps the float homes in line, below them.
+    let inline_fhomes = import && n_stack > 0;
+    if inline_fhomes {
+        save_fhomes(&mut f.asm, 64);
     }
     let arg_bytes = load_args(f, params, &places, n_stack);
 
@@ -2773,12 +2800,18 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
         f.asm.store64(VMCTX, vmctx::FUEL, FUEL);
         f.asm.load64(T, VMCTX, vmctx::HOST_FNS);
         f.asm.load64(T, T, 8 * function_index as i32);
-        f.asm.call_reg(T);
+        if inline_fhomes {
+            f.asm.call_reg(T);
+        } else {
+            f.call_routine(NATIVE_CALL);
+        }
         f.vhomes_in();
         if arg_bytes > 0 {
             f.asm.add_r64_imm32(Reg::Rsp, arg_bytes);
         }
-        f.fhomes_in();
+        if inline_fhomes {
+            restore_fhomes(&mut f.asm, 64);
+        }
         f.asm.load64(FUEL, VMCTX, vmctx::FUEL);
         after_call(f, n, results, 0);
         return Ok(());

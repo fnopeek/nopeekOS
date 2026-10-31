@@ -465,6 +465,10 @@ struct Linker {
     trap_relocs: Vec<usize>,
     entry_offset: usize,
     trap_routine: usize,
+    /// The shared routines generated code calls (`codegen::NATIVE_CALL`,
+    /// `codegen::REFUEL`).
+    native_call: usize,
+    refuel: usize,
     pf_entry: usize,
     de_entry: usize,
 }
@@ -493,6 +497,16 @@ impl Linker {
         codegen::emit_trap_routine(&mut a);
         code.extend_from_slice(&a.finish().unwrap_or_default());
 
+        let native_call = code.len();
+        let mut a = x64::Asm::new();
+        codegen::emit_native_call(&mut a);
+        code.extend_from_slice(&a.finish().unwrap_or_default());
+
+        let refuel = code.len();
+        let mut a = x64::Asm::new();
+        codegen::emit_refuel(&mut a);
+        code.extend_from_slice(&a.finish().unwrap_or_default());
+
         // One entry per processor fault the generator relies on. A handler
         // only has to point the interrupted instruction pointer at the right
         // one; the entry names the reason itself.
@@ -518,6 +532,8 @@ impl Linker {
             trap_relocs: Vec::new(),
             entry_offset,
             trap_routine,
+            native_call,
+            refuel,
             pf_entry,
             de_entry,
         }
@@ -583,10 +599,14 @@ impl Linker {
 
         let n_imported = plan.imported_funcs.len() as u32;
         for (at, target) in &self.relocs {
-            let dst = target
-                .checked_sub(n_imported)
-                .and_then(|d| self.offsets.get(d as usize).copied().flatten())
-                .unwrap_or(trap);
+            let dst = match *target {
+                codegen::NATIVE_CALL => self.native_call,
+                codegen::REFUEL => self.refuel,
+                t => t
+                    .checked_sub(n_imported)
+                    .and_then(|d| self.offsets.get(d as usize).copied().flatten())
+                    .unwrap_or(trap),
+            };
             let rel = dst as i64 - (*at as i64 + 4);
             self.code[*at..*at + 4].copy_from_slice(&(rel as i32).to_le_bytes());
         }
