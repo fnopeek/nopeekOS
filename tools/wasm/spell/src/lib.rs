@@ -124,6 +124,11 @@ struct Strings {
     /// "Spaces: {}".
     spaces:        &'static str,
     tabs:          &'static str,
+    toggle_comment: &'static str,
+    delete_line:   &'static str,
+    disk_changed:  &'static str,
+    reload:        &'static str,
+    keep_mine:     &'static str,
 }
 
 const EN: Strings = Strings {
@@ -134,7 +139,7 @@ const EN: Strings = Strings {
     settings: "Settings",
     zoom_in: "Zoom in", zoom_out: "Zoom out",
     zoom_reset: "Actual size ({} px)",
-    cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n",
+    cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n# trim_trailing: yes removes spaces at line ends on save.\n# final_newline: yes ends the file with a line break on save.\n# recent / open: recently used files and the tabs open at exit.\n",
     about: "About Spell",
     untitled: "Untitled",
     untitled_file: "untitled",
@@ -156,6 +161,11 @@ const EN: Strings = Strings {
     selected: "{} selected",
     spaces: "Spaces: {}",
     tabs: "Tabs",
+    toggle_comment: "Toggle comment",
+    delete_line: "Delete line",
+    disk_changed: "This file changed on disk.",
+    reload: "Reload",
+    keep_mine: "Keep mine",
 };
 
 
@@ -274,6 +284,13 @@ const ACT_FIND_CLOSE:   u32 = 6_403;
 const ACT_REPLACE_ONE:  u32 = 6_404;
 const ACT_REPLACE_ALL:  u32 = 6_405;
 const ACT_GOTO_SUBMIT:  u32 = 6_406;
+const ACT_COMMENT:      u32 = 6_205;
+const ACT_DELETE_LINE:  u32 = 6_206;
+const ACT_DISK_RELOAD:  u32 = 6_407;
+const ACT_DISK_KEEP:    u32 = 6_408;
+/// File menu: reopen recent file i.
+const ACT_RECENT_BASE:  u32 = 7_000;
+const MAX_RECENT:       usize = 8;
 
 // `npk_pick` modes.
 const PICK_OPEN: host::PickMode = host::PickMode::Open;
@@ -321,7 +338,7 @@ enum Kind { Markdown, Code(Lang), Plain, Untyped }
 /// Languages with a preview highlighter. Markup = HTML/XML (tag-based);
 /// the rest share the C-like scanner parameterised by `syntax_for`.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Lang { Rust, C, Js, Python, Shell, Json, Markup }
+enum Lang { Rust, C, Js, Python, Shell, Json, Markup, Toml, Yaml, Css, Diff, Make }
 
 /// One open document = one tab.
 struct Doc {
@@ -345,6 +362,9 @@ struct Doc {
     spans_stale: bool,
     /// Indent width and whether it is tabs, detected from the text.
     indent: (u8, bool),
+    /// The file on disk is no longer what was loaded or saved, and the
+    /// tab has edits of its own: the user decides.
+    disk_changed: bool,
 }
 
 impl Doc {
@@ -361,6 +381,7 @@ impl Doc {
             spans: Vec::new(),
             spans_stale: true,
             indent: (4, false),
+            disk_changed: false,
         }
     }
 
@@ -385,6 +406,7 @@ impl Doc {
         if !self.spans_stale { return; }
         self.spans = match self.kind() {
             Kind::Code(lang) => code_spans(&self.text, lang),
+            Kind::Markdown => markdown_spans(&self.text),
             _ => Vec::new(),
         };
         self.spans_stale = false;
@@ -397,6 +419,10 @@ impl Doc {
     }
 
     fn kind(&self) -> Kind {
+        let base = self.path.as_deref().map(basename).unwrap_or("");
+        if matches!(base, "Makefile" | "makefile" | "GNUmakefile") {
+            return Kind::Code(Lang::Make);
+        }
         match self.ext().as_deref() {
             Some("md") | Some("markdown")          => Kind::Markdown,
             Some("rs")                             => Kind::Code(Lang::Rust),
@@ -405,7 +431,12 @@ impl Doc {
             Some("py")                             => Kind::Code(Lang::Python),
             Some("sh") | Some("bash")              => Kind::Code(Lang::Shell),
             Some("json")                           => Kind::Code(Lang::Json),
-            Some("html") | Some("htm") | Some("xml") => Kind::Code(Lang::Markup),
+            Some("html") | Some("htm") | Some("xml") | Some("svg") => Kind::Code(Lang::Markup),
+            Some("toml")                           => Kind::Code(Lang::Toml),
+            Some("yaml") | Some("yml")             => Kind::Code(Lang::Yaml),
+            Some("css")                            => Kind::Code(Lang::Css),
+            Some("diff") | Some("patch")           => Kind::Code(Lang::Diff),
+            Some("mk")                             => Kind::Code(Lang::Make),
             None                                   => Kind::Untyped, // unnamed buffer
             _                                      => Kind::Plain,   // txt/log/toml/yaml/…
         }
@@ -440,11 +471,15 @@ struct Spell {
     /// Editor font size in px. Ctrl+wheel moves it; every tab shares one
     /// setting, like a view preference rather than a per-file property.
     font_px:       u16,
-    /// What is actually on disk. A wheel spin fires a dozen zoom events
-    /// and each npkFS write costs an encrypt + hash + flush, so the file
-    /// is written when leaving, not per notch — this says whether that
-    /// write is still owed.
-    font_px_saved: u16,
+    /// Save options from the settings file.
+    trim:          bool,
+    final_nl:      bool,
+    /// Recently opened or saved files, newest first.
+    recent:        Vec<String>,
+    /// What the settings file holds. A wheel spin fires a dozen zoom
+    /// events and each npkFS write costs an encrypt + hash + flush, so the
+    /// file is written when leaving, not per change.
+    cfg_saved:     Config,
     /// How many dirty tabs the quit started with, and how many are done.
     /// Counted at the start because the live count shrinks as tabs close
     /// — deriving the step from it would show "1 of 3", "1 of 2", "1 of 1".
@@ -464,6 +499,8 @@ struct Spell {
     shown_node:    u32,
     /// Shift from the `Event::Mods` sent right before a key.
     shift:         bool,
+    /// Ctrl from the `Event::Mods` sent right before a key.
+    ctrl:          bool,
 }
 
 /// The fields that can ask for the keyboard.
@@ -487,15 +524,17 @@ struct FindBar {
 
 impl Spell {
     fn new() -> Self {
-        let cfg_font = read_config_font();
+        let cfg = read_config();
         let mut sp = Spell {
             docs:      Vec::new(),
             active:    0,
             open_menu: None,
             confirm_close: None,
             quitting:      false,
-            font_px:       cfg_font,
-            font_px_saved: cfg_font,
+            font_px:       cfg.font,
+            trim:          cfg.trim,
+            final_nl:      cfg.final_nl,
+            recent:        cfg.recent.clone(),
             quit_total:    0,
             quit_done:     0,
             next_uid:      0,
@@ -505,6 +544,8 @@ impl Spell {
             bar:           None,
             shown_node:    u32::MAX,
             shift:         false,
+            ctrl:          false,
+            cfg_saved:     cfg,
         };
 
         // Launched to open a specific file (loft file association)?
@@ -519,6 +560,19 @@ impl Spell {
                 return sp;
             }
         }
+
+        // The tabs open when spell last closed.
+        let open = sp.cfg_saved.open.clone();
+        for p in &open {
+            if let Some(text) = read_file(p) {
+                let mut d = sp.fresh_doc();
+                d.title = basename(p).to_string();
+                d.path = Some(p.clone());
+                d.load(&text);
+                sp.docs.push(d);
+            }
+        }
+        if !sp.docs.is_empty() { return sp; }
 
         // No file argument → welcome tab.
         let mut d = sp.fresh_doc();
@@ -570,8 +624,13 @@ impl Spell {
         }
         let text = match read_file(path) {
             Some(t) => t,
-            None => { log("[spell] open: failed"); return; }
+            None => {
+                log("[spell] open: failed");
+                self.recent.retain(|p| p != path);
+                return;
+            }
         };
+        self.note_recent(path);
         let mut d = self.fresh_doc();
         d.path = Some(path.to_string());
         d.title = basename(path).to_string();
@@ -668,9 +727,27 @@ impl Spell {
     /// Persist settings if they drifted from the file. Cheap no-op when
     /// nothing changed, so it can sit on every exit path.
     fn save_config(&mut self) {
-        if self.font_px == self.font_px_saved { return; }
-        write_config(self.font_px);
-        self.font_px_saved = self.font_px;
+        let c = self.config();
+        if c == self.cfg_saved { return; }
+        write_config(&c);
+        self.cfg_saved = c;
+    }
+
+    fn config(&self) -> Config {
+        Config {
+            font:     self.font_px,
+            trim:     self.trim,
+            final_nl: self.final_nl,
+            recent:   self.recent.clone(),
+            open:     self.docs.iter().filter_map(|d| d.path.clone()).collect(),
+        }
+    }
+
+    /// Put `path` at the top of the recent list.
+    fn note_recent(&mut self, path: &str) {
+        self.recent.retain(|p| p != path);
+        self.recent.insert(0, path.to_string());
+        self.recent.truncate(MAX_RECENT);
     }
 
     fn cancel_quit(&mut self) {
@@ -698,29 +775,64 @@ impl Spell {
     /// Save the active doc, or ask where to put it if it has no file yet.
     fn save_or_name(&mut self) {
         if let Some(p) = self.cur().path.clone() {
-            self.write_to(&p);
+            let _ = self.write_to(&p);
         } else {
             self.ask_save_target(self.active, false);
         }
     }
 
-    fn write_to(&mut self, path: &str) {
-        if !host::store(path, self.cur().text.as_bytes()) {
-            log("[spell] save: store failed");
-            return;
+    /// Write the active doc to `path`. False if it did not happen: the
+    /// file changed on disk meanwhile (the tab asks first), or the store
+    /// refused it (this instance may not write there: the save dialog
+    /// asks for the place, which grants it).
+    fn write_to(&mut self, path: &str) -> bool {
+        if let Some(disk) = host::fetch(path) {
+            let d = self.cur_mut();
+            if d.path.as_deref() == Some(path) && text_hash_bytes(&disk) != d.saved {
+                d.disk_changed = true;
+                return false;
+            }
         }
+        self.apply_save_options();
+        if !host::store(path, self.cur().text.as_bytes()) {
+            log("[spell] save: store failed, asking where");
+            self.ask_save_target(self.active, false);
+            return false;
+        }
+        self.note_recent(path);
         let d = self.cur_mut();
         d.saved = text_hash(&d.text);
         d.dirty = false;
+        d.disk_changed = false;
         // Editing the settings file in spell itself is a stated use of
         // having one. Adopt what was just saved — otherwise our in-memory
         // value would be written back over it on the way out and the edit
         // would silently undo itself.
         if path == CONFIG_PATH {
-            let f = read_config_font();
-            self.font_px = f;
-            self.font_px_saved = f;
+            let c = read_config();
+            self.font_px = c.font;
+            self.trim = c.trim;
+            self.final_nl = c.final_nl;
+            self.recent = c.recent.clone();
+            self.cfg_saved = c;
         }
+        true
+    }
+
+    /// Trailing spaces and the final line break, as the settings ask; one
+    /// undo step, caret kept on its text.
+    fn apply_save_options(&mut self) {
+        let (trim, final_nl) = (self.trim, self.final_nl);
+        if !trim && !final_nl { return; }
+        let d = self.cur_mut();
+        let (a, c) = d.history.caret();
+        let (mut new, na, nc) = if trim { trim_trailing(&d.text, a, c) } else { (d.text.clone(), a, c) };
+        if final_nl && !new.is_empty() && !new.ends_with('\n') { new.push('\n'); }
+        if new == d.text { return; }
+        let old = core::mem::replace(&mut d.text, new);
+        d.history.replaced(&old, &d.text, na, nc);
+        d.touch();
+        self.place(na, nc);
     }
 
     /// Ask the picker where to save tab `doc`. `then_close` remembers that
@@ -753,7 +865,10 @@ impl Spell {
         self.docs[doc].spans_stale = true;
         let prev = self.active;
         self.active = doc;
-        self.write_to(path);
+        // The user just picked this place: no question about what is there.
+        self.docs[doc].disk_changed = false;
+        if let Some(disk) = host::fetch(path) { self.docs[doc].saved = text_hash_bytes(&disk); }
+        let _ = self.write_to(path);
         self.active = prev.min(self.docs.len().saturating_sub(1));
     }
 }
@@ -896,6 +1011,144 @@ impl Spell {
         self.place(end, end);
     }
 
+    /// Ctrl+/: comment the covered lines out, or back in if all are.
+    fn toggle_comment(&mut self) {
+        let Some((open, close)) = comment_markers(self.cur().kind()) else { return };
+        let d = self.cur_mut();
+        let (a, c) = d.history.caret();
+        let (ls, le) = covered(&d.text, a, c);
+        let block = d.text[ls..le].to_string();
+        let new_block = if close.is_empty() {
+            let lines: Vec<&str> = block.split('\n').collect();
+            let filled = || lines.iter().filter(|l| !l.trim().is_empty());
+            let all = filled().all(|l| l.trim_start().starts_with(open));
+            let col = filled().map(|l| l.len() - l.trim_start().len()).min().unwrap_or(0);
+            let mut out = String::with_capacity(block.len() + lines.len() * 3);
+            for (n, l) in lines.iter().enumerate() {
+                if n > 0 { out.push('\n'); }
+                if l.trim().is_empty() { out.push_str(l); continue; }
+                if all {
+                    let ind = l.len() - l.trim_start().len();
+                    let rest = &l[ind + open.len()..];
+                    out.push_str(&l[..ind]);
+                    out.push_str(rest.strip_prefix(' ').unwrap_or(rest));
+                } else {
+                    out.push_str(&l[..col]);
+                    out.push_str(open);
+                    out.push(' ');
+                    out.push_str(&l[col..]);
+                }
+            }
+            out
+        } else {
+            let t = block.trim();
+            let lead = &block[..block.len() - block.trim_start().len()];
+            if t.starts_with(open) && t.ends_with(close) && t.len() >= open.len() + close.len() {
+                let inner = &t[open.len()..t.len() - close.len()];
+                let mut out = String::from(lead);
+                let inner = inner.strip_prefix(' ').unwrap_or(inner);
+                out.push_str(inner.strip_suffix(' ').unwrap_or(inner));
+                out
+            } else {
+                let mut out = String::from(lead);
+                out.push_str(open);
+                out.push(' ');
+                out.push_str(block.trim_start());
+                out.push(' ');
+                out.push_str(close);
+                out
+            }
+        };
+        if new_block == block { return; }
+        let old = d.text.clone();
+        d.text.replace_range(ls..le, &new_block);
+        let (na, nc) = if a != c {
+            (ls as u32, (ls + new_block.len()) as u32)
+        } else {
+            let delta = new_block.len() as isize - block.len() as isize;
+            let p = (c as isize + delta).clamp(ls as isize, (ls + new_block.len()) as isize) as u32;
+            (p, p)
+        };
+        d.history.replaced(&old, &d.text, na, nc);
+        d.touch();
+        self.place(na, nc);
+    }
+
+    /// Ctrl+Shift+K: remove the covered lines.
+    fn delete_lines(&mut self) {
+        let d = self.cur_mut();
+        let (a, c) = d.history.caret();
+        let (ls, le) = covered(&d.text, a, c);
+        let (from, to) = if le < d.text.len() { (ls, le + 1) }
+                         else if ls > 0 { (ls - 1, le) } else { (ls, le) };
+        if from == to { return; }
+        let old = d.text.clone();
+        d.text.replace_range(from..to, "");
+        let p = from.min(d.text.len());
+        let p = if from < ls { d.text[..p].rfind('\n').map(|i| i + 1).unwrap_or(0) } else { p };
+        d.history.replaced(&old, &d.text, p as u32, p as u32);
+        d.touch();
+        self.place(p as u32, p as u32);
+    }
+
+    /// The window got the keyboard back: what changed on disk meanwhile?
+    /// A clean tab follows the file (as one undo step), a tab with its own
+    /// edits asks.
+    fn check_disk(&mut self) -> bool {
+        let mut any = false;
+        let active = self.active;
+        for i in 0..self.docs.len() {
+            let Some(path) = self.docs[i].path.clone() else { continue };
+            let Some(disk) = host::fetch(&path) else { continue };
+            let h = text_hash_bytes(&disk);
+            let d = &mut self.docs[i];
+            if h == d.saved || d.disk_changed { continue; }
+            any = true;
+            if d.dirty {
+                d.disk_changed = true;
+            } else if let Ok(t) = String::from_utf8(disk) {
+                let (a, c) = d.history.caret();
+                let (a, c) = (a.min(t.len() as u32), c.min(t.len() as u32));
+                let old = core::mem::replace(&mut d.text, t);
+                d.history.replaced(&old, &d.text, a, c);
+                d.saved = h;
+                d.touch();
+                if i == active { self.place(a, c); }
+            }
+        }
+        any
+    }
+
+    fn disk_reload(&mut self) {
+        let Some(path) = self.cur().path.clone() else { return };
+        let Some(t) = read_file(&path) else { return };
+        let d = self.cur_mut();
+        let (a, c) = d.history.caret();
+        let (a, c) = (a.min(t.len() as u32), c.min(t.len() as u32));
+        let old = core::mem::replace(&mut d.text, t);
+        d.history.replaced(&old, &d.text, a, c);
+        d.saved = text_hash(&d.text);
+        d.disk_changed = false;
+        d.touch();
+        self.place(a, c);
+    }
+
+    /// Keep the tab's text; the next save overwrites the file.
+    fn disk_keep(&mut self) {
+        let Some(path) = self.cur().path.clone() else { return };
+        let disk = host::fetch(&path).map(|b| text_hash_bytes(&b));
+        let d = self.cur_mut();
+        if let Some(h) = disk { d.saved = h; }
+        d.disk_changed = false;
+        d.touch();
+    }
+
+    /// Ctrl+PageUp/Down: the tab before or after, wrapping.
+    fn cycle_tab(&mut self, dir: isize) {
+        let n = self.docs.len() as isize;
+        self.active = ((self.active as isize + dir).rem_euclid(n)) as usize;
+    }
+
     fn open_goto(&mut self) {
         self.bar = Some(Bar::Goto(String::new()));
         self.focus_on(Focus::Goto);
@@ -923,6 +1176,101 @@ fn text_hash(t: &str) -> u64 {
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
     h
+}
+
+fn text_hash_bytes(b: &[u8]) -> u64 {
+    match core::str::from_utf8(b) { Ok(t) => text_hash(t), Err(_) => 0 }
+}
+
+/// `t` without spaces and tabs at line ends, with `(anchor, cursor)`
+/// moved along: by what went before them, onto the line's text when they
+/// stood in what went.
+fn trim_trailing(t: &str, anchor: u32, cursor: u32) -> (String, u32, u32) {
+    let mut out = String::with_capacity(t.len());
+    let (mut a, mut c) = (anchor as usize, cursor as usize);
+    let (oa, oc) = (a, c);
+    let mut removed = 0usize;
+    let mut ls = 0usize;
+    for line in t.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let kept = body.trim_end_matches([' ', '\t']);
+        let cut_from = ls + kept.len();
+        let cut_to = ls + body.len();
+        for (orig, new) in [(oa, &mut a), (oc, &mut c)] {
+            if orig > cut_from && orig <= cut_to { *new = cut_from - removed; }
+            else if orig > cut_to { *new = orig - removed - (cut_to - cut_from); }
+            else if orig <= cut_from && orig >= ls { *new = orig - removed; }
+        }
+        removed += cut_to - cut_from;
+        out.push_str(kept);
+        if line.ends_with('\n') { out.push('\n'); }
+        ls += line.len();
+    }
+    (out, a as u32, c as u32)
+}
+
+/// Line comment marker, or block markers, for a kind.
+fn comment_markers(k: Kind) -> Option<(&'static str, &'static str)> {
+    match k {
+        Kind::Code(Lang::Rust | Lang::C | Lang::Js) => Some(("//", "")),
+        Kind::Code(Lang::Python | Lang::Shell | Lang::Toml | Lang::Yaml | Lang::Make) => Some(("#", "")),
+        Kind::Code(Lang::Css) => Some(("/*", "*/")),
+        Kind::Code(Lang::Markup) | Kind::Markdown => Some(("<!--", "-->")),
+        _ => None,
+    }
+}
+
+/// AutoClose bits for a kind: brackets, then the quotes the language uses.
+fn pair_bits(k: Kind) -> u8 {
+    match k {
+        Kind::Code(Lang::Rust) => 1 | 2,
+        Kind::Code(Lang::Js) => 1 | 2 | 4 | 8,
+        Kind::Code(Lang::C | Lang::Python | Lang::Shell | Lang::Toml | Lang::Yaml | Lang::Make) => 1 | 2 | 4,
+        Kind::Code(Lang::Json | Lang::Css) => 1 | 2,
+        Kind::Code(Lang::Markup) => 2,
+        _ => 0,
+    }
+}
+
+/// The line range `[start, end)` the caret or selection covers; a
+/// selection ending at a line start leaves that line out.
+fn covered(t: &str, anchor: u32, cursor: u32) -> (usize, usize) {
+    let (a, mut b) = (anchor.min(cursor) as usize, anchor.max(cursor) as usize);
+    let a = a.min(t.len());
+    b = b.min(t.len());
+    if b > a && t[..b].ends_with('\n') { b -= 1; }
+    let ls = t[..a].rfind('\n').map(|i| i + 1).unwrap_or(0);
+    let le = t[b..].find('\n').map(|i| b + i).unwrap_or(t.len());
+    (ls, le)
+}
+
+/// The bracket matching the one at or just before `at`, as both offsets.
+fn bracket_pair(t: &str, at: usize) -> Option<(usize, usize)> {
+    let b = t.as_bytes();
+    let pick = |i: usize| -> Option<(usize, u8, u8, bool)> {
+        match *b.get(i)? {
+            b'(' => Some((i, b'(', b')', true)), b'[' => Some((i, b'[', b']', true)),
+            b'{' => Some((i, b'{', b'}', true)), b')' => Some((i, b'(', b')', false)),
+            b']' => Some((i, b'[', b']', false)), b'}' => Some((i, b'{', b'}', false)),
+            _ => None,
+        }
+    };
+    let (i, open, close, fwd) = pick(at).or_else(|| at.checked_sub(1).and_then(pick))?;
+    const SCAN: usize = 200_000;
+    let mut depth = 0i32;
+    if fwd {
+        for (k, &c) in b.iter().enumerate().skip(i).take(SCAN) {
+            if c == open { depth += 1; }
+            if c == close { depth -= 1; if depth == 0 { return Some((i, k)); } }
+        }
+    } else {
+        let lo = i.saturating_sub(SCAN);
+        for k in (lo..=i).rev() {
+            if b[k] == close { depth += 1; }
+            if b[k] == open { depth -= 1; if depth == 0 { return Some((k, i)); } }
+        }
+    }
+    None
 }
 
 /// Indent of a file: tabs if more lines start with a tab than with
@@ -1006,31 +1354,56 @@ fn read_file(path: &str) -> Option<String> {
 
 const CONFIG_PATH: &str = "sys/config/spell";
 
-/// Read the saved font size. Anything missing or unparseable falls back
-/// to the default — a broken config should never keep the editor shut.
-fn read_config_font() -> u16 {
-    let Some(buf) = host::fetch(CONFIG_PATH) else { return MONO_SIZE_PX };
-    let text = match core::str::from_utf8(&buf) { Ok(t) => t, Err(_) => return MONO_SIZE_PX };
+/// The settings file, and the state spell keeps there across runs.
+#[derive(Clone, PartialEq, Eq)]
+struct Config {
+    font:     u16,
+    trim:     bool,
+    final_nl: bool,
+    recent:   Vec<String>,
+    open:     Vec<String>,
+}
+
+/// Read the settings. Anything missing or unparseable falls back to the
+/// default — a broken config should never keep the editor shut.
+fn read_config() -> Config {
+    let mut c = Config { font: MONO_SIZE_PX, trim: false, final_nl: false,
+                         recent: Vec::new(), open: Vec::new() };
+    let Some(buf) = host::fetch(CONFIG_PATH) else { return c };
+    let Ok(text) = core::str::from_utf8(&buf) else { return c };
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') { continue; }
         let Some((key, val)) = line.split_once(':') else { continue };
-        if key.trim() != "font" { continue; }
-        if let Ok(v) = val.trim().parse::<u16>() {
-            return v.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+        let val = val.trim();
+        let yes = matches!(val, "yes" | "true" | "on" | "1");
+        match key.trim() {
+            "font" => if let Ok(v) = val.parse::<u16>() {
+                c.font = v.clamp(FONT_SIZE_MIN, FONT_SIZE_MAX);
+            },
+            "trim_trailing" => c.trim = yes,
+            "final_newline" => c.final_nl = yes,
+            "recent" if !val.is_empty() && c.recent.len() < MAX_RECENT => c.recent.push(val.to_string()),
+            "open" if !val.is_empty() => c.open.push(val.to_string()),
+            _ => {}
         }
     }
-    MONO_SIZE_PX
+    c
 }
 
-/// Write the config back, header and all. Called when settings change,
-/// not on every wheel notch — see `Event::Zoom`.
-fn write_config(font_px: u16) {
-    let mut out = String::with_capacity(256);
+/// Write the settings back, header and all.
+fn write_config(c: &Config) {
+    let mut out = String::with_capacity(512);
     out.push_str(s().cfg_header);
     out.push_str("font: ");
-    push_usize(&mut out, font_px as usize);
+    push_usize(&mut out, c.font as usize);
+    out.push_str("\ntrim_trailing: ");
+    out.push_str(if c.trim { "yes" } else { "no" });
+    out.push_str("\nfinal_newline: ");
+    out.push_str(if c.final_nl { "yes" } else { "no" });
     out.push('\n');
+    for p in &c.recent { out.push_str("recent: "); out.push_str(p); out.push('\n'); }
+    for p in &c.open { out.push_str("open: "); out.push_str(p); out.push('\n'); }
     if !host::store(CONFIG_PATH, out.as_bytes()) { log("[spell] config: store failed"); }
 }
 
@@ -1060,6 +1433,10 @@ fn render(sp: &Spell) -> Widget {
         Widget::Divider,
     ];
     let editing = sp.confirm_close.is_none();
+    if editing && sp.cur().disk_changed {
+        children.push(render_disk_strip());
+        children.push(Widget::Divider);
+    }
     if editing {
         if let Some(bar) = render_bar(sp) {
             children.push(bar);
@@ -1110,17 +1487,26 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
     match kind {
         // The menu is where the shortcuts are learned, so they're listed
         // next to the entry that binds them.
-        OpenMenu::File => (
-            NODE_MENU_FILE,
-            prefab::popover_menu_shortcuts(&[
+        OpenMenu::File => {
+            let mut items: Vec<(String, ActionId)> = alloc::vec![
                 (s().new.to_string(), ActionId(ACT_FILE_NEW)),
                 (s().open.to_string(), ActionId(ACT_FILE_OPEN)),
                 (s().save.to_string(), ActionId(ACT_FILE_SAVE)),
                 (s().save_as.to_string(), ActionId(ACT_FILE_SAVE_AS)),
                 (s().close.to_string(), ActionId(ACT_FILE_CLOSE)),
                 (s().settings.to_string(), ActionId(ACT_FILE_SETTINGS)),
-            ], &["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", ""], None),
-        ),
+            ];
+            let mut keys: Vec<&str> = alloc::vec!["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", ""];
+            // Recent files, other than the ones open, under the name and
+            // with the folder as the hint.
+            let open: Vec<&str> = sp.docs.iter().filter_map(|d| d.path.as_deref()).collect();
+            for (i, p) in sp.recent.iter().enumerate() {
+                if open.contains(&p.as_str()) { continue; }
+                items.push((basename(p).to_string(), ActionId(ACT_RECENT_BASE + i as u32)));
+                keys.push(dirname(p));
+            }
+            (NODE_MENU_FILE, prefab::popover_menu_shortcuts(&items, &keys, None))
+        }
         OpenMenu::Edit => (
             NODE_MENU_EDIT,
             prefab::popover_menu_shortcuts(&[
@@ -1129,7 +1515,9 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().find.to_string(), ActionId(ACT_FIND)),
                 (s().replace.to_string(), ActionId(ACT_REPLACE)),
                 (s().goto_line.to_string(), ActionId(ACT_GOTO)),
-            ], &["Ctrl+Z", "Ctrl+Y", "Ctrl+F", "Ctrl+H", "Ctrl+G"], None),
+                (s().toggle_comment.to_string(), ActionId(ACT_COMMENT)),
+                (s().delete_line.to_string(), ActionId(ACT_DELETE_LINE)),
+            ], &["Ctrl+Z", "Ctrl+Y", "Ctrl+F", "Ctrl+H", "Ctrl+G", "Ctrl+/", "Ctrl+Shift+K"], None),
         ),
         OpenMenu::View => (
             NODE_MENU_VIEW,
@@ -1294,6 +1682,14 @@ fn render_body(sp: &Spell) -> Widget {
             spans.push(Span { start: a as u32, len: (b - a) as u32, token });
         }
     }
+    // The bracket next to the caret and its partner.
+    let (ca, cc) = doc.history.caret();
+    if ca == cc {
+        if let Some((x, y)) = bracket_pair(&doc.text, cc as usize) {
+            spans.push(Span { start: x as u32, len: 1, token: Token::Accent });
+            spans.push(Span { start: y as u32, len: 1, token: Token::Accent });
+        }
+    }
     spans.extend_from_slice(&doc.spans);
     let node = doc.node();
     let mut modifiers = alloc::vec![
@@ -1311,6 +1707,7 @@ fn render_body(sp: &Spell) -> Widget {
             tabs:  doc.indent.1,
             colon: matches!(doc.kind(), Kind::Code(Lang::Python)),
         },
+        Modifier::AutoClose(pair_bits(doc.kind())),
     ];
     if let Some((n, seq, a, c)) = sp.select {
         if n == node {
@@ -1458,6 +1855,25 @@ fn render_bar(sp: &Spell) -> Option<Widget> {
     })
 }
 
+/// The file changed on disk under a tab with edits of its own.
+fn render_disk_strip() -> Widget {
+    Widget::Row {
+        children: alloc::vec![
+            Widget::Icon { id: IconId::FileText, size: 16, modifiers: alloc::vec![Modifier::Tint(Token::Warning)] },
+            Widget::Text { content: s().disk_changed.to_string(), style: TextStyle::Body, modifiers: alloc::vec![] },
+            Widget::Spacer { flex: 1 },
+            bar_button(s().reload, ACT_DISK_RELOAD, true),
+            bar_button(s().keep_mine, ACT_DISK_KEEP, false),
+        ],
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: Padding::Xs.as_u16() },
+            Modifier::Background(Token::SurfaceElevated),
+        ],
+    }
+}
+
 /// Status line: caret position on the left, the file's facts on the right.
 fn render_status(sp: &Spell) -> Widget {
     let d = sp.cur();
@@ -1515,6 +1931,11 @@ fn lang_name(k: Kind) -> &'static str {
         Kind::Code(Lang::Shell)  => "Shell",
         Kind::Code(Lang::Json)   => "JSON",
         Kind::Code(Lang::Markup) => "HTML/XML",
+        Kind::Code(Lang::Toml)   => "TOML",
+        Kind::Code(Lang::Yaml)   => "YAML",
+        Kind::Code(Lang::Css)    => "CSS",
+        Kind::Code(Lang::Diff)   => "Diff",
+        Kind::Code(Lang::Make)   => "Makefile",
         Kind::Plain | Kind::Untyped => "Plain text",
     }
 }
@@ -1842,9 +2263,9 @@ fn syntax_for(lang: Lang) -> &'static Syntax {
         Lang::C      => &CLANG,
         Lang::Js     => &JS,
         Lang::Python => &PY,
-        Lang::Shell  => &SH,
+        Lang::Shell | Lang::Make => &SH,
         // Handled by their own scanners — never reached.
-        Lang::Json | Lang::Markup => &RUST,
+        Lang::Json | Lang::Markup | Lang::Toml | Lang::Yaml | Lang::Css | Lang::Diff => &RUST,
     }
 }
 
@@ -1853,6 +2274,10 @@ fn code_spans(text: &str, lang: Lang) -> Vec<Span> {
     match lang {
         Lang::Markup => markup_spans(text),
         Lang::Json   => json_spans(text),
+        Lang::Toml   => conf_spans(text, false),
+        Lang::Yaml   => conf_spans(text, true),
+        Lang::Css    => css_spans(text),
+        Lang::Diff   => diff_spans(text),
         other        => clike_spans(text, syntax_for(other)),
     }
 }
@@ -2202,6 +2627,251 @@ fn json_spans(text: &str) -> Vec<Span> {
     out
 }
 
+// ── TOML / YAML ───────────────────────────────────────────────────────
+
+/// Settings files: `# comment`, `[section]` (TOML) as a type, the key in
+/// front of `=` or `:` as a variable, strings, numbers and the literal
+/// constants.
+fn conf_spans(text: &str, yaml: bool) -> Vec<Span> {
+    let b = text.as_bytes();
+    let mut out: Vec<Span> = Vec::new();
+    let mut ls = 0usize;
+    while ls < b.len() {
+        let le = line_end(b, ls);
+        let mut i = ls;
+        while i < le && (b[i] == b' ' || b[i] == b'\t') { i += 1; }
+        if yaml && i + 1 < le && b[i] == b'-' && b[i + 1] == b' ' {
+            push_span(&mut out, i, 1, Token::CodeControl);
+            i += 2;
+        }
+        if i < le && b[i] == b'[' && !yaml {
+            push_span(&mut out, i, le - i, Token::CodeType);
+            ls = le + 1;
+            continue;
+        }
+        // The key: up to the first `=` (TOML) or `: ` (YAML) outside quotes.
+        let sep = if yaml { b':' } else { b'=' };
+        let mut k = i;
+        while k < le && b[k] != sep && b[k] != b'#' && b[k] != b'"' && b[k] != b'\'' { k += 1; }
+        if k < le && b[k] == sep && k > i && (!yaml || k + 1 == le || b[k + 1] == b' ') {
+            push_span(&mut out, i, k - i, Token::CodeVariable);
+            i = k + 1;
+        }
+        while i < le {
+            let c = b[i];
+            if c == b'#' && (i == ls || b[i - 1] == b' ' || b[i - 1] == b'\t') {
+                push_span(&mut out, i, le - i, Token::CodeComment);
+                break;
+            }
+            if c == b'"' || c == b'\'' {
+                let end = scan_string(text, i, c, !yaml, false).min(le.max(i + 1));
+                push_span(&mut out, i, end - i, Token::CodeString);
+                i = end;
+                continue;
+            }
+            let word_start = i == ls || !is_ident(b[i - 1]);
+            if word_start && (c.is_ascii_digit() || (c == b'-' && i + 1 < le && b[i + 1].is_ascii_digit())) {
+                let s0 = i;
+                if c == b'-' { i += 1; }
+                let end = scan_number(text, i).min(le);
+                push_span(&mut out, s0, end - s0, Token::CodeNumber);
+                i = end.max(i + 1);
+                continue;
+            }
+            if word_start && is_ident_start(c) {
+                let s0 = i;
+                while i < le && is_ident(b[i]) { i += 1; }
+                if matches!(&text[s0..i], "true" | "false" | "null" | "yes" | "no" | "on" | "off") {
+                    push_span(&mut out, s0, i - s0, Token::CodeConstant);
+                }
+                continue;
+            }
+            i += char_len(text, i);
+        }
+        ls = le + 1;
+    }
+    out
+}
+
+// ── CSS ───────────────────────────────────────────────────────────────
+
+/// Selectors as types, `@rules` as keywords, properties as variables,
+/// strings, numbers with their unit, `#rrggbb` as constants, comments.
+fn css_spans(text: &str) -> Vec<Span> {
+    let b = text.as_bytes();
+    let mut out: Vec<Span> = Vec::new();
+    let mut depth = 0usize;
+    let mut i = 0usize;
+    while i < b.len() {
+        let c = b[i];
+        if b[i..].starts_with(b"/*") {
+            let end = scan_block(text, i, "/*", "*/", false);
+            push_span(&mut out, i, end - i, Token::CodeComment);
+            i = end;
+            continue;
+        }
+        match c {
+            b'{' => { depth += 1; i += 1; continue; }
+            b'}' => { depth = depth.saturating_sub(1); i += 1; continue; }
+            b'"' | b'\'' => {
+                let end = scan_string(text, i, c, false, false);
+                push_span(&mut out, i, end - i, Token::CodeString);
+                i = end;
+                continue;
+            }
+            b'@' => {
+                let s0 = i;
+                i += 1;
+                while i < b.len() && (is_ident(b[i]) || b[i] == b'-') { i += 1; }
+                push_span(&mut out, s0, i - s0, Token::CodeKeyword);
+                continue;
+            }
+            _ => {}
+        }
+        if depth == 0 {
+            // A selector runs to the `{`.
+            if !c.is_ascii_whitespace() && c != b',' {
+                let s0 = i;
+                while i < b.len() && !matches!(b[i], b'{' | b',' | b'\n') && !b[i..].starts_with(b"/*") { i += 1; }
+                push_span(&mut out, s0, i - s0, Token::CodeType);
+                continue;
+            }
+        } else {
+            if c == b'#' {
+                let s0 = i;
+                i += 1;
+                while i < b.len() && b[i].is_ascii_hexdigit() { i += 1; }
+                push_span(&mut out, s0, i - s0, Token::CodeConstant);
+                continue;
+            }
+            if c.is_ascii_digit() || (c == b'.' && i + 1 < b.len() && b[i + 1].is_ascii_digit()) {
+                let s0 = i;
+                while i < b.len() && (b[i].is_ascii_digit() || b[i] == b'.') { i += 1; }
+                while i < b.len() && (b[i].is_ascii_alphabetic() || b[i] == b'%') { i += 1; }
+                push_span(&mut out, s0, i - s0, Token::CodeNumber);
+                continue;
+            }
+            if is_ident_start(c) || c == b'-' {
+                let s0 = i;
+                while i < b.len() && (is_ident(b[i]) || b[i] == b'-') { i += 1; }
+                let mut k = i;
+                while k < b.len() && b[k] == b' ' { k += 1; }
+                if k < b.len() && b[k] == b':' {
+                    push_span(&mut out, s0, i - s0, Token::CodeVariable);
+                } else if i < b.len() && b[i] == b'(' {
+                    push_span(&mut out, s0, i - s0, Token::CodeFunction);
+                }
+                continue;
+            }
+        }
+        i += char_len(text, i);
+    }
+    out
+}
+
+// ── diff / patch ──────────────────────────────────────────────────────
+
+/// Added lines green, removed red, hunk headers as keywords, file
+/// headers as comments.
+fn diff_spans(text: &str) -> Vec<Span> {
+    let b = text.as_bytes();
+    let mut out: Vec<Span> = Vec::new();
+    let mut ls = 0usize;
+    while ls < b.len() {
+        let le = line_end(b, ls);
+        let line = &text[ls..le];
+        let tok = if line.starts_with("+++") || line.starts_with("---")
+            || line.starts_with("diff ") || line.starts_with("index ") {
+            Some(Token::CodeComment)
+        } else if line.starts_with("@@") {
+            Some(Token::CodeKeyword)
+        } else if line.starts_with('+') {
+            Some(Token::Success)
+        } else if line.starts_with('-') {
+            Some(Token::Danger)
+        } else {
+            None
+        };
+        if let Some(t) = tok { push_span(&mut out, ls, le - ls, t); }
+        ls = le + 1;
+    }
+    out
+}
+
+// ── Markdown source ───────────────────────────────────────────────────
+
+/// Headings, list markers, quotes, fenced and inline code, link targets,
+/// emphasis markers: enough colour to find the structure while writing.
+fn markdown_spans(text: &str) -> Vec<Span> {
+    let b = text.as_bytes();
+    let mut out: Vec<Span> = Vec::new();
+    let mut fence = false;
+    let mut ls = 0usize;
+    while ls < b.len() {
+        let le = line_end(b, ls);
+        let line = &text[ls..le];
+        let trimmed = line.trim_start();
+        let ind = line.len() - trimmed.len();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = !fence;
+            push_span(&mut out, ls, le - ls, Token::CodeString);
+            ls = le + 1;
+            continue;
+        }
+        if fence {
+            push_span(&mut out, ls, le - ls, Token::CodeString);
+            ls = le + 1;
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            push_span(&mut out, ls, le - ls, Token::CodeKeyword);
+            ls = le + 1;
+            continue;
+        }
+        if trimmed.starts_with('>') {
+            push_span(&mut out, ls, le - ls, Token::CodeComment);
+            ls = le + 1;
+            continue;
+        }
+        let tb = trimmed.as_bytes();
+        if tb.len() >= 2 && matches!(tb[0], b'-' | b'*' | b'+') && tb[1] == b' ' {
+            push_span(&mut out, ls + ind, 1, Token::CodeControl);
+        } else {
+            let digits = tb.iter().take_while(|c| c.is_ascii_digit()).count();
+            if digits > 0 && tb.get(digits) == Some(&b'.') {
+                push_span(&mut out, ls + ind, digits + 1, Token::CodeControl);
+            }
+        }
+        let mut i = ls + ind;
+        while i < le {
+            match b[i] {
+                b'`' => {
+                    let end = text[i + 1..le].find('`').map(|k| i + 1 + k + 1).unwrap_or(le);
+                    push_span(&mut out, i, end - i, Token::CodeString);
+                    i = end;
+                    continue;
+                }
+                b']' if i + 1 < le && b[i + 1] == b'(' => {
+                    let end = text[i + 1..le].find(')').map(|k| i + 1 + k + 1).unwrap_or(le);
+                    push_span(&mut out, i + 1, end - i - 1, Token::CodeFunction);
+                    i = end;
+                    continue;
+                }
+                b'*' | b'_' => {
+                    let s0 = i;
+                    while i < le && b[i] == b[s0] { i += 1; }
+                    push_span(&mut out, s0, i - s0, Token::CodeControl);
+                    continue;
+                }
+                _ => {}
+            }
+            i += char_len(text, i);
+        }
+        ls = le + 1;
+    }
+    out
+}
+
 // ── HTML / XML ────────────────────────────────────────────────────────
 
 /// Tag names → type colour, attribute names → variable, attribute values
@@ -2270,8 +2940,12 @@ enum Outcome { Idle, Rerender, Exit }
 fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
     // `Event::Mods` describes only the event right behind it.
     let shift = core::mem::take(&mut sp.shift);
+    let ctrl = core::mem::take(&mut sp.ctrl);
     match ev {
-        Event::Mods { shift, .. } => { sp.shift = shift; Outcome::Idle }
+        Event::Mods { shift, ctrl } => { sp.shift = shift; sp.ctrl = ctrl; Outcome::Idle }
+        Event::Key(KeyCode::PageUp) if ctrl => { sp.cycle_tab(-1); Outcome::Rerender }
+        Event::Key(KeyCode::PageDown) if ctrl => { sp.cycle_tab(1); Outcome::Rerender }
+        Event::Focus(true) => if sp.check_disk() { Outcome::Rerender } else { Outcome::Idle },
         // Esc backs out of whatever is open. It does not quit: in an
         // editor Esc is the cancel key, and a stray press should never
         // end the session. Closing is Mod+Q, the window's ×, or
@@ -2379,6 +3053,9 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             b'f' => { sp.open_find(false); Outcome::Rerender }
             b'h' => { sp.open_find(true); Outcome::Rerender }
             b'g' => { sp.open_goto(); Outcome::Rerender }
+            // `/` on US layouts, `#` where it sits on its own key (German).
+            b'/' | b'#' => { sp.toggle_comment(); Outcome::Rerender }
+            b'k' if shift => { sp.delete_lines(); Outcome::Rerender }
             _ => Outcome::Idle,
         },
         // Ctrl+wheel. One px per notch: small enough to land on the size
@@ -2413,6 +3090,10 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_REPLACE_ONE => { sp.replace_one(); Outcome::Rerender }
         ACT_REPLACE_ALL => { sp.replace_all(); Outcome::Rerender }
         ACT_GOTO_SUBMIT => { sp.goto_submit(); Outcome::Rerender }
+        ACT_COMMENT     => { sp.open_menu = None; sp.toggle_comment(); Outcome::Rerender }
+        ACT_DELETE_LINE => { sp.open_menu = None; sp.delete_lines(); Outcome::Rerender }
+        ACT_DISK_RELOAD => { sp.disk_reload(); Outcome::Rerender }
+        ACT_DISK_KEEP   => { sp.disk_keep(); Outcome::Rerender }
         ACT_MENU_DISMISS => {
             if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
             else { Outcome::Idle }
@@ -2452,9 +3133,14 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
             if let Some(i) = sp.confirm_close.take() {
                 sp.active = i;
                 if let Some(p) = sp.cur().path.clone() {
-                    sp.write_to(&p);
-                    sp.close_tab(i);
-                    if sp.advance_quit() { return Outcome::Exit; }
+                    // A save that did not happen keeps the tab open and ends
+                    // the quit: its strip or dialog now asks.
+                    if sp.write_to(&p) {
+                        sp.close_tab(i);
+                        if sp.advance_quit() { return Outcome::Exit; }
+                    } else {
+                        sp.cancel_quit();
+                    }
                 } else {
                     // No filename yet → ask where to put it. The chain
                     // resumes when the picker replies.
@@ -2479,7 +3165,11 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
             // Write it first when it doesn't exist yet, so "Settings"
             // always opens something — an empty editor with no file would
             // just raise the question of where to put it.
-            if read_file(CONFIG_PATH).is_none() { write_config(sp.font_px); }
+            if read_file(CONFIG_PATH).is_none() {
+                let c = sp.config();
+                write_config(&c);
+                sp.cfg_saved = c;
+            }
             sp.open_path(CONFIG_PATH);
             Outcome::Rerender
         }
@@ -2500,6 +3190,13 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
             if id >= ACT_TAB_BASE {
                 let i = (id - ACT_TAB_BASE) as usize;
                 if i < sp.docs.len() { sp.active = i; }
+                return Outcome::Rerender;
+            }
+            if id >= ACT_RECENT_BASE && id < ACT_RECENT_BASE + MAX_RECENT as u32 {
+                sp.open_menu = None;
+                if let Some(p) = sp.recent.get((id - ACT_RECENT_BASE) as usize).cloned() {
+                    sp.open_path(&p);
+                }
                 return Outcome::Rerender;
             }
             Outcome::Idle
