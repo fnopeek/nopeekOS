@@ -59,9 +59,33 @@ pub enum Cond {
     Le = 0xE,
     G = 0xF,
     S = 0x8,
+    Ns = 0x9,
     /// Parity: set when a float comparison was unordered, i.e. saw a NaN.
     P = 0xA,
     Np = 0xB,
+}
+
+impl Cond {
+    /// The condition that holds exactly when this one does not. x86 pairs
+    /// every condition with its negation in the low bit of the encoding.
+    pub fn not(self) -> Cond {
+        match self {
+            Cond::E => Cond::Ne,
+            Cond::Ne => Cond::E,
+            Cond::B => Cond::Ae,
+            Cond::Ae => Cond::B,
+            Cond::Be => Cond::A,
+            Cond::A => Cond::Be,
+            Cond::L => Cond::Ge,
+            Cond::Ge => Cond::L,
+            Cond::Le => Cond::G,
+            Cond::G => Cond::Le,
+            Cond::S => Cond::Ns,
+            Cond::Ns => Cond::S,
+            Cond::P => Cond::Np,
+            Cond::Np => Cond::P,
+        }
+    }
 }
 
 /// A forward branch whose target is not known yet. Every one handed out must
@@ -186,6 +210,13 @@ impl Asm {
     pub fn load32(&mut self, dst: Reg, base: Reg, disp: i32) {
         self.rex(false, dst.ext(), 0, base.ext());
         self.b(0x8B);
+        self.modrm_mem(dst, base, disp);
+    }
+
+    /// `lea dst, [base + disp]` (64-bit). Adds without touching the flags.
+    pub fn lea64(&mut self, dst: Reg, base: Reg, disp: i32) {
+        self.rex(true, dst.ext(), 0, base.ext());
+        self.b(0x8D);
         self.modrm_mem(dst, base, disp);
     }
 

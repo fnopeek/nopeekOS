@@ -822,6 +822,32 @@ const CASES: &[Case] = &[
          (func $unused (type $t2) local.get 0)",
         body: "local.get 0 i32.const 0 call_indirect (type $t2)", params: 1 },
 
+    // --- a compare consumed by the next operator (`Loc::Flags`) ---
+    Case { name: "fuse_brif", decl: "", body:
+        "(local i32) \
+         (block $out (loop $top \
+           local.get 1 i32.const 1 i32.add local.set 1 \
+           local.get 1 local.get 0 i32.const 7 i32.and i32.lt_s br_if $top)) \
+         local.get 1", params: 1 },
+    Case { name: "fuse_eqz_brif", decl: "", body:
+        "(block $b (result i32) i32.const 3 \
+           local.get 0 local.get 1 i32.lt_u i32.eqz br_if $b drop i32.const 4)", params: 2 },
+    Case { name: "fuse_eqz2", decl: "", body:
+        "local.get 0 local.get 1 i32.lt_u i32.eqz i32.eqz", params: 2 },
+    Case { name: "fuse_if", decl: "", body:
+        "local.get 0 local.get 1 i32.gt_s \
+         (if (result i32) (then i32.const 1) (else i32.const 2))", params: 2 },
+    Case { name: "fuse_select", decl: "", body:
+        "i32.const 10 i32.const 20 local.get 0 local.get 1 i32.eq select", params: 2 },
+    Case { name: "fuse_value", decl: "", body:
+        "local.get 0 local.get 1 i32.lt_s local.get 0 i32.add", params: 2 },
+    Case { name: "fuse_i64", decl: "", body:
+        "(block $b (result i32) i32.const 9 \
+           local.get 0 i64.extend_i32_u local.get 1 i64.extend_i32_s i64.ge_u br_if $b \
+           drop i32.const 5)", params: 2 },
+    Case { name: "fuse_eqz_if", decl: "", body:
+        "local.get 0 i32.eqz (if (result i32) (then i32.const 7) (else local.get 0))", params: 1 },
+
     // --- select ---
     Case { name: "select", decl: "", body:
         "local.get 0 local.get 1 local.get 0 select", params: 2 },

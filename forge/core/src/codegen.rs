@@ -290,6 +290,13 @@ enum Loc {
     /// have to settle any pending reference to the local they are about to
     /// overwrite.
     Local(u32),
+    /// An i32 that is 1 when `Cond` holds on the flags the last instruction
+    /// left. Only ever the top of the stack, and only until the next
+    /// operator: a branch or `if` jumps on the flags directly, anything else
+    /// gets the value in a register first (`settle_flags`). Nothing emitted
+    /// between the compare and that point may touch the flags, which is why
+    /// fuel is charged with `lea` and spills are plain moves.
+    Flags(Cond),
 }
 
 #[derive(Copy, Clone)]
@@ -565,6 +572,10 @@ impl<'a> Ctx<'a> {
                 self.asm.fstore_slot(fw_of(v.ty), Reg::Rbp, off, x);
                 self.free_xmm(x);
             }
+            Loc::Flags(cc) => {
+                self.asm.set_cond(cc, T);
+                self.asm.store32(Reg::Rbp, off, T);
+            }
             Loc::Slot => return,
         }
         census::spill(self.asm.pos() - _mark);
@@ -587,6 +598,33 @@ impl<'a> Ctx<'a> {
                 return;
             }
         }
+    }
+
+    fn push_flags(&mut self, cc: Cond) {
+        self.stack.push(Val { ty: ValType::I32, loc: Loc::Flags(cc) });
+        self.note_depth();
+    }
+
+    /// A compare result on top of the stack goes into a register, before
+    /// anything that is not a branch on it can change the flags.
+    fn settle_flags(&mut self) {
+        let Some(&Val { loc: Loc::Flags(cc), .. }) = self.stack.last() else { return };
+        let i = self.stack.len() - 1;
+        let r = self.alloc_gpr();
+        self.asm.set_cond(cc, r);
+        self.stack[i].loc = Loc::Gpr(r);
+    }
+
+    /// Pop a branch condition: the flags themselves when a compare left them,
+    /// otherwise the value tested against zero. Returns when to branch.
+    fn pop_cond(&mut self) -> Cond {
+        if let Some(Loc::Flags(cc)) = self.stack.last().map(|v| v.loc) {
+            self.stack.pop();
+            return cc;
+        }
+        self.pop_to(A);
+        self.asm.test32(A, A);
+        Cond::Ne
     }
 
     /// Put the whole operand stack where everyone else expects to find it.
@@ -778,6 +816,7 @@ impl<'a> Ctx<'a> {
                 }
                 census::local(self.asm.pos() - _mark);
             }
+            Loc::Flags(cc) => self.asm.set_cond(cc, r),
         }
         Some(v.ty)
     }
@@ -805,6 +844,10 @@ impl<'a> Ctx<'a> {
             Loc::Imm(c) => {
                 self.asm.mov_r64_imm64(T, c);
                 self.asm.gpr_to_xmm(wide(v.ty), x, T);
+            }
+            Loc::Flags(cc) => {
+                self.asm.set_cond(cc, T);
+                self.asm.gpr_to_xmm(false, x, T);
             }
         }
         Some(v.ty)
@@ -846,6 +889,7 @@ impl<'a> Ctx<'a> {
                     self.asm.load32(r, Reg::Rbp, off);
                 }
             }
+            Loc::Flags(cc) => self.asm.set_cond(cc, r),
         }
     }
 
@@ -854,14 +898,14 @@ impl<'a> Ctx<'a> {
         self.asm.load64(r, VMCTX, vmctx::GLOBALS);
     }
 
-    /// Charge everything counted so far. Must come before anything that sets
-    /// flags for a branch — `sub` writes the flags too.
+    /// Charge everything counted so far. `lea` rather than `sub`, so a
+    /// compare's flags survive it on the way to their branch (`Loc::Flags`).
     fn fuel_flush(&mut self) {
         if self.fuel_pending == 0 {
             return;
         }
         let n = self.fuel_pending.clamp(0, i32::MAX as i64) as i32;
-        self.asm.sub_r64_imm32(FUEL, n);
+        self.asm.lea64(FUEL, FUEL, -n);
         self.fuel_pending = 0;
     }
 
@@ -1139,6 +1183,9 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
     if f.reachable && !matches!(op, Block { .. } | Loop { .. } | Else | End | Nop) {
         f.fuel_pending += 1;
     }
+    if !matches!(op, BrIf { .. } | If { .. } | I32Eqz) {
+        f.settle_flags();
+    }
 
     // Frames are tracked even where no code is emitted, because the nesting
     // is what tells us when control becomes reachable again.
@@ -1199,13 +1246,12 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             let else_patch = if dead {
                 None
             } else {
-                f.pop_to(A);
+                let cc = f.pop_cond();
                 // Both arms start from this point, and the else-arm is
                 // reached long after the then-arm has had its way with the
                 // registers. Settling here is what keeps the two agreeing.
                 f.spill_all();
-                f.asm.test32(A, A);
-                Some(f.asm.jcc(Cond::E))
+                Some(f.asm.jcc(cc.not()))
             };
             f.ctrl.push(Ctrl {
                 kind: Kind::If,
@@ -1928,24 +1974,23 @@ fn br_if(f: &mut Ctx, relative_depth: u32) -> Result<(), &'static str> {
         .ok_or("br-depth")?;
     let arity = f.ctrl[idx].branch_arity;
 
-    f.pop_to(A);
+    let cc = f.pop_cond();
     // The taken side lands on a label, and the fall-through continues from
     // here — both have to agree, so settle before either happens.
     f.spill_all();
-    f.asm.test32(A, A);
 
     if arity == 0 {
         if f.ctrl[idx].kind == Kind::Loop {
             let start = f.ctrl[idx].start;
-            f.asm.jcc_back(Cond::Ne, start);
+            f.asm.jcc_back(cc, start);
         } else {
-            let p = f.asm.jcc(Cond::Ne);
+            let p = f.asm.jcc(cc);
             f.ctrl[idx].ends.push(p);
         }
         return Ok(());
     }
 
-    let skip = f.asm.jcc(Cond::E);
+    let skip = f.asm.jcc(cc.not());
     branch_to(f, relative_depth)?;
     f.asm.bind(skip);
     Ok(())
@@ -2626,8 +2671,8 @@ fn cmp(f: &mut Ctx, w: bool, cc: Cond) {
         Rhs::Mem(off) => f.asm.alu_rm(w, CMP_OP.rm, d, Reg::Rbp, off),
         Rhs::Reg => f.asm.alu_raw(w, CMP_OP.rr, d, B),
     }
-    f.asm.set_cond(cc, d);
-    f.push_reg(d, ValType::I32);
+    f.free_gpr(d);
+    f.push_flags(cc);
 }
 
 /// Divide or take the remainder. The dividend has to be in the accumulator
@@ -2670,10 +2715,15 @@ fn div_op(f: &mut Ctx, w: bool, signed: bool, rem: bool) {
 }
 
 fn eqz(f: &mut Ctx, w: bool) {
+    if let Some(Loc::Flags(cc)) = f.stack.last().map(|v| v.loc) {
+        f.stack.pop();
+        f.push_flags(cc.not());
+        return;
+    }
+    f.settle_flags();
     f.pop_to(A);
     f.asm.test(w, A, A);
-    f.asm.set_cond(Cond::E, A);
-    f.push_from_ty(A, ValType::I32);
+    f.push_flags(Cond::E);
 }
 
 /// `clz`: `bsr` gives the index of the highest set bit, so `width-1 - index`
