@@ -796,34 +796,23 @@ impl<'a> Ctx<'a> {
     }
 
     /// The cases a direct move cannot handle — done here, while `r11` is still
-    /// free. Afterwards `load_args` needs neither a spill nor a helper register,
-    /// which is the condition for `call_indirect` holding its target in `r11`.
+    /// free. Afterwards `load_args` needs neither a spill nor `r11`, which is
+    /// the condition for `call_indirect` holding its target there.
     ///
-    /// Three kinds go to their slot:
-    /// 1. An argument whose register is the destination of another argument —
-    ///    the move there would overwrite it. (`rsi`, `r8`, `r9` are both.)
-    /// 2. Float arguments. Cache and argument XMM registers overlap as well;
-    ///    the slot path costs little here because integers dominate.
-    /// 3. Arguments passed on the stack — they are written from their slot.
+    /// Two kinds go to their slot: arguments passed on the stack, which are
+    /// written from their slot, and float arguments that are neither in a
+    /// register nor a local. Everything else reaches its argument register
+    /// directly; `load_args` orders the register moves.
     fn spill_arg_conflicts(&mut self, places: &[Place], base: usize) {
-        let mut is_dest = [false; 16];
-        for p in places {
-            if let Place::Int(k) = p {
-                is_dest[ARG_REGS[*k] as usize] = true;
-            }
-        }
         for i in 0..places.len() {
-            let own = match places[i] {
-                Place::Int(k) => Some(ARG_REGS[k]),
-                _ => None,
+            let keep = match (places[i], self.stack[base + i].loc) {
+                (Place::Stack(_), _) => false,
+                (Place::Int(_), _) => true,
+                (Place::Flt(_), Loc::Xmm(_) | Loc::Local(_)) => true,
+                (Place::Flt(_), _) => false,
             };
-            match self.stack[base + i].loc {
-                Loc::Gpr(r) if own.is_none() || is_dest[r as usize] && Some(r) != own => {
-                    self.spill(base + i)
-                }
-                Loc::Xmm(_) => self.spill(base + i),
-                _ if own.is_none() => self.spill(base + i),
-                _ => {}
+            if !keep {
+                self.spill(base + i);
             }
         }
     }
@@ -2405,7 +2394,7 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
         Code(usize),
         Label(usize),
     }
-    let mut dest_of = |f: &mut Ctx, d: u32| -> Result<Dest, &'static str> {
+    let dest_of = |f: &mut Ctx, d: u32| -> Result<Dest, &'static str> {
         let idx = frame(f, d)?;
         if f.ctrl[idx].branch_arity == 0 {
             if f.ctrl[idx].kind == Kind::Loop {
@@ -2434,7 +2423,7 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
     let table = f.asm.pos();
     f.asm
         .patch_i32(lea_at, (table as i64 - (lea_at as i64 + 4)) as i32);
-    let mut put = |f: &mut Ctx, d: &Dest| match *d {
+    let put = |f: &mut Ctx, d: &Dest| match *d {
         Dest::Code(at) => f.asm.emit_i32((at as i64 - table as i64) as i32),
         Dest::Label(idx) => {
             let entry = f.asm.pos();
@@ -2562,20 +2551,36 @@ fn load_args(f: &mut Ctx, params: &[ValType], places: &[Place], n_stack: usize) 
             f.asm.store64(Reg::Rsp, 8 * j as i32, A);
         }
     }
+    // Register to register first, as a parallel move: a source may be
+    // another argument's destination (`rsi`, `r8`, `r9` are both), so each
+    // move waits until nobody still has to read its destination. What is
+    // left then are cycles, broken through `rax`, which no operand occupies.
+    let mut moves: Vec<(u8, u8, bool, bool)> = Vec::new(); // (dst, src, float, wide)
+    for (i, t) in params.iter().enumerate() {
+        match (places[i], f.stack[base + i].loc) {
+            (Place::Int(k), Loc::Gpr(r)) if r != ARG_REGS[k] => {
+                moves.push((ARG_REGS[k] as u8, r as u8, false, wide(*t)))
+            }
+            (Place::Flt(k), Loc::Xmm(x)) if x != FARG_REGS[k] => {
+                moves.push((FARG_REGS[k] as u8, x as u8, true, false))
+            }
+            _ => {}
+        }
+    }
+    let mark = f.asm.pos();
+    parallel_move(f, &mut moves);
+    census::arg(f.asm.pos() - mark);
+
+    // Then everything that reads no argument register: constants, locals,
+    // slots. These only write their destination, which no move reads any more.
     for (i, t) in params.iter().enumerate() {
         let off = f.slot((base + i) as u32);
         let mark = f.asm.pos();
         match places[i] {
             Place::Int(k) => {
                 let dst = ARG_REGS[k];
-                // `spill_arg_conflicts` has already cleared everything a direct
-                // move cannot handle. Whatever is still in a register may go
-                // straight to its destination.
                 match f.stack[base + i].loc {
-                    Loc::Gpr(r) if r == dst => {} // already in place
-                    Loc::Gpr(r) => {
-                        if wide(*t) { f.asm.mov_rr64(dst, r); } else { f.asm.mov_rr32(dst, r); }
-                    }
+                    Loc::Gpr(_) => {} // moved above
                     Loc::Imm(c) => {
                         if wide(*t) {
                             f.asm.mov_r64_imm64(dst, c);
@@ -2603,12 +2608,72 @@ fn load_args(f: &mut Ctx, params: &[ValType], places: &[Place], n_stack: usize) 
                     }
                 }
             }
-            Place::Flt(k) => f.asm.fload_slot(fw_of(*t), FARG_REGS[k], Reg::Rbp, off),
+            Place::Flt(k) => {
+                let dst = FARG_REGS[k];
+                match f.stack[base + i].loc {
+                    Loc::Xmm(_) => {} // moved above
+                    Loc::Local(idx) if let Some(h) = f.fhome(idx) => f.asm.fmov(dst, h),
+                    Loc::Local(idx) => {
+                        let src = f.local(idx);
+                        f.asm.fload_slot(fw_of(*t), dst, Reg::Rbp, src);
+                    }
+                    _ => f.asm.fload_slot(fw_of(*t), dst, Reg::Rbp, off),
+                }
+            }
             Place::Stack(_) => {}
         }
         census::arg(f.asm.pos() - mark);
     }
     bytes
+}
+
+/// Register by its encoding number.
+const GPR_BY_NUM: [Reg; 16] = [
+    Reg::Rax, Reg::Rcx, Reg::Rdx, Reg::Rbx, Reg::Rsp, Reg::Rbp, Reg::Rsi, Reg::Rdi,
+    Reg::R8, Reg::R9, Reg::R10, Reg::R11, Reg::R12, Reg::R13, Reg::R14, Reg::R15,
+];
+const XMM_BY_NUM: [Xmm; 16] = [
+    Xmm::X0, Xmm::X1, Xmm::X2, Xmm::X3, Xmm::X4, Xmm::X5, Xmm::X6, Xmm::X7,
+    Xmm::X8, Xmm::X9, Xmm::X10, Xmm::X11, Xmm::X12, Xmm::X13, Xmm::X14, Xmm::X15,
+];
+
+/// Emit register moves `(dst, src, float, wide)` as if all happened at once.
+/// Destinations are distinct, and so are sources (each operand owns its
+/// register). A move goes out once no pending move still reads its
+/// destination; when none can, every pending move lies on a cycle, and one
+/// destination's old value is parked in `rax` so its reader takes it from
+/// there instead.
+fn parallel_move(f: &mut Ctx, moves: &mut Vec<(u8, u8, bool, bool)>) {
+    const PARKED: u8 = 0xff;
+    while !moves.is_empty() {
+        let ready = (0..moves.len()).find(|&i| {
+            let (d, _, fl, _) = moves[i];
+            !moves.iter().any(|&(_, s, sf, _)| sf == fl && s == d)
+        });
+        if let Some(i) = ready {
+            let (d, s, fl, w) = moves.swap_remove(i);
+            match (fl, s) {
+                (false, PARKED) if w => f.asm.mov_rr64(GPR_BY_NUM[d as usize], A),
+                (false, PARKED) => f.asm.mov_rr32(GPR_BY_NUM[d as usize], A),
+                (false, _) if w => f.asm.mov_rr64(GPR_BY_NUM[d as usize], GPR_BY_NUM[s as usize]),
+                (false, _) => f.asm.mov_rr32(GPR_BY_NUM[d as usize], GPR_BY_NUM[s as usize]),
+                (true, PARKED) => f.asm.gpr_to_xmm(true, XMM_BY_NUM[d as usize], A),
+                (true, _) => f.asm.fmov(XMM_BY_NUM[d as usize], XMM_BY_NUM[s as usize]),
+            }
+            continue;
+        }
+        let (d, _, fl, _) = moves[0];
+        if fl {
+            f.asm.xmm_to_gpr(true, A, XMM_BY_NUM[d as usize]);
+        } else {
+            f.asm.mov_rr64(A, GPR_BY_NUM[d as usize]);
+        }
+        for m in moves.iter_mut() {
+            if m.2 == fl && m.1 == d {
+                m.1 = PARKED;
+            }
+        }
+    }
 }
 
 /// After a call there is nothing to repair. The instance reserves its address
