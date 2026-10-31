@@ -73,6 +73,16 @@ const MEMBASE: Reg = Reg::R13;
 /// epilogue.
 const HOMES: [Reg; 2] = [Reg::Rbx, Reg::R12];
 
+/// Where the hottest float locals live. forge uses no other register from
+/// `xmm8` up, so all eight are free for this. Between wasm functions they are
+/// callee-saved like `HOMES`: a function saves the ones it uses and restores
+/// them on the way out. Native code may clobber every xmm register (SysV), so
+/// around a call into native code (an import, `memory.grow`, a refuel, where
+/// the fiber may also switch) the locals go to their slots and come back.
+const FHOMES: [Xmm; 8] = [
+    Xmm::X8, Xmm::X9, Xmm::X10, Xmm::X11, Xmm::X12, Xmm::X13, Xmm::X14, Xmm::X15,
+];
+
 /// Weighted uses below which a local stays in memory: the save and restore
 /// cost two memory operations, so fewer accesses than that cannot pay.
 const HOME_MIN_USES: u64 = 4;
@@ -359,6 +369,9 @@ struct Ctx<'a> {
     /// of those registers are saved in the same order below `rbp`.
     homed: [u32; 2],
     n_homes: usize,
+    /// The same for float locals in `FHOMES`, saved below the integer ones.
+    fhomed: [u32; 8],
+    n_fhomes: usize,
     /// The operand stack. Its length is the depth — one source of truth, so a
     /// push that forgets its type cannot happen.
     stack: Vec<Val>,
@@ -457,18 +470,51 @@ pub mod census {
 impl<'a> Ctx<'a> {
     /// Frame slot for local `i`, relative to `rbp`.
     fn local(&self, i: u32) -> i32 {
-        -8 * (i as i32 + self.n_homes as i32 + 1)
+        -8 * (i as i32 + self.saved() as i32 + 1)
+    }
+
+    /// Frame slots taken by the caller's values of the home registers.
+    fn saved(&self) -> usize {
+        self.n_homes + self.n_fhomes
+    }
+
+    /// Frame slot holding the caller's value of `FHOMES[k]`.
+    fn fhome_save(&self, k: usize) -> i32 {
+        -8 * (self.n_homes as i32 + k as i32 + 1)
     }
 
     /// Frame slot for operand-stack entry `d`. Every value has one whether it
     /// is currently in a register or not — a spill needs somewhere to go, and
     /// the place must not depend on when the spill happens.
     fn slot(&self, d: u32) -> i32 {
-        -8 * (self.n_homes as i32 + self.n_locals as i32 + d as i32 + 1)
+        -8 * (self.saved() as i32 + self.n_locals as i32 + d as i32 + 1)
     }
 
     fn home(&self, i: u32) -> Option<Reg> {
         (0..self.n_homes).find(|&k| self.homed[k] == i).map(|k| HOMES[k])
+    }
+
+    fn fhome(&self, i: u32) -> Option<Xmm> {
+        (0..self.n_fhomes).find(|&k| self.fhomed[k] == i).map(|k| FHOMES[k])
+    }
+
+    /// Before a call into native code: every float local in a register goes
+    /// to its slot, because the callee may clobber the register.
+    fn fhomes_out(&mut self) {
+        for k in 0..self.n_fhomes {
+            let i = self.fhomed[k];
+            let (t, off) = (self.local_types[i as usize], self.local(i));
+            self.asm.fstore_slot(fw_of(t), Reg::Rbp, off, FHOMES[k]);
+        }
+    }
+
+    /// After it: back into their registers.
+    fn fhomes_in(&mut self) {
+        for k in 0..self.n_fhomes {
+            let i = self.fhomed[k];
+            let (t, off) = (self.local_types[i as usize], self.local(i));
+            self.asm.fload_slot(fw_of(t), FHOMES[k], Reg::Rbp, off);
+        }
     }
 
     fn mov_ty(&mut self, t: ValType, dst: Reg, src: Reg) {
@@ -577,6 +623,9 @@ impl<'a> Ctx<'a> {
             Loc::Imm(c) => {
                 self.asm.mov_r64_imm64(T, c);
                 self.asm.store64(Reg::Rbp, off, T);
+            }
+            Loc::Local(idx) if let Some(h) = self.fhome(idx) => {
+                self.asm.fstore_slot(fw_of(v.ty), Reg::Rbp, off, h);
             }
             Loc::Local(idx) => {
                 let src = self.local(idx);
@@ -854,6 +903,7 @@ impl<'a> Ctx<'a> {
                     self.asm.mov_r32_imm32(r, c as i32);
                 }
             }
+            Loc::Local(idx) if let Some(h) = self.fhome(idx) => self.asm.xmm_to_gpr(wide(v.ty), r, h),
             Loc::Local(idx) if let Some(h) = self.home(idx) => self.mov_ty(v.ty, r, h),
             Loc::Local(idx) => {
                 let _mark = self.asm.pos();
@@ -886,6 +936,7 @@ impl<'a> Ctx<'a> {
                 let off = self.slot(self.depth());
                 self.asm.fload_slot(fw_of(v.ty), x, Reg::Rbp, off);
             }
+            Loc::Local(idx) if let Some(h) = self.fhome(idx) => self.asm.fmov(x, h),
             Loc::Local(idx) if let Some(h) = self.home(idx) => {
                 self.asm.gpr_to_xmm(wide(v.ty), x, h);
             }
@@ -933,6 +984,7 @@ impl<'a> Ctx<'a> {
                     self.asm.mov_r32_imm32(r, c as i32);
                 }
             }
+            Loc::Local(idx) if let Some(h) = self.fhome(idx) => self.asm.xmm_to_gpr(wide(v.ty), r, h),
             Loc::Local(idx) if let Some(h) = self.home(idx) => self.mov_ty(v.ty, r, h),
             Loc::Local(idx) => {
                 let off = self.local(idx);
@@ -956,6 +1008,7 @@ impl<'a> Ctx<'a> {
                 let off = self.slot(self.depth() - 1);
                 self.asm.fload_slot(fw_of(v.ty), x, Reg::Rbp, off);
             }
+            Loc::Local(idx) if let Some(h) = self.fhome(idx) => self.asm.fmov(x, h),
             Loc::Local(idx) if let Some(h) = self.home(idx) => self.asm.gpr_to_xmm(wide(v.ty), x, h),
             Loc::Local(idx) => {
                 let off = self.local(idx);
@@ -1040,7 +1093,9 @@ impl<'a> Ctx<'a> {
             self.trap_patch(trap::OUT_OF_FUEL, none);
             self.asm.store64(VMCTX, vmctx::FUEL, FUEL);
             self.asm.mov_rr64(Reg::Rdi, VMCTX);
+            self.fhomes_out();
             self.asm.call_reg(T);
+            self.fhomes_in();
             self.asm.load64(FUEL, VMCTX, vmctx::FUEL);
             self.asm.test(true, FUEL, FUEL);
             let spent = self.asm.jcc(Cond::Le);
@@ -1092,10 +1147,11 @@ fn block_out(ty: BlockType) -> Result<(u32, ValType), &'static str> {
 /// Give the integer locals used most a register each (`HOMES`). A use inside
 /// a loop counts eight times as much per level of nesting, which is a rough
 /// guess at how often it runs, and all a single pass can know in advance.
-fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; 2], usize) {
+fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; 2], usize, [u32; 8], usize) {
     let mut homed = [0u32; 2];
+    let mut fhomed = [0u32; 8];
     if local_types.is_empty() {
-        return (homed, 0);
+        return (homed, 0, fhomed, 0);
     }
     let mut score = alloc::vec![0u64; local_types.len()];
     // Block depth at which each open loop began; a function without loops
@@ -1129,22 +1185,31 @@ fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; 2], usi
             *s = s.saturating_add(1 << (3 * loop_at.len().min(6)));
         }
     }
-    // The best two, in one scan; ties go to the lower index.
+    // The best of each kind, in one scan per kind; ties go to the lower
+    // index.
+    let n = best(&score, local_types, false, &mut homed);
+    let fnum = best(&score, local_types, true, &mut fhomed);
+    (homed, n, fhomed, fnum)
+}
+
+/// Fill `out` with the highest-scoring locals of one kind (float or not),
+/// best first, and return how many qualified.
+fn best(score: &[u64], local_types: &[ValType], float: bool, out: &mut [u32]) -> usize {
     let mut n = 0;
     for i in 0..local_types.len() {
-        if is_float(local_types[i]) || score[i] < HOME_MIN_USES {
+        if is_float(local_types[i]) != float || score[i] < HOME_MIN_USES {
             continue;
         }
-        let at = (0..n).find(|&k| score[i] > score[homed[k] as usize]).unwrap_or(n);
-        if at < HOMES.len() {
-            for k in (at + 1..HOMES.len()).rev() {
-                homed[k] = homed[k - 1];
+        let at = (0..n).find(|&k| score[i] > score[out[k] as usize]).unwrap_or(n);
+        if at < out.len() {
+            for k in (at + 1..out.len()).rev() {
+                out[k] = out[k - 1];
             }
-            homed[at] = i as u32;
-            n = (n + 1).min(HOMES.len());
+            out[at] = i as u32;
+            n = (n + 1).min(out.len());
         }
     }
-    (homed, n)
+    n
 }
 
 pub fn compile_func(
@@ -1188,6 +1253,8 @@ pub fn compile_func(
         n_locals,
         homed: [0; 2],
         n_homes: 0,
+        fhomed: [0; 8],
+        n_fhomes: 0,
         fuel_pending: 0,
         refuels: Vec::new(),
         stack: Vec::new(),
@@ -1225,13 +1292,25 @@ pub fn compile_func(
     f.asm.load64(A, VMCTX, vmctx::STACK_LIMIT);
     f.asm.cmp_rr64(Reg::Rsp, A);
     f.trap_if(Cond::B, trap::STACK_EXHAUSTED);
-    (f.homed, f.n_homes) = choose_homes(&f.local_types, ops);
+    (f.homed, f.n_homes, f.fhomed, f.n_fhomes) = choose_homes(&f.local_types, ops);
     for k in 0..f.n_homes {
         f.asm.store64(Reg::Rbp, -8 * (k as i32 + 1), HOMES[k]);
+    }
+    for k in 0..f.n_fhomes {
+        let off = f.fhome_save(k);
+        f.asm.fstore_slot(Fw::Double, Reg::Rbp, off, FHOMES[k]);
     }
     let (places, _) = arg_places(params);
     for (i, t) in params.iter().enumerate() {
         let off = f.local(i as u32);
+        if let Some(h) = f.fhome(i as u32) {
+            match places[i] {
+                Place::Flt(k) => f.asm.fmov(h, FARG_REGS[k]),
+                Place::Stack(j) => f.asm.fload_slot(fw_of(*t), h, Reg::Rbp, incoming_arg(j)),
+                Place::Int(_) => {}
+            }
+            continue;
+        }
         if let Some(h) = f.home(i as u32) {
             match places[i] {
                 Place::Int(k) => f.mov_ty(*t, h, ARG_REGS[k]),
@@ -1271,6 +1350,10 @@ pub fn compile_func(
     if n_declared > 0 {
         f.asm.mov_r32_imm32(A, 0);
         for i in params.len() as u32..n_locals {
+            if let Some(h) = f.fhome(i) {
+                f.asm.fxor(Fw::Double, h, h);
+                continue;
+            }
             match f.home(i) {
                 Some(h) => f.asm.xor32(h, h),
                 None => {
@@ -1301,6 +1384,10 @@ pub fn compile_func(
     for k in 0..f.n_homes {
         f.asm.load64(HOMES[k], Reg::Rbp, -8 * (k as i32 + 1));
     }
+    for k in 0..f.n_fhomes {
+        let off = f.fhome_save(k);
+        f.asm.fload_slot(Fw::Double, FHOMES[k], Reg::Rbp, off);
+    }
     f.asm.mov_rr64(Reg::Rsp, Reg::Rbp);
     f.asm.pop(Reg::Rbp);
     f.asm.ret();
@@ -1320,7 +1407,7 @@ pub fn compile_func(
         f.trap_relocs.push(at);
     }
 
-    let slots = f.n_homes as u32 + n_locals + f.max_stack.max(1);
+    let slots = f.saved() as u32 + n_locals + f.max_stack.max(1);
     let frame = (8 * slots + 15) & !15;
     let patch = f.frame_patch;
     f.asm.code[patch..patch + 4].copy_from_slice(&(frame as i32).to_le_bytes());
@@ -1576,6 +1663,10 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
                 .ok_or("local-index")?;
             f.push_local(*local_index, t);
         }
+        LocalSet { local_index } if let Some(h) = f.fhome(*local_index) => {
+            f.settle_local(*local_index);
+            f.fpop_to(h).ok_or("stack-empty")?;
+        }
         LocalSet { local_index } if let Some(h) = f.home(*local_index) => {
             f.settle_local(*local_index);
             f.pop_to(h).ok_or("stack-empty")?;
@@ -1590,6 +1681,11 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             } else {
                 f.asm.store32(Reg::Rbp, off, A);
             }
+        }
+        LocalTee { local_index } if let Some(h) = f.fhome(*local_index) => {
+            f.settle_local(*local_index);
+            f.peek_ty().ok_or("stack-empty")?;
+            f.fpeek_to(h);
         }
         LocalTee { local_index } if let Some(h) = f.home(*local_index) => {
             f.settle_local(*local_index);
@@ -1917,7 +2013,9 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             f.asm.mov_rr64(Reg::Rsi, A);
             f.asm.mov_rr64(Reg::Rdi, VMCTX);
             f.asm.load64(T, VMCTX, vmctx::BUILTIN_GROW);
+            f.fhomes_out();
             f.asm.call_reg(T);
+            f.fhomes_in();
             f.push_from_ty(A, ValType::I32);
         }
         MemorySize { mem } => {
@@ -2364,7 +2462,9 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
         f.asm.store64(VMCTX, vmctx::FUEL, FUEL);
         f.asm.load64(T, VMCTX, vmctx::HOST_FNS);
         f.asm.load64(T, T, 8 * function_index as i32);
+        f.fhomes_out();
         f.asm.call_reg(T);
+        f.fhomes_in();
         f.asm.load64(FUEL, VMCTX, vmctx::FUEL);
     } else {
         let at = f.asm.call_rel32_blank();
@@ -2521,10 +2621,21 @@ fn fstore(f: &mut Ctx, memarg: &wasmparser::MemArg, fw: Fw) -> Result<(), &'stat
 }
 
 fn fbin(f: &mut Ctx, fw: Fw, mut go: impl FnMut(&mut Asm, Fw, Xmm, Xmm)) {
-    f.fpop_to(FB);
+    // A right operand in a float home is read where it lives: the operation
+    // writes only its left operand.
+    let rhs = match f.stack.last().map(|v| v.loc) {
+        Some(Loc::Local(i)) if let Some(h) = f.fhome(i) => {
+            f.stack.pop();
+            h
+        }
+        _ => {
+            f.fpop_to(FB);
+            FB
+        }
+    };
     // The left operand is worked on where it lies and stays there.
     let d = f.fpop_to_pool();
-    go(&mut f.asm, fw, d, FB);
+    go(&mut f.asm, fw, d, rhs);
     f.fpush_reg(d, if fw.is_double() { ValType::F64 } else { ValType::F32 });
 }
 
