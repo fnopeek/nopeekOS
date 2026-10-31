@@ -79,7 +79,7 @@ npk> time                # Wall clock (RTC, NTP, time zone)
 npk> driver wifi_rtl8822ce  # Start a driver module by hand (normally autostart)
 npk> wlan                # Link report: rate, retries, airtime, handshake rung
 npk> wlan connect <name> # Join a network; the password goes into the vault
-npk> python fib.py       # CPython 3.13 as a WASM module (WASI)
+npk> python fib.py       # CPython 3.15 as a WASM module (WASI)
 npk> forge <module>      # Translate a module with forge and report the cost
 npk> cores               # Per-core CPU and per-engine GPU load
 npk> usb                 # What the USB driver enumerated, with descriptors
@@ -270,7 +270,7 @@ refuses any module forge cannot translate completely. wasmi stays in the
 image as the second engine (`forge default off` makes it the default),
 so the same binary can be compared on real hardware.
 
-**Python:** CPython 3.13 runs as an ordinary signed WASM module. The
+**Python:** CPython 3.15 runs as an ordinary signed WASM module. The
 kernel implements `wasi_snapshot_preview1` against npkFS, so nothing
 about Python is special-cased: it gets the same grant any WASI binary
 would, plus two directories. `python fib.py`, stdlib from a bundle in

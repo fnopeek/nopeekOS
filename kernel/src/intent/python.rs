@@ -17,7 +17,7 @@ use super::{home_dir, resolve_path};
 
 /// npkFS path of the interpreter module.
 const MODULE: &str = "sys/wasm/python";
-/// npkFS directory holding `lib/python313.zip` + `lib/python3.13/os.py`.
+/// npkFS directory holding the stdlib, `lib/python315.zip`.
 const BUNDLE: &str = "sys/python";
 
 pub fn intent_python(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {

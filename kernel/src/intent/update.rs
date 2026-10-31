@@ -78,7 +78,7 @@ const ASSETS: &[AssetSpec] = &[
     //
     // Not bundled into the installer: like the guest images, Python is
     // something you fetch, not something every USB stick carries.
-    AssetSpec { section: "python:stdlib",       npkfs_path: "sys/python/lib/python313.zip" },
+    AssetSpec { section: "python:stdlib",       npkfs_path: "sys/python/lib/python315.zip" },
 ];
 
 struct AssetEntry {

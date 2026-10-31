@@ -1297,9 +1297,10 @@ sha384=${INITRAMFS_SHA}
         # CPython standard library, placed under release/assets/ by
         # tools/stage-python.sh. Optional: absent entry means OTA leaves
         # whatever is already installed alone.
-        if [ -f "$RELEASE_DIR/assets/python313.zip" ]; then
-            PYLIB_SIZE=$(stat -c%s "$RELEASE_DIR/assets/python313.zip")
-            PYLIB_SHA=$(openssl dgst -sha384 -hex "$RELEASE_DIR/assets/python313.zip" 2>/dev/null | awk '{print $NF}')
+        PYLIB=$(ls "$RELEASE_DIR"/assets/python3*.zip 2>/dev/null | head -1)
+        if [ -n "$PYLIB" ]; then
+            PYLIB_SIZE=$(stat -c%s "$PYLIB")
+            PYLIB_SHA=$(openssl dgst -sha384 -hex "$PYLIB" 2>/dev/null | awk '{print $NF}')
 
             ASSET_MANIFEST="${ASSET_MANIFEST}[python:stdlib]
 size=${PYLIB_SIZE}
@@ -1308,8 +1309,8 @@ sha384=${PYLIB_SHA}
 "
             if [ -f "$KEY_FILE" ]; then
                 openssl dgst -sha384 -sign "$KEY_FILE" \
-                    -out "$RELEASE_DIR/assets/python313.zip.sig" "$RELEASE_DIR/assets/python313.zip"
-                ok "Signed stdlib: python313.zip ($PYLIB_SIZE bytes)"
+                    -out "$PYLIB.sig" "$PYLIB"
+                ok "Signed stdlib: $(basename "$PYLIB") ($PYLIB_SIZE bytes)"
             fi
         fi
 

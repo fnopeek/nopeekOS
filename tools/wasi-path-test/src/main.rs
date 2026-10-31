@@ -24,7 +24,7 @@ fn main() {
     const R: &str = "sys/python";
 
     // ── ordinary descent ──────────────────────────────────────────────
-    ok(R, R, "lib/python313.zip", "sys/python/lib/python313.zip");
+    ok(R, R, "lib/python315.zip", "sys/python/lib/python315.zip");
     ok(R, R, "", "sys/python");
     ok(R, R, ".", "sys/python");
     ok(R, R, "a/./b", "sys/python/a/b");
