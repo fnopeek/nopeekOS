@@ -243,6 +243,17 @@ struct Strings {
     /// `{}` = items deleted before the stop.
     delete_stopped: &'static str,
     busy:           &'static str,
+    // Tabs and bookmarks.
+    new_tab:        &'static str,
+    open_tab:       &'static str,
+    close_tab:      &'static str,
+    sec_bookmarks:  &'static str,
+    bm_here:        &'static str,
+    bm_item:        &'static str,
+    bm_remove:      &'static str,
+    bm_up:          &'static str,
+    /// `{}` = the folder's name.
+    bm_added:       &'static str,
 }
 
 const EN: Strings = Strings {
@@ -327,6 +338,11 @@ const EN: Strings = Strings {
     deleting: "Deleting… {} left · Esc stops",
     delete_stopped: "Stopped after {} deleted",
     busy: "Still deleting, wait or press Esc",
+    new_tab: "New tab", open_tab: "Open in new tab", close_tab: "Close tab",
+    sec_bookmarks: "BOOKMARKS",
+    bm_here: "Bookmark this folder", bm_item: "Add bookmark",
+    bm_remove: "Remove bookmark", bm_up: "Move up",
+    bm_added: "Bookmarked: {}",
 };
 
 
@@ -477,6 +493,8 @@ const ACT_EDIT_OPEN_WITH:     u32 = 8_014;
 const ACT_EDIT_NEW_FILE:      u32 = 8_015;
 const ACT_EDIT_DUPLICATE:     u32 = 8_016;
 const ACT_EDIT_UNDO:          u32 = 8_017;
+const ACT_EDIT_OPEN_TAB:      u32 = 8_018;
+const ACT_EDIT_BOOKMARK:      u32 = 8_019;
 // Dialog buttons (name, confirm, properties).
 const ACT_DIALOG_SUBMIT:      u32 = 8_100;
 const ACT_DIALOG_CANCEL:      u32 = 8_101;
@@ -492,6 +510,17 @@ const ACT_BACKGROUND:         u32 = 8_300;
 // "Open with" app rows, one id per app.
 const ACT_OW_BASE:            u32 = 8_400;
 const ACT_OW_END:             u32 = 9_000;
+// Tab strip: switch, close, and the + button.
+const ACT_TAB_BASE:           u32 = 9_000;
+const ACT_TAB_CLOSE_BASE:     u32 = 9_400;
+const ACT_TAB_NEW:            u32 = 9_800;
+// Sidebar context menu.
+const ACT_SB_OPEN_TAB:        u32 = 9_900;
+const ACT_SB_REMOVE:          u32 = 9_901;
+const ACT_SB_UP:              u32 = 9_902;
+const ACT_GO_BOOKMARK:        u32 = 6_204;
+const TAB_W: u16 = 180;
+const TAB_H: u16 = 28;
 
 // NodeIds for menu-bar labels — used as Popover anchors.
 const NODE_MENU_FILE: u32 = 100;
@@ -512,8 +541,21 @@ struct Place {
     label:  String,
     icon:   IconId,
     path:   String,
-    /// Listed under Devices rather than Places.
-    device: bool,
+    section: Section,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section { Places, Bookmarks, Devices }
+
+/// Where one tab is. The active tab lives in `Loft`'s own fields; this
+/// holds the others.
+struct Tab {
+    current:  String,
+    history:  Vec<String>,
+    forward:  Vec<String>,
+    query:    String,
+    cursor:   Option<String>,
+    marks:    BTreeSet<String>,
 }
 
 struct Entry {
@@ -593,6 +635,8 @@ enum CtxMenu {
     Item(String),
     /// The empty part of the file area.
     Background,
+    /// A sidebar row, by its index in `Loft::sidebar`.
+    Sidebar(usize),
 }
 
 /// One item a file operation acts on.
@@ -754,18 +798,23 @@ struct Loft {
     undo:           Vec<Vec<Step>>,
     paste:          Option<PasteJob>,
     deleting:       Option<DeleteJob>,
+    /// Saved state of every tab; the entry at `active` is stale while the
+    /// tab is shown.
+    tabs:           Vec<Tab>,
+    active:         usize,
+    /// Bookmarked folders, in sidebar order.
+    bookmarks:      Vec<String>,
 }
 
 impl Loft {
     fn new() -> Self {
         let home = read_home_dir();
-        let sidebar = filter_sidebar_to_existing(default_sidebar(&home));
         let mut lf = Loft {
             current:       home.clone(),
             home,
             history:       Vec::new(),
             forward:       Vec::new(),
-            sidebar,
+            sidebar:       Vec::new(),
             entries:       Vec::new(),
             recursive:     Vec::new(),
             recursive_dir: None,
@@ -797,8 +846,19 @@ impl Loft {
             undo:          Vec::new(),
             paste:         None,
             deleting:      None,
+            tabs:          Vec::new(),
+            active:        0,
+            bookmarks:     Vec::new(),
         };
         lf.load_settings();
+        lf.rebuild_sidebar();
+        if let Some(arg) = host::launch_arg().filter(|a| !a.trim().is_empty()) {
+            lf.current = arg.trim().trim_matches('/').to_string();
+            if !dir_exists(&lf.current) && !lf.current.is_empty() {
+                lf.current = parent_path(&lf.current);
+            }
+        }
+        lf.tabs.push(lf.snapshot());
         lf.refresh();
         lf
     }
@@ -1390,8 +1450,7 @@ impl Loft {
         if dir_exists(&trash) { return true; }
         if !fs_mkdir(&trash) { return false; }
         // The sidebar shows only existing places; Trash exists now.
-        self.sidebar = filter_sidebar_to_existing(default_sidebar(&self.home));
-        self.sync_sidebar_from_current();
+        self.rebuild_sidebar();
         true
     }
 
@@ -1838,6 +1897,143 @@ impl Loft {
         }
     }
 
+    // ── Tabs ──────────────────────────────────────────────────────────
+
+    fn snapshot(&self) -> Tab {
+        Tab {
+            current: self.current.clone(),
+            history: self.history.clone(),
+            forward: self.forward.clone(),
+            query:   self.query.clone(),
+            cursor:  self.cursor_name(),
+            marks:   self.marks.clone(),
+        }
+    }
+
+    /// Show tab `i`, saving the one shown so far.
+    fn switch_tab(&mut self, i: usize) {
+        if i >= self.tabs.len() || i == self.active { return; }
+        self.tabs[self.active] = self.snapshot();
+        self.active = i;
+        self.show_active_tab();
+    }
+
+    fn show_active_tab(&mut self) {
+        let t = &self.tabs[self.active];
+        let (cur, hist, fwd, query, cursor, marks) = (t.current.clone(), t.history.clone(),
+            t.forward.clone(), t.query.clone(), t.cursor.clone(), t.marks.clone());
+        self.enter(cur);
+        self.history = hist;
+        self.forward = fwd;
+        self.query.push_str(&query);
+        self.marks = marks;
+        self.refilter();
+        if let Some(name) = cursor { self.select_name(&name); }
+    }
+
+    /// A new tab on `path` (a folder), shown at once.
+    fn new_tab(&mut self, path: String) {
+        self.close_menus();
+        self.tabs[self.active] = self.snapshot();
+        self.tabs.push(Tab {
+            current: path, history: Vec::new(), forward: Vec::new(),
+            query: String::new(), cursor: None, marks: BTreeSet::new(),
+        });
+        self.active = self.tabs.len() - 1;
+        self.show_active_tab();
+    }
+
+    /// Close tab `i`. False if it was the last one (the window goes then).
+    fn close_tab(&mut self, i: usize) -> bool {
+        if self.tabs.len() <= 1 { return false; }
+        if i >= self.tabs.len() { return true; }
+        self.tabs[self.active] = self.snapshot();
+        self.tabs.remove(i);
+        if self.active > i || self.active >= self.tabs.len() {
+            self.active = self.active.saturating_sub(1);
+        }
+        self.show_active_tab();
+        true
+    }
+
+    /// Open the cursor folder in a new tab.
+    fn open_cursor_in_tab(&mut self) {
+        if let Some(t) = self.cursor_target().filter(|t| t.is_dir) { self.new_tab(t.full); }
+    }
+
+    /// `Event::Open` and the launch argument: a folder opens in a new tab,
+    /// a file in a new tab on its folder with the file selected.
+    fn open_path(&mut self, arg: &str) {
+        let path = arg.trim().trim_matches('/').to_string();
+        if path.is_empty() || dir_exists(&path) {
+            self.new_tab(path);
+        } else if path_exists(&path) {
+            let name = basename(&path).to_string();
+            self.new_tab(parent_path(&path));
+            self.select_name(&name);
+        }
+    }
+
+    // ── Sidebar and bookmarks ─────────────────────────────────────────
+
+    /// Places that exist, then the bookmarks, then the devices.
+    fn rebuild_sidebar(&mut self) {
+        let mut places = filter_sidebar_to_existing(default_sidebar(&self.home));
+        let devices: Vec<Place> = places.iter().filter(|p| p.section == Section::Devices)
+            .map(|p| Place { label: p.label.clone(), icon: p.icon, path: p.path.clone(), section: p.section })
+            .collect();
+        places.retain(|p| p.section == Section::Places);
+        for b in &self.bookmarks {
+            let label = if b.is_empty() { "/".to_string() } else { basename(b).to_string() };
+            places.push(Place { label, icon: IconId::Folder, path: b.clone(), section: Section::Bookmarks });
+        }
+        places.extend(devices);
+        self.sidebar = places;
+        self.sync_sidebar_from_current();
+    }
+
+    /// Bookmark `path`, or say it is one already.
+    fn add_bookmark(&mut self, path: String) {
+        self.close_menus();
+        let name = if path.is_empty() { "/".to_string() } else { basename(&path).to_string() };
+        if !self.bookmarks.contains(&path) {
+            self.bookmarks.push(path);
+            self.save_settings();
+            self.rebuild_sidebar();
+        }
+        self.say(fill(s().bm_added, &[&name]), false);
+    }
+
+    /// Ctrl+B / Go menu: toggle a bookmark on the current folder.
+    fn toggle_bookmark_here(&mut self) {
+        let here = self.current.clone();
+        if let Some(i) = self.bookmarks.iter().position(|b| *b == here) {
+            self.close_menus();
+            self.bookmarks.remove(i);
+            self.save_settings();
+            self.rebuild_sidebar();
+        } else {
+            self.add_bookmark(here);
+        }
+    }
+
+    /// Context menu on sidebar row `i`.
+    fn sidebar_op(&mut self, i: usize, id: u32) {
+        self.close_menus();
+        let Some(path) = self.sidebar.get(i).map(|p| p.path.clone()) else { return };
+        let bm = self.bookmarks.iter().position(|b| *b == path);
+        match (id, bm) {
+            (ACT_SB_OPEN_TAB, _) => self.new_tab(path),
+            (ACT_SB_REMOVE, Some(k)) => { self.bookmarks.remove(k); }
+            (ACT_SB_UP, Some(k)) if k > 0 => self.bookmarks.swap(k, k - 1),
+            _ => return,
+        }
+        if id != ACT_SB_OPEN_TAB {
+            self.save_settings();
+            self.rebuild_sidebar();
+        }
+    }
+
     // ── View settings ─────────────────────────────────────────────────
 
     fn grid_cols(&self) -> usize { ZOOM_STEPS[self.zoom].0 }
@@ -1883,6 +2079,7 @@ impl Loft {
                 "order" => self.sort_asc = v != "desc",
                 "hidden" => self.show_hidden = v == "show",
                 "zoom" => if let Ok(z) = v.parse::<usize>() { self.zoom = z.min(ZOOM_STEPS.len() - 1) },
+                "bookmark" => if !v.is_empty() { self.bookmarks.push(v.to_string()) },
                 _ => {}
             }
         }
@@ -1900,6 +2097,11 @@ impl Loft {
         out.push_str("zoom: ");
         push_usize(&mut out, self.zoom);
         out.push('\n');
+        for b in &self.bookmarks {
+            out.push_str("bookmark: ");
+            out.push_str(b);
+            out.push('\n');
+        }
         if !host::store(CONFIG_PATH, out.as_bytes()) { log("[loft] could not save settings"); }
     }
 }
@@ -1919,15 +2121,15 @@ fn render(lf: &Loft) -> Widget {
     // Custom outer column instead of `prefab::panel`: panel's
     // Padding-Xs + Spacing-Md would keep the menu-bar bg from reaching
     // the window edges and put a 12 px gap between menu and divider.
-    let mut children: Vec<Widget> = alloc::vec![
-        menu,
-        Widget::Divider,
+    let mut children: Vec<Widget> = alloc::vec![menu, Widget::Divider];
+    if lf.tabs.len() > 1 { children.push(render_tabbar(lf)); }
+    children.extend([
         toolbar,
         Widget::Divider,
         body,                           // Modifier::Flex(1) — fills
         Widget::Divider,
         render_status_bar(lf),
-    ];
+    ]);
 
     // The open menu's dropdown floats below its label (NodeId anchor);
     // a click outside fires `on_dismiss`.
@@ -1956,6 +2158,80 @@ fn render(lf: &Loft) -> Widget {
         spacing:   Spacing::None.as_u16(),
         align:     Align::Stretch,
         modifiers: alloc::vec![],
+    }
+}
+
+/// One tab per open location, shown once there are two. The active tab
+/// carries the × and the page colour; the + opens the current folder again.
+fn render_tabbar(lf: &Loft) -> Widget {
+    let mut tabs: Vec<Widget> = Vec::with_capacity(lf.tabs.len() + 1);
+    for (i, t) in lf.tabs.iter().enumerate() {
+        let active = i == lf.active;
+        let path = if active { &lf.current } else { &t.current };
+        let title = if path.is_empty() { "/".to_string() } else { basename(path).to_string() };
+        let mut mods: Vec<Modifier> = alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinWidth(TAB_W),
+            Modifier::MaxWidth(TAB_W),
+            Modifier::MinHeight(TAB_H),
+            Modifier::OnClick(ActionId(ACT_TAB_BASE + i as u32)),
+            Modifier::Rounded(Radius::Md.as_u8()),
+        ];
+        if active {
+            mods.push(Modifier::Background(Token::Page));
+        } else {
+            mods.push(Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceMuted),
+                Modifier::Rounded(Radius::Md.as_u8()),
+            ]));
+        }
+        tabs.push(Widget::Row {
+            children: alloc::vec![
+                Widget::Icon { id: IconId::Folder, size: 16, modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint)] },
+                Widget::Text {
+                    content:   title,
+                    style:     TextStyle::Body,
+                    modifiers: if active { alloc::vec![] } else { alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+                },
+                Widget::Spacer { flex: 1 },
+                Widget::Icon {
+                    id:   IconId::X,
+                    size: 16,
+                    modifiers: alloc::vec![
+                        Modifier::OnClick(ActionId(ACT_TAB_CLOSE_BASE + i as u32)),
+                        Modifier::Tint(Token::OnSurfaceMuted),
+                    ],
+                },
+            ],
+            spacing:   Spacing::Sm.as_u16(),
+            align:     Align::Center,
+            modifiers: mods,
+        });
+    }
+    tabs.push(Widget::Text {
+        content:   "+".to_string(),
+        style:     TextStyle::Body,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::MinHeight(TAB_H),
+            Modifier::Tint(Token::OnSurfaceFaint),
+            Modifier::OnClick(ActionId(ACT_TAB_NEW)),
+            Modifier::Rounded(Radius::Md.as_u8()),
+            Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceMuted),
+                Modifier::Rounded(Radius::Md.as_u8()),
+            ]),
+        ],
+    });
+    Widget::Scroll {
+        child: alloc::boxed::Box::new(Widget::Row {
+            children:  tabs,
+            spacing:   Spacing::Xxs.as_u16(),
+            align:     Align::End,
+            modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+        }),
+        axis:      Axis::Horizontal,
+        modifiers: alloc::vec![Modifier::Background(Token::SurfaceElevated)],
     }
 }
 
@@ -1991,8 +2267,14 @@ fn target_items(lf: &Loft, m: &mut MenuBuf, with_open: bool) {
         m.add(s().delete_perm, ACT_EDIT_DELETE, "Del");
     } else {
         if with_open { m.add(s().open, ACT_EDIT_OPEN, "Enter"); }
-        if n == 1 && lf.cursor_target().is_some_and(|t| !t.is_dir) {
-            m.add(s().open_with, ACT_EDIT_OPEN_WITH, "");
+        let one = if n == 1 { lf.cursor_target() } else { None };
+        match &one {
+            Some(t) if t.is_dir => {
+                m.add(s().open_tab, ACT_EDIT_OPEN_TAB, "");
+                if !lf.bookmarks.contains(&t.full) { m.add(s().bm_item, ACT_EDIT_BOOKMARK, ""); }
+            }
+            Some(_) => m.add(s().open_with, ACT_EDIT_OPEN_WITH, ""),
+            None => {}
         }
         m.add(s().copy, ACT_EDIT_COPY, "Ctrl+C");
         if !lf.in_trash_tree() { m.add(s().cut, ACT_EDIT_CUT, "Ctrl+X"); }
@@ -2013,6 +2295,13 @@ fn target_items(lf: &Loft, m: &mut MenuBuf, with_open: bool) {
 
 fn ctx_menu_items(lf: &Loft, ctx: &CtxMenu, m: &mut MenuBuf) {
     match ctx {
+        CtxMenu::Sidebar(i) => {
+            m.add(s().open_tab, ACT_SB_OPEN_TAB, "");
+            if lf.sidebar.get(*i).is_some_and(|p| p.section == Section::Bookmarks) {
+                m.add(s().bm_up, ACT_SB_UP, "");
+                m.add(s().bm_remove, ACT_SB_REMOVE, "");
+            }
+        }
         CtxMenu::Item(_) => {
             target_items(lf, m, true);
             if lf.in_trash() { m.add(s().empty_trash, ACT_EDIT_EMPTY_TRASH, ""); }
@@ -2045,8 +2334,10 @@ fn file_menu_items(lf: &Loft, m: &mut MenuBuf) {
         m.add(s().new_folder, ACT_EDIT_NEW_FOLDER, "Ctrl+Shift+N");
         m.add(s().new_file, ACT_EDIT_NEW_FILE, "");
     }
+    m.add(s().new_tab, ACT_TAB_NEW, "Ctrl+T");
     m.add(s().refresh, ACT_EDIT_REFRESH, "F5");
     if lf.in_trash() { m.add(s().empty_trash, ACT_EDIT_EMPTY_TRASH, ""); }
+    if lf.tabs.len() > 1 { m.add(s().close_tab, ACT_TAB_CLOSE_BASE + lf.active as u32, "Ctrl+W"); }
     m.add(s().quit, ACT_FILE_QUIT, "");
 }
 
@@ -2320,6 +2611,8 @@ fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
             m.add(s().go_home, ACT_GO_HOME, "");
             m.add(s().go_filesystem, ACT_GO_FILESYSTEM, "");
             m.add(s().go_location, ACT_GO_LOCATION, "Ctrl+L");
+            let marked = lf.bookmarks.contains(&lf.current);
+            m.add(if marked { s().bm_remove } else { s().bm_here }, ACT_GO_BOOKMARK, "Ctrl+B");
             (NODE_MENU_GO, m.widget())
         }
         OpenMenu::Help => (
@@ -2488,6 +2781,7 @@ fn render_body(lf: &Loft) -> Widget {
     // + Devices (Filesystem/Trash). `nav_row` selected-state lights
     // up when the current dir matches a sidebar path verbatim.
     let mut places_rows: Vec<Widget> = Vec::new();
+    let mut bookmark_rows: Vec<Widget> = Vec::new();
     let mut devices_rows: Vec<Widget> = Vec::new();
     for (i, p) in lf.sidebar.iter().enumerate() {
         let selected = lf.sidebar_sel == Some(i);
@@ -2496,19 +2790,24 @@ fn render_body(lf: &Loft) -> Widget {
             Some(ActionId(ACT_SIDEBAR_CLICK_BASE + i as u32)),
             Some(ActionId(ACT_SIDEBAR_HOVER_BASE + i as u32)),
         );
-        if p.device { devices_rows.push(row); }
-        else { places_rows.push(row); }
+        match p.section {
+            Section::Places => places_rows.push(row),
+            Section::Bookmarks => bookmark_rows.push(row),
+            Section::Devices => devices_rows.push(row),
+        }
     }
     // Sections scroll; the capacity meter is a fixed footer below that
     // scroll, so it stays glued to the bottom edge at any window height.
     // Inside the scrolled column (or with `prefab::sidebar_pane`, which
     // appends its own trailing Spacer) it would float in the middle of
     // the leftover space.
+    let mut section_list = alloc::vec![prefab::sidebar_section(s().sec_places, places_rows)];
+    if !bookmark_rows.is_empty() {
+        section_list.push(prefab::sidebar_section(s().sec_bookmarks, bookmark_rows));
+    }
+    section_list.push(prefab::sidebar_section(s().sec_devices, devices_rows));
     let sections = Widget::Column {
-        children:  alloc::vec![
-            prefab::sidebar_section(s().sec_places,  places_rows),
-            prefab::sidebar_section(s().sec_devices, devices_rows),
-        ],
+        children:  section_list,
         spacing:   Spacing::None.as_u16(),
         align:     Align::Stretch,
         modifiers: alloc::vec![],
@@ -2882,6 +3181,12 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         Event::Key(KeyCode::Char(b)) if b.is_ascii_graphic() => { lf.type_ahead(b); Outcome::Rerender }
         Event::Chord { letter: b'a', .. } => { lf.select_all(); Outcome::Rerender }
         Event::Chord { letter: b'l', .. } => { lf.open_location(); Outcome::Rerender }
+        Event::Chord { letter: b't', .. } => { let here = lf.current.clone(); lf.new_tab(here); Outcome::Rerender }
+        Event::Chord { letter: b'w', .. } => {
+            if lf.close_tab(lf.active) { Outcome::Rerender } else { Outcome::Exit }
+        }
+        Event::Chord { letter: b'b', .. } => { lf.toggle_bookmark_here(); Outcome::Rerender }
+        Event::Open(arg) => { lf.open_path(&arg); Outcome::Rerender }
         Event::Chord { letter: b'h', .. } => { lf.toggle_hidden(); Outcome::Rerender }
         Event::Chord { letter: b'd', .. } => { if lf.idle_fs() { lf.duplicate(); } Outcome::Rerender }
         Event::Chord { letter: b'z', shift: false, .. } => { if lf.idle_fs() { lf.undo_last(); } Outcome::Rerender }
@@ -3002,6 +3307,12 @@ fn handle_context(lf: &mut Loft, id: u32) -> Outcome {
             lf.close_menus();
             lf.ctx = Some(CtxMenu::Background);
         }
+        ACT_SIDEBAR_CLICK_BASE..ACT_SIDEBAR_HOVER_BASE => {
+            let i = (id - ACT_SIDEBAR_CLICK_BASE) as usize;
+            if i >= lf.sidebar.len() { return Outcome::Idle; }
+            lf.close_menus();
+            lf.ctx = Some(CtxMenu::Sidebar(i));
+        }
         ACT_CTX_DISMISS | ACT_MENU_DISMISS => lf.close_menus(),
         _ => return Outcome::Idle,
     }
@@ -3030,15 +3341,20 @@ fn handle_file_op(lf: &mut Loft, id: u32) {
         ACT_EDIT_NEW_FILE    => lf.open_new_file(),
         ACT_EDIT_DUPLICATE   => lf.duplicate(),
         ACT_EDIT_UNDO        => lf.undo_last(),
+        ACT_EDIT_OPEN_TAB    => lf.open_cursor_in_tab(),
+        ACT_EDIT_BOOKMARK    => {
+            if let Some(t) = lf.cursor_target().filter(|t| t.is_dir) { lf.add_bookmark(t.full); }
+        }
         _ => {}
     }
 }
 
 fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
-    if (ACT_EDIT_COPY..=ACT_EDIT_UNDO).contains(&id) {
+    if (ACT_EDIT_COPY..=ACT_EDIT_BOOKMARK).contains(&id) {
         // Changing files while a delete runs could race it; looking is fine.
         let looks = matches!(id, ACT_EDIT_OPEN | ACT_EDIT_SELECT_ALL | ACT_EDIT_COPY_PATH
-            | ACT_EDIT_PROPERTIES | ACT_EDIT_REFRESH | ACT_EDIT_OPEN_WITH | ACT_EDIT_COPY);
+            | ACT_EDIT_PROPERTIES | ACT_EDIT_REFRESH | ACT_EDIT_OPEN_WITH | ACT_EDIT_COPY
+            | ACT_EDIT_OPEN_TAB | ACT_EDIT_BOOKMARK);
         if looks || lf.idle_fs() { handle_file_op(lf, id); }
         return Outcome::Rerender;
     }
@@ -3093,6 +3409,22 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             Outcome::Rerender
         }
         ACT_GO_LOCATION => { lf.open_location(); Outcome::Rerender }
+        ACT_GO_BOOKMARK => { lf.toggle_bookmark_here(); Outcome::Rerender }
+        ACT_TAB_NEW => { let here = lf.current.clone(); lf.new_tab(here); Outcome::Rerender }
+        ACT_TAB_BASE..ACT_TAB_CLOSE_BASE => {
+            lf.close_menus();
+            lf.switch_tab((id - ACT_TAB_BASE) as usize);
+            Outcome::Rerender
+        }
+        ACT_TAB_CLOSE_BASE..ACT_TAB_NEW => {
+            lf.close_menus();
+            if lf.close_tab((id - ACT_TAB_CLOSE_BASE) as usize) { Outcome::Rerender } else { Outcome::Exit }
+        }
+        ACT_SB_OPEN_TAB..=ACT_SB_UP => {
+            if let Some(CtxMenu::Sidebar(i)) = lf.ctx.clone() { lf.sidebar_op(i, id); }
+            lf.close_menus();
+            Outcome::Rerender
+        }
         ACT_LOCATION_SUBMIT => { lf.submit_location(); Outcome::Rerender }
         ACT_GO_HOME => {
             lf.open_menu = None;
@@ -3153,15 +3485,16 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
 // ── Sidebar helpers ───────────────────────────────────────────────────
 
 fn default_sidebar(home: &str) -> Vec<Place> {
-    let place = |label: &str, icon, path: String, device| Place { label: label.into(), icon, path, device };
+    use Section::{Devices, Places};
+    let place = |label: &str, icon, path: String, section| Place { label: label.into(), icon, path, section };
     alloc::vec![
-        place(s().place_home,      IconId::Home,       home.into(),                         false),
-        place(s().place_documents, IconId::FileText,   alloc::format!("{}/documents", home), false),
-        place(s().place_downloads, IconId::Download,   alloc::format!("{}/downloads", home), false),
-        place(s().place_pictures,  IconId::Image,      alloc::format!("{}/pictures",  home), false),
-        place(s().place_projects,  IconId::Folders,    alloc::format!("{}/projects",  home), false),
-        place(s().go_filesystem,   IconId::HardDrives, String::new(),                        true),
-        place(s().place_trash,     IconId::Trash,      join(home, TRASH_DIR),                true),
+        place(s().place_home,      IconId::Home,       home.into(),                         Places),
+        place(s().place_documents, IconId::FileText,   alloc::format!("{}/documents", home), Places),
+        place(s().place_downloads, IconId::Download,   alloc::format!("{}/downloads", home), Places),
+        place(s().place_pictures,  IconId::Image,      alloc::format!("{}/pictures",  home), Places),
+        place(s().place_projects,  IconId::Folders,    alloc::format!("{}/projects",  home), Places),
+        place(s().go_filesystem,   IconId::HardDrives, String::new(),                        Devices),
+        place(s().place_trash,     IconId::Trash,      join(home, TRASH_DIR),                Devices),
     ]
 }
 
