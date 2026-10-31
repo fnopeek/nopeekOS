@@ -863,6 +863,7 @@ pub fn menu_bar_with_icon(
         });
     }
     children.push(Widget::Spacer { flex: 1 });
+    children.push(window_controls_reserve());
     Widget::Row {
         children,
         spacing: Spacing::Xxs.as_u16(),
@@ -877,6 +878,24 @@ pub fn menu_bar_with_icon(
 
 /// Menu-bar band height (docs/spec/UI_REFRESH.md §5).
 const MENU_BAR_H: u16 = 36;
+
+/// Width the compositor's window controls take at the right end of the top
+/// bar (docs/spec/UI_REFRESH.md §4). A bar that is not `menu_bar_with_icon`
+/// ends with `window_controls_reserve()` so no item sits under them.
+pub const WINDOW_CONTROLS_W: u16 = 115;
+
+/// Empty space of `WINDOW_CONTROLS_W`, the last child of a top bar.
+pub fn window_controls_reserve() -> Widget {
+    Widget::Row {
+        children: Vec::new(),
+        spacing: 0,
+        align: Align::Center,
+        modifiers: vec![
+            Modifier::MinWidth(WINDOW_CONTROLS_W),
+            Modifier::MaxWidth(WINDOW_CONTROLS_W),
+        ],
+    }
+}
 
 /// Build a popover-content surface from a list of menu items.
 /// Each item is `(label, action_id)`. The wrapper is a SurfaceElevated

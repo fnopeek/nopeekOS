@@ -67,6 +67,9 @@ pub enum Source {
     Surface(u32),
     /// A terminal window's text layer (alpha: set where text is).
     TermText(u32),
+    /// A line of compositor text (a window control's hint), same format as
+    /// `TermText`.
+    Label(u32),
 }
 
 /// How a source fills a destination rectangle of a different size.
@@ -106,9 +109,9 @@ pub enum Item {
     Text { src: Source, dst: Rect },
     /// A colour over what lies beneath, `alpha` 0..=255, rounded corners.
     Fill { rect: Rect, color: u32, alpha: u32, radius: u32 },
-    /// The window close glyph (`icons::IconId::X`), `size` px, centred in
-    /// `rect`.
-    CloseGlyph { rect: Rect, size: u32, color: u32 },
+    /// An atlas icon, `size` px, centred in `rect`, its coverage scaled by
+    /// `alpha` 0..=255 (`glyph_alpha`).
+    Glyph { rect: Rect, icon: crate::shade::widgets::abi::IconId, size: u32, color: u32, alpha: u32 },
 }
 
 #[derive(Clone)]
@@ -222,10 +225,10 @@ fn paint(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &R
                 }
             }
         }
-        Item::CloseGlyph { rect, size, color } => {
+        Item::Glyph { rect, icon, size, color, alpha } => {
             let area = rect.intersect(clip);
-            if area.is_empty() { return; }
-            crate::gui::icons::with_alpha(crate::shade::widgets::abi::IconId::X, size as u16, |asz, glyph| {
+            if area.is_empty() || alpha == 0 { return; }
+            crate::gui::icons::with_alpha(icon, size as u16, |asz, glyph| {
                 let asz = asz as u32;
                 if asz == 0 || glyph.len() < (asz * asz) as usize { return; }
                 let ox = rect.x + rect.w.saturating_sub(asz) / 2;
@@ -233,7 +236,7 @@ fn paint(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &R
                 let g = Rect::new(ox, oy, asz, asz).intersect(&area);
                 for y in g.y..g.y1() {
                     for x in g.x..g.x1() {
-                        let a = glyph[((y - oy) * asz + (x - ox)) as usize] as u32;
+                        let a = glyph_alpha(glyph[((y - oy) * asz + (x - ox)) as usize], alpha) as u32;
                         if a > 0 {
                             render::blend_pixel(t, info, x, y, color, a + (a >> 7));
                         }
@@ -242,6 +245,12 @@ fn paint(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &R
             });
         }
     }
+}
+
+/// Glyph coverage `a` scaled by an item's `alpha`. The GPU executor gets the
+/// mask already scaled by this, so both paint the same bytes.
+pub fn glyph_alpha(a: u8, alpha: u32) -> u8 {
+    if alpha >= 255 { a } else { ((a as u32 * alpha + 127) / 255) as u8 }
 }
 
 /// The source pixel shown at `(lx, ly)` of a `dw` x `dh` destination.

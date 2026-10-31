@@ -356,15 +356,15 @@ app's tree by one round trip, which is why it is parked and not dropped.
 
 ## 4. Window chrome
 
-The compositor draws the border, the focus halo and a close button. It
-draws no title and no shadow; the app fills the inside.
+The compositor draws the border, the focus halo and the window controls.
+It draws no title and no shadow; the app fills the inside.
 
 | Property | Value |
 |---|---|
 | Gap between tiles | `shade.gaps`, default 8 |
 | Border width | `shade.border`, default 1 |
 | Corner radius | `shade.rounding`, default 10; content radius = rounding - border |
-| Fullscreen window | no border, square corners, no close button |
+| Fullscreen window | no border, square corners, controls only at the top edge |
 
 ### Border colour
 
@@ -386,16 +386,37 @@ A colour pinned with `shade.border_active` / `shade.border_inactive`
 | Colour | wallpaper accent (section 2, `auto` row) if a wallpaper is set, else the focused border colour |
 | Strength | steady 100/255; on a focus change it starts at 255 and settles over 240 ms |
 
-### Close button
+### Window controls
 
-Drawn on every tiled or floating window except panels, overlays,
-`Surface` windows and fullscreen windows.
+A pill of buttons at the right end of the window's top band, drawn after
+the content so it is always on top. Clicks inside it never reach the
+app. Drawn on every tiled or floating window except panels, overlays,
+popups and `Surface` windows.
+
+| Button | Does | Key | Glyph |
+|---|---|---|---|
+| Fullscreen | fullscreen on (off on the top-edge pill) | Mod+F | `ArrowsOut` (`ArrowsIn` when fullscreen) |
+| Float | floating, or back into the tiling | Mod+V | the state it leads to: `Browsers`, `SquaresFour` |
+| Split | flip the split the window sits on | Mod+J | the orientation it flips to: `SquareSplitVertical`, `SquareSplitHorizontal` |
+| Close | close (`request_close_window`) | Mod+Q | `X` |
 
 | Property | Value |
 |---|---|
-| Hit box | 26 x 26 |
-| Position | centred in a 36 px band at the top; right inset equal to the top inset (5) |
-| Glyph | `X`, 16 px, `OnSurfaceMuted` (glass palette on `loop`) |
+| Buttons | 26 x 26, 2 apart, left to right Fullscreen, Float, Split, Close |
+| Position | centred in the 36 px band, right inset equal to the top inset (5) |
+| Reserve | 4 x 26 + 3 x 2 + 5 = 115 (`WINDOW_CONTROLS_W`, section 5) |
+| Glyph | 16 px, `OnSurfaceMuted` (glass palette on `loop`) |
+| Unfocused window | glyphs at 129/255, full while the pointer is on the pill |
+| Disabled | Split while the window floats or has no split: drawn at 80/255, not removed |
+| Hover | `SurfaceHover` fill, radius 4; Close in `Danger` (glyph, and its fill at 56/255) |
+| Hint | after 400 ms on a button: label and key (`Full screen · Super+F`), in `lang`, the key spelled from `shade.mod`; `Surface` text on `OnSurface` at 235/255, radius 6, below the button |
+| Narrow window | content narrower than 345: `More` (`DotsThree`) and Close; `More` opens a menu with the other three, their labels and keys |
+| Fullscreen | no pill in the band; the pointer resting 300 ms on the top screen row brings the pill in at the top right on a `SurfaceElevated` backdrop, and it leaves with the pointer |
+
+`shade.controls` sets how much is shown: `full` (default) all four,
+`compact` only Close until the pointer is over the corner, `none` no
+buttons. The reserve is the same in every mode, so a change never moves
+the app's layout.
 
 ### Glass
 
@@ -429,14 +450,18 @@ The screen dips towards black at 110/255 and drains quadratically over
 
 ## 5. App window structure
 
-The compositor places the close button in a 36 px top band, so apps put
-their top band at that height. `prefab::menu_bar_with_icon` builds it:
+The compositor places the window controls in a 36 px top band, so apps
+put their top band at that height and leave its right end free.
+`prefab::menu_bar_with_icon` builds it:
 
 | Band | Value |
 |---|---|
 | Menu bar | min height 36, `SurfaceElevated`, padding 4, 2 px between items |
 | App icon | 16 px, `Accent`, padding 4 |
 | Menu labels | as in section 3, followed by a flex spacer |
+| Reserve | `window_controls_reserve()`: empty, exactly `WINDOW_CONTROLS_W` (115) wide, last |
+
+A top band built by hand ends with `window_controls_reserve()` too.
 
 The rest is app code. The values the first-party apps share:
 
@@ -469,6 +494,7 @@ re-tiles the workspace.
 | `shade.border_active` | hex | `AccentLine` | Focused border, pinned (wins over the wallpaper) |
 | `shade.border_inactive` | hex | `Border` | Unfocused border, pinned (wins over the wallpaper) |
 | `shade.glow` | px, 0 off | 6 | Focus halo width |
+| `shade.controls` | `full`, `compact`, `none` | `full` | Window controls (section 4) |
 | `shade.bar_margin` | px | 6 | Gap between a strut panel and the screen edge |
 | `shade.blur` | 0..8 | auto | Glass blur |
 | `shade.opacity` | 0..256 | auto | `loop` glass fill |

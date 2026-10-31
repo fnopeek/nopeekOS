@@ -604,7 +604,12 @@ fn render(t: &Tune) -> Widget {
     // Nothing in the folder and nothing opened: no player to show, only
     // the way to a file.
     if t.files.is_empty() && t.src.is_none() && t.video.is_none() {
-        return empty_state(t);
+        return Widget::Column {
+            children: alloc::vec![top_bar(), empty_state(t)],
+            spacing: 0,
+            align: Align::Stretch,
+            modifiers: alloc::vec![Modifier::Flex(1)],
+        };
     }
 
     let body = match t.video.as_ref() {
@@ -689,12 +694,14 @@ fn render(t: &Tune) -> Widget {
             // upper layer above the bar rather than on the picture: hit testing
             // takes the first child that hits, and the picture covers the whole
             // area — the buttons would be dead beneath it.
-            let mut over = alloc::vec![Widget::Column {
+            let mut over = Vec::new();
+            if t.controls_shown { over.push(top_bar()); }
+            over.push(Widget::Column {
                 children: Vec::new(),
                 spacing: 0,
                 align: Align::Stretch,
                 modifiers: alloc::vec![Modifier::Flex(1), Modifier::OnClick(ActionId(A_PLAY_PAUSE))],
-            }];
+            });
             if t.controls_shown { over.push(controls); }
             let layers = alloc::vec![body, Widget::Column {
                 children: over,
@@ -707,7 +714,7 @@ fn render(t: &Tune) -> Widget {
                 modifiers: alloc::vec![Modifier::Flex(1), Modifier::OnMotion(ActionId(A_MOTION))],
             }]
         }
-        None => alloc::vec![body, controls],
+        None => alloc::vec![top_bar(), body, controls],
     };
     if t.vol_open {
         children.push(Widget::Popover {
@@ -808,6 +815,11 @@ fn audio_body(t: &Tune, title: &str, artist: &str) -> Widget {
         align: Align::Stretch,
         modifiers: alloc::vec![Modifier::Flex(1)],
     }
+}
+
+/// The window's top bar; over a picture it comes and goes with the controls.
+fn top_bar() -> Widget {
+    prefab::menu_bar_with_icon(IconId::MusicNotes, &[("Open".to_string(), ActionId(A_OPEN))], &[])
 }
 
 fn volume_icon(v: u8) -> IconId {

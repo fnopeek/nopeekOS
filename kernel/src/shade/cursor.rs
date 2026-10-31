@@ -393,14 +393,6 @@ impl MouseState {
         self.y = (screen_h / 2) as i32;
     }
 
-    /// Update position from relative mouse movement. Clamps to screen.
-    pub fn update(&mut self, dx: i8, dy: i8, buttons: u8) {
-        self.prev_buttons = self.buttons;
-        self.buttons = buttons;
-        self.x = (self.x + dx as i32).clamp(0, self.screen_w as i32 - 1);
-        self.y = (self.y + dy as i32).clamp(0, self.screen_h as i32 - 1);
-    }
-
     pub fn left_clicked(&self) -> bool {
         (self.buttons & 1) != 0 && (self.prev_buttons & 1) == 0
     }

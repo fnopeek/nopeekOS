@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod widgets;
 pub mod surface;
 pub mod clipboard;
+pub mod controls;
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use spin::Mutex;
@@ -998,29 +999,13 @@ pub fn handle_action(action: input::ShadeAction) {
         }
         ShadeAction::ToggleFullscreen => {
             with_compositor(|comp| {
-                if let Some(id) = comp.focused {
-                    if let Some(win) = comp.window_mut(id) {
-                        win.state = match win.state {
-                            window::WindowState::Fullscreen => window::WindowState::Tiled,
-                            _ => window::WindowState::Fullscreen,
-                        };
-                    }
-                    comp.retile();
-                }
+                if let Some(id) = comp.focused { comp.toggle_fullscreen(id); }
             });
             render_frame();
         }
         ShadeAction::ToggleFloating => {
             with_compositor(|comp| {
-                if let Some(id) = comp.focused {
-                    if let Some(win) = comp.window_mut(id) {
-                        win.state = match win.state {
-                            window::WindowState::Floating => window::WindowState::Tiled,
-                            _ => window::WindowState::Floating,
-                        };
-                    }
-                    comp.retile();
-                }
+                if let Some(id) = comp.focused { comp.toggle_floating(id); }
             });
             render_frame();
         }
@@ -1358,6 +1343,11 @@ pub fn poll_render() {
         render_frame();
     }
 
+    // Hint and fullscreen-edge timers of the window controls.
+    if with_compositor(|comp| comp.tick_controls(crate::interrupts::ticks())).unwrap_or(false) {
+        render_damaged();
+    }
+
     // A power-off or restart waiting for apps and the guest.
     crate::shutdown::tick();
 
@@ -1624,6 +1614,12 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // Hover routing — deduplicated per window. Runs on every move so the
     // app can react even when no buttons changed.
     let (hx, hy) = cursor::atomic_pos();
+    let controls_changed = with_compositor(|comp| {
+        comp.drag.is_none() && comp.controls_pointer(hx, hy, crate::interrupts::ticks())
+    }).unwrap_or(false);
+    if controls_changed {
+        render_damaged();
+    }
     let hover_target = with_compositor(|comp| {
         if comp.drag.is_some() { return None; }
         let wid = comp.window_at(hx, hy)?;
@@ -1747,7 +1743,9 @@ fn update_terminal_selection(mx: i32, my: i32, lmb: bool, was: bool) {
     }
     if lmb && !was {
         if let Some(hit) = with_compositor(|c| c.scroll_hit_at(mx, my)).flatten() {
-            if hit.is_terminal {
+            let on_controls = hit.close_rect.is_some_and(|(bx, by, bw, bh)|
+                mx >= bx as i32 && mx < (bx + bw) as i32 && my >= by as i32 && my < (by + bh) as i32);
+            if hit.is_terminal && !on_controls {
                 let (rx, ry, rw, rh) = hit.text_rect;
                 if mx >= rx && mx < rx + rw as i32 && my >= ry && my < ry + rh as i32 {
                     // Collapsed selection draws nothing; the click's focus

@@ -89,6 +89,14 @@ pub fn wasm_names_on_core(cid: usize) -> (alloc::string::String, u64) {
     (out, n)
 }
 
+/// What runs in the foreground of terminal `idx`: the newest intent or
+/// module of the given kind on it.
+pub fn newest_on_terminal(idx: u8, kind: u8) -> Option<alloc::string::String> {
+    PROCS.lock().values().rev()
+        .find(|p| p.terminal_idx == idx && p.kind == kind)
+        .map(|p| p.name.clone())
+}
+
 /// The name of process `pid`, if it runs.
 pub fn name(pid: u32) -> Option<alloc::string::String> {
     PROCS.lock().get(&pid).map(|p| p.name.clone())

@@ -112,6 +112,12 @@ const ICONS: &[IconEntry] = &[
     IconEntry { id: 58, svg: "wifi-none.svg",         name: "WifiNone" },
     IconEntry { id: 59, svg: "wifi-slash.svg",        name: "WifiSlash" },
     IconEntry { id: 60, svg: "network.svg",           name: "Network" },
+    IconEntry { id: 61, svg: "arrows-out.svg",              name: "ArrowsOut" },
+    IconEntry { id: 62, svg: "arrows-in.svg",               name: "ArrowsIn" },
+    IconEntry { id: 63, svg: "browsers.svg",                name: "Browsers" },
+    IconEntry { id: 64, svg: "square-split-horizontal.svg", name: "SquareSplitHorizontal" },
+    IconEntry { id: 65, svg: "square-split-vertical.svg",   name: "SquareSplitVertical" },
+    IconEntry { id: 66, svg: "dots-three.svg",              name: "DotsThree" },
 ];
 
 /// Rasterized sizes, in actual pixels (not HiDPI-scaled).

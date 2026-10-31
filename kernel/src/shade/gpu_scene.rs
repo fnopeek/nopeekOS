@@ -282,6 +282,7 @@ fn source_key(s: Source) -> (u8, u32) {
         Source::Widget(i) => (0, i),
         Source::Surface(i) => (1, i),
         Source::TermText(i) => (2, i),
+        Source::Label(i) => (3, i),
     }
 }
 
@@ -405,7 +406,7 @@ fn kinds_at(frame: &Scene, x: u32, y: u32) -> alloc::string::String {
             Item::Panel { dst, .. } => ("Panel", Some(dst)),
             Item::Text { dst, .. } => ("Text", Some(dst)),
             Item::Fill { rect, .. } => ("Fill", Some(rect)),
-            Item::CloseGlyph { rect, .. } => ("CloseGlyph", Some(rect)),
+            Item::Glyph { rect, .. } => ("Glyph", Some(rect)),
         };
         if r.is_none_or(|r| !r.intersect(&p).is_empty()) {
             let _ = write!(s, "{}{}", if s.is_empty() { "" } else { " " }, name);
@@ -510,9 +511,10 @@ fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage: &[Rect])
                 r(&mut w, rect);
                 w[5..8].copy_from_slice(&[color, alpha, radius]);
             }
-            Item::CloseGlyph { rect, size, color } => {
-                let glyph = crate::gui::icons::with_alpha(crate::shade::widgets::abi::IconId::X, size as u16,
-                    |asz, a| (asz as u32, a.to_vec()));
+            Item::Glyph { rect, icon, size, color, alpha } => {
+                if alpha == 0 { continue; }
+                let glyph = crate::gui::icons::with_alpha(icon, size as u16,
+                    |asz, a| (asz as u32, a.iter().map(|&m| scene::glyph_alpha(m, alpha)).collect::<Vec<u8>>()));
                 // The CPU paints nothing for a missing or short glyph either.
                 let Some((asz, a)) = glyph else { continue };
                 if asz == 0 || a.len() < (asz * asz) as usize { continue; }

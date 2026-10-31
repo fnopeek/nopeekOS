@@ -12,6 +12,7 @@ use super::scene::{self, Fit, Item, Rect, Scene, Source};
 use super::window::{Window, WindowId, WindowState};
 use super::terminal;
 use super::cursor::MouseState;
+use super::controls;
 
 /// Focus halo. The focused tile bleeds a little accent into the gap around
 /// it: a 1 px border in a wallpaper-derived colour is invisible on half the
@@ -39,62 +40,6 @@ pub struct Glow {
 
 impl Glow {
     pub const NONE: Glow = Glow { band: 0, alpha: 0, color: 0 };
-}
-
-/// Platform close button — the compositor draws a small "X" affordance in
-/// the top-right corner of every real (non-panel) window so mouse users
-/// can close it without remembering Mod+Q. Not per-app: provided here
-/// once for all windows. Edge of the (square) hit box at 1× scale.
-const CLOSE_BTN_BOX: u32 = 26;
-/// Assumed height of the app's top menu/toolbar band (loft/spell:
-/// `Datei Bearbeiten …`) at 1× — the X is vertically centred in this
-/// band so it lines up with the menu labels instead of clinging to the
-/// very top edge. Windows without a menu bar (browser, terminal) just
-/// get the X centred in their top ~band; close enough.
-const CLOSE_BTN_BAND: u32 = 36;
-/// Close-X glyph size at 1×.
-const CLOSE_BTN_GLYPH: u32 = 16;
-
-/// Screen rect `(x, y, w, h)` of a window's platform close button, or
-/// `None` for the panel (managed chrome, never closable here)
-/// and windows too narrow to host the button. Shared by the renderer and
-/// the click hit-test so the drawn disc and the clickable area always
-/// coincide.
-/// The X follows the UI scale, like the menu labels it lines up with.
-fn close_button_rect(win: &Window, border: u32)
-    -> Option<(u32, u32, u32, u32)>
-{
-    // No X on managed chrome (the panel), on transient overlays (drun and
-    // other launchers — dismissed with Esc, not closed), or on Surface
-    // windows (the microvm browser owns its own close via its UI).
-    if win.is_panel || win.is_overlay { return None; }
-    if win.kind == crate::shade::window::WindowKind::Surface { return None; }
-    // A fullscreen window has no chrome; the X would float over its content.
-    if win.state == WindowState::Fullscreen { return None; }
-    use crate::shade::widgets::scale;
-    let box_px = scale::len(CLOSE_BTN_BOX);
-    // The box is centred vertically in the app's menu-bar band so the X
-    // aligns with `Datei / Bearbeiten / …` rather than the top edge. Reuse
-    // that same vertical inset as the right-edge margin → equal gap on the
-    // top, bottom and right sides.
-    let band = scale::len(CLOSE_BTN_BAND);
-    let inset = band.saturating_sub(box_px) / 2;
-    if win.width <= border * 2 + inset + box_px { return None; }
-    let bx = win.x + win.width - border - inset - box_px;
-    let by = win.y + border + inset;
-    Some((bx, by, box_px, box_px))
-}
-
-/// Colour of a window's close glyph: secondary text weight, like the menu
-/// labels beside it; on loop's glass it follows the glass palette.
-fn close_glyph_color(win: &Window) -> u32 {
-    use crate::shade::widgets::abi::Token;
-    let c = if matches!(win.kind, crate::shade::window::WindowKind::Terminal) {
-        crate::shade::widgets::palette::resolve_glass(Token::OnSurfaceMuted)
-    } else {
-        crate::shade::widgets::palette::resolve(Token::OnSurfaceMuted)
-    };
-    c & 0x00FF_FFFF
 }
 
 /// Swap animation state — windows glide from old to new position.
@@ -125,7 +70,7 @@ pub struct ScrollHit {
     pub text_rect: (i32, i32, u32, u32),
     /// Monospace cell height (px) — terminal rows = text_rect.h / char_h.
     pub char_h: u32,
-    /// The window's close-button rect, to exclude from the bar strip.
+    /// The window controls' corner, to exclude from the bar strip.
     pub close_rect: Option<(u32, u32, u32, u32)>,
 }
 
@@ -235,6 +180,11 @@ pub struct Compositor {
     pub popup_prev_focus: Option<WindowId>,
     /// Text layer of each terminal window, by window id.
     pub term_layers: alloc::collections::BTreeMap<u32, PixelBuffer>,
+    /// Pointer state of the window controls.
+    pub controls: controls::State,
+    /// Screen areas to repaint on the next partial render that no dirty
+    /// window covers (a hint or menu of the window controls).
+    pub extra_damage: Vec<Rect>,
 }
 
 #[allow(dead_code)]
@@ -277,6 +227,8 @@ impl Compositor {
             bottom_strut: None,
             popup_prev_focus: None,
             term_layers: alloc::collections::BTreeMap::new(),
+            controls: controls::State::default(),
+            extra_damage: Vec::new(),
         }
     }
 
@@ -540,7 +492,7 @@ impl Compositor {
     /// The window holding the split line the focused tile sits on, whatever
     /// its orientation — its own if it has one, else the one its last child
     /// drew. Used by `toggle_split`.
-    fn split_line_owner(&self, id: WindowId) -> Option<WindowId> {
+    pub(super) fn split_line_owner(&self, id: WindowId) -> Option<WindowId> {
         let w = self.windows.iter().find(|w| w.id == id)?;
         if w.split_from.filter(|p| self.is_tiled(*p)).is_some() {
             return Some(id);
@@ -1051,6 +1003,7 @@ impl Compositor {
     /// `shade::needs_tick`).
     pub fn needs_tick(&self) -> bool {
         self.animation.is_some() || self.flash.is_some() || self.focus_glow.is_some()
+            || self.controls_need_tick()
     }
 
     /// True iff any visible window on the active workspace is modal.
@@ -1726,6 +1679,7 @@ impl Compositor {
     /// The whole frame, composed into `target`.
     pub fn render(&mut self, target: *mut u8, info: &FbInfo) {
         self.compose(target, info, alloc::vec![Rect::new(0, 0, info.width, info.height)]);
+        self.extra_damage.clear();
         for win in &mut self.windows {
             win.dirty = false;
         }
@@ -1748,11 +1702,16 @@ impl Compositor {
     }
 
     /// Text rect of a terminal window: its content rect less the padding.
-    fn term_text_rect(&self, win: &Window) -> Rect {
+    /// A fullscreen terminal has no bar: there are no controls to hold.
+    pub(super) fn term_text_rect(&self, win: &Window) -> Rect {
         let pad = term_pad();
-        Rect::new(win.content_x(self.border) + pad, win.content_y(self.border) + pad,
-            win.content_w(self.border).saturating_sub(pad * 2),
-            win.content_h(self.border).saturating_sub(pad * 2))
+        let b = self.effective_border(win);
+        let bar = if win.state == WindowState::Fullscreen { 0 } else { controls::loop_bar_h() };
+        let ch = win.content_h(b);
+        let bar = bar.min(ch);
+        Rect::new(win.content_x(b) + pad, win.content_y(b) + bar + pad,
+            win.content_w(b).saturating_sub(pad * 2),
+            ch.saturating_sub(bar + pad * 2))
     }
 
     /// Bring a terminal window's text layer up to date. While windows are
@@ -1789,9 +1748,10 @@ impl Compositor {
             bg: u32,
             content: Rect,
             text: Rect,
-            close: Option<(Rect, u32)>,
+            controls: Vec<Item>,
             fullscreen: bool,
         }
+        self.controls.begin_frame();
         let border = self.border;
         let rounding = self.rounding;
         let border_pinned = self.border_active.is_some();
@@ -1830,8 +1790,11 @@ impl Compositor {
                 bg: win.bg_color,
                 content: Rect::new(win.content_x(cb), win.content_y(cb), win.content_w(cb), win.content_h(cb)),
                 text: self.term_text_rect(win),
-                close: close_button_rect(win, border)
-                    .map(|(x, y, w, h)| (Rect::new(x, y, w, h), close_glyph_color(win))),
+                controls: {
+                    let mut v = Vec::new();
+                    self.controls_items(win, &mut v);
+                    v
+                },
             });
         }
         let live: Vec<u32> = plans.iter().filter(|p| p.kind == WindowKind::Terminal).map(|p| p.id.0).collect();
@@ -1888,6 +1851,9 @@ impl Compositor {
             }
             match p.kind {
                 WindowKind::Terminal => {
+                    if !p.fullscreen {
+                        self.loop_bar_items(p.content, p.terminal_idx, &mut items);
+                    }
                     self.update_term_layer(p.id.0, p.terminal_idx, p.text.w, p.text.h, p.dirty, in_motion);
                     items.push(Item::Text { src: Source::TermText(p.id.0), dst: p.text });
                     if let Some(bar) = term_scrollbar(p.terminal_idx, p.text) {
@@ -1923,10 +1889,10 @@ impl Compositor {
                         fit: Fit::Extend });
                 }
             }
-            if let Some((rect, color)) = p.close {
-                items.push(Item::CloseGlyph { rect, size: crate::shade::widgets::scale::len(CLOSE_BTN_GLYPH), color });
-            }
+            items.extend_from_slice(&p.controls);
         }
+        self.controls_overlay(&mut items);
+        self.controls.end_frame();
         // Last of all, over everything: the screenshot flash.
         let flash = self.flash_alpha();
         if flash > 0 {
@@ -1959,7 +1925,8 @@ impl Compositor {
             return alloc::vec![Rect::new(0, 0, self.screen_w, self.screen_h)];
         }
         let screen = Rect::new(0, 0, info.width, info.height);
-        let damage: Vec<Rect> = self.windows.iter()
+        let extra = core::mem::take(&mut self.extra_damage);
+        let mut damage: Vec<Rect> = self.windows.iter()
             .filter(|w| w.dirty && w.workspace == self.active_workspace && w.visible)
             .map(|w| {
                 // The halo band too: the tile that just lost focus loses its
@@ -1968,6 +1935,7 @@ impl Compositor {
                 Rect::new(w.x, w.y, w.width, w.height).grow(g).intersect(&screen)
             })
             .collect();
+        damage.extend(extra.iter().map(|r| r.intersect(&screen)).filter(|r| !r.is_empty()));
         if damage.is_empty() { return damage; }
         let painted = self.compose(target, info, damage);
         for win in &mut self.windows {
@@ -2094,116 +2062,6 @@ impl Compositor {
         self.focus_window(ws_windows[prev_idx]);
     }
 
-    /// Process a mouse event (legacy path). Returns true if the scene needs re-rendering.
-    pub fn handle_mouse(&mut self, evt: &crate::xhci::MouseEvent) -> bool {
-        self.mouse.update(evt.dx, evt.dy, evt.buttons);
-        let mx = self.mouse.x;
-        let my = self.mouse.y;
-
-        // A modal dialog owns the pointer. Swallow presses outside it so
-        // nothing behind takes focus and buries it. Motion still goes
-        // through (the cursor must keep moving) and drags in progress are
-        // let finish, so a resize started before the dialog opened doesn't
-        // stick.
-        if self.drag.is_none()
-            && (self.mouse.left_clicked() || self.mouse.right_clicked())
-            && self.modal_blocks(mx, my)
-        {
-            return false;
-        }
-
-        if self.drag.is_none() && (self.mouse.left_clicked() || self.mouse.right_clicked())
-            && self.popup_dismiss_at(mx, my)
-        {
-            return true;
-        }
-
-        let mod_held = crate::keyboard::is_super_held();
-
-        // Handle active drag (swap or resize)
-        if let Some(mut drag) = self.drag {
-            let held = match drag.mode {
-                DragMode::Swap => self.mouse.left_held(),
-                DragMode::Resize => self.mouse.right_held(),
-            };
-            if held {
-                match drag.mode {
-                    DragMode::Swap => {
-                        let mut swapped = false;
-                        if let Some(target) = self.window_at(mx, my) {
-                            if target != drag.window && drag.last_target != Some(target) {
-                                self.swap_window_order(drag.window, target);
-                                drag.last_target = Some(target);
-                                self.focus_window(drag.window);
-                                swapped = true;
-                            }
-                        }
-                        self.drag = Some(drag); // Keep drag alive
-                        return swapped;
-                    }
-                    DragMode::Resize => {
-                        let dx = mx - drag.start_mx;
-                        let dy = my - drag.start_my;
-                        self.apply_resize_drag(&drag, dx, dy);
-                        self.drag = Some(drag); // Keep drag alive
-                        self.retile();
-                        self.needs_full_redraw = true;
-                        return true;
-                    }
-                }
-            } else {
-                self.drag = None;
-                self.sync_surface_tile_sizes();
-                return drag.mode == DragMode::Resize; // resize needs final render
-            }
-        }
-
-        // Mod+LMB: start swap-drag
-        if mod_held && self.mouse.left_clicked() {
-            if let Some(wid) = self.window_at(mx, my) {
-                self.drag = Some(DragState {
-                    window: wid, mode: DragMode::Swap,
-                    last_target: None,
-                    start_mx: 0, start_my: 0, start_rw: 0, start_rh: 0,
-                    w_target: None, h_target: None,
-                });
-                self.focus_window(wid);
-                return true;
-            }
-        }
-
-        // Mod+RMB: start resize-drag
-        if mod_held && self.mouse.right_clicked() {
-            if let Some(wid) = self.window_at(mx, my) {
-                self.begin_resize_drag(wid, mx, my);
-                return true;
-            }
-        }
-
-        // Plain LMB on a window's close button → close it (see the
-        // button-event path for the rationale).
-        if !mod_held && self.mouse.left_clicked() {
-            if let Some(wid) = self.close_button_at(mx, my) {
-                self.request_close_window(wid);
-                return true;
-            }
-        }
-
-        // Regular LMB click: focus window
-        if self.mouse.left_clicked() {
-            if let Some(wid) = self.window_at(mx, my) {
-                if self.focused != Some(wid) {
-                    self.focus_window(wid);
-                    return true;
-                }
-            }
-        }
-
-        // Cursor overlay handled by redraw_overlay — no scene redraw for movement
-        false
-    }
-
-
     /// Handle only button events (click, drag, release). Position already in self.mouse.
     /// Called from lock-free input path — only when buttons change.
     pub fn handle_mouse_buttons(&mut self) -> bool {
@@ -2293,15 +2151,11 @@ impl Compositor {
             }
         }
 
-        // Plain LMB on a window's close button → close it. Checked before
-        // focus/dispatch so the corner "X" always wins over whatever widget
-        // sits beneath it. Mod+LMB is the swap-drag above, so guard on
-        // `!mod_held` to keep the two gestures from overlapping.
-        if !mod_held && self.mouse.left_clicked() {
-            if let Some(wid) = self.close_button_at(mx, my) {
-                self.request_close_window(wid);
-                return true;
-            }
+        // Plain LMB on the window controls or their menu. Checked before
+        // focus/dispatch so the pill always wins over whatever widget sits
+        // beneath it; Mod+LMB is the swap-drag above.
+        if !mod_held && self.mouse.left_clicked() && self.controls_click(mx, my) {
+            return true;
         }
 
         // Regular LMB click: focus window + dispatch widget event
@@ -2817,51 +2671,24 @@ impl Compositor {
         None
     }
 
-    /// Find the window whose platform close button contains `(x, y)`,
-    /// front-to-back so the topmost button wins. Returns `None` if the
-    /// point isn't over any close button.
-    fn close_button_at(&self, x: i32, y: i32) -> Option<WindowId> {
-        let border = self.border;
-        for &wid in &self.z_order {
-            if let Some(win) = self.windows.iter().find(|w| w.id == wid
-                && w.workspace == self.active_workspace && w.visible)
-            {
-                if let Some((bx, by, bw, bh)) = close_button_rect(win, border) {
-                    if x >= bx as i32 && x < (bx + bw) as i32
-                        && y >= by as i32 && y < (by + bh) as i32
-                    {
-                        return Some(wid);
-                    }
-                }
-            }
-        }
-        None
-    }
-
     /// Geometry for a scrollbar drag at `(x, y)`: the window under the
-    /// cursor plus its terminal text rect (for terminals) and close-button
-    /// rect (to exclude from the bar). Widget windows fill the viewport from
+    /// cursor plus its terminal text rect (for terminals) and the controls'
+    /// corner (to exclude from the bar). Widget windows fill the viewport from
     /// their scene; here we just identify the window + kind. `None` for
     /// panels or empty space.
     pub fn scroll_hit_at(&self, x: i32, y: i32) -> Option<ScrollHit> {
         let wid = self.window_at(x, y)?;
         let win = self.windows.iter().find(|w| w.id == wid)?;
         if win.is_panel { return None; }
-        let border = self.border;
-        let pad = term_pad();
-        let text_rect = (
-            (win.content_x(border) + pad) as i32,
-            (win.content_y(border) + pad) as i32,
-            win.content_w(border).saturating_sub(pad * 2),
-            win.content_h(border).saturating_sub(pad * 2),
-        );
+        let t = self.term_text_rect(win);
+        let text_rect = (t.x as i32, t.y as i32, t.w, t.h);
         Some(ScrollHit {
             window: wid.0,
             is_terminal: win.kind == crate::shade::window::WindowKind::Terminal,
             term_idx: win.terminal_idx,
             text_rect,
             char_h: terminal::cells().h,
-            close_rect: close_button_rect(win, border),
+            close_rect: self.controls_corner(win).map(|r| (r.x, r.y, r.w, r.h)),
         })
     }
 }
@@ -2930,6 +2757,11 @@ impl scene::Sources for Compositor {
             }
             Source::TermText(id) => {
                 if let Some(b) = self.term_layers.get(&id) {
+                    f(b, b.width(), b.height());
+                }
+            }
+            Source::Label(id) => {
+                if let Some(b) = self.label_pixels(id) {
                     f(b, b.width(), b.height());
                 }
             }

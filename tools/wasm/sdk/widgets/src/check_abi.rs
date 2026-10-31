@@ -109,6 +109,12 @@ const _: () = {
     assert!(IconId::WifiNone.0         == 58);
     assert!(IconId::WifiSlash.0        == 59);
     assert!(IconId::Network.0          == 60);
+    assert!(IconId::ArrowsOut.0           == 61);
+    assert!(IconId::ArrowsIn.0            == 62);
+    assert!(IconId::Browsers.0            == 63);
+    assert!(IconId::SquareSplitHorizontal.0 == 64);
+    assert!(IconId::SquareSplitVertical.0 == 65);
+    assert!(IconId::DotsThree.0           == 66);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);

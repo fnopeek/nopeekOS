@@ -212,6 +212,12 @@ icon_ids! {
     WifiNone              = 58,
     WifiSlash             = 59,
     Network               = 60,
+    ArrowsOut             = 61,
+    ArrowsIn              = 62,
+    Browsers              = 63,
+    SquareSplitHorizontal = 64,
+    SquareSplitVertical   = 65,
+    DotsThree             = 66,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

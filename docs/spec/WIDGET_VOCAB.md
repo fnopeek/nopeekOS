@@ -335,9 +335,10 @@ BatteryHigh BatteryFull BatteryCharging BatteryWarning Plug SpeakerHigh
 SpeakerLow SpeakerX Minus Plus Bird MusicNotes Play Pause SkipBack
 SkipForward FileAudio ArrowCounterClockwise PlayCircle Fire SquaresFour
 SlidersHorizontal WifiHigh WifiMedium WifiLow WifiNone WifiSlash Network
+ArrowsOut ArrowsIn Browsers SquareSplitHorizontal SquareSplitVertical DotsThree
 ```
 
-(`IconId::None` = 0 through `IconId::Network` = 60; `IconId::ALL` lists
+(`IconId::None` = 0 through `IconId::DotsThree` = 66; `IconId::ALL` lists
 them.) The Phosphor atlas carries vector outlines, so an icon is filled
 at exactly the requested size; the 16/24/32/48/64 px bitmaps are only
 the fallback. `IconId::None` draws nothing; a number the atlas lacks
