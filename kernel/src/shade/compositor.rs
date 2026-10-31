@@ -1597,10 +1597,14 @@ impl Compositor {
     /// Children are walked in creation order, each taking half of what is left:
     /// splitting A, then splitting A again, halves A twice — which is exactly
     /// what happens interactively when the focus stays put.
+    /// `depth` bounds the walk: a corrupt tree (a window its own ancestor)
+    /// must not recurse until the stack runs out.
+    #[allow(clippy::too_many_arguments)]
     fn dwindle(&mut self, id: WindowId, tiled: &[WindowId],
-               x: u32, y: u32, w: u32, h: u32, gap: u32) {
+               x: u32, y: u32, w: u32, h: u32, gap: u32, depth: usize) {
+        if depth > tiled.len() { return; }
         let kids: Vec<WindowId> = self.windows.iter()
-            .filter(|c| c.split_from == Some(id) && tiled.contains(&c.id))
+            .filter(|c| c.split_from == Some(id) && c.id != id && tiled.contains(&c.id))
             .map(|c| c.id)
             .collect();
 
@@ -1619,7 +1623,7 @@ impl Compositor {
                 let keep = (half as i32 - dw).clamp(100, max) as u32;
                 self.store_delta(kid, true, half as i32 - keep as i32, dw);
                 let give = cw.saturating_sub(keep + gap);
-                self.dwindle(kid, tiled, cx + keep + gap, cy, give, ch, gap);
+                self.dwindle(kid, tiled, cx + keep + gap, cy, give, ch, gap, depth + 1);
                 cw = keep;
             } else {
                 let half = ch.saturating_sub(gap) / 2;
@@ -1627,7 +1631,7 @@ impl Compositor {
                 let keep = (half as i32 - dh).clamp(80, max) as u32;
                 self.store_delta(kid, false, half as i32 - keep as i32, dh);
                 let give = ch.saturating_sub(keep + gap);
-                self.dwindle(kid, tiled, cx, cy + keep + gap, cw, give, gap);
+                self.dwindle(kid, tiled, cx, cy + keep + gap, cw, give, gap, depth + 1);
                 ch = keep;
             }
         }
@@ -1660,10 +1664,10 @@ impl Compositor {
         for (i, root) in roots.iter().enumerate() {
             let left = roots.len() - i;
             if left == 1 {
-                self.dwindle(*root, tiled, cx, y, cw, h, gap);
+                self.dwindle(*root, tiled, cx, y, cw, h, gap, 0);
             } else {
                 let share = cw.saturating_sub(gap * (left as u32 - 1)) / left as u32;
-                self.dwindle(*root, tiled, cx, y, share.max(1), h, gap);
+                self.dwindle(*root, tiled, cx, y, share.max(1), h, gap, 0);
                 cx += share + gap;
                 cw = cw.saturating_sub(share + gap);
             }

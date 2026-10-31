@@ -1025,9 +1025,13 @@ impl Compositor {
                 && !w.is_overlay && w.split_from.is_none_or(|p| !self.is_tiled(p)))
             .map(|w| w.id);
         // Its own children follow the old root, so this window is a leaf.
-        let new_parent = root;
+        // The root itself may be one of them (this window was the root
+        // before it floated): it becomes the root for real, never its own
+        // parent.
         for w in self.windows.iter_mut() {
-            if w.split_from == Some(id) { w.split_from = new_parent; }
+            if w.split_from == Some(id) {
+                w.split_from = if Some(w.id) == root { None } else { root };
+            }
         }
         if let Some(w) = self.window_mut(id) {
             w.state = WindowState::Tiled;
