@@ -2656,10 +2656,28 @@ fn store(
     memarg: &wasmparser::MemArg,
     mut go: impl FnMut(&mut Asm, Reg, Reg, i32, Reg),
 ) -> Result<(), &'static str> {
-    f.pop_to(A);
+    // The value is stored from wherever it already is: a cache register
+    // (marked used until the store is out) or a local's home.
+    let (src, owned) = match f.stack.last().map(|v| v.loc) {
+        Some(Loc::Gpr(r)) => {
+            f.stack.pop();
+            (r, true)
+        }
+        Some(Loc::Local(i)) if let Some(h) = f.home(i) => {
+            f.stack.pop();
+            (h, false)
+        }
+        _ => {
+            f.pop_to(A);
+            (A, false)
+        }
+    };
     f.pop_to(B);
     let disp = mem_disp(f, memarg, B, C)?;
-    go(&mut f.asm, MEMBASE, B, disp, A);
+    go(&mut f.asm, MEMBASE, B, disp, src);
+    if owned {
+        f.free_gpr(src);
+    }
     Ok(())
 }
 
@@ -3002,6 +3020,8 @@ enum Rhs {
     Mem(i32),
     /// In a register: a local's home, or else `rcx`, where it was put.
     Reg(Reg),
+    /// In a cache register the operation takes over and frees afterwards.
+    Owned(Reg),
 }
 
 /// Take the right-hand operand off the stack without materialising it, if it
@@ -3028,10 +3048,24 @@ fn take_rhs(f: &mut Ctx) -> Rhs {
             f.stack.pop();
             Rhs::Mem(f.slot(f.depth()))
         }
+        // Read where it is. The register stays marked used until the caller
+        // has emitted the operation (`release_rhs`), so the left operand
+        // cannot be put into it.
+        Loc::Gpr(r) => {
+            f.stack.pop();
+            Rhs::Owned(r)
+        }
         _ => {
             f.pop_to(B);
             Rhs::Reg(B)
         }
+    }
+}
+
+/// Give back a right operand's cache register once the operation is out.
+fn release_rhs(f: &mut Ctx, rhs: &Rhs) {
+    if let Rhs::Owned(r) = rhs {
+        f.free_gpr(*r);
     }
 }
 
@@ -3045,8 +3079,9 @@ fn bin(f: &mut Ctx, w: bool, op: AluOp) {
     match rhs {
         Rhs::Imm(c) => f.asm.alu_r_imm32(w, op.imm_ext, d, c),
         Rhs::Mem(off) => f.asm.alu_rm(w, op.rm, d, Reg::Rbp, off),
-        Rhs::Reg(r) => f.asm.alu_raw(w, op.rr, d, r),
+        Rhs::Reg(r) | Rhs::Owned(r) => f.asm.alu_raw(w, op.rr, d, r),
     }
+    release_rhs(f, &rhs);
     f.push_reg(d, if w { ValType::I64 } else { ValType::I32 });
 }
 
@@ -3056,8 +3091,9 @@ fn mul(f: &mut Ctx, w: bool) {
     match rhs {
         Rhs::Imm(c) => f.asm.imul_r_imm32(w, d, d, c),
         Rhs::Mem(off) => f.asm.imul_rm(w, d, Reg::Rbp, off),
-        Rhs::Reg(r) => f.asm.imul(w, d, r),
+        Rhs::Reg(r) | Rhs::Owned(r) => f.asm.imul(w, d, r),
     }
+    release_rhs(f, &rhs);
     f.push_reg(d, if w { ValType::I64 } else { ValType::I32 });
 }
 
@@ -3101,8 +3137,9 @@ fn cmp(f: &mut Ctx, w: bool, cc: Cond) {
     match rhs {
         Rhs::Imm(c) => f.asm.alu_r_imm32(w, CMP_OP.imm_ext, d, c),
         Rhs::Mem(off) => f.asm.alu_rm(w, CMP_OP.rm, d, Reg::Rbp, off),
-        Rhs::Reg(r) => f.asm.alu_raw(w, CMP_OP.rr, d, r),
+        Rhs::Reg(r) | Rhs::Owned(r) => f.asm.alu_raw(w, CMP_OP.rr, d, r),
     }
+    release_rhs(f, &rhs);
     if home.is_none() {
         f.free_gpr(d);
     }
