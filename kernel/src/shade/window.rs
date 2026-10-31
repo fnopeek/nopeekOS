@@ -109,6 +109,8 @@ pub struct Window {
     /// next to an anchor in the parent.
     pub popup_of: Option<WindowId>,
     pub popup_slot: u8,
+    /// A maximized floating window: the `(x, y, w, h)` it returns to.
+    pub restore: Option<(u32, u32, u32, u32)>,
 }
 
 #[allow(dead_code)]
@@ -142,6 +144,7 @@ impl Window {
             light_dismiss: false,
             popup_of: None,
             popup_slot: 0,
+            restore: None,
         }
     }
 

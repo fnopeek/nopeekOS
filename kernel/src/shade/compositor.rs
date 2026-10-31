@@ -188,6 +188,11 @@ pub struct Compositor {
     /// A left press on a floating window's free bar: the window, and where
     /// the press was. Becomes a Move drag once the pointer travels.
     pub pending_move: Option<(WindowId, i32, i32)>,
+    /// The last press on a free bar: window, position, tick. A second one
+    /// close by and soon after is a double click.
+    pub last_bar_press: Option<(WindowId, i32, i32, u64)>,
+    /// Where a floating window being moved lands if let go now.
+    pub snap: Option<controls::Snap>,
     /// Screen areas to repaint on the next partial render that no dirty
     /// window covers (a hint or menu of the window controls).
     pub extra_damage: Vec<Rect>,
@@ -235,6 +240,8 @@ impl Compositor {
             term_layers: alloc::collections::BTreeMap::new(),
             controls: controls::State::default(),
             pending_move: None,
+            last_bar_press: None,
+            snap: None,
             extra_damage: Vec::new(),
         }
     }
@@ -371,6 +378,11 @@ impl Compositor {
     }
 
     /// Usable workspace area (excluding the bottom panel band).
+    /// `sync_surface_tile_sizes` for the controls.
+    pub(super) fn sync_surface_sizes_pub(&self) {
+        self.sync_surface_tile_sizes();
+    }
+
     /// `workspace_area` for the controls.
     pub(super) fn workspace_area_pub(&self) -> (u32, u32, u32, u32) {
         self.workspace_area()
@@ -425,7 +437,7 @@ impl Compositor {
     }
 
     /// Is this window part of the active workspace's tiling right now?
-    fn is_tiled(&self, id: WindowId) -> bool {
+    pub(super) fn is_tiled(&self, id: WindowId) -> bool {
         self.windows.iter().any(|w| w.id == id
             && w.workspace == self.active_workspace
             && w.state == WindowState::Tiled
@@ -1815,7 +1827,11 @@ impl Compositor {
 
         let mut items = Vec::with_capacity(4 + plans.len() * 6);
         items.push(Item::Background);
+        let snap_preview = self.snap_preview();
         for p in &plans {
+            if let Some((win, item)) = snap_preview {
+                if win == p.id { items.push(item); }
+            }
             if p.kind == WindowKind::Surface && !crate::shade::surface::has_frame(p.id.0) { continue; }
             if p.glow.alpha > 0 {
                 items.push(Item::Glow { rect: p.win_rect, radius: rounding, color: p.glow.color,
@@ -2145,6 +2161,7 @@ impl Compositor {
                 }
             } else {
                 self.drag = None;
+                if drag.mode == DragMode::Move { self.finish_move(drag.window); }
                 self.sync_surface_tile_sizes();
                 if drag.mode != DragMode::Swap { self.needs_full_redraw = true; }
                 return drag.mode != DragMode::Swap;
@@ -2206,9 +2223,16 @@ impl Compositor {
                 self.start_float_drag(wid, DragMode::Edge(edges), mx, my);
                 return true;
             }
-            // On its free bar: a move, once the pointer travels.
-            if let Some(wid) = self.window_at(mx, my).filter(|id| self.bar_grab_at(*id, mx, my)) {
-                self.pending_move = Some((wid, mx, my));
+            // On a free spot of the bar: a double click maximizes a floating
+            // window or makes a tile fullscreen; a single press on a
+            // floating window's bar moves it once the pointer travels.
+            if let Some(wid) = self.window_at(mx, my).filter(|id| self.bar_free_at(*id, mx, my)) {
+                if self.bar_double_click(wid, mx, my) {
+                    return true;
+                }
+                if self.is_floating_window(wid) {
+                    self.pending_move = Some((wid, mx, my));
+                }
             }
         }
 

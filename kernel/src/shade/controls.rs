@@ -567,6 +567,7 @@ impl Compositor {
         let lift = self.window(id).is_some_and(|w| w.state != WindowState::Floating);
         if let Some(win) = self.window_mut(id) {
             win.state = if lift { WindowState::Floating } else { WindowState::Tiled };
+            win.restore = None;
         }
         if lift {
             self.detach_geometry(id);
@@ -748,6 +749,19 @@ pub const EDGE_R: u8 = 2;
 pub const EDGE_T: u8 = 4;
 pub const EDGE_B: u8 = 8;
 
+/// Two presses this close in time (10 ms ticks) are a double click.
+const DOUBLE_CLICK_TICKS: u64 = 45;
+
+/// Where a floating window lands when it is let go at a screen edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Snap {
+    /// Top edge: the whole work area.
+    Max,
+    /// Left or right edge: that half, as a tile.
+    Left,
+    Right,
+}
+
 /// Pointer travel before a press on a bar becomes a move, physical px.
 pub fn drag_threshold() -> i32 {
     scale::len(6) as i32
@@ -841,11 +855,11 @@ impl Compositor {
         h | v
     }
 
-    /// `(x, y)` lies on a free spot of a floating window's top bar: in the
-    /// bar, off the controls, on nothing the app reacts to.
-    pub(super) fn bar_grab_at(&self, id: WindowId, x: i32, y: i32) -> bool {
-        if !self.is_floating_window(id) { return false; }
+    /// `(x, y)` lies on a free spot of a window's top bar: in the bar, off
+    /// the controls, on nothing the app reacts to.
+    pub(super) fn bar_free_at(&self, id: WindowId, x: i32, y: i32) -> bool {
         let Some(win) = self.window(id) else { return false };
+        if !hosts(win) || win.workspace != self.active_workspace { return false; }
         let b = self.border;
         let bar = Rect::new(win.x + b, win.y + b, win.content_w(b), scale::len(BAND));
         if !contains(bar, x, y) { return false; }
@@ -858,6 +872,21 @@ impl Compositor {
     }
 
     pub(super) fn start_float_drag(&mut self, id: WindowId, mode: DragMode, mx: i32, my: i32) {
+        // A maximized window pulled away takes its own size back, under the
+        // pointer at the same share of its width; a resized one forgets it.
+        let restore = self.window(id).and_then(|w| w.restore);
+        if let (Some((_, _, rw, rh)), Some(w)) = (restore, self.window(id)) {
+            if mode == DragMode::Move {
+                let share = (mx - w.x as i32).max(0) as u64 * rw as u64 / w.width.max(1) as u64;
+                let nx = (mx - share as i32).max(0) as u32;
+                let ny = w.y;
+                if let Some(w) = self.window_mut(id) {
+                    (w.x, w.y, w.width, w.height) = (nx, ny, rw, rh);
+                    w.dirty = true;
+                }
+            }
+            if let Some(w) = self.window_mut(id) { w.restore = None; }
+        }
         let Some(w) = self.window(id) else { return };
         let start_geom = (w.x, w.y, w.width, w.height);
         self.drag = Some(DragState {
@@ -898,6 +927,148 @@ impl Compositor {
             (win.x, win.y, win.width, win.height) = (x.max(0) as u32, y.max(0) as u32, w.max(1) as u32, h.max(1) as u32);
             win.dirty = true;
         }
+        if drag.mode == DragMode::Move {
+            let edge = scale::len(2) as i32;
+            self.snap = if mx < edge { Some(Snap::Left) }
+                else if mx >= sw - edge { Some(Snap::Right) }
+                else if my < edge { Some(Snap::Max) }
+                else { None };
+        }
+    }
+
+    /// A press on a free bar: true when it completes a double click, which
+    /// then maximizes or restores a floating window, or toggles fullscreen
+    /// on a tile.
+    pub(super) fn bar_double_click(&mut self, id: WindowId, x: i32, y: i32) -> bool {
+        let now = crate::interrupts::ticks();
+        let near = scale::len(6) as i32;
+        let double = self.controls_last_press(id, x, y, now, near);
+        if !double {
+            self.last_bar_press = Some((id, x, y, now));
+            return false;
+        }
+        self.last_bar_press = None;
+        self.pending_move = None;
+        if self.is_floating_window(id) {
+            self.focus_window(id);
+            self.toggle_maximize(id);
+        } else {
+            self.focus_window(id);
+            self.toggle_fullscreen(id);
+        }
+        self.controls.hover = None;
+        self.needs_full_redraw = true;
+        true
+    }
+
+    fn controls_last_press(&self, id: WindowId, x: i32, y: i32, now: u64, near: i32) -> bool {
+        self.last_bar_press.is_some_and(|(lid, lx, ly, t)| lid == id
+            && now.saturating_sub(t) <= DOUBLE_CLICK_TICKS
+            && (x - lx).abs() <= near && (y - ly).abs() <= near)
+    }
+
+    /// A floating window to the whole work area, or back to where it was.
+    pub(super) fn toggle_maximize(&mut self, id: WindowId) {
+        let area = self.workspace_area_pub();
+        let Some(w) = self.window_mut(id) else { return };
+        match w.restore.take() {
+            Some(g) => (w.x, w.y, w.width, w.height) = g,
+            None => {
+                w.restore = Some((w.x, w.y, w.width, w.height));
+                (w.x, w.y, w.width, w.height) = area;
+            }
+        }
+        w.dirty = true;
+        self.sync_surface_sizes_pub();
+    }
+
+    /// Where a snap puts a window, screen rect.
+    fn snap_rect(&self, snap: Snap) -> Rect {
+        let (ax, ay, aw, ah) = self.workspace_area_pub();
+        let half = aw.saturating_sub(self.gaps) / 2;
+        match snap {
+            Snap::Max => Rect::new(ax, ay, aw, ah),
+            Snap::Left => Rect::new(ax, ay, half, ah),
+            Snap::Right => Rect::new(ax + aw - half, ay, half, ah),
+        }
+    }
+
+    /// The preview of a pending snap, painted under the window being moved.
+    pub(super) fn snap_preview(&self) -> Option<(WindowId, Item)> {
+        let snap = self.snap?;
+        let drag = self.drag.filter(|d| d.mode == DragMode::Move)?;
+        let r = self.snap_rect(snap);
+        let color = super::widgets::palette::resolve(Token::Accent) & 0x00FF_FFFF;
+        Some((drag.window, Item::Fill { rect: r, color, alpha: 70, radius: self.rounding }))
+    }
+
+    /// A move ended: land on the snap the pointer reached, if any.
+    pub(super) fn finish_move(&mut self, id: WindowId) {
+        let Some(snap) = self.snap.take() else { return };
+        match snap {
+            Snap::Max => {
+                if self.window(id).is_some_and(|w| w.restore.is_none()) {
+                    self.toggle_maximize(id);
+                }
+            }
+            Snap::Left | Snap::Right => self.tile_to_side(id, snap == Snap::Left),
+        }
+    }
+
+    /// Put a floating window back into the tiling as the whole left or right
+    /// half; everything else shares the other half as it did before.
+    fn tile_to_side(&mut self, id: WindowId, left: bool) {
+        let ws = self.active_workspace;
+        // The root of the tiling, if there is one.
+        let root = self.windows.iter()
+            .find(|w| w.id != id && w.workspace == ws && w.state == WindowState::Tiled && w.visible
+                && !w.is_overlay && w.split_from.is_none_or(|p| !self.is_tiled(p)))
+            .map(|w| w.id);
+        // Its own children follow the old root, so this window is a leaf.
+        let new_parent = root;
+        for w in self.windows.iter_mut() {
+            if w.split_from == Some(id) { w.split_from = new_parent; }
+        }
+        if let Some(w) = self.window_mut(id) {
+            w.state = WindowState::Tiled;
+            w.restore = None;
+            w.resize_w = 0;
+            w.resize_h = 0;
+        }
+        match (root, left) {
+            (None, _) => {
+                if let Some(w) = self.window_mut(id) { w.split_from = None; }
+            }
+            (Some(r), true) => {
+                // This window becomes the root; the old root splits it and
+                // takes the right half with everything under it.
+                if let Some(w) = self.window_mut(id) { w.split_from = None; }
+                if let Some(w) = self.window_mut(r) {
+                    w.split_from = Some(id);
+                    w.split_beside = true;
+                    w.resize_w = 0;
+                    w.resize_h = 0;
+                }
+            }
+            (Some(r), false) => {
+                // The first child of the root: it takes the right half, the
+                // root's other children share the left.
+                if let Some(w) = self.window_mut(id) {
+                    w.split_from = Some(r);
+                    w.split_beside = true;
+                }
+                let first_kid = self.windows.iter().position(|w| w.id != id && w.split_from == Some(r));
+                let me = self.windows.iter().position(|w| w.id == id);
+                if let (Some(k), Some(m)) = (first_kid, me) {
+                    if m > k {
+                        let w = self.windows.remove(m);
+                        self.windows.insert(k, w);
+                    }
+                }
+            }
+        }
+        self.focus_window(id);
+        self.retile();
     }
 
     /// The pointer's shape at `(x, y)`: a resize arrow over a floating
