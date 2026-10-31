@@ -465,6 +465,18 @@ impl Asm {
         at
     }
 
+    /// `movss`/`movsd dst, [rip + disp32]` with the displacement left blank,
+    /// for a constant placed after the function. Returns the offset of the
+    /// displacement.
+    pub fn fload_rip_blank(&mut self, fw: Fw, dst: Xmm) -> usize {
+        self.sse_pre(Some(fw.scalar()), false, dst.ext(), 0, 0);
+        self.b(0x10);
+        self.b((dst.low() << 3) | 5); // mod=00, rm=101 -> RIP-relative
+        let at = self.pos();
+        self.d32(0);
+        at
+    }
+
     /// `movsxd dst, dword [base + index*2^scale + disp]` — sign-extending,
     /// because jump-table entries are offsets back to code that precedes the
     /// table and are therefore negative.

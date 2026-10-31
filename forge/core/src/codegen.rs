@@ -381,6 +381,11 @@ struct Ctx<'a> {
     /// Fuel checks that still need their refuel stub: the jump out, and where
     /// execution resumes.
     refuels: Vec<(Patch, usize)>,
+    /// Float constants, each with the displacements that load it. They are
+    /// laid out after the function and read RIP-relative: a load from there
+    /// is cheaper than building the bits in a general register and moving
+    /// them across, which costs more on some cores than the arithmetic.
+    fconsts: Vec<(u64, Vec<usize>)>,
     /// Instructions counted since the last time the fuel register was
     /// updated. Charged in one go at the next control-flow edge, so metering
     /// costs one `sub` per basic block instead of one per instruction.
@@ -944,6 +949,7 @@ impl<'a> Ctx<'a> {
                 let off = self.local(idx);
                 self.asm.fload_slot(fw_of(v.ty), x, Reg::Rbp, off);
             }
+            Loc::Imm(c) if is_float(v.ty) => self.fconst(fw_of(v.ty), x, c as u64),
             Loc::Imm(c) => {
                 self.asm.mov_r64_imm64(T, c);
                 self.asm.gpr_to_xmm(wide(v.ty), x, T);
@@ -1014,6 +1020,7 @@ impl<'a> Ctx<'a> {
                 let off = self.local(idx);
                 self.asm.fload_slot(fw_of(v.ty), x, Reg::Rbp, off);
             }
+            Loc::Imm(c) if is_float(v.ty) => self.fconst(fw_of(v.ty), x, c as u64),
             Loc::Imm(c) => {
                 self.asm.mov_r64_imm64(T, c);
                 self.asm.gpr_to_xmm(wide(v.ty), x, T);
@@ -1022,6 +1029,41 @@ impl<'a> Ctx<'a> {
                 self.asm.set_cond(cc, T);
                 self.asm.gpr_to_xmm(false, x, T);
             }
+        }
+    }
+
+    /// Put a float constant into `x`: positive zero by clearing the register,
+    /// anything else from the function's constant pool.
+    fn fconst(&mut self, fw: Fw, x: Xmm, bits: u64) {
+        if bits == 0 {
+            self.asm.fxor(fw, x, x);
+            return;
+        }
+        let at = self.asm.fload_rip_blank(fw, x);
+        match self.fconsts.iter_mut().find(|c| c.0 == bits) {
+            Some(c) => c.1.push(at),
+            None => self.fconsts.push((bits, alloc::vec![at])),
+        }
+    }
+
+    /// Lay the constant pool out after everything else, eight-byte aligned,
+    /// and point every load at its entry. Never executed: control cannot
+    /// fall into it, since every path before ends in a jump or a return.
+    fn emit_fconsts(&mut self) {
+        let consts = core::mem::take(&mut self.fconsts);
+        if consts.is_empty() {
+            return;
+        }
+        while self.asm.pos() % 8 != 0 {
+            self.asm.code.push(0xCC);
+        }
+        for (bits, sites) in consts {
+            let here = self.asm.pos();
+            for at in sites {
+                self.asm.patch_i32(at, (here as i64 - (at as i64 + 4)) as i32);
+            }
+            self.asm.emit_i32(bits as u32 as i32);
+            self.asm.emit_i32((bits >> 32) as u32 as i32);
         }
     }
 
@@ -1257,6 +1299,7 @@ pub fn compile_func(
         n_fhomes: 0,
         fuel_pending: 0,
         refuels: Vec::new(),
+        fconsts: Vec::new(),
         stack: Vec::new(),
         gpr_used: [false; 16],
         xmm_used: [false; 16],
@@ -1406,6 +1449,7 @@ pub fn compile_func(
         let at = f.asm.jmp_rel32_blank();
         f.trap_relocs.push(at);
     }
+    f.emit_fconsts();
 
     let slots = f.saved() as u32 + n_locals + f.max_stack.max(1);
     let frame = (8 * slots + 15) & !15;
@@ -2654,23 +2698,20 @@ fn fsign(f: &mut Ctx, fw: Fw, kind: Sign) {
     match kind {
         Sign::Abs => {
             f.fpop_to(FA);
-            f.asm.mov_r64_imm64(A, mask);
-            f.asm.gpr_to_xmm(true, FB, A);
+            f.fconst(fw, FB, mask as u64);
             // Clear the sign: keep everything the mask does not cover.
             f.asm.fandn(fw, FB, FA);
             f.asm.fmov(FA, FB);
         }
         Sign::Neg => {
             f.fpop_to(FA);
-            f.asm.mov_r64_imm64(A, mask);
-            f.asm.gpr_to_xmm(true, FB, A);
+            f.fconst(fw, FB, mask as u64);
             f.asm.fxor(fw, FA, FB);
         }
         Sign::Copy => {
             f.fpop_to(FB); // the sign donor
             f.fpop_to(FA); // the magnitude
-            f.asm.mov_r64_imm64(A, mask);
-            f.asm.gpr_to_xmm(true, FC, A);
+            f.fconst(fw, FC, mask as u64);
             f.asm.fand(fw, FB, FC); // just the donor's sign
             f.asm.fandn(fw, FC, FA); // the magnitude without its own sign
             f.asm.f_or(fw, FC, FB);
@@ -2848,8 +2889,7 @@ fn trunc_sat_u32(f: &mut Ctx, fw: Fw) {
     f.asm.fucomi(fw, FA, FB);
     let done_neg = f.asm.jcc(Cond::Be);
 
-    f.asm.mov_r64_imm64(B, two32 as i64);
-    f.asm.gpr_to_xmm(true, FB, B);
+    f.fconst(fw, FB, two32);
     f.asm.fucomi(fw, FA, FB);
     f.asm.mov_r64_imm64(A, 0xFFFF_FFFF); // saturates; `mov` leaves flags alone
     let done_big = f.asm.jcc(Cond::Ae);
@@ -2876,8 +2916,7 @@ fn trunc_sat_u64(f: &mut Ctx, fw: Fw) {
     f.asm.fucomi(fw, FA, FB);
     let done_neg = f.asm.jcc(Cond::Be);
 
-    f.asm.mov_r64_imm64(B, two63 as i64);
-    f.asm.gpr_to_xmm(true, FB, B);
+    f.fconst(fw, FB, two63);
     f.asm.fucomi(fw, FA, FB);
     let high = f.asm.jcc(Cond::Ae);
     f.asm.float_to_int(fw, true, A, FA);
