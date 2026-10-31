@@ -547,6 +547,22 @@ pub enum Modifier {
     /// (password entry). The compositor still edits the real buffer and
     /// reports it via `Event::InputChange`; only the glyphs are hidden.
     Mask,
+    /// Place the caret and selection of this `Widget::Input` or
+    /// `Widget::TextArea`, in byte offsets into `value`, whenever `seq`
+    /// differs from the one last honoured in this window. `anchor ==
+    /// cursor` means no selection. Applied after the value: a commit that
+    /// also changes the value keeps this caret instead of moving it to the
+    /// end. Offsets are clamped to the value and to char boundaries. A
+    /// widget that is not focused keeps the caret for when focus returns,
+    /// and a TextArea scrolls it into view either way. Outranks
+    /// `FocusRequest`'s select-all on the same widget. 0 never applies.
+    Select { seq: u32, anchor: u32, cursor: u32 },
+    /// Indentation of a `Widget::TextArea`: Tab inserts up to the next
+    /// multiple of `width` (spaces, or one `\t` when `tabs`), Shift+Tab
+    /// outdents, Backspace in leading spaces removes one level, and Enter
+    /// keeps the line's indent, one level more after `{`, `(`, `[` and,
+    /// when `colon`, after `:`. Without it: width 4, spaces, no colon.
+    Indent { width: u8, tabs: bool, colon: bool },
     // Appended only.
 }
 
@@ -846,6 +862,12 @@ pub enum Event {
     /// was mutated. Sent in addition to `InputChange`, so a form with
     /// several fields knows which one changed: `node` is that NodeId.
     InputChangeAt { node: u32, value: alloc::string::String },
+    /// The caret or selection of the focused `Widget::TextArea` moved.
+    /// Byte offsets into the value of the last `InputChange` (it is always
+    /// sent before the `Caret` of the same step); `anchor == cursor` means
+    /// no selection. `node` is the widget's `Modifier::NodeId`, or
+    /// `u32::MAX` without one. Not sent for a `Widget::Input`.
+    Caret { node: u32, cursor: u32, anchor: u32 },
     // Appended only.
 }
 

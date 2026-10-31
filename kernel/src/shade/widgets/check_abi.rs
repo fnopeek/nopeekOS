@@ -216,6 +216,8 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::CanvasNative        => 34,
         Modifier::FocusRequest(_)     => 35,
         Modifier::Mask                => 36,
+        Modifier::Select { .. }       => 37,
+        Modifier::Indent { .. }       => 38,
     }
 }
 
@@ -240,6 +242,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::Slide { .. }      => 15,
         Event::PopupDone { .. }  => 16,
         Event::InputChangeAt { .. } => 17,
+        Event::Caret { .. }         => 18,
     }
 }
 

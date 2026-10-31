@@ -20,7 +20,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use nopeek_widgets::app_meta::IconRef;
-use nopeek_widgets::i18n;
+use nopeek_widgets::history::{History, Restore};
 use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Spacing};
 use nopeek_widgets::*;
@@ -104,6 +104,26 @@ struct Strings {
     /// "{} of {}" — position in the quit sequence.
     step_of:       &'static str,
     welcome:       &'static str,
+    menu_edit:     &'static str,
+    undo:          &'static str,
+    redo:          &'static str,
+    find:          &'static str,
+    replace:       &'static str,
+    goto_line:     &'static str,
+    find_ph:       &'static str,
+    replace_ph:    &'static str,
+    replace_one:   &'static str,
+    replace_all:   &'static str,
+    /// "Go to line (1-{})".
+    goto_ph:       &'static str,
+    no_results:    &'static str,
+    /// "Ln {}, Col {}".
+    ln_col:        &'static str,
+    /// "{} selected".
+    selected:      &'static str,
+    /// "Spaces: {}".
+    spaces:        &'static str,
+    tabs:          &'static str,
 }
 
 const EN: Strings = Strings {
@@ -125,32 +145,21 @@ const EN: Strings = Strings {
     esc_cancels: "Esc cancels",
     step_of: "{} of {}",
     welcome: "Welcome to Spell\n\nStart typing, or open a file via File \u{2192} Open\u{2026} \u{2014} or double-click in loft.\n\nMultiple files open as tabs. Save it with a name and the\nextension decides how it is highlighted.\n",
+    menu_edit: "Edit",
+    undo: "Undo", redo: "Redo",
+    find: "Find", replace: "Replace", goto_line: "Go to line…",
+    find_ph: "Find", replace_ph: "Replace with",
+    replace_one: "Replace", replace_all: "All",
+    goto_ph: "Go to line (1-{})",
+    no_results: "No results",
+    ln_col: "Ln {}, Col {}",
+    selected: "{} selected",
+    spaces: "Spaces: {}",
+    tabs: "Tabs",
 };
 
-const DE: Strings = Strings {
-    menu_file: "Datei", menu_view: "Ansicht", menu_help: "Hilfe",
-    new: "Neu", open: "Öffnen…", save: "Speichern",
-    save_as: "Speichern unter…", close: "Schließen",
-    view_source: "Quelltext", view_preview: "Vorschau",
-    settings: "Einstellungen",
-    zoom_in: "Vergrößern", zoom_out: "Verkleinern",
-    zoom_reset: "Originalgröße ({} px)",
-    cfg_header: "# spell-Einstellungen — ein Schlüssel pro Zeile, # ist ein Kommentar.\n# font: Schriftgröße im Editor in px (6-64), Ctrl+0 stellt 13 her.\n",
-    about: "Über Spell",
-    untitled: "Unbenannt",
-    untitled_file: "unbenannt",
-    placeholder: "Tippe los…",
-    unsaved_title: "Ungespeicherte Änderungen",
-    unsaved_body: "{} hat ungespeicherte Änderungen.",
-    discard: "Verwerfen", cancel: "Abbrechen",
-    esc_cancels: "Esc bricht ab",
-    step_of: "{} von {}",
-    welcome: "Willkommen bei Spell\n\nTippe los, oder öffne eine Datei über Datei \u{2192} Öffnen\u{2026} \u{2014} oder Doppelklick in loft.\n\nMehrere Dateien liegen als Tabs nebeneinander. Speichere sie\nunter einem Namen, die Endung entscheidet über die Farben.\n",
-};
 
-fn s() -> &'static Strings {
-    match i18n::lang() { i18n::Lang::De => &DE, _ => &EN }
-}
+fn s() -> &'static Strings { &EN }
 
 /// Substitute the single `{}` placeholder in a catalog string.
 fn fill(template: &str, value: &str) -> String {
@@ -251,6 +260,20 @@ const ACT_ZOOM_IN:    u32 = 6_102;
 const ACT_ZOOM_OUT:   u32 = 6_103;
 const ACT_ZOOM_RESET: u32 = 6_104;
 const ACT_HELP_ABOUT: u32 = 6_300;
+const ACT_MENU_EDIT:  u32 = 5_006;
+const ACT_UNDO:       u32 = 6_200;
+const ACT_REDO:       u32 = 6_201;
+const ACT_FIND:       u32 = 6_202;
+const ACT_REPLACE:    u32 = 6_203;
+const ACT_GOTO:       u32 = 6_204;
+// Find / go-to bar.
+const ACT_FIND_NEXT:    u32 = 6_400;
+const ACT_FIND_PREV:    u32 = 6_401;
+const ACT_FIND_CASE:    u32 = 6_402;
+const ACT_FIND_CLOSE:   u32 = 6_403;
+const ACT_REPLACE_ONE:  u32 = 6_404;
+const ACT_REPLACE_ALL:  u32 = 6_405;
+const ACT_GOTO_SUBMIT:  u32 = 6_406;
 
 // `npk_pick` modes.
 const PICK_OPEN: host::PickMode = host::PickMode::Open;
@@ -270,6 +293,16 @@ const ACT_TAB_CLOSE_BASE: u32 = 8_500;
 const NODE_MENU_FILE: u32 = 100;
 const NODE_MENU_VIEW: u32 = 102;
 const NODE_MENU_HELP: u32 = 104;
+const NODE_MENU_EDIT: u32 = 106;
+const NODE_FIND:      u32 = 200;
+const NODE_REPLACE:   u32 = 201;
+const NODE_GOTO:      u32 = 202;
+/// Each document's editor carries `NODE_EDITOR_BASE + uid`, so a caret or
+/// change event still finds its document after the tab was switched.
+const NODE_EDITOR_BASE: u32 = 10_000;
+
+/// More hits than this are not counted or coloured.
+const MAX_HITS: usize = 10_000;
 
 // ── State ─────────────────────────────────────────────────────────────
 
@@ -277,7 +310,7 @@ const NODE_MENU_HELP: u32 = 104;
 enum Mode { Edit, Preview }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum OpenMenu { File, View, Help }
+enum OpenMenu { File, Edit, View, Help }
 
 /// What the file's extension says it is. A buffer with no filename yet is
 /// `Untyped`: no highlighting, no preview toggle, no assumed extension —
@@ -301,6 +334,17 @@ struct Doc {
     dirty: bool,
     /// Markdown raw↔rendered toggle (per document).
     mode:  Mode,
+    /// Stable id for the editor's NodeId; tab indices shift on close.
+    uid:   u32,
+    history: History,
+    /// Hash of the text as last loaded or saved: undoing back to it makes
+    /// the tab clean again.
+    saved: u64,
+    /// Highlight spans for `text`, rebuilt when it changes.
+    spans: Vec<Span>,
+    spans_stale: bool,
+    /// Indent width and whether it is tabs, detected from the text.
+    indent: (u8, bool),
 }
 
 impl Doc {
@@ -311,7 +355,39 @@ impl Doc {
             text:  String::with_capacity(TEXT_CAP),
             dirty: false,
             mode:  Mode::Edit,
+            uid:   0,
+            history: History::default(),
+            saved: text_hash(""),
+            spans: Vec::new(),
+            spans_stale: true,
+            indent: (4, false),
         }
+    }
+
+    fn node(&self) -> u32 { NODE_EDITOR_BASE + self.uid }
+
+    /// Adopt a freshly loaded text: nothing to undo, clean.
+    fn load(&mut self, text: &str) {
+        self.set_text(text);
+        self.history.clear();
+        self.saved = text_hash(&self.text);
+        self.dirty = false;
+        self.indent = detect_indent(&self.text);
+    }
+
+    /// The text changed by an edit, an undo or a replace.
+    fn touch(&mut self) {
+        self.dirty = text_hash(&self.text) != self.saved;
+        self.spans_stale = true;
+    }
+
+    fn refresh_spans(&mut self) {
+        if !self.spans_stale { return; }
+        self.spans = match self.kind() {
+            Kind::Code(lang) => code_spans(&self.text, lang),
+            _ => Vec::new(),
+        };
+        self.spans_stale = false;
     }
 
     fn ext(&self) -> Option<String> {
@@ -339,6 +415,7 @@ impl Doc {
     fn set_text(&mut self, s: &str) {
         self.text.clear();
         self.text.push_str(s);
+        self.spans_stale = true;
     }
 
     /// `true` for a fresh, never-edited untitled tab — opening a file
@@ -373,6 +450,37 @@ struct Spell {
     /// — deriving the step from it would show "1 of 3", "1 of 2", "1 of 1".
     quit_total:    usize,
     quit_done:     usize,
+    next_uid:      u32,
+    /// Counter shared by `Modifier::Select` and `Modifier::FocusRequest`:
+    /// each new request takes the next number.
+    seq:           u32,
+    /// Caret placement for an editor: `(node, seq, anchor, cursor)`.
+    select:        Option<(u32, u32, u32, u32)>,
+    /// Which field should take the keyboard, and the request's number.
+    focus:         Option<(Focus, u32)>,
+    bar:           Option<Bar>,
+    /// Editor node of the last commit: a different one means the tab
+    /// changed, and that document's caret is put back.
+    shown_node:    u32,
+}
+
+/// The fields that can ask for the keyboard.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus { Editor, Query, Replace, Goto }
+
+/// The strip above the editor.
+enum Bar {
+    Find(FindBar),
+    Goto(String),
+}
+
+struct FindBar {
+    query:   String,
+    /// Some while the replace row is shown.
+    replace: Option<String>,
+    case:    bool,
+    /// Index of the current hit.
+    cur:     usize,
 }
 
 impl Spell {
@@ -388,26 +496,63 @@ impl Spell {
             font_px_saved: cfg_font,
             quit_total:    0,
             quit_done:     0,
+            next_uid:      0,
+            seq:           0,
+            select:        None,
+            focus:         None,
+            bar:           None,
+            shown_node:    u32::MAX,
         };
 
         // Launched to open a specific file (loft file association)?
         let path = host::launch_arg().unwrap_or_default();
         if !path.is_empty() {
             if let Some(text) = read_file(&path) {
-                let mut d = Doc::empty();
-                d.set_text(&text);
+                let mut d = sp.fresh_doc();
                 d.title = basename(&path).to_string();
                 d.path = Some(path);
+                d.load(&text);
                 sp.docs.push(d);
                 return sp;
             }
         }
 
         // No file argument → welcome tab.
-        let mut d = Doc::empty();
+        let mut d = sp.fresh_doc();
         d.text.push_str(s().welcome);
         sp.docs.push(d);
         sp
+    }
+
+    /// An empty document with its own uid.
+    fn fresh_doc(&mut self) -> Doc {
+        let mut d = Doc::empty();
+        d.uid = self.next_uid;
+        self.next_uid = self.next_uid.wrapping_add(1);
+        d
+    }
+
+    fn next_seq(&mut self) -> u32 {
+        self.seq = self.seq.wrapping_add(1).max(1);
+        self.seq
+    }
+
+    /// Put the active editor's caret at `(anchor, cursor)`.
+    fn place(&mut self, anchor: u32, cursor: u32) {
+        let node = self.cur().node();
+        let seq = self.next_seq();
+        self.select = Some((node, seq, anchor, cursor));
+        self.cur_mut().history.caret_moved(anchor, cursor);
+    }
+
+    fn focus_on(&mut self, f: Focus) {
+        let seq = self.next_seq();
+        self.focus = Some((f, seq));
+    }
+
+    /// The document whose editor carries `node`.
+    fn doc_by_node(&mut self, node: u32) -> Option<&mut Doc> {
+        self.docs.iter_mut().find(|d| d.node() == node)
     }
 
     fn cur(&self) -> &Doc { &self.docs[self.active] }
@@ -424,10 +569,10 @@ impl Spell {
             Some(t) => t,
             None => { log("[spell] open: failed"); return; }
         };
-        let mut d = Doc::empty();
-        d.set_text(&text);
+        let mut d = self.fresh_doc();
         d.path = Some(path.to_string());
         d.title = basename(path).to_string();
+        d.load(&text);
         if self.cur().is_pristine() {
             let a = self.active;
             self.docs[a] = d;
@@ -438,11 +583,12 @@ impl Spell {
     }
 
     fn new_doc(&mut self) {
+        let d = self.fresh_doc();
         if self.cur().is_pristine() {
             let a = self.active;
-            self.docs[a] = Doc::empty();
+            self.docs[a] = d;
         } else {
-            self.docs.push(Doc::empty());
+            self.docs.push(d);
             self.active = self.docs.len() - 1;
         }
     }
@@ -536,7 +682,8 @@ impl Spell {
         if i >= self.docs.len() { return; }
         self.docs.remove(i);
         if self.docs.is_empty() {
-            self.docs.push(Doc::empty());
+            let d = self.fresh_doc();
+            self.docs.push(d);
             self.active = 0;
         } else if self.active >= self.docs.len() {
             self.active = self.docs.len() - 1;
@@ -559,7 +706,9 @@ impl Spell {
             log("[spell] save: store failed");
             return;
         }
-        self.cur_mut().dirty = false;
+        let d = self.cur_mut();
+        d.saved = text_hash(&d.text);
+        d.dirty = false;
         // Editing the settings file in spell itself is a stated use of
         // having one. Adopt what was just saved — otherwise our in-memory
         // value would be written back over it on the way out and the edit
@@ -597,11 +746,237 @@ impl Spell {
         let title = basename(path).to_string();
         self.docs[doc].title = title;
         self.docs[doc].path = Some(path.to_string());
+        // The extension may have changed the language.
+        self.docs[doc].spans_stale = true;
         let prev = self.active;
         self.active = doc;
         self.write_to(path);
         self.active = prev.min(self.docs.len().saturating_sub(1));
     }
+}
+
+// ── Editing: undo, find, replace, go to line ─────────────────────────
+//
+// The compositor edits the buffer; spell sees each change as the whole
+// value and each caret move as `Event::Caret`, and places the caret back
+// with `Modifier::Select` when it changes the text itself.
+
+impl Spell {
+    fn undo(&mut self) {
+        let d = self.cur_mut();
+        let Some(r) = d.history.undo(&d.text) else { return };
+        self.apply_restore(r);
+    }
+
+    fn redo(&mut self) {
+        let d = self.cur_mut();
+        let Some(r) = d.history.redo(&d.text) else { return };
+        self.apply_restore(r);
+    }
+
+    fn apply_restore(&mut self, r: Restore) {
+        let d = self.cur_mut();
+        d.set_text(&r.text);
+        d.touch();
+        self.place(r.anchor, r.cursor);
+        self.focus_on(Focus::Editor);
+    }
+
+    /// Open the find bar, with the replace row if `replace`. A selection
+    /// on one line becomes the query.
+    fn open_find(&mut self, replace: bool) {
+        let d = self.cur();
+        let (a, c) = d.history.caret();
+        let (lo, hi) = (a.min(c) as usize, a.max(c) as usize);
+        let picked = d.text.get(lo..hi).filter(|t| !t.is_empty() && !t.contains('\n'))
+            .map(|t| t.to_string());
+        match &mut self.bar {
+            Some(Bar::Find(f)) => {
+                if let Some(q) = picked { f.query = q; }
+                if replace && f.replace.is_none() { f.replace = Some(String::new()); }
+            }
+            _ => {
+                self.bar = Some(Bar::Find(FindBar {
+                    query:   picked.unwrap_or_default(),
+                    replace: if replace { Some(String::new()) } else { None },
+                    case:    false,
+                    cur:     0,
+                }));
+            }
+        }
+        self.focus_on(if replace { Focus::Replace } else { Focus::Query });
+        self.seek_from_caret();
+    }
+
+    /// Close the bar; the editor takes the keyboard at the current hit.
+    fn close_bar(&mut self) {
+        self.bar = None;
+        self.focus_on(Focus::Editor);
+        let (a, c) = self.cur().history.caret();
+        self.place(a, c);
+    }
+
+    fn hits(&self) -> Vec<(usize, usize)> {
+        match &self.bar {
+            Some(Bar::Find(f)) => find_all(&self.cur().text, &f.query, f.case),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make the first hit at or after the caret current and select it.
+    fn seek_from_caret(&mut self) {
+        let hits = self.hits();
+        let (a, c) = self.cur().history.caret();
+        let from = a.min(c) as usize;
+        let i = hits.iter().position(|h| h.0 >= from).unwrap_or(0);
+        self.select_hit(&hits, i);
+    }
+
+    fn select_hit(&mut self, hits: &[(usize, usize)], i: usize) {
+        if let Some(Bar::Find(f)) = &mut self.bar { f.cur = i; }
+        if let Some(&(s, e)) = hits.get(i) {
+            self.place(s as u32, e as u32);
+        }
+    }
+
+    /// Step to the next (`dir` 1) or previous (`dir` -1) hit.
+    fn step_hit(&mut self, dir: isize) {
+        let hits = self.hits();
+        if hits.is_empty() { return; }
+        let cur = match &self.bar { Some(Bar::Find(f)) => f.cur, _ => 0 };
+        let n = hits.len() as isize;
+        let i = ((cur.min(hits.len() - 1) as isize + dir).rem_euclid(n)) as usize;
+        self.select_hit(&hits, i);
+    }
+
+    /// Replace the current hit and move on to the next one.
+    fn replace_one(&mut self) {
+        let hits = self.hits();
+        let (cur, with) = match &self.bar {
+            Some(Bar::Find(FindBar { cur, replace: Some(r), .. })) => (*cur, r.clone()),
+            _ => return,
+        };
+        let Some(&(s, e)) = hits.get(cur) else { return };
+        let d = self.cur_mut();
+        let old = d.text.clone();
+        d.text.replace_range(s..e, &with);
+        let end = (s + with.len()) as u32;
+        d.history.replaced(&old, &d.text, end, end);
+        d.touch();
+        let hits = self.hits();
+        let i = hits.iter().position(|h| h.0 >= end as usize).unwrap_or(0);
+        if hits.is_empty() { self.place(end, end); } else { self.select_hit(&hits, i); }
+    }
+
+    /// Replace every hit, as one undo step.
+    fn replace_all(&mut self) {
+        let hits = self.hits();
+        let with = match &self.bar {
+            Some(Bar::Find(FindBar { replace: Some(r), .. })) => r.clone(),
+            _ => return,
+        };
+        if hits.is_empty() { return; }
+        let d = self.cur_mut();
+        let old = d.text.clone();
+        let mut out = String::with_capacity(old.len());
+        let (mut last, mut end) = (0, 0);
+        for &(s, e) in &hits {
+            out.push_str(&old[last..s]);
+            out.push_str(&with);
+            end = out.len() as u32;
+            last = e;
+        }
+        out.push_str(&old[last..]);
+        d.set_text(&out);
+        d.history.replaced(&old, &d.text, end, end);
+        d.touch();
+        self.place(end, end);
+    }
+
+    fn open_goto(&mut self) {
+        self.bar = Some(Bar::Goto(String::new()));
+        self.focus_on(Focus::Goto);
+    }
+
+    /// Jump to the line typed into the go-to bar (1-based).
+    fn goto_submit(&mut self) {
+        let n = match &self.bar {
+            Some(Bar::Goto(t)) => t.trim().parse::<usize>().unwrap_or(0),
+            _ => return,
+        };
+        if n == 0 { return; }
+        let off = line_offset(&self.cur().text, n - 1) as u32;
+        self.bar = None;
+        self.focus_on(Focus::Editor);
+        self.place(off, off);
+    }
+}
+
+/// FNV-1a over a text, for "is this what is on disk".
+fn text_hash(t: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in t.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Indent of a file: tabs if more lines start with a tab than with
+/// spaces, else the smallest space indent of 2 or more (4 if none).
+fn detect_indent(t: &str) -> (u8, bool) {
+    let (mut tabs, mut spaced, mut min) = (0usize, 0usize, usize::MAX);
+    for line in t.lines().take(2_000) {
+        if line.starts_with('\t') { tabs += 1; continue; }
+        let n = line.bytes().take_while(|b| *b == b' ').count();
+        if n >= 2 && n < line.len() {
+            spaced += 1;
+            min = min.min(n);
+        }
+    }
+    if tabs > spaced { return (4, true); }
+    match min {
+        2 | 3 => (min as u8, false),
+        usize::MAX => (4, false),
+        _ => (4, false),
+    }
+}
+
+/// Byte offset of the start of line `n` (0-based), or the end of the text.
+fn line_offset(t: &str, n: usize) -> usize {
+    if n == 0 { return 0; }
+    t.match_indices('\n').nth(n - 1).map(|(i, _)| i + 1).unwrap_or(t.len())
+}
+
+/// 1-based line and column (in characters) of byte offset `at`.
+fn line_col(t: &str, at: usize) -> (usize, usize) {
+    let at = at.min(t.len());
+    let mut at_b = at;
+    while at_b > 0 && !t.is_char_boundary(at_b) { at_b -= 1; }
+    let before = &t[..at_b];
+    let line = before.matches('\n').count() + 1;
+    let ls = before.rfind('\n').map(|i| i + 1).unwrap_or(0);
+    (line, before[ls..].chars().count() + 1)
+}
+
+/// Every non-overlapping occurrence of `q` in `t`, as byte ranges.
+/// Without `case`, ASCII letters match either case.
+fn find_all(t: &str, q: &str, case: bool) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    if q.is_empty() { return out; }
+    let (tb, qb) = (t.as_bytes(), q.as_bytes());
+    let mut i = 0;
+    while i + qb.len() <= tb.len() && out.len() < MAX_HITS {
+        let hit = if case { &tb[i..i + qb.len()] == qb }
+                  else { tb[i..i + qb.len()].eq_ignore_ascii_case(qb) };
+        if hit && t.is_char_boundary(i) && t.is_char_boundary(i + qb.len()) {
+            out.push((i, i + qb.len()));
+            i += qb.len();
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Ask the kernel for a file dialog. `tag` comes back in `Event::Picked`.
@@ -680,8 +1055,19 @@ fn render(sp: &Spell) -> Widget {
         Widget::Divider,
         render_tabbar(sp),
         Widget::Divider,
-        render_body(sp),       // Flex(1) — fills
     ];
+    let editing = sp.confirm_close.is_none();
+    if editing {
+        if let Some(bar) = render_bar(sp) {
+            children.push(bar);
+            children.push(Widget::Divider);
+        }
+    }
+    children.push(render_body(sp));   // Flex(1) — fills
+    if editing {
+        children.push(Widget::Divider);
+        children.push(render_status(sp));
+    }
 
     if let Some(kind) = sp.open_menu {
         let (anchor, content) = render_dropdown(sp, kind);
@@ -704,11 +1090,13 @@ fn render(sp: &Spell) -> Widget {
 fn render_menu_bar() -> Widget {
     let labels: Vec<(String, ActionId)> = alloc::vec![
         (s().menu_file.to_string(), ActionId(ACT_MENU_FILE)),
+        (s().menu_edit.to_string(), ActionId(ACT_MENU_EDIT)),
         (s().menu_view.to_string(), ActionId(ACT_MENU_VIEW)),
         (s().menu_help.to_string(), ActionId(ACT_MENU_HELP)),
     ];
     let anchors: Vec<NodeId> = alloc::vec![
         NodeId(NODE_MENU_FILE),
+        NodeId(NODE_MENU_EDIT),
         NodeId(NODE_MENU_VIEW),
         NodeId(NODE_MENU_HELP),
     ];
@@ -729,6 +1117,16 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().close.to_string(), ActionId(ACT_FILE_CLOSE)),
                 (s().settings.to_string(), ActionId(ACT_FILE_SETTINGS)),
             ], &["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", ""], None),
+        ),
+        OpenMenu::Edit => (
+            NODE_MENU_EDIT,
+            prefab::popover_menu_shortcuts(&[
+                (s().undo.to_string(), ActionId(ACT_UNDO)),
+                (s().redo.to_string(), ActionId(ACT_REDO)),
+                (s().find.to_string(), ActionId(ACT_FIND)),
+                (s().replace.to_string(), ActionId(ACT_REPLACE)),
+                (s().goto_line.to_string(), ActionId(ACT_GOTO)),
+            ], &["Ctrl+Z", "Ctrl+Y", "Ctrl+F", "Ctrl+H", "Ctrl+G"], None),
         ),
         OpenMenu::View => (
             NODE_MENU_VIEW,
@@ -885,24 +1283,236 @@ fn render_body(sp: &Spell) -> Widget {
             ],
         };
     }
-    let spans = match doc.kind() {
-        Kind::Code(lang) => code_spans(&doc.text, lang),
-        _ => Vec::new(),
-    };
+    // Find hits go first: the first span covering a byte wins.
+    let mut spans: Vec<Span> = Vec::new();
+    if let Some(Bar::Find(f)) = &sp.bar {
+        for (i, (a, b)) in sp.hits().into_iter().enumerate() {
+            let token = if i == f.cur { Token::Accent } else { Token::Warning };
+            spans.push(Span { start: a as u32, len: (b - a) as u32, token });
+        }
+    }
+    spans.extend_from_slice(&doc.spans);
+    let node = doc.node();
+    let mut modifiers = alloc::vec![
+        Modifier::Flex(1),
+        Modifier::Background(Token::Page),
+        Modifier::Padding(Padding::Sm.as_u16()),
+        Modifier::LineNumbers(true),
+        Modifier::FontSize(sp.font_px),
+        // Typing works without a click: on open, and whenever focus
+        // has nowhere else to be (new tab, closed dialog).
+        Modifier::Autofocus,
+        Modifier::NodeId(NodeId(node)),
+        Modifier::Indent {
+            width: doc.indent.0,
+            tabs:  doc.indent.1,
+            colon: matches!(doc.kind(), Kind::Code(Lang::Python)),
+        },
+    ];
+    if let Some((n, seq, a, c)) = sp.select {
+        if n == node {
+            modifiers.push(Modifier::Select { seq, anchor: a, cursor: c });
+        }
+    }
+    if let Some((Focus::Editor, seq)) = sp.focus {
+        modifiers.push(Modifier::FocusRequest(seq));
+    }
     Widget::TextArea {
         value:       doc.text.clone(),
         placeholder: s().placeholder.to_string(),
         spans,
-        modifiers:   alloc::vec![
-            Modifier::Flex(1),
+        modifiers,
+    }
+}
+
+/// A text field of the bar: its node, and the focus request when it is
+/// the one that should have the keyboard.
+fn bar_input(sp: &Spell, value: &str, placeholder: &str, node: u32, me: Focus,
+             submit: u32, width: u16) -> Widget {
+    let mut mods = alloc::vec![
+        Modifier::NodeId(NodeId(node)),
+        Modifier::MinWidth(width),
+    ];
+    if let Some((f, seq)) = sp.focus {
+        if f == me { mods.push(Modifier::FocusRequest(seq)); }
+    }
+    let input = Widget::Input {
+        value:       value.to_string(),
+        placeholder: placeholder.to_string(),
+        on_submit:   ActionId(submit),
+        modifiers:   mods,
+    };
+    Widget::Row {
+        children:  alloc::vec![input],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
             Modifier::Background(Token::Page),
-            Modifier::Padding(Padding::Sm.as_u16()),
-            Modifier::LineNumbers(true),
-            Modifier::FontSize(sp.font_px),
-            // Typing works without a click: on open, and whenever focus
-            // has nowhere else to be (new tab, closed dialog).
-            Modifier::Autofocus,
+            Modifier::Rounded(6),
+            Modifier::Focus(alloc::vec![
+                Modifier::Border { token: Token::Accent, width: 1, radius: 6 },
+            ]),
         ],
+    }
+}
+
+fn bar_button(label: &str, action: u32, on: bool) -> Widget {
+    Widget::Text {
+        content:   label.to_string(),
+        style:     TextStyle::Body,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::Rounded(6),
+            Modifier::OnClick(ActionId(action)),
+            Modifier::Tint(if on { Token::Accent } else { Token::OnSurfaceMuted }),
+            Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(6),
+            ]),
+        ],
+    }
+}
+
+fn bar_icon(id: IconId, action: u32) -> Widget {
+    Widget::Icon {
+        id,
+        size: 16,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::OnClick(ActionId(action)),
+            Modifier::Tint(Token::OnSurfaceMuted),
+            Modifier::Rounded(6),
+            Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(6),
+            ]),
+        ],
+    }
+}
+
+fn bar_row(children: Vec<Widget>) -> Widget {
+    Widget::Row {
+        children,
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![],
+    }
+}
+
+/// Find / replace / go-to strip above the editor.
+fn render_bar(sp: &Spell) -> Option<Widget> {
+    let rows = match sp.bar.as_ref()? {
+        Bar::Find(f) => {
+            let hits = sp.hits();
+            let count = if f.query.is_empty() {
+                String::new()
+            } else if hits.is_empty() {
+                s().no_results.to_string()
+            } else {
+                step_label(f.cur.min(hits.len() - 1) + 1, hits.len())
+            };
+            let mut rows = alloc::vec![bar_row(alloc::vec![
+                bar_input(sp, &f.query, s().find_ph, NODE_FIND, Focus::Query, ACT_FIND_NEXT, 240),
+                bar_button("Aa", ACT_FIND_CASE, f.case),
+                Widget::Text {
+                    content:   count,
+                    style:     TextStyle::Caption,
+                    modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint), Modifier::MinWidth(80)],
+                },
+                bar_icon(IconId::ArrowUp, ACT_FIND_PREV),
+                bar_icon(IconId::ArrowDown, ACT_FIND_NEXT),
+                Widget::Spacer { flex: 1 },
+                bar_icon(IconId::X, ACT_FIND_CLOSE),
+            ])];
+            if let Some(r) = &f.replace {
+                rows.push(bar_row(alloc::vec![
+                    bar_input(sp, r, s().replace_ph, NODE_REPLACE, Focus::Replace, ACT_REPLACE_ONE, 240),
+                    bar_button(s().replace_one, ACT_REPLACE_ONE, false),
+                    bar_button(s().replace_all, ACT_REPLACE_ALL, false),
+                ]));
+            }
+            rows
+        }
+        Bar::Goto(t) => {
+            let mut n = String::with_capacity(8);
+            push_usize(&mut n, sp.cur().text.matches('\n').count() + 1);
+            alloc::vec![bar_row(alloc::vec![
+                bar_input(sp, t, &fill(s().goto_ph, &n), NODE_GOTO, Focus::Goto, ACT_GOTO_SUBMIT, 200),
+                Widget::Spacer { flex: 1 },
+                bar_icon(IconId::X, ACT_FIND_CLOSE),
+            ])]
+        }
+    };
+    Some(Widget::Column {
+        children:  rows,
+        spacing:   Spacing::Xs.as_u16(),
+        align:     Align::Stretch,
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Xs.as_u16()),
+            Modifier::Background(Token::SurfaceElevated),
+        ],
+    })
+}
+
+/// Status line: caret position on the left, the file's facts on the right.
+fn render_status(sp: &Spell) -> Widget {
+    let d = sp.cur();
+    let (a, c) = d.history.caret();
+    let (line, col) = line_col(&d.text, c as usize);
+    let mut l = String::with_capacity(8);
+    push_usize(&mut l, line);
+    let mut k = String::with_capacity(8);
+    push_usize(&mut k, col);
+    let mut left = fill(&fill(s().ln_col, &l), &k);
+    if a != c {
+        let (lo, hi) = (a.min(c) as usize, a.max(c) as usize);
+        let n = d.text.get(lo..hi).map(|t| t.chars().count()).unwrap_or(0);
+        let mut m = String::with_capacity(8);
+        push_usize(&mut m, n);
+        left.push_str("   ");
+        left.push_str(&fill(s().selected, &m));
+    }
+    let mut right = String::with_capacity(48);
+    right.push_str(lang_name(d.kind()));
+    right.push_str("   ");
+    if d.indent.1 {
+        right.push_str(s().tabs);
+    } else {
+        let mut w = String::with_capacity(2);
+        push_usize(&mut w, d.indent.0 as usize);
+        right.push_str(&fill(s().spaces, &w));
+    }
+    right.push_str("   ");
+    right.push_str(if d.text.contains("\r\n") { "CRLF" } else { "LF" });
+    right.push_str("   UTF-8");
+    let text = |t: String| Widget::Text {
+        content:   t,
+        style:     TextStyle::Caption,
+        modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
+    };
+    Widget::Row {
+        children:  alloc::vec![text(left), Widget::Spacer { flex: 1 }, text(right)],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: Padding::Xxs.as_u16() },
+            Modifier::Background(Token::SurfaceElevated),
+        ],
+    }
+}
+
+fn lang_name(k: Kind) -> &'static str {
+    match k {
+        Kind::Markdown        => "Markdown",
+        Kind::Code(Lang::Rust)   => "Rust",
+        Kind::Code(Lang::C)      => "C",
+        Kind::Code(Lang::Js)     => "JavaScript",
+        Kind::Code(Lang::Python) => "Python",
+        Kind::Code(Lang::Shell)  => "Shell",
+        Kind::Code(Lang::Json)   => "JSON",
+        Kind::Code(Lang::Markup) => "HTML/XML",
+        Kind::Plain | Kind::Untyped => "Plain text",
     }
 }
 
@@ -1663,20 +2273,54 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
         Event::Key(KeyCode::Escape) => {
             if sp.confirm_close.is_some() { sp.cancel_quit(); Outcome::Rerender }
             else if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
+            else if sp.bar.is_some() { sp.close_bar(); Outcome::Rerender }
             else { Outcome::Idle }
+        }
+        Event::Key(KeyCode::F(3)) => {
+            if matches!(sp.bar, Some(Bar::Find(_))) { sp.step_hit(1); } else { sp.open_find(false); }
+            Outcome::Rerender
         }
         // The window manager is asking whether it may close us.
         Event::CloseRequest => {
             if sp.begin_quit() { Outcome::Exit } else { Outcome::Rerender }
         }
-        Event::InputChange { .. } => {
-            // `payload` is the buffer value. The TextArea is the only
-            // editable widget we render — the file dialogs live in their
-            // own window.
-            let d = sp.cur_mut();
-            d.set_text(payload);
-            d.dirty = true;
-            Outcome::Rerender
+        // Every field carries a NodeId, so the change comes with the node as
+        // well; the plain `InputChange` beside it is ignored.
+        Event::InputChangeAt { node, .. } => match node {
+            NODE_FIND => {
+                if let Some(Bar::Find(f)) = &mut sp.bar { f.query = payload.to_string(); }
+                sp.seek_from_caret();
+                Outcome::Rerender
+            }
+            NODE_REPLACE => {
+                if let Some(Bar::Find(FindBar { replace: Some(r), .. })) = &mut sp.bar {
+                    *r = payload.to_string();
+                }
+                Outcome::Idle
+            }
+            NODE_GOTO => {
+                if let Some(Bar::Goto(t)) = &mut sp.bar { *t = payload.to_string(); }
+                Outcome::Idle
+            }
+            _ => match sp.doc_by_node(node) {
+                Some(d) => {
+                    d.history.changed(&d.text, payload);
+                    d.set_text(payload);
+                    d.touch();
+                    Outcome::Rerender
+                }
+                None => Outcome::Idle,
+            },
+        },
+        Event::Caret { node, cursor, anchor } => {
+            let active = sp.cur().node() == node;
+            match sp.doc_by_node(node) {
+                Some(d) => {
+                    d.history.caret_moved(anchor, cursor);
+                    if active { Outcome::Rerender } else { Outcome::Idle }
+                }
+                None => Outcome::Idle,
+            }
         }
         // The file dialog came back. `payload` is the chosen path; empty
         // means the user cancelled.
@@ -1718,6 +2362,12 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             b'+' | b'=' => { sp.zoom(Some(1)); Outcome::Rerender }
             b'-' => { sp.zoom(Some(-1)); Outcome::Rerender }
             b'0' => { sp.zoom(None); Outcome::Rerender }
+            b'z' if shift => { sp.redo(); Outcome::Rerender }
+            b'z' => { sp.undo(); Outcome::Rerender }
+            b'y' => { sp.redo(); Outcome::Rerender }
+            b'f' => { sp.open_find(false); Outcome::Rerender }
+            b'h' => { sp.open_find(true); Outcome::Rerender }
+            b'g' => { sp.open_goto(); Outcome::Rerender }
             _ => Outcome::Idle,
         },
         // Ctrl+wheel. One px per notch: small enough to land on the size
@@ -1735,6 +2385,23 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_MENU_FILE => { sp.open_menu = toggle(sp.open_menu, OpenMenu::File); Outcome::Rerender }
         ACT_MENU_VIEW => { sp.open_menu = toggle(sp.open_menu, OpenMenu::View); Outcome::Rerender }
         ACT_MENU_HELP => { sp.open_menu = toggle(sp.open_menu, OpenMenu::Help); Outcome::Rerender }
+        ACT_MENU_EDIT => { sp.open_menu = toggle(sp.open_menu, OpenMenu::Edit); Outcome::Rerender }
+        ACT_UNDO    => { sp.open_menu = None; sp.undo(); Outcome::Rerender }
+        ACT_REDO    => { sp.open_menu = None; sp.redo(); Outcome::Rerender }
+        ACT_FIND    => { sp.open_menu = None; sp.open_find(false); Outcome::Rerender }
+        ACT_REPLACE => { sp.open_menu = None; sp.open_find(true); Outcome::Rerender }
+        ACT_GOTO    => { sp.open_menu = None; sp.open_goto(); Outcome::Rerender }
+        ACT_FIND_NEXT => { sp.step_hit(1); Outcome::Rerender }
+        ACT_FIND_PREV => { sp.step_hit(-1); Outcome::Rerender }
+        ACT_FIND_CASE => {
+            if let Some(Bar::Find(f)) = &mut sp.bar { f.case = !f.case; }
+            sp.seek_from_caret();
+            Outcome::Rerender
+        }
+        ACT_FIND_CLOSE  => { sp.close_bar(); Outcome::Rerender }
+        ACT_REPLACE_ONE => { sp.replace_one(); Outcome::Rerender }
+        ACT_REPLACE_ALL => { sp.replace_all(); Outcome::Rerender }
+        ACT_GOTO_SUBMIT => { sp.goto_submit(); Outcome::Rerender }
         ACT_MENU_DISMISS => {
             if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
             else { Outcome::Idle }
@@ -1835,7 +2502,15 @@ fn toggle(cur: Option<OpenMenu>, want: OpenMenu) -> Option<OpenMenu> {
 
 // ── Commit + main loop ────────────────────────────────────────────────
 
-fn commit_tree(sp: &Spell) {
+fn commit_tree(sp: &mut Spell) {
+    // A tab switch: put that document's caret back where it was.
+    let node = sp.cur().node();
+    if node != sp.shown_node {
+        sp.shown_node = node;
+        let (a, c) = sp.cur().history.caret();
+        sp.place(a, c);
+    }
+    sp.cur_mut().refresh_spans();
     let tree = render(sp);
     // `wire::encode` prepends the WIRE_VERSION byte that the compositor's
     // `scene_commit` checks — a raw postcard payload is rejected (-1).
@@ -1851,7 +2526,7 @@ pub extern "C" fn _start() {
     // `Autofocus` gives it the keyboard.
     let mut sp = Spell::new();
 
-    commit_tree(&sp);
+    commit_tree(&mut sp);
     // After the first commit — the window has to exist before it can be
     // guarded. From here Mod+Q and the × ask us first.
     window_set_close_guard(true);
@@ -1864,14 +2539,14 @@ pub extern "C" fn _start() {
                 // path), whole: a document has no size limit here.
                 let payload = match &ev {
                     Event::Open(s) => s.clone(),
-                    Event::InputChange { value } => value.clone(),
+                    Event::InputChangeAt { value, .. } => value.clone(),
                     Event::Picked { path, .. } => path.clone(),
                     _ => alloc::string::String::new(),
                 };
                 let outcome = handle(&mut sp, ev, &payload);
                 match outcome {
                     Outcome::Idle => {}
-                    Outcome::Rerender => commit_tree(&sp),
+                    Outcome::Rerender => commit_tree(&mut sp),
                     Outcome::Exit => { sp.save_config(); host::close_widget(); return; }
                 }
             }

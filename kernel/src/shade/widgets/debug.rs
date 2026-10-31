@@ -225,6 +225,12 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             Modifier::CanvasNative  => { s.push_str("CanvasNative"); }
             Modifier::FocusRequest(n) => { let _ = write!(s, "FocusRequest({})", n); }
             Modifier::Mask => { let _ = write!(s, "Mask"); }
+            Modifier::Select { seq, anchor, cursor } => {
+                let _ = write!(s, "Select({} {}..{})", seq, anchor, cursor);
+            }
+            Modifier::Indent { width, tabs, colon } => {
+                let _ = write!(s, "Indent({} tabs={} colon={})", width, tabs, colon);
+            }
         }
     }
     s.push(']');

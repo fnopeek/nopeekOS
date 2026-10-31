@@ -52,6 +52,7 @@ pub mod fs;
 // (build.rs, tests) there is nothing to do and it would be dead code.
 #[cfg(all(feature = "heap", target_arch = "wasm32"))]
 pub mod heap;
+pub mod history;
 pub mod i18n;
 pub mod prefab;
 pub mod style;

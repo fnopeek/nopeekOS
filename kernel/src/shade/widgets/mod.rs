@@ -56,12 +56,47 @@ pub struct InputEditState {
     /// movement and mouse-drag, cleared by any plain (non-Shift) move or
     /// edit. The selected range is `min(anchor, cursor)..max(anchor, cursor)`.
     pub sel_anchor: Option<usize>,
+    /// Hashes of the values sent in `InputChange` that the app has not
+    /// committed back yet, oldest first. An app re-renders after every
+    /// event, so while the user types faster than it answers, its commits
+    /// carry values the buffer has already moved past. Such a commit is
+    /// an echo, not an override, and must not reset the buffer.
+    pub echoes: VecDeque<u64>,
+}
+
+/// Unanswered `InputChange` values remembered per buffer; an app further
+/// behind than this loses the echo test and its commit resets the buffer.
+const MAX_ECHOES: usize = 64;
+
+/// FNV-1a over a value, for the echo test.
+fn value_hash(v: &str) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in v.as_bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h ^ (v.len() as u64).rotate_left(32)
 }
 
 impl InputEditState {
     fn from_value(v: &str) -> Self {
         InputEditState { value: v.into(), cursor: v.len(),
-                         pending: [0; 4], pending_len: 0, sel_anchor: None }
+                         pending: [0; 4], pending_len: 0, sel_anchor: None,
+                         echoes: VecDeque::new() }
+    }
+
+    /// Remember the current value as sent to the app.
+    fn note_sent(&mut self) {
+        if self.echoes.len() >= MAX_ECHOES { self.echoes.pop_front(); }
+        self.echoes.push_back(value_hash(&self.value));
+    }
+
+    /// Place caret and anchor, clamped to the value and char boundaries.
+    fn place(&mut self, anchor: u32, cursor: u32) {
+        let c = clamp_boundary(&self.value, cursor as usize);
+        let a = clamp_boundary(&self.value, anchor as usize);
+        self.cursor = c;
+        self.sel_anchor = if a != c { Some(a) } else { None };
     }
 
     /// Selected byte range `[start, end)` if a non-empty selection exists.
@@ -147,6 +182,11 @@ pub struct WidgetScene {
     pub parked_edit: Option<(Vec<u32>, InputEditState)>,
     /// The last `Modifier::FocusRequest` number honoured in this window.
     pub focus_request: u32,
+    /// The last `Modifier::Select` number honoured in this window.
+    pub select_seq: u32,
+    /// Focus path, caret and anchor of the last `Event::Caret` sent, so
+    /// an unchanged caret is not reported again.
+    pub last_caret: Option<(Vec<u32>, usize, usize)>,
     /// Compositor-owned text-editor state, populated when `focus_path`
     /// targets a `Widget::Input`. None means no Input is focused (or
     /// the focused widget isn't an Input). Drives caret render +
@@ -369,6 +409,9 @@ pub fn push_event(window_id: u32, event: abi::Event) {
             }
             (Some(abi::Event::Wheel { dy }), abi::Event::Wheel { dy: ndy }) => {
                 *dy = dy.saturating_add(*ndy);
+            }
+            (Some(last @ abi::Event::Caret { .. }), abi::Event::Caret { .. }) => {
+                *last = event;
             }
             _ => {
                 if q.len() >= MAX_EVENTS_PER_WINDOW {
@@ -1395,6 +1438,7 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
         }
     };
     finish_job(window_id, job, LayoutMode::Reuse);
+    sync_caret(window_id);
     crate::shade::request_render();
     true
 }
@@ -1484,6 +1528,7 @@ fn advance_focus(window_id: u32, delta: isize) -> bool {
         RenderJob::take(s, LayoutMode::Reuse)
     };
     finish_job(window_id, job, LayoutMode::Reuse);
+    sync_caret(window_id);
     mark_dirty(window_id);
     true
 }
@@ -1721,7 +1766,17 @@ fn compute_input_edit(
     };
     if let Some(p) = prev {
         if p.value == value {
-            return Some(p.clone());
+            let mut e = p.clone();
+            e.echoes.clear();
+            return Some(e);
+        }
+        // A value the buffer already sent and moved past: everything sent
+        // up to it is answered, the buffer stays.
+        let h = value_hash(value);
+        if let Some(i) = p.echoes.iter().position(|&e| e == h) {
+            let mut e = p.clone();
+            e.echoes.drain(..=i);
+            return Some(e);
         }
     }
     Some(InputEditState::from_value(value))
@@ -1774,6 +1829,162 @@ fn cursor_down(s: &str, cursor: usize) -> usize {
     clamp_boundary(s, next_ls + col.min(next_len))
 }
 
+/// How a TextArea indents (`Modifier::Indent`).
+#[derive(Clone, Copy)]
+struct IndentRule { width: usize, tabs: bool, colon: bool }
+
+impl Default for IndentRule {
+    fn default() -> Self { IndentRule { width: 4, tabs: false, colon: false } }
+}
+
+impl IndentRule {
+    fn of(mods: &[abi::Modifier]) -> Self {
+        mods.iter().find_map(|m| match m {
+            abi::Modifier::Indent { width, tabs, colon } => Some(IndentRule {
+                width: (*width).clamp(1, 16) as usize, tabs: *tabs, colon: *colon,
+            }),
+            _ => None,
+        }).unwrap_or_default()
+    }
+
+    /// One indent level.
+    fn unit(&self) -> String {
+        if self.tabs { String::from("\t") } else { " ".repeat(self.width) }
+    }
+
+    /// What Tab inserts after `before` (the line up to the caret): a tab,
+    /// or spaces up to the next multiple of the width.
+    fn step_from(&self, before: &str) -> String {
+        if self.tabs { return String::from("\t"); }
+        let col = before.chars().count();
+        " ".repeat(self.width - col % self.width)
+    }
+
+    /// Bytes Backspace removes at `cursor`: back to the previous indent
+    /// stop while only spaces precede the caret on its line, else 1.
+    fn backspace_len(&self, s: &str, cursor: usize) -> usize {
+        if self.tabs { return 1; }
+        let ls = line_start(s, cursor);
+        let lead = &s[ls..cursor];
+        if lead.is_empty() || !lead.bytes().all(|b| b == b' ') { return 1; }
+        (lead.len() - 1) % self.width + 1
+    }
+}
+
+/// Text Enter inserts at `cursor`, and where the caret lands in it: the
+/// line's indent, one level more after an opener, and with the closer
+/// right behind the caret it moves to a line of its own.
+fn newline_text(s: &str, cursor: usize, rule: IndentRule) -> (String, usize) {
+    let ls = line_start(s, cursor);
+    let before = &s[ls..cursor];
+    let lead_len = before.bytes().take_while(|b| *b == b' ' || *b == b'\t').count();
+    let lead = &before[..lead_len];
+    let last = before.trim_end().chars().last();
+    let opener = matches!(last, Some('{' | '(' | '[')) || (rule.colon && last == Some(':'));
+    let mut text = String::from("\n");
+    text.push_str(lead);
+    if opener { text.push_str(&rule.unit()); }
+    let caret = text.len();
+    let next = s[cursor..].chars().next();
+    let pair = matches!((last, next), (Some('{'), Some('}')) | (Some('('), Some(')')) | (Some('['), Some(']')));
+    if pair {
+        text.push('\n');
+        text.push_str(lead);
+    }
+    (text, caret)
+}
+
+/// Indent (`indent`) or outdent every line the selection or caret
+/// touches, keeping caret and anchor on the same text. A line the
+/// selection only reaches at its very start is not touched. Returns
+/// whether the buffer changed.
+fn indent_lines(edit: &mut InputEditState, rule: IndentRule, indent: bool) -> bool {
+    let (a, b) = edit.selection().unwrap_or((edit.cursor, edit.cursor));
+    let mut starts = Vec::new();
+    let mut ls = line_start(&edit.value, a);
+    loop {
+        starts.push(ls);
+        let le = line_end(&edit.value, ls);
+        // The next line counts only if the selection reaches into it.
+        if le >= edit.value.len() || le + 1 >= b { break; }
+        ls = le + 1;
+    }
+    let unit = rule.unit();
+    let mut changed = false;
+    let mut cursor = edit.cursor;
+    let mut anchor = edit.sel_anchor;
+    // Last line first, so earlier offsets stay valid.
+    for &ls in starts.iter().rev() {
+        let le = line_end(&edit.value, ls);
+        if indent {
+            if le == ls { continue; }   // empty lines stay empty
+            edit.value.insert_str(ls, &unit);
+            let shift = |p: usize| if p >= ls { p + unit.len() } else { p };
+            cursor = shift(cursor);
+            anchor = anchor.map(shift);
+            changed = true;
+        } else {
+            let line = &edit.value[ls..le];
+            let n = if line.starts_with('\t') { 1 } else {
+                line.bytes().take(rule.width).take_while(|b| *b == b' ').count()
+            };
+            if n == 0 { continue; }
+            edit.value.replace_range(ls..ls + n, "");
+            let pull = |p: usize| if p > ls { p - n.min(p - ls) } else { p };
+            cursor = pull(cursor);
+            anchor = anchor.map(pull);
+            changed = true;
+        }
+    }
+    edit.cursor = clamp_boundary(&edit.value, cursor);
+    edit.sel_anchor = anchor.map(|a| clamp_boundary(&edit.value, a)).filter(|a| *a != edit.cursor);
+    changed
+}
+
+/// 0 whitespace, 1 word character, 2 punctuation: a word jump crosses one
+/// run of a class.
+fn char_class(c: char) -> u8 {
+    if c.is_whitespace() { 0 } else if c.is_alphanumeric() || c == '_' { 1 } else { 2 }
+}
+
+/// Ctrl+Left: over spaces, then over one run of word characters or of
+/// punctuation. A line break is a stop of its own.
+fn word_left(s: &str, i: usize) -> usize {
+    let mut pos = i;
+    let mut class = None;
+    for (j, c) in s[..i].char_indices().rev() {
+        if c == '\n' { return if pos == i { j } else { pos }; }
+        let k = char_class(c);
+        match class {
+            None if k == 0 => {}
+            None => class = Some(k),
+            Some(cl) if cl != k => break,
+            Some(_) => {}
+        }
+        pos = j;
+    }
+    pos
+}
+
+/// Ctrl+Right: the mirror of `word_left`, to the end of the next run.
+fn word_right(s: &str, i: usize) -> usize {
+    let mut pos = i;
+    let mut class = None;
+    for (j, c) in s[i..].char_indices() {
+        let at = i + j;
+        if c == '\n' { return if pos == i { at + 1 } else { pos }; }
+        let k = char_class(c);
+        match class {
+            None if k == 0 => {}
+            None => class = Some(k),
+            Some(cl) if cl != k => break,
+            Some(_) => {}
+        }
+        pos = at + c.len_utf8();
+    }
+    pos
+}
+
 /// Breathing room kept between the caret and the edge of the text column,
 /// so typing at the end of a long line doesn't park the caret exactly on
 /// the boundary where the next glyph would already be clipped.
@@ -1796,14 +2007,24 @@ fn caret_follow_scroll(window_id: u32) {
 
 /// `caret_follow_scroll` on a scene the caller has already locked.
 fn caret_follow_scroll_in(s: &mut WidgetScene) {
-    // Resolve the focused editor's metrics in one immutable pass — a zoomed
+    let Some(e) = s.input_edit.take() else { return };
+    let path = core::mem::take(&mut s.focus_path);
+    follow_caret_at(s, &path, &e);
+    s.focus_path = path;
+    s.input_edit = Some(e);
+}
+
+/// Scroll so the caret of `e`, the editor state of the TextArea at
+/// `path`, is on screen. `path` need not be focused: a `Modifier::Select`
+/// on an editor whose find bar holds the keyboard still scrolls it.
+fn follow_caret_at(s: &mut WidgetScene, path: &[u32], e: &InputEditState) {
+    // Resolve the editor's metrics in one immutable pass — a zoomed
     // editor scrolls in its own line height, not the default one.
-    let (px, column) = match widget_at_path(&s.tree, &s.focus_path) {
+    let (px, column) = match widget_at_path(&s.tree, path) {
         Some(w) => {
             let mods = modifiers_of_ref(w);
-            let total_lines = s.input_edit.as_ref()
-                .map(|e| e.value.split('\n').count()).unwrap_or(1);
-            let column = layout_node_at_path(&s.layout_tree, &s.focus_path)
+            let total_lines = e.value.split('\n').count();
+            let column = layout_node_at_path(&s.layout_tree, path)
                 .map(|n| render::textarea_text_column(n.rect, mods, total_lines));
             (layout::font_size_of(abi::TextStyle::Mono, mods), column)
         }
@@ -1812,16 +2033,13 @@ fn caret_follow_scroll_in(s: &mut WidgetScene) {
     let line_h = (crate::gui::text::line_height_px(abi::TextStyle::Mono, px) as u32).max(1);
 
     // Caret line + how far into that line it sits, in px.
-    let (caret_line, caret_x) = match &s.input_edit {
-        Some(e) => {
-            let cur = e.cursor.min(e.value.len());
-            let line = e.value[..cur].matches('\n').count();
-            let lstart = e.value[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
-            let adv = ceil_u32(crate::gui::text::measure_px(
-                &e.value[lstart..cur], abi::TextStyle::Mono, px));
-            (line, adv)
-        }
-        None => (0, 0),
+    let (caret_line, caret_x) = {
+        let cur = e.cursor.min(e.value.len());
+        let line = e.value[..cur].matches('\n').count();
+        let lstart = e.value[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let adv = ceil_u32(crate::gui::text::measure_px(
+            &e.value[lstart..cur], abi::TextStyle::Mono, px));
+        (line, adv)
     };
 
     if s.scroll_viewport.h > 0 {
@@ -1892,6 +2110,7 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
                     edit.value.replace_range(s..e, "");
                     edit.cursor = clamp_boundary(&edit.value, s);
                     edit.sel_anchor = None;
+                    edit.note_sent();
                     Some(edit.value.clone())
                 } else {
                     None
@@ -1916,6 +2135,7 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
                             edit.cursor = clamp_boundary(&edit.value, edit.cursor + text.len());
                         }
                         edit.sel_anchor = None;
+                        edit.note_sent();
                         Some(edit.value.clone())
                     }
                     None => None,
@@ -1935,6 +2155,7 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
             push_event(window_id, abi::Event::InputChangeAt { node, value: v });
         }
     }
+    sync_caret(window_id);
     rerender_state_only(window_id);
     mark_dirty(window_id);
     crate::shade::request_render();
@@ -2142,6 +2363,7 @@ pub fn text_select_begin(window_id: u32, x: i32, y: i32) -> bool {
     };
     if began {
         TEXT_DRAG.store(window_id + 1, Ordering::Release);
+        sync_caret(window_id);
         rerender_state_only(window_id);
         mark_dirty(window_id);
         crate::shade::request_render();
@@ -2182,6 +2404,7 @@ pub fn text_select_run(window_id: u32, x: i32, y: i32, run: u8) -> bool {
         // The drag state stays off: a double click selects, it does not drag.
         TEXT_DRAG.store(0, Ordering::Release);
         caret_follow_scroll(window_id);
+        sync_caret(window_id);
         rerender_state_only(window_id);
         mark_dirty(window_id);
         crate::shade::request_render();
@@ -2208,6 +2431,7 @@ pub fn text_select_extend(window_id: u32, x: i32, y: i32) -> bool {
     };
     if changed {
         caret_follow_scroll(window_id);
+        sync_caret(window_id);
         rerender_state_only(window_id);
         mark_dirty(window_id);
         crate::shade::request_render();
@@ -2219,12 +2443,69 @@ pub fn text_select_extend(window_id: u32, x: i32, y: i32) -> bool {
 /// plain click leaves no highlight.
 pub fn text_select_end(window_id: u32) {
     TEXT_DRAG.store(0, Ordering::Release);
-    let mut scenes = SCENES.lock();
-    if let Some(scene) = scenes.get_mut(&window_id) {
-        if let Some(edit) = scene.input_edit.as_mut() {
-            if edit.sel_anchor == Some(edit.cursor) { edit.sel_anchor = None; }
+    {
+        let mut scenes = SCENES.lock();
+        if let Some(scene) = scenes.get_mut(&window_id) {
+            if let Some(edit) = scene.input_edit.as_mut() {
+                if edit.sel_anchor == Some(edit.cursor) { edit.sel_anchor = None; }
+            }
         }
     }
+    sync_caret(window_id);
+}
+
+/// Send `Event::Caret` if the focused TextArea's caret or selection
+/// differs from the last one reported. Pushed after any `InputChange` of
+/// the same step, so the offsets refer to a value the app already has.
+fn sync_caret(window_id: u32) {
+    let event = {
+        let mut scenes = SCENES.lock();
+        let Some(s) = scenes.get_mut(&window_id) else { return };
+        let is_textarea = matches!(widget_at_path(&s.tree, &s.focus_path),
+                                   Some(abi::Widget::TextArea { .. }));
+        let caret = match &s.input_edit {
+            Some(e) if is_textarea => (e.cursor, e.sel_anchor.unwrap_or(e.cursor)),
+            _ => { s.last_caret = None; return; }
+        };
+        if let Some((p, c, a)) = &s.last_caret {
+            if *p == s.focus_path && (*c, *a) == caret { return; }
+        }
+        s.last_caret = Some((s.focus_path.clone(), caret.0, caret.1));
+        abi::Event::Caret {
+            node:   node_id_at(&s.tree, &s.focus_path).unwrap_or(u32::MAX),
+            cursor: caret.0 as u32,
+            anchor: caret.1 as u32,
+        }
+    };
+    push_event(window_id, event);
+}
+
+/// The first text widget carrying a non-zero `Modifier::Select`, with its
+/// path and `(seq, anchor, cursor)`.
+fn find_select(tree: &abi::Widget) -> Option<(Vec<u32>, u32, u32, u32)> {
+    fn walk(w: &abi::Widget, cursor: &mut Vec<u32>, out: &mut Option<(Vec<u32>, u32, u32, u32)>) {
+        if out.is_some() { return; }
+        if matches!(w, abi::Widget::Input { .. } | abi::Widget::TextArea { .. }) {
+            let hit = modifiers_of_ref(w).iter().find_map(|m| match m {
+                abi::Modifier::Select { seq, anchor, cursor } if *seq != 0 =>
+                    Some((*seq, *anchor, *cursor)),
+                _ => None,
+            });
+            if let Some((seq, a, c)) = hit {
+                *out = Some((cursor.clone(), seq, a, c));
+                return;
+            }
+        }
+        for (i, c) in widget_children_ref(w).iter().enumerate() {
+            cursor.push(i as u32);
+            walk(c, cursor, out);
+            cursor.pop();
+        }
+    }
+    let mut cursor: Vec<u32> = Vec::new();
+    let mut out = None;
+    walk(tree, &mut cursor, &mut out);
+    out
 }
 
 // ── Slider drag ───────────────────────────────────────────────────────
@@ -2506,12 +2787,19 @@ pub fn handle_input_key(
         Insert(u8),
         Newline,
         Indent,
+        Outdent,
         Backspace,
         Delete,
+        DeleteWordBack,
+        DeleteWordFwd,
         Left,
         Right,
+        WordLeft,
+        WordRight,
         Home,
         End,
+        DocStart,
+        DocEnd,
         Up,
         Down,
         PageUp,
@@ -2519,15 +2807,22 @@ pub fn handle_input_key(
         Submit,
     }
 
+    let ctrl = mods.ctrl;
     let op = match key {
         // Not only ASCII: every byte from 0x80 is part of a UTF-8 sequence
         // and is assembled below (so umlauts can be typed); 0x7F (DEL) is
         // not text and stays out.
         K::Char(b) if b >= 0x20 && b != 0x7F => Op::Insert(b),
+        K::Backspace if ctrl                     => Op::DeleteWordBack,
+        K::Delete    if ctrl                     => Op::DeleteWordFwd,
         K::Backspace                             => Op::Backspace,
         K::Delete                                => Op::Delete,
+        K::Left  if ctrl                         => Op::WordLeft,
+        K::Right if ctrl                         => Op::WordRight,
         K::Left                                  => Op::Left,
         K::Right                                 => Op::Right,
+        K::Home  if ctrl && is_textarea          => Op::DocStart,
+        K::End   if ctrl && is_textarea          => Op::DocEnd,
         K::Home                                  => Op::Home,
         K::End                                   => Op::End,
         K::Up       if is_textarea               => Op::Up,
@@ -2539,8 +2834,9 @@ pub fn handle_input_key(
         // `Event::Key` so window-level Enter handlers (drun's launcher)
         // keep working without wiring on_submit just to receive it.
         K::Enter if is_textarea                  => Op::Newline,
-        // Tab in a TextArea indents (4 spaces) instead of moving focus;
-        // for an Input it falls through so Tab still navigates fields.
+        // Tab in a TextArea indents instead of moving focus; for an Input
+        // it falls through so Tab still navigates fields.
+        K::Tab   if is_textarea && mods.shift    => Op::Outdent,
         K::Tab   if is_textarea                  => Op::Indent,
         K::Enter if on_submit.0 != u32::MAX      => Op::Submit,
         _                                        => return false,
@@ -2555,6 +2851,9 @@ pub fn handle_input_key(
             Some(s) => s,
             None    => return false,
         };
+        let rule = widget_at_path(&scene.tree, &scene.focus_path)
+            .map(|w| IndentRule::of(modifiers_of_ref(w)))
+            .unwrap_or_default();
         let edit = match scene.input_edit.as_mut() {
             Some(e) => e,
             None    => return false,
@@ -2574,14 +2873,22 @@ pub fn handle_input_key(
         // (Shift extends; a plain move drops the selection). An edit op with
         // an active selection replaces it: delete the range first, then the
         // op (insert / newline / indent) applies at the collapsed caret;
-        // Backspace/Delete are satisfied by the range removal alone.
+        // Backspace/Delete are satisfied by the range removal alone. Tab on
+        // a selection across lines and Shift+Tab act on whole lines and
+        // keep the selection.
         let sel = edit.selection();
         let had_sel = sel.is_some();
+        let block = match (&op, sel) {
+            (Op::Outdent, _) => true,
+            (Op::Indent, Some((s, e))) => edit.value[s..e].contains('\n'),
+            _ => false,
+        };
         let is_move = matches!(op,
-            Op::Left | Op::Right | Op::Home | Op::End |
-            Op::Up | Op::Down | Op::PageUp | Op::PageDown);
-        let is_edit = matches!(op,
-            Op::Insert(_) | Op::Newline | Op::Indent | Op::Backspace | Op::Delete);
+            Op::Left | Op::Right | Op::WordLeft | Op::WordRight | Op::Home | Op::End |
+            Op::DocStart | Op::DocEnd | Op::Up | Op::Down | Op::PageUp | Op::PageDown);
+        let is_edit = !block && matches!(op,
+            Op::Insert(_) | Op::Newline | Op::Indent | Op::Backspace | Op::Delete |
+            Op::DeleteWordBack | Op::DeleteWordFwd);
         if is_move {
             if mods.shift {
                 if edit.sel_anchor.is_none() { edit.sel_anchor = Some(edit.cursor); }
@@ -2628,26 +2935,56 @@ pub fn handle_input_key(
                 }
             }
             Op::Newline => {
-                edit.value.insert(edit.cursor, '\n');
-                edit.cursor += 1;
+                let (text, caret) = newline_text(&edit.value, edit.cursor, rule);
+                edit.value.insert_str(edit.cursor, &text);
+                edit.cursor += caret;
                 changed = true;
             }
+            Op::Indent if block => {
+                changed |= indent_lines(edit, rule, true);
+            }
             Op::Indent => {
-                edit.value.insert_str(edit.cursor, "    ");
-                edit.cursor += 4;
+                let ls = line_start(&edit.value, edit.cursor);
+                let text = rule.step_from(&edit.value[ls..edit.cursor]);
+                edit.value.insert_str(edit.cursor, &text);
+                edit.cursor += text.len();
                 changed = true;
+            }
+            Op::Outdent => {
+                changed |= indent_lines(edit, rule, false);
             }
             Op::Backspace => {
                 if !had_sel && edit.cursor > 0 {
-                    let idx = clamp_boundary(&edit.value, edit.cursor - 1);
-                    edit.value.remove(idx);
-                    edit.cursor = idx;
+                    let n = if is_textarea { rule.backspace_len(&edit.value, edit.cursor) } else { 0 };
+                    if n > 1 {
+                        edit.value.replace_range(edit.cursor - n..edit.cursor, "");
+                        edit.cursor -= n;
+                    } else {
+                        let idx = clamp_boundary(&edit.value, edit.cursor - 1);
+                        edit.value.remove(idx);
+                        edit.cursor = idx;
+                    }
                     changed = true;
                 }
             }
             Op::Delete => {
                 if !had_sel && edit.cursor < edit.value.len() {
                     edit.value.remove(edit.cursor);
+                    changed = true;
+                }
+            }
+            Op::DeleteWordBack => {
+                if !had_sel && edit.cursor > 0 {
+                    let to = word_left(&edit.value, edit.cursor);
+                    edit.value.replace_range(to..edit.cursor, "");
+                    edit.cursor = to;
+                    changed = true;
+                }
+            }
+            Op::DeleteWordFwd => {
+                if !had_sel && edit.cursor < edit.value.len() {
+                    let to = word_right(&edit.value, edit.cursor);
+                    edit.value.replace_range(edit.cursor..to, "");
                     changed = true;
                 }
             }
@@ -2658,14 +2995,19 @@ pub fn handle_input_key(
                 let c = edit.value[edit.cursor..].chars().next().map(|c| c.len_utf8()).unwrap_or(1);
                 edit.cursor += c;
             },
+            Op::WordLeft  => edit.cursor = word_left(&edit.value, edit.cursor),
+            Op::WordRight => edit.cursor = word_right(&edit.value, edit.cursor),
             Op::Home  => edit.cursor = if is_textarea { line_start(&edit.value, edit.cursor) } else { 0 },
             Op::End   => edit.cursor = if is_textarea { line_end(&edit.value, edit.cursor) } else { edit.value.len() },
+            Op::DocStart => edit.cursor = 0,
+            Op::DocEnd   => edit.cursor = edit.value.len(),
             Op::Up    => edit.cursor = cursor_up(&edit.value, edit.cursor),
             Op::Down  => edit.cursor = cursor_down(&edit.value, edit.cursor),
             Op::PageUp   => for _ in 0..page { edit.cursor = cursor_up(&edit.value, edit.cursor); },
             Op::PageDown => for _ in 0..page { edit.cursor = cursor_down(&edit.value, edit.cursor); },
             Op::Submit => {}
         }
+        if changed { edit.note_sent(); }
         let new_value = if changed { Some(edit.value.clone()) } else { None };
 
         // Caret-follow scroll. The render does not pull the view to the
@@ -2694,6 +3036,8 @@ pub fn handle_input_key(
             }
         }
     }
+
+    sync_caret(window_id);
 
     // Phase 4: re-rasterize so the new buffer + caret position appear.
     // Same machinery as a hover-state change: pure local re-render
@@ -2811,7 +3155,8 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // `npk_window_set_overlay` (drun's path), which is exactly when we
     // want to auto-focus.
     let (prev_hover, prev_focus, prev_active, prev_input_edit, prev_parked,
-         prev_scroll_x, prev_focus_request, is_first_commit) = {
+         prev_scroll_x, prev_focus_request, prev_select_seq, prev_last_caret,
+         is_first_commit) = {
         let scenes = SCENES.lock();
         match scenes.get(&target_id) {
             Some(s) => (
@@ -2822,9 +3167,11 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
                 s.parked_edit.clone(),
                 s.scroll_x,
                 s.focus_request,
+                s.select_seq,
+                s.last_caret.clone(),
                 false,
             ),
-            None    => (Vec::new(), Vec::new(), None, None, None, 0, 0, true),
+            None    => (Vec::new(), Vec::new(), None, None, None, 0, 0, 0, None, true),
         }
     };
     // A commit that shortens the longest line must pull the view back with
@@ -2840,6 +3187,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // user gets into a field without the mouse.
     let requested = find_focus_request(&tree).filter(|(_, n)| *n != prev_focus_request);
     let focus_request = requested.as_ref().map_or(prev_focus_request, |(_, n)| *n);
+    let leaving_focus = prev_focus.clone();
     let focus_path: Vec<u32> = if let Some((p, _)) = &requested {
         p.clone()
     } else if is_first_commit || focus_lost {
@@ -2855,7 +3203,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     //   - focus targets an Input with a different value → app overrode
     //     it programmatically; rebuild from the tree value.
     //   - focus elsewhere → drop the editor.
-    let input_edit: Option<InputEditState> = if focus_path.is_empty() {
+    let mut input_edit: Option<InputEditState> = if focus_path.is_empty() {
         None
     } else if requested.is_some() {
         // Selected whole, so typing replaces it — what Ctrl+L does in
@@ -2867,6 +3215,33 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     } else {
         compute_input_edit(&tree, &focus_path, prev_input_edit.as_ref())
     };
+
+    // An app-placed caret: rebuilt from the committed value, on the focused
+    // editor or on the parked state of one that is not focused.
+    let selected = find_select(&tree).filter(|(_, seq, _, _)| *seq != prev_select_seq);
+    let select_seq = selected.as_ref().map_or(prev_select_seq, |(_, seq, _, _)| *seq);
+    let mut parked_edit = prev_parked;
+    // Focus moved by the app (a find bar's FocusRequest): the editor it
+    // leaves keeps its caret for when focus comes back, as on a click away.
+    if focus_path != leaving_focus && widget_at_path(&tree, &leaving_focus).is_some() {
+        if let Some(e) = prev_input_edit {
+            parked_edit = Some((leaving_focus, e));
+        }
+    }
+    let mut select_path: Option<Vec<u32>> = None;
+    if let Some((path, _, anchor, cursor)) = selected {
+        if let Some(mut e) = compute_input_edit(&tree, &path, None) {
+            e.place(anchor, cursor);
+            if path == focus_path {
+                input_edit = Some(e);
+            } else {
+                parked_edit = Some((path.clone(), e));
+            }
+            if matches!(widget_at_path(&tree, &path), Some(abi::Widget::TextArea { .. })) {
+                select_path = Some(path);
+            }
+        }
+    }
 
     let hover_slice:  Option<&[u32]> = if prev_hover.is_empty() { None } else { Some(&prev_hover) };
     let focus_slice:  Option<&[u32]> = if focus_path.is_empty() { None } else { Some(&focus_path) };
@@ -2898,8 +3273,10 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         active_path: prev_active,
         density,
         has_pseudo,
-        parked_edit: prev_parked,
+        parked_edit,
         focus_request,
+        select_seq,
+        last_caret: prev_last_caret,
         input_edit,
         scroll_x,
         scroll_y,
@@ -2909,6 +3286,28 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
         scroll_viewport_x: max_scroll_x_rect,
     });
     reapply_slide_after_commit(target_id, slide_applied);
+
+    // The placed caret scrolls into view. Layout and pixels are done by
+    // now, so this costs a second raster, only on a commit that moves it.
+    if let Some(path) = select_path {
+        let job = {
+            let mut scenes = SCENES.lock();
+            scenes.get_mut(&target_id).map(|s| {
+                let focused = s.focus_path == path;
+                let e = if focused { s.input_edit.take() } else {
+                    s.parked_edit.as_mut().map(|(_, e)| core::mem::take(e))
+                };
+                if let Some(e) = e {
+                    follow_caret_at(s, &path, &e);
+                    if focused { s.input_edit = Some(e); }
+                    else if let Some((_, slot)) = s.parked_edit.as_mut() { *slot = e; }
+                }
+                RenderJob::take(s, LayoutMode::Reuse)
+            })
+        };
+        if let Some(job) = job { finish_job(target_id, job, LayoutMode::Reuse); }
+    }
+    sync_caret(target_id);
 
     // Mark the window dirty so shade paints it in the next render,
     // then request a full render on Core 0. scene_commit may run on
