@@ -23,7 +23,6 @@ use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use nopeek_widgets::i18n;
 use nopeek_widgets::app_meta::IconRef;
 use nopeek_widgets::prefab;
 use nopeek_widgets::style::{Padding, Radius, Spacing};
@@ -97,8 +96,8 @@ fn clipboard_set(text: &str) -> bool {
 }
 
 // ── Strings ───────────────────────────────────────────────────────────
-// English is the source language; a new one is one more `const` below.
-// See `nopeek_widgets::i18n`.
+// English only for now; a translation is one more `const` like `EN`,
+// picked in `s()` via `nopeek_widgets::i18n`.
 
 struct Strings {
     menu_file:      &'static str,
@@ -160,7 +159,6 @@ struct Strings {
     col_files:      &'static str,
     col_type:       &'static str,
     col_modified:   &'static str,
-    no_handler:     &'static str,
     // Status bar. `{}` placeholders are filled in order by `fill`.
     items_one:      &'static str,
     items_many:     &'static str,
@@ -183,6 +181,68 @@ struct Strings {
     name_exists:    &'static str,
     name_invalid:   &'static str,
     rename_failed:  &'static str,
+    // Sidebar.
+    place_home:      &'static str,
+    place_documents: &'static str,
+    place_downloads: &'static str,
+    place_pictures:  &'static str,
+    place_projects:  &'static str,
+    place_trash:     &'static str,
+    sec_places:      &'static str,
+    sec_devices:     &'static str,
+    // View menu.
+    sort_name:      &'static str,
+    sort_size:      &'static str,
+    sort_files:     &'static str,
+    sort_type:      &'static str,
+    sort_modified:  &'static str,
+    sort_asc:       &'static str,
+    sort_desc:      &'static str,
+    show_hidden:    &'static str,
+    zoom_in:        &'static str,
+    zoom_out:       &'static str,
+    // Location bar.
+    go_location:    &'static str,
+    location_hint:  &'static str,
+    /// `{}` = the typed path.
+    location_missing: &'static str,
+    // Open with.
+    open_with:      &'static str,
+    ow_title:       &'static str,
+    /// `{}` = the extension without the dot.
+    ow_always:      &'static str,
+    ow_none:        &'static str,
+    ow_hint:        &'static str,
+    assoc_failed:   &'static str,
+    // New file, duplicate.
+    new_file:       &'static str,
+    file_title:     &'static str,
+    file_label:     &'static str,
+    file_default:   &'static str,
+    file_failed:    &'static str,
+    duplicate:      &'static str,
+    duplicated:     &'static str,
+    duplicate_failed: &'static str,
+    // Undo.
+    undo:           &'static str,
+    undone:         &'static str,
+    undo_failed:    &'static str,
+    nothing_to_undo: &'static str,
+    // Name conflict on paste.
+    cf_title:       &'static str,
+    /// `{}` = the item's name.
+    cf_text:        &'static str,
+    cf_replace:     &'static str,
+    cf_keep:        &'static str,
+    cf_skip:        &'static str,
+    cf_all:         &'static str,
+    cf_hint:        &'static str,
+    // Background delete.
+    /// `{}` = items still to go.
+    deleting:       &'static str,
+    /// `{}` = items deleted before the stop.
+    delete_stopped: &'static str,
+    busy:           &'static str,
 }
 
 const EN: Strings = Strings {
@@ -218,7 +278,6 @@ const EN: Strings = Strings {
     empty_dir: "Empty directory", no_matches: "No matches",
     col_name: "NAME", col_size: "SIZE", col_files: "FILES",
     col_type: "TYPE", col_modified: "MODIFIED",
-    no_handler: "No app is associated with this file type",
     items_one: "{} item", items_many: "{} items",
     selected: "{} of {} selected, {}",
     trashed: "Moved to trash: {}",
@@ -239,68 +298,39 @@ const EN: Strings = Strings {
     name_exists: "An item with that name already exists",
     name_invalid: "Invalid name",
     rename_failed: "Could not rename",
+    place_home: "Home", place_documents: "Documents", place_downloads: "Downloads",
+    place_pictures: "Pictures", place_projects: "Projects", place_trash: "Trash",
+    sec_places: "PLACES", sec_devices: "DEVICES",
+    sort_name: "Sort by name", sort_size: "Sort by size", sort_files: "Sort by file count",
+    sort_type: "Sort by type", sort_modified: "Sort by date",
+    sort_asc: "Ascending", sort_desc: "Descending",
+    show_hidden: "Show hidden files",
+    zoom_in: "Bigger icons", zoom_out: "Smaller icons",
+    go_location: "Go to location…",
+    location_hint: "path, e.g. home/documents",
+    location_missing: "Not found: {}",
+    open_with: "Open with…", ow_title: "Open with",
+    ow_always: "Always use for .{} files",
+    ow_none: "No app is installed that can open files",
+    ow_hint: "Click an app · Esc cancels",
+    assoc_failed: "Could not save the association",
+    new_file: "New file…", file_title: "New file", file_label: "File name:",
+    file_default: "Untitled.txt", file_failed: "Could not create file",
+    duplicate: "Duplicate", duplicated: "Duplicated: {}", duplicate_failed: "Could not duplicate: {}",
+    undo: "Undo", undone: "Undone", undo_failed: "Could not undo, the items changed since",
+    nothing_to_undo: "Nothing to undo",
+    cf_title: "Item exists",
+    cf_text: "“{}” already exists here.",
+    cf_replace: "Replace", cf_keep: "Keep both", cf_skip: "Skip",
+    cf_all: "Same for all",
+    cf_hint: "Replace moves the existing item to the trash · Esc stops",
+    deleting: "Deleting… {} left · Esc stops",
+    delete_stopped: "Stopped after {} deleted",
+    busy: "Still deleting, wait or press Esc",
 };
 
-const DE: Strings = Strings {
-    menu_file: "Datei", menu_edit: "Bearbeiten", menu_view: "Ansicht",
-    menu_go: "Gehe zu", menu_help: "Hilfe",
-    quit: "Beenden",
-    view_grid: "Kacheln", view_list: "Liste",
-    go_home: "Persönlicher Ordner", go_filesystem: "Dateisystem",
-    about: "Über loft",
-    open: "Öffnen",
-    copy: "Kopieren", cut: "Ausschneiden", paste: "Einfügen",
-    rename: "Umbenennen…",
-    select_all: "Alles auswählen", new_folder: "Neuer Ordner…", refresh: "Aktualisieren",
-    move_to_trash: "In den Papierkorb", delete_perm: "Endgültig löschen",
-    restore: "Wiederherstellen", empty_trash: "Papierkorb leeren",
-    copy_path: "Pfad kopieren", properties: "Eigenschaften",
-    no_action: "(keine Aktion)",
-    rename_title: "Umbenennen", rename_label: "Neuer Name:",
-    rename_hint: "Klicke ins Feld, dann Enter · Esc bricht ab",
-    cancel: "Abbrechen", confirm_rename: "Umbenennen",
-    folder_title: "Neuer Ordner", folder_label: "Ordnername:",
-    folder_default: "Neuer Ordner", create: "Erstellen",
-    delete_title: "Endgültig löschen",
-    delete_one: "„{}“ endgültig löschen?",
-    delete_many: "{} Elemente endgültig löschen?",
-    delete_hint: "Das lässt sich nicht rückgängig machen · Esc bricht ab",
-    delete: "Löschen",
-    props_title: "Eigenschaften",
-    props_name: "Name", props_type: "Typ", props_size: "Größe",
-    props_files: "Dateien", props_modified: "Geändert", props_location: "Ort",
-    props_folder: "Ordner",
-    close: "Schließen",
-    search: "suchen",
-    empty_dir: "Leerer Ordner", no_matches: "Keine Treffer",
-    col_name: "NAME", col_size: "GRÖSSE", col_files: "DATEIEN",
-    col_type: "TYP", col_modified: "GEÄNDERT",
-    no_handler: "Keine App für diesen Dateityp zugeordnet",
-    items_one: "{} Element", items_many: "{} Elemente",
-    selected: "{} von {} ausgewählt, {}",
-    trashed: "In den Papierkorb verschoben: {}",
-    trash_failed: "Nicht in den Papierkorb verschoben: {}",
-    deleted: "Gelöscht: {}",
-    delete_failed: "Nicht gelöscht: {}",
-    restored: "Wiederhergestellt: {}",
-    restored_home: "Im persönlichen Ordner wiederhergestellt, der alte Ordner fehlt: {}",
-    restore_failed: "Nicht wiederhergestellt: {}",
-    restore_nested: "Nur Elemente direkt im Papierkorb lassen sich wiederherstellen",
-    pasted: "Eingefügt: {}",
-    paste_failed: "Nicht eingefügt: {}",
-    copied: "Kopiert: {}",
-    cut_done: "Ausgeschnitten: {}",
-    path_copied: "Pfad kopiert",
-    path_failed: "Pfad konnte nicht kopiert werden",
-    folder_failed: "Ordner konnte nicht erstellt werden",
-    name_exists: "Ein Element mit diesem Namen existiert bereits",
-    name_invalid: "Ungültiger Name",
-    rename_failed: "Umbenennen fehlgeschlagen",
-};
 
-fn s() -> &'static Strings {
-    match i18n::lang() { Lang::De => &DE, _ => &EN }
-}
+fn s() -> &'static Strings { &EN }
 
 /// Replace each `{}` in `template` with the next of `args`.
 fn fill(template: &str, args: &[&str]) -> String {
@@ -370,6 +400,16 @@ const TRASH_INDEX: &str = ".index";
 /// Upper bound on list-and-delete passes for one directory tree; each pass
 /// removes at least what one `npk_fs_list` buffer holds.
 const DELETE_ROUNDS: usize = 64;
+/// `npk_fs_delete` calls per idle tick (~16 ms) of a background delete.
+const DELETE_BUDGET: usize = 48;
+/// loft's own settings, and the extension → app table it shares.
+const CONFIG_PATH: &str = "sys/config/loft";
+const ASSOC_PATH: &str = "sys/config/associations";
+/// Grid zoom steps as (columns, icon size in px), smallest icons first.
+const ZOOM_STEPS: [(usize, u16); 5] = [(8, 32), (6, 48), (4, 64), (3, 96), (2, 128)];
+const ZOOM_DEFAULT: usize = 2;
+/// Modules that are panels or system parts, never an "Open with" target.
+const NOT_HANDLERS: &[&str] = &["loft", "dock", "bar", "drun", "deck", "pick", "volume", "link"];
 
 // Grid/list items: one id per visible row, so the band is wide enough for
 // any directory without running into the next surface.
@@ -395,8 +435,20 @@ const ACT_MENU_DISMISS:       u32 = 5_500;
 const ACT_FILE_QUIT:          u32 = 6_000;
 const ACT_VIEW_GRID:          u32 = 6_100;
 const ACT_VIEW_LIST:          u32 = 6_101;
+const ACT_SORT_NAME:          u32 = 6_102;
+const ACT_SORT_SIZE:          u32 = 6_103;
+const ACT_SORT_FILES:         u32 = 6_104;
+const ACT_SORT_TYPE:          u32 = 6_105;
+const ACT_SORT_MTIME:         u32 = 6_106;
+const ACT_SORT_ASC:           u32 = 6_107;
+const ACT_SORT_DESC:          u32 = 6_108;
+const ACT_VIEW_HIDDEN:        u32 = 6_109;
+const ACT_ZOOM_IN:            u32 = 6_110;
+const ACT_ZOOM_OUT:           u32 = 6_111;
 const ACT_GO_HOME:            u32 = 6_200;
 const ACT_GO_FILESYSTEM:      u32 = 6_201;
+const ACT_GO_LOCATION:        u32 = 6_202;
+const ACT_LOCATION_SUBMIT:    u32 = 6_203;
 const ACT_HELP_ABOUT:         u32 = 6_300;
 // List-view column headers — click to sort / toggle direction.
 const ACT_HEADER_NAME:        u32 = 7_000;
@@ -421,13 +473,25 @@ const ACT_EDIT_COPY_PATH:     u32 = 8_010;
 const ACT_EDIT_PROPERTIES:    u32 = 8_011;
 const ACT_EDIT_OPEN:          u32 = 8_012;
 const ACT_EDIT_REFRESH:       u32 = 8_013;
+const ACT_EDIT_OPEN_WITH:     u32 = 8_014;
+const ACT_EDIT_NEW_FILE:      u32 = 8_015;
+const ACT_EDIT_DUPLICATE:     u32 = 8_016;
+const ACT_EDIT_UNDO:          u32 = 8_017;
 // Dialog buttons (name, confirm, properties).
 const ACT_DIALOG_SUBMIT:      u32 = 8_100;
 const ACT_DIALOG_CANCEL:      u32 = 8_101;
+const ACT_OW_ALWAYS:          u32 = 8_102;
+const ACT_CF_REPLACE:         u32 = 8_103;
+const ACT_CF_KEEP:            u32 = 8_104;
+const ACT_CF_SKIP:            u32 = 8_105;
+const ACT_CF_ALL:             u32 = 8_106;
 // Click-outside dismiss for the right-click context menu.
 const ACT_CTX_DISMISS:        u32 = 8_200;
 // The file area behind the items: right-click opens the background menu.
 const ACT_BACKGROUND:         u32 = 8_300;
+// "Open with" app rows, one id per app.
+const ACT_OW_BASE:            u32 = 8_400;
+const ACT_OW_END:             u32 = 9_000;
 
 // NodeIds for menu-bar labels — used as Popover anchors.
 const NODE_MENU_FILE: u32 = 100;
@@ -435,16 +499,21 @@ const NODE_MENU_EDIT: u32 = 101;
 const NODE_MENU_VIEW: u32 = 102;
 const NODE_MENU_GO:   u32 = 103;
 const NODE_MENU_HELP: u32 = 104;
+// Text fields, so `InputChangeAt` says which one changed.
+const NODE_SEARCH:    u32 = 110;
+const NODE_LOCATION:  u32 = 111;
+const NODE_NAME:      u32 = 112;
 
-const GRID_COLS: usize = 4;
 const QUERY_CAP: usize = 127;
 
 // ── State ─────────────────────────────────────────────────────────────
 
 struct Place {
-    label: String,
-    icon:  IconId,
-    path:  String,
+    label:  String,
+    icon:   IconId,
+    path:   String,
+    /// Listed under Devices rather than Places.
+    device: bool,
 }
 
 struct Entry {
@@ -538,6 +607,45 @@ enum NameKind {
     /// `old` is the source's full path, captured when the dialog opened.
     Rename { old: String },
     NewFolder,
+    NewFile,
+}
+
+/// One reversible step of a file operation.
+enum Step {
+    /// `from` was moved (or renamed) to `to`.
+    Move { from: String, to: String },
+    /// `path` was created (new file or folder, copy, duplicate).
+    Create { path: String, is_dir: bool },
+}
+
+/// How a name clash on paste is resolved.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Clash { Replace, Keep, Skip }
+
+/// A paste in progress; it pauses on a name clash until the user answers.
+struct PasteJob {
+    mode:      ClipMode,
+    /// All source paths, for the clipboard afterwards.
+    all:       Vec<String>,
+    /// Sources still to go, next one last.
+    todo:      Vec<String>,
+    /// The answer to reuse once "same for all" is ticked.
+    policy:    Option<Clash>,
+    apply_all: bool,
+    steps:     Vec<Step>,
+    ok:        usize,
+    failed:    usize,
+    last:      Option<String>,
+}
+
+/// A permanent delete running off the idle loop.
+struct DeleteJob {
+    /// Paths still to delete, next one last. `top` marks a selected item
+    /// (counted in the report) as opposed to something inside one.
+    todo:   Vec<(String, bool, bool)>,
+    rounds: usize,
+    ok:     usize,
+    failed: usize,
 }
 
 struct Props {
@@ -555,6 +663,10 @@ enum Dialog {
     Name(NameKind),
     ConfirmDelete(Vec<Target>),
     Properties(Props),
+    /// Pick an app for `target`; `apps` holds (module, display name).
+    OpenWith { target: Target, apps: Vec<(String, String)>, always: bool },
+    /// A paste hit an existing name; the job waits in `Loft::paste`.
+    Clash { name: String },
 }
 
 struct Status {
@@ -631,6 +743,17 @@ struct Loft {
     /// The name dialog's text, at most its pre-allocated capacity.
     name_buf:       String,
     status:         Option<Status>,
+    show_hidden:    bool,
+    /// Index into `ZOOM_STEPS`.
+    zoom:           usize,
+    /// The typed location while the location bar replaces the breadcrumb.
+    location:       Option<String>,
+    /// Raised to move the keyboard into the location bar.
+    focus_seq:      u32,
+    /// Finished operations, most recent last. Each entry is one user action.
+    undo:           Vec<Vec<Step>>,
+    paste:          Option<PasteJob>,
+    deleting:       Option<DeleteJob>,
 }
 
 impl Loft {
@@ -667,7 +790,15 @@ impl Loft {
             dialog:        None,
             name_buf:      String::with_capacity(256),
             status:        None,
+            show_hidden:   false,
+            zoom:          ZOOM_DEFAULT,
+            location:      None,
+            focus_seq:     0,
+            undo:          Vec::new(),
+            paste:         None,
+            deleting:      None,
         };
+        lf.load_settings();
         lf.refresh();
         lf
     }
@@ -769,6 +900,7 @@ impl Loft {
         }
         sort_entries(&mut self.entries, self.sort_key, self.sort_asc);
         self.refilter();
+        self.save_settings();
     }
 
     /// Compute the recursive size + file count for up to `budget` queued
@@ -827,7 +959,9 @@ impl Loft {
         let recursive_mode = self.ensure_search_source();
         self.filtered.clear();
         if self.query.is_empty() {
-            for i in 0..self.entries.len() { self.filtered.push(i); }
+            for (i, e) in self.entries.iter().enumerate() {
+                if self.show_hidden || !is_hidden(&e.name) { self.filtered.push(i); }
+            }
         } else {
             // Reuse the buffer for the lowercased query.
             self.query_lc.clear();
@@ -836,7 +970,9 @@ impl Loft {
             }
             let source: &Vec<Entry> = if recursive_mode { &self.recursive } else { &self.entries };
             for (i, e) in source.iter().enumerate() {
-                if e.name_lc.contains(self.query_lc.as_str()) {
+                if e.name_lc.contains(self.query_lc.as_str())
+                    && (self.show_hidden || !is_hidden(&e.name))
+                {
                     self.filtered.push(i);
                 }
             }
@@ -913,6 +1049,7 @@ impl Loft {
         self.cursor = None;
         self.last_click = None;
         self.ctx = None;
+        self.location = None;
         self.refresh();
     }
 
@@ -954,7 +1091,7 @@ impl Loft {
         } else if let Some(app) = self.associated_app_in(&self.current, &name) {
             open(&app, &full);
         } else {
-            self.say(s().no_handler.to_string(), true);
+            self.open_with();
         }
     }
 
@@ -976,7 +1113,7 @@ impl Loft {
 
     fn row_stride(&self) -> isize {
         match self.view_mode {
-            ViewMode::Grid => GRID_COLS as isize,
+            ViewMode::Grid => self.grid_cols() as isize,
             ViewMode::List => 1,
         }
     }
@@ -1114,35 +1251,91 @@ impl Loft {
         self.say(fill(t, &[&n]), false);
     }
 
-    /// Ctrl+V — copy or move the clipboard items into the current folder,
-    /// each under a free name.
+    /// Ctrl+V: copy or move the clipboard items into the current folder.
+    /// A name that exists already asks first (see `Dialog::Clash`).
     fn do_paste(&mut self) {
+        if self.paste.is_some() { return; }
         let Some(clip) = self.clipboard.take() else { return };
-        let (mut ok, mut failed) = (0usize, 0usize);
-        let mut last: Option<String> = None;
-        for src in &clip.items {
+        let mut todo = clip.items.clone();
+        todo.reverse();
+        self.paste = Some(PasteJob {
+            mode: clip.mode, all: clip.items, todo, policy: None, apply_all: false,
+            steps: Vec::new(), ok: 0, failed: 0, last: None,
+        });
+        self.run_paste(None);
+    }
+
+    /// Work through the paste job. `answer` resolves the clash the job is
+    /// waiting on; the next clash without a standing policy pauses it again.
+    fn run_paste(&mut self, mut answer: Option<Clash>) {
+        let Some(mut job) = self.paste.take() else { return };
+        while let Some(src) = job.todo.last().cloned() {
             // Moving an item into the folder it is already in changes nothing.
-            if clip.mode == ClipMode::Cut && parent_path(src) == self.current { continue; }
-            let dest = unique_in(&self.current, basename(src), dir_exists(src));
-            let done = match clip.mode {
-                ClipMode::Copy => fs_copy(src, &dest),
-                ClipMode::Cut  => fs_rename(src, &dest),
+            if job.mode == ClipMode::Cut && parent_path(&src) == self.current {
+                job.todo.pop();
+                continue;
+            }
+            let name = basename(&src).to_string();
+            let is_dir = dir_exists(&src);
+            let plain = join(&self.current, &name);
+            // A copy into its own folder is a duplicate, not a clash.
+            let clash = plain != src && path_exists(&plain);
+            let choice = if !clash {
+                Clash::Keep
+            } else if let Some(c) = answer.take().or(job.policy) {
+                if job.apply_all { job.policy = Some(c); }
+                c
+            } else {
+                self.dialog = Some(Dialog::Clash { name });
+                self.paste = Some(job);
+                return;
+            };
+            job.todo.pop();
+            if choice == Clash::Skip { continue; }
+            if choice == Clash::Replace {
+                let old = Target { name: name.clone(), full: plain.clone(), is_dir: dir_exists(&plain) };
+                match self.trash_items(core::slice::from_ref(&old)).0.pop() {
+                    Some(step) => job.steps.push(step),
+                    None => { job.failed += 1; continue; }
+                }
+            }
+            let dest = if choice == Clash::Replace { plain } else { unique_in(&self.current, &name, is_dir) };
+            let done = match job.mode {
+                ClipMode::Copy => fs_copy(&src, &dest),
+                ClipMode::Cut  => fs_rename(&src, &dest),
             };
             if done {
-                ok += 1;
-                last = Some(basename(&dest).to_string());
+                job.ok += 1;
+                job.last = Some(basename(&dest).to_string());
+                job.steps.push(match job.mode {
+                    ClipMode::Copy => Step::Create { path: dest, is_dir },
+                    ClipMode::Cut  => Step::Move { from: src, to: dest },
+                });
             } else {
-                failed += 1;
+                job.failed += 1;
             }
         }
+        self.finish_paste(job);
+    }
+
+    fn finish_paste(&mut self, job: PasteJob) {
         // A copy can be pasted again; a cut keeps only what did not move.
-        let mut clip = clip;
-        if clip.mode == ClipMode::Cut { clip.items.retain(|p| path_exists(p)); }
-        if !clip.items.is_empty() { self.clipboard = Some(clip); }
+        let mut items = job.all;
+        if job.mode == ClipMode::Cut { items.retain(|p| path_exists(p)); }
+        if !items.is_empty() { self.clipboard = Some(Clip { items, mode: job.mode }); }
+        self.record(job.steps);
         self.marks.clear();
         self.refresh();
-        if let Some(name) = last { self.select_name(&name); }
-        self.report(ok, failed, s().pasted, s().paste_failed);
+        if let Some(name) = job.last { self.select_name(&name); }
+        self.report(job.ok, job.failed, s().pasted, s().paste_failed);
+    }
+
+    /// Esc on the clash dialog: keep what is done, drop the rest.
+    fn stop_paste(&mut self) {
+        if let Some(mut job) = self.paste.take() {
+            job.todo.clear();
+            self.finish_paste(job);
+        }
     }
 
     /// Delete key / "Move to trash": to the trash, or with a confirmation
@@ -1159,29 +1352,36 @@ impl Loft {
     }
 
     fn move_to_trash(&mut self, targets: Vec<Target>) {
-        if !self.ensure_trash() {
-            self.say(fill(s().trash_failed, &[&num(targets.len())]), true);
-            return;
-        }
+        let (steps, failed) = self.trash_items(&targets);
+        let ok = steps.len();
+        self.record(steps);
+        self.marks.clear();
+        self.refresh();
+        self.report(ok, failed, s().trashed, s().trash_failed);
+    }
+
+    /// Move `targets` into the trash and note where they came from. Returns
+    /// the moves done and the number that failed; refreshes nothing.
+    fn trash_items(&mut self, targets: &[Target]) -> (Vec<Step>, usize) {
+        if !self.ensure_trash() { return (Vec::new(), targets.len()); }
         let trash = self.trash_dir();
         let mut records = self.read_trash_index();
         let now = host::unix_time();
-        let (mut ok, mut failed) = (0usize, 0usize);
-        for t in &targets {
+        let mut steps = Vec::new();
+        let mut failed = 0usize;
+        for t in targets {
             // The trash cannot move into itself, nor can a folder holding it.
             if t.full == trash || is_below(&trash, &t.full) { failed += 1; continue; }
             let dest = unique_in(&trash, basename(&t.name), t.is_dir);
             if fs_rename(&t.full, &dest) {
                 records.push(TrashRecord { name: basename(&dest).to_string(), origin: t.full.clone(), time: now });
-                ok += 1;
+                steps.push(Step::Move { from: t.full.clone(), to: dest });
             } else {
                 failed += 1;
             }
         }
-        if ok > 0 { self.write_trash_index(&records); }
-        self.marks.clear();
-        self.refresh();
-        self.report(ok, failed, s().trashed, s().trash_failed);
+        if !steps.is_empty() { self.write_trash_index(&records); }
+        (steps, failed)
     }
 
     /// Create the trash folder if it is missing. False if that failed.
@@ -1203,6 +1403,7 @@ impl Loft {
         let targets = self.targets();
         let mut records = self.read_trash_index();
         let (mut ok, mut homed, mut nested, mut failed) = (0usize, 0usize, 0usize, 0usize);
+        let mut steps = Vec::new();
         for t in &targets {
             // A search hit below the top level has no index line of its own.
             if t.name.contains('/') { nested += 1; continue; }
@@ -1217,12 +1418,14 @@ impl Loft {
             let dest = unique_in(&dir, &name, t.is_dir);
             if fs_rename(&t.full, &dest) {
                 if let Some(p) = pos { records.remove(p); }
+                steps.push(Step::Move { from: t.full.clone(), to: dest });
                 if back_home { homed += 1 } else { ok += 1 }
             } else {
                 failed += 1;
             }
         }
         self.write_trash_index(&records);
+        self.record(steps);
         self.marks.clear();
         self.refresh();
         if failed > 0 {
@@ -1253,16 +1456,60 @@ impl Loft {
         if !targets.is_empty() { self.dialog = Some(Dialog::ConfirmDelete(targets)); }
     }
 
+    /// Start deleting `targets` for good; `pump_delete` does the work a
+    /// slice per idle tick so a big tree never freezes the window.
     fn delete_permanently(&mut self, targets: Vec<Target>) {
-        let (mut ok, mut failed) = (0usize, 0usize);
-        for t in &targets {
-            if delete_tree(&t.full, t.is_dir) { ok += 1 } else { failed += 1 }
-        }
-        self.prune_trash_index();
+        if self.deleting.is_some() { return; }
+        let mut todo: Vec<(String, bool, bool)> = targets.into_iter()
+            .map(|t| (t.full, t.is_dir, true))
+            .collect();
+        todo.reverse();
         self.marks.clear();
-        self.refresh();
-        self.report(ok, failed, s().deleted, s().delete_failed);
+        self.deleting = Some(DeleteJob { todo, rounds: 0, ok: 0, failed: 0 });
     }
+
+    /// Delete up to `budget` paths. A folder is expanded into its contents
+    /// (files first, deepest folders next) and removed once empty; a listing
+    /// cut short by its buffer takes another round. True if anything changed.
+    fn pump_delete(&mut self, budget: usize) -> bool {
+        let Some(job) = self.deleting.as_mut() else { return false };
+        for _ in 0..budget {
+            let Some((path, is_dir, top)) = job.todo.pop() else { break };
+            if fs_delete(&path) {
+                if top { job.ok += 1; }
+                continue;
+            }
+            let children = if is_dir { list_dir_internal(&path, true) } else { Vec::new() };
+            if children.is_empty() || job.rounds >= DELETE_ROUNDS {
+                if top { job.failed += 1; }
+                continue;
+            }
+            job.rounds += 1;
+            job.todo.push((path.clone(), true, top));
+            let mut dirs: Vec<&Entry> = children.iter().filter(|e| e.is_dir).collect();
+            dirs.sort_by_key(|e| e.name.matches('/').count());
+            for d in dirs { job.todo.push((join(&path, &d.name), true, false)); }
+            for f in children.iter().filter(|e| !e.is_dir) {
+                job.todo.push((join(&path, &f.name), false, false));
+            }
+        }
+        if job.todo.is_empty() { self.finish_delete(); }
+        true
+    }
+
+    fn finish_delete(&mut self) {
+        let Some(job) = self.deleting.take() else { return };
+        self.prune_trash_index();
+        self.refresh();
+        if job.todo.is_empty() {
+            self.report(job.ok, job.failed, s().deleted, s().delete_failed);
+        } else {
+            self.say(fill(s().delete_stopped, &[&num(job.ok)]), false);
+        }
+    }
+
+    /// Esc while deleting: stop after the current slice.
+    fn stop_delete(&mut self) { self.finish_delete(); }
 
     // ── Trash index ───────────────────────────────────────────────────
 
@@ -1331,6 +1578,14 @@ impl Loft {
         self.dialog = Some(Dialog::Name(NameKind::NewFolder));
     }
 
+    fn open_new_file(&mut self) {
+        self.close_menus();
+        let dest = unique_in(&self.current, s().file_default, false);
+        let name = basename(&dest).to_string();
+        self.set_name_buf(&name);
+        self.dialog = Some(Dialog::Name(NameKind::NewFile));
+    }
+
     fn open_properties(&mut self) {
         let Some(e) = self.cursor.and_then(|c| self.entry_at(c)) else { return };
         // Folder totals exist only for the browse listing, once scanned.
@@ -1356,7 +1611,9 @@ impl Loft {
         match self.dialog.take() {
             Some(Dialog::Name(kind)) => self.commit_name(kind),
             Some(Dialog::ConfirmDelete(targets)) => self.delete_permanently(targets),
-            Some(Dialog::Properties(_)) | None => {}
+            // Enter on a clash keeps both, the choice that loses nothing.
+            Some(Dialog::Clash { .. }) => self.run_paste(Some(Clash::Keep)),
+            Some(Dialog::OpenWith { .. }) | Some(Dialog::Properties(_)) | None => {}
         }
     }
 
@@ -1370,7 +1627,7 @@ impl Loft {
         }
         let dir = match &kind {
             NameKind::Rename { old } => parent_path(old),
-            NameKind::NewFolder => self.current.clone(),
+            NameKind::NewFolder | NameKind::NewFile => self.current.clone(),
         };
         let dest = join(&dir, &new);
         if let NameKind::Rename { old } = &kind {
@@ -1384,12 +1641,23 @@ impl Loft {
         let done = match &kind {
             NameKind::Rename { old } => fs_rename(old, &dest),
             NameKind::NewFolder => fs_mkdir(&dest),
+            NameKind::NewFile => host::store(&dest, &[]),
         };
         if !done {
-            let msg = match kind { NameKind::Rename { .. } => s().rename_failed, NameKind::NewFolder => s().folder_failed };
+            let msg = match kind {
+                NameKind::Rename { .. } => s().rename_failed,
+                NameKind::NewFolder => s().folder_failed,
+                NameKind::NewFile => s().file_failed,
+            };
             self.say(msg.to_string(), true);
             return;
         }
+        let step = match kind {
+            NameKind::Rename { old } => Step::Move { from: old, to: dest },
+            NameKind::NewFolder => Step::Create { path: dest, is_dir: true },
+            NameKind::NewFile => Step::Create { path: dest, is_dir: false },
+        };
+        self.record(alloc::vec![step]);
         self.marks.clear();
         self.refresh();
         if dir == self.current { self.select_name(&new); }
@@ -1405,6 +1673,234 @@ impl Loft {
         } else {
             self.say(s().path_failed.to_string(), true);
         }
+    }
+
+    // ── Duplicate ─────────────────────────────────────────────────────
+
+    /// Ctrl+D: a copy of each target next to it, under a free name.
+    fn duplicate(&mut self) {
+        self.close_menus();
+        let targets = self.targets();
+        if targets.is_empty() || self.in_trash_tree() { return; }
+        let (mut ok, mut failed) = (0usize, 0usize);
+        let mut steps = Vec::new();
+        let mut last = None;
+        for t in &targets {
+            let dest = unique_in(&parent_path(&t.full), basename(&t.name), t.is_dir);
+            if fs_copy(&t.full, &dest) {
+                ok += 1;
+                last = Some(basename(&dest).to_string());
+                steps.push(Step::Create { path: dest, is_dir: t.is_dir });
+            } else {
+                failed += 1;
+            }
+        }
+        self.record(steps);
+        self.marks.clear();
+        self.refresh();
+        if let Some(name) = last { self.select_name(&name); }
+        self.report(ok, failed, s().duplicated, s().duplicate_failed);
+    }
+
+    // ── Undo ──────────────────────────────────────────────────────────
+
+    /// False, with a note in the status bar, while a delete is running.
+    fn idle_fs(&mut self) -> bool {
+        if self.deleting.is_none() { return true; }
+        self.say(s().busy.to_string(), true);
+        false
+    }
+
+    fn record(&mut self, steps: Vec<Step>) {
+        if !steps.is_empty() { self.undo.push(steps); }
+    }
+
+    /// Ctrl+Z: reverse the last operation. A move goes back, something
+    /// created goes to the trash, so an undo never destroys data. Steps
+    /// whose items changed since are left alone and reported.
+    fn undo_last(&mut self) {
+        self.close_menus();
+        let Some(steps) = self.undo.pop() else {
+            self.say(s().nothing_to_undo.to_string(), false);
+            return;
+        };
+        let mut failed = 0usize;
+        let mut created: Vec<Target> = Vec::new();
+        for step in steps.into_iter().rev() {
+            match step {
+                Step::Move { from, to } => {
+                    let back = path_exists(&to) && !path_exists(&from)
+                        && (parent_path(&from).is_empty() || dir_exists(&parent_path(&from)));
+                    if !(back && fs_rename(&to, &from)) { failed += 1; }
+                }
+                Step::Create { path, is_dir } => {
+                    if path_exists(&path) {
+                        created.push(Target { name: basename(&path).to_string(), full: path, is_dir });
+                    } else {
+                        failed += 1;
+                    }
+                }
+            }
+        }
+        if !created.is_empty() { failed += self.trash_items(&created).1; }
+        self.prune_trash_index();
+        self.marks.clear();
+        self.refresh();
+        if failed > 0 {
+            self.say(s().undo_failed.to_string(), true);
+        } else {
+            self.say(s().undone.to_string(), false);
+        }
+    }
+
+    // ── Open with ─────────────────────────────────────────────────────
+
+    /// Offer every installed app for the cursor file.
+    fn open_with(&mut self) {
+        let Some(target) = self.cursor_target() else { return };
+        if target.is_dir { return; }
+        self.close_menus();
+        let apps: Vec<(String, String)> = app_catalog::load(NOT_HANDLERS).into_iter()
+            .filter(|a| a.kind == app_catalog::EntryKind::Module)
+            .map(|a| (a.launch_name, a.display_name))
+            .collect();
+        self.dialog = Some(Dialog::OpenWith { target, apps, always: false });
+    }
+
+    /// The user picked app `i` in the "Open with" dialog.
+    fn open_with_pick(&mut self, i: usize) {
+        let Some(Dialog::OpenWith { target, apps, always }) = self.dialog.take() else { return };
+        let Some((app, _)) = apps.get(i) else { return };
+        if always {
+            if let Some(ext) = extension(&target.name) {
+                if !self.set_association(&ext, app) {
+                    self.say(s().assoc_failed.to_string(), true);
+                }
+            }
+        }
+        open(app, &target.full);
+    }
+
+    /// Point `ext` at `app` in `sys/config/associations`, keeping every
+    /// other line (comments included) as it is.
+    fn set_association(&mut self, ext: &str, app: &str) -> bool {
+        let old = host::fetch(ASSOC_PATH).unwrap_or_default();
+        let text = String::from_utf8_lossy(&old);
+        let mut out = String::with_capacity(text.len() + 32);
+        let mut placed = false;
+        for line in text.lines() {
+            let key = line.split_once('=').map(|(k, _)| k.trim().to_ascii_lowercase());
+            if !line.trim_start().starts_with('#') && key.as_deref() == Some(ext) {
+                if !placed { out.push_str(&alloc::format!("{}={}\n", ext, app)); placed = true; }
+                continue;
+            }
+            out.push_str(line);
+            out.push('\n');
+        }
+        if !placed { out.push_str(&alloc::format!("{}={}\n", ext, app)); }
+        if !host::store(ASSOC_PATH, out.as_bytes()) { return false; }
+        self.assoc = load_associations();
+        true
+    }
+
+    // ── Location bar ──────────────────────────────────────────────────
+
+    /// Ctrl+L: replace the breadcrumb with a field holding the path.
+    fn open_location(&mut self) {
+        self.close_menus();
+        self.location = Some(self.current.clone());
+        self.focus_seq = self.focus_seq.wrapping_add(1).max(1);
+    }
+
+    /// Enter in the location bar: a folder is entered, a file selected in
+    /// its folder. `~` stands for home, leading and trailing slashes are
+    /// ignored.
+    fn submit_location(&mut self) {
+        let Some(typed) = self.location.clone() else { return };
+        let t = typed.trim().trim_matches('/');
+        let path = if t == "~" {
+            self.home.clone()
+        } else if let Some(rest) = t.strip_prefix("~/") {
+            join(&self.home, rest.trim_matches('/'))
+        } else {
+            t.to_string()
+        };
+        if path.is_empty() || dir_exists(&path) {
+            self.location = None;
+            self.navigate(path);
+        } else if path_exists(&path) {
+            self.location = None;
+            let name = basename(&path).to_string();
+            self.navigate(parent_path(&path));
+            self.select_name(&name);
+        } else {
+            self.say(fill(s().location_missing, &[&path]), true);
+        }
+    }
+
+    // ── View settings ─────────────────────────────────────────────────
+
+    fn grid_cols(&self) -> usize { ZOOM_STEPS[self.zoom].0 }
+
+    fn set_zoom(&mut self, delta: i32) {
+        let z = (self.zoom as i32 + delta.signum()).clamp(0, ZOOM_STEPS.len() as i32 - 1) as usize;
+        if z != self.zoom {
+            self.zoom = z;
+            self.save_settings();
+        }
+    }
+
+    fn toggle_hidden(&mut self) {
+        self.show_hidden = !self.show_hidden;
+        self.refilter();
+        self.save_settings();
+    }
+
+    /// Sort from the View menu: a new column keeps its default direction,
+    /// the active one stays as it is.
+    fn sort_from_menu(&mut self, key: SortKey) {
+        if self.sort_key != key { self.set_sort(key); }
+    }
+
+    fn set_direction(&mut self, asc: bool) {
+        self.sort_asc = asc;
+        sort_entries(&mut self.entries, self.sort_key, self.sort_asc);
+        self.refilter();
+        self.save_settings();
+    }
+
+    /// Read `sys/config/loft`: `key: value` lines. Anything missing or
+    /// unreadable keeps the default.
+    fn load_settings(&mut self) {
+        let Some(buf) = host::fetch(CONFIG_PATH) else { return };
+        let text = String::from_utf8_lossy(&buf);
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once(':') else { continue };
+            let v = v.trim();
+            match k.trim() {
+                "view" => self.view_mode = if v == "grid" { ViewMode::Grid } else { ViewMode::List },
+                "sort" => if let Some(key) = sort_key_from(v) { self.sort_key = key },
+                "order" => self.sort_asc = v != "desc",
+                "hidden" => self.show_hidden = v == "show",
+                "zoom" => if let Ok(z) = v.parse::<usize>() { self.zoom = z.min(ZOOM_STEPS.len() - 1) },
+                _ => {}
+            }
+        }
+    }
+
+    fn save_settings(&self) {
+        let mut out = String::with_capacity(128);
+        out.push_str("# loft view settings\n");
+        out.push_str(if self.view_mode == ViewMode::Grid { "view: grid\n" } else { "view: list\n" });
+        out.push_str("sort: ");
+        out.push_str(sort_key_name(self.sort_key));
+        out.push('\n');
+        out.push_str(if self.sort_asc { "order: asc\n" } else { "order: desc\n" });
+        out.push_str(if self.show_hidden { "hidden: show\n" } else { "hidden: hide\n" });
+        out.push_str("zoom: ");
+        push_usize(&mut out, self.zoom);
+        out.push('\n');
+        if !host::store(CONFIG_PATH, out.as_bytes()) { log("[loft] could not save settings"); }
     }
 }
 
@@ -1495,11 +1991,15 @@ fn target_items(lf: &Loft, m: &mut MenuBuf, with_open: bool) {
         m.add(s().delete_perm, ACT_EDIT_DELETE, "Del");
     } else {
         if with_open { m.add(s().open, ACT_EDIT_OPEN, "Enter"); }
+        if n == 1 && lf.cursor_target().is_some_and(|t| !t.is_dir) {
+            m.add(s().open_with, ACT_EDIT_OPEN_WITH, "");
+        }
         m.add(s().copy, ACT_EDIT_COPY, "Ctrl+C");
         if !lf.in_trash_tree() { m.add(s().cut, ACT_EDIT_CUT, "Ctrl+X"); }
         if with_open && lf.can_paste() && !lf.in_trash_tree() {
             m.add(s().paste, ACT_EDIT_PASTE, "Ctrl+V");
         }
+        if !lf.in_trash_tree() { m.add(s().duplicate, ACT_EDIT_DUPLICATE, "Ctrl+D"); }
         if n == 1 && !lf.in_trash_tree() { m.add(s().rename, ACT_EDIT_RENAME, "F2"); }
         if lf.in_trash_tree() {
             m.add(s().delete_perm, ACT_EDIT_DELETE, "Del");
@@ -1520,6 +2020,7 @@ fn ctx_menu_items(lf: &Loft, ctx: &CtxMenu, m: &mut MenuBuf) {
         CtxMenu::Background => {
             if !lf.in_trash_tree() {
                 m.add(s().new_folder, ACT_EDIT_NEW_FOLDER, "Ctrl+Shift+N");
+                m.add(s().new_file, ACT_EDIT_NEW_FILE, "");
                 if lf.can_paste() { m.add(s().paste, ACT_EDIT_PASTE, "Ctrl+V"); }
             }
             m.add(s().select_all, ACT_EDIT_SELECT_ALL, "");
@@ -1530,7 +2031,8 @@ fn ctx_menu_items(lf: &Loft, ctx: &CtxMenu, m: &mut MenuBuf) {
 }
 
 fn edit_menu_items(lf: &Loft, m: &mut MenuBuf) {
-    m.add(s().select_all, ACT_EDIT_SELECT_ALL, "");
+    if !lf.undo.is_empty() { m.add(s().undo, ACT_EDIT_UNDO, "Ctrl+Z"); }
+    m.add(s().select_all, ACT_EDIT_SELECT_ALL, "Ctrl+A");
     if !lf.in_trash_tree() {
         m.add(s().new_folder, ACT_EDIT_NEW_FOLDER, "Ctrl+Shift+N");
         if lf.can_paste() { m.add(s().paste, ACT_EDIT_PASTE, "Ctrl+V"); }
@@ -1539,10 +2041,36 @@ fn edit_menu_items(lf: &Loft, m: &mut MenuBuf) {
 }
 
 fn file_menu_items(lf: &Loft, m: &mut MenuBuf) {
-    if !lf.in_trash_tree() { m.add(s().new_folder, ACT_EDIT_NEW_FOLDER, "Ctrl+Shift+N"); }
+    if !lf.in_trash_tree() {
+        m.add(s().new_folder, ACT_EDIT_NEW_FOLDER, "Ctrl+Shift+N");
+        m.add(s().new_file, ACT_EDIT_NEW_FILE, "");
+    }
     m.add(s().refresh, ACT_EDIT_REFRESH, "F5");
     if lf.in_trash() { m.add(s().empty_trash, ACT_EDIT_EMPTY_TRASH, ""); }
     m.add(s().quit, ACT_FILE_QUIT, "");
+}
+
+/// View menu: the active choices carry a dot in the hint column.
+fn view_menu_items(lf: &Loft, m: &mut MenuBuf) {
+    let on = |b: bool| if b { "•" } else { "" };
+    m.add(s().view_grid, ACT_VIEW_GRID, on(lf.view_mode == ViewMode::Grid));
+    m.add(s().view_list, ACT_VIEW_LIST, on(lf.view_mode == ViewMode::List));
+    for (label, key, id) in [
+        (s().sort_name, SortKey::Name, ACT_SORT_NAME),
+        (s().sort_size, SortKey::Size, ACT_SORT_SIZE),
+        (s().sort_files, SortKey::Files, ACT_SORT_FILES),
+        (s().sort_type, SortKey::Type, ACT_SORT_TYPE),
+        (s().sort_modified, SortKey::Modified, ACT_SORT_MTIME),
+    ] {
+        m.add(label, id, on(lf.sort_key == key));
+    }
+    m.add(s().sort_asc, ACT_SORT_ASC, on(lf.sort_asc));
+    m.add(s().sort_desc, ACT_SORT_DESC, on(!lf.sort_asc));
+    m.add(s().show_hidden, ACT_VIEW_HIDDEN, if lf.show_hidden { "• Ctrl+H" } else { "Ctrl+H" });
+    if lf.view_mode == ViewMode::Grid {
+        if lf.zoom + 1 < ZOOM_STEPS.len() { m.add(s().zoom_in, ACT_ZOOM_IN, "Ctrl+Wheel"); }
+        if lf.zoom > 0 { m.add(s().zoom_out, ACT_ZOOM_OUT, "Ctrl+Wheel"); }
+    }
 }
 
 /// Append `m` to a Row's or Column's modifiers; other widgets are left as is.
@@ -1554,9 +2082,10 @@ fn add_modifier(w: &mut Widget, m: Modifier) {
 
 /// Count line, or the selection and its size, or a transient message.
 fn render_status_bar(lf: &Loft) -> Widget {
-    let (text, tint) = match &lf.status {
-        Some(st) => (st.text.clone(), if st.error { Token::Danger } else { Token::OnSurface }),
-        None => (selection_summary(lf), Token::OnSurfaceMuted),
+    let (text, tint) = match (&lf.deleting, &lf.status) {
+        (Some(job), _) => (fill(s().deleting, &[&num(job.todo.len())]), Token::OnSurface),
+        (None, Some(st)) => (st.text.clone(), if st.error { Token::Danger } else { Token::OnSurface }),
+        (None, None) => (selection_summary(lf), Token::OnSurfaceMuted),
     };
     Widget::Row {
         children: alloc::vec![
@@ -1592,6 +2121,8 @@ fn render_dialog(lf: &Loft, d: &Dialog) -> Widget {
         Dialog::Name(kind) => name_dialog(lf, kind),
         Dialog::ConfirmDelete(targets) => confirm_dialog(targets),
         Dialog::Properties(p) => properties_dialog(p),
+        Dialog::OpenWith { target, apps, always } => open_with_dialog(target, apps, *always),
+        Dialog::Clash { name } => clash_dialog(lf, name),
     };
     Widget::Column {
         children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
@@ -1634,11 +2165,14 @@ fn name_dialog(lf: &Loft, kind: &NameKind) -> Widget {
     let (title, label, ok) = match kind {
         NameKind::Rename { .. } => (s().rename_title, s().rename_label, s().confirm_rename),
         NameKind::NewFolder => (s().folder_title, s().folder_label, s().create),
+        NameKind::NewFile => (s().file_title, s().file_label, s().create),
     };
+    let mut field = prefab::input_autofocus(&lf.name_buf, "name", prefab::InputKind::Text,
+                                            ActionId(ACT_DIALOG_SUBMIT), None);
+    tag_input(&mut field, NODE_NAME);
     let body = dialog_body(alloc::vec![
         Widget::Text { content: label.to_string(), style: TextStyle::Muted, modifiers: alloc::vec![] },
-        prefab::input_autofocus(&lf.name_buf, "name", prefab::InputKind::Text,
-                                ActionId(ACT_DIALOG_SUBMIT), None),
+        field,
         dialog_buttons(Some((ok, prefab::ButtonStyle::Primary)), s().cancel),
     ]);
     prefab::dialog(title, body, Some(s().rename_hint), 360)
@@ -1667,6 +2201,64 @@ fn properties_dialog(p: &Props) -> Widget {
     rows.push(prop_row(s().props_location, &p.location));
     rows.push(dialog_buttons(None, s().close));
     prefab::dialog(s().props_title, dialog_body(rows), None, 360)
+}
+
+fn open_with_dialog(target: &Target, apps: &[(String, String)], always: bool) -> Widget {
+    let mut rows: Vec<Widget> = alloc::vec![Widget::Text {
+        content:   basename(&target.name).to_string(),
+        style:     TextStyle::Muted,
+        modifiers: alloc::vec![],
+    }];
+    if apps.is_empty() {
+        rows.push(Widget::Text { content: s().ow_none.to_string(), style: TextStyle::Body, modifiers: alloc::vec![] });
+    }
+    for (i, (_, display)) in apps.iter().enumerate() {
+        let id = ACT_OW_BASE + i as u32;
+        if id >= ACT_OW_END { break; }
+        rows.push(prefab::button(display, prefab::ButtonStyle::Secondary, ActionId(id)));
+    }
+    if let Some(ext) = extension(&target.name) {
+        rows.push(Widget::Row {
+            children: alloc::vec![
+                Widget::Checkbox { value: always, on_toggle: ActionId(ACT_OW_ALWAYS), modifiers: alloc::vec![] },
+                Widget::Text { content: fill(s().ow_always, &[&ext]), style: TextStyle::Body, modifiers: alloc::vec![] },
+            ],
+            spacing:   Spacing::Sm.as_u16(),
+            align:     Align::Center,
+            modifiers: alloc::vec![],
+        });
+    }
+    rows.push(dialog_buttons(None, s().cancel));
+    prefab::dialog(s().ow_title, dialog_body(rows), Some(s().ow_hint), 360)
+}
+
+fn clash_dialog(lf: &Loft, name: &str) -> Widget {
+    let all = lf.paste.as_ref().is_some_and(|j| j.apply_all);
+    let buttons = Widget::Row {
+        children: alloc::vec![
+            prefab::button(s().cf_skip, prefab::ButtonStyle::Ghost, ActionId(ACT_CF_SKIP)),
+            Widget::Spacer { flex: 1 },
+            prefab::button(s().cf_replace, prefab::ButtonStyle::Secondary, ActionId(ACT_CF_REPLACE)),
+            prefab::button(s().cf_keep, prefab::ButtonStyle::Primary, ActionId(ACT_CF_KEEP)),
+        ],
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![],
+    };
+    let body = dialog_body(alloc::vec![
+        Widget::Text { content: fill(s().cf_text, &[name]), style: TextStyle::Body, modifiers: alloc::vec![] },
+        Widget::Row {
+            children: alloc::vec![
+                Widget::Checkbox { value: all, on_toggle: ActionId(ACT_CF_ALL), modifiers: alloc::vec![] },
+                Widget::Text { content: s().cf_all.to_string(), style: TextStyle::Body, modifiers: alloc::vec![] },
+            ],
+            spacing:   Spacing::Sm.as_u16(),
+            align:     Align::Center,
+            modifiers: alloc::vec![],
+        },
+        buttons,
+    ]);
+    prefab::dialog(s().cf_title, body, Some(s().cf_hint), 400)
 }
 
 fn prop_row(label: &str, value: &str) -> Widget {
@@ -1718,23 +2310,18 @@ fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
             edit_menu_items(lf, &mut m);
             (NODE_MENU_EDIT, m.widget())
         }
-        OpenMenu::View => (
-            NODE_MENU_VIEW,
-            prefab::popover_menu(&[
-                (s().view_grid.to_string(), ActionId(ACT_VIEW_GRID)),
-                (s().view_list.to_string(), ActionId(ACT_VIEW_LIST)),
-            ], Some(match lf.view_mode {
-                ViewMode::Grid => 0,
-                ViewMode::List => 1,
-            })),
-        ),
-        OpenMenu::Go => (
-            NODE_MENU_GO,
-            prefab::popover_menu(&[
-                (s().go_home.to_string(), ActionId(ACT_GO_HOME)),
-                (s().go_filesystem.to_string(), ActionId(ACT_GO_FILESYSTEM)),
-            ], None),
-        ),
+        OpenMenu::View => {
+            let mut m = MenuBuf::default();
+            view_menu_items(lf, &mut m);
+            (NODE_MENU_VIEW, m.widget())
+        }
+        OpenMenu::Go => {
+            let mut m = MenuBuf::default();
+            m.add(s().go_home, ACT_GO_HOME, "");
+            m.add(s().go_filesystem, ACT_GO_FILESYSTEM, "");
+            m.add(s().go_location, ACT_GO_LOCATION, "Ctrl+L");
+            (NODE_MENU_GO, m.widget())
+        }
         OpenMenu::Help => (
             NODE_MENU_HELP,
             prefab::popover_menu(&[
@@ -1745,24 +2332,54 @@ fn render_dropdown(lf: &Loft, kind: OpenMenu) -> (u32, Widget) {
 }
 
 fn render_toolbar(lf: &Loft) -> Widget {
-    let crumbs = breadcrumb_for(&lf.current);
     let search = search_input(&lf.query);
+    let mut children = alloc::vec![
+        prefab::icon_button(IconId::ArrowLeft,      16, Some(ActionId(ACT_TOOLBAR_BACK)),    None),
+        prefab::icon_button(IconId::ArrowRight,     16, Some(ActionId(ACT_TOOLBAR_FORWARD)), None),
+        prefab::icon_button(IconId::ArrowUp,        16, Some(ActionId(ACT_TOOLBAR_UP)),      None),
+        prefab::icon_button(IconId::ArrowClockwise, 16, Some(ActionId(ACT_TOOLBAR_REFRESH)), None),
+        select_toggle(lf.select_mode),
+    ];
+    match &lf.location {
+        Some(loc) => children.push(location_input(loc, lf.focus_seq)),
+        None => {
+            children.push(breadcrumb_for(&lf.current));
+            children.push(Widget::Spacer { flex: 1 });
+        }
+    }
+    children.push(search);
     Widget::Row {
-        children: alloc::vec![
-            prefab::icon_button(IconId::ArrowLeft,      16, Some(ActionId(ACT_TOOLBAR_BACK)),    None),
-            prefab::icon_button(IconId::ArrowRight,     16, Some(ActionId(ACT_TOOLBAR_FORWARD)), None),
-            prefab::icon_button(IconId::ArrowUp,        16, Some(ActionId(ACT_TOOLBAR_UP)),      None),
-            prefab::icon_button(IconId::ArrowClockwise, 16, Some(ActionId(ACT_TOOLBAR_REFRESH)), None),
-            select_toggle(lf.select_mode),
-            crumbs,
-            Widget::Spacer { flex: 1 },
-            search,
-        ],
+        children,
         spacing: Spacing::Sm.as_u16(),
         align:   Align::Center,
         // Own padding now that the outer Column is flush — keeps
         // back/forward/breadcrumbs + search bar off the chrome.
         modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+    }
+}
+
+/// The typed location, in the breadcrumb's place. Enter goes there.
+fn location_input(value: &str, focus_seq: u32) -> Widget {
+    Widget::Row {
+        children: alloc::vec![Widget::Input {
+            value:       value.to_string(),
+            placeholder: s().location_hint.to_string(),
+            on_submit:   ActionId(ACT_LOCATION_SUBMIT),
+            modifiers:   alloc::vec![
+                Modifier::NodeId(NodeId(NODE_LOCATION)),
+                Modifier::FocusRequest(focus_seq),
+                Modifier::Flex(1),
+            ],
+        }],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::Flex(1),
+            Modifier::PaddingXY { x: 8, y: 0 },
+            Modifier::MinHeight(FIELD_H),
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
+        ],
     }
 }
 
@@ -1788,7 +2405,7 @@ fn search_input(query: &str) -> Widget {
         value:       query.to_string(),
         placeholder: s().search.to_string(),
         on_submit:   prefab::NO_ACTION,
-        modifiers:   alloc::vec![],
+        modifiers:   alloc::vec![Modifier::NodeId(NodeId(NODE_SEARCH))],
     };
     Widget::Row {
         children: alloc::vec![
@@ -1879,7 +2496,7 @@ fn render_body(lf: &Loft) -> Widget {
             Some(ActionId(ACT_SIDEBAR_CLICK_BASE + i as u32)),
             Some(ActionId(ACT_SIDEBAR_HOVER_BASE + i as u32)),
         );
-        if is_device(&p.label) { devices_rows.push(row); }
+        if p.device { devices_rows.push(row); }
         else { places_rows.push(row); }
     }
     // Sections scroll; the capacity meter is a fixed footer below that
@@ -1889,8 +2506,8 @@ fn render_body(lf: &Loft) -> Widget {
     // the leftover space.
     let sections = Widget::Column {
         children:  alloc::vec![
-            prefab::sidebar_section("PLACES",  places_rows),
-            prefab::sidebar_section("DEVICES", devices_rows),
+            prefab::sidebar_section(s().sec_places,  places_rows),
+            prefab::sidebar_section(s().sec_devices, devices_rows),
         ],
         spacing:   Spacing::None.as_u16(),
         align:     Align::Stretch,
@@ -1974,6 +2591,7 @@ fn render_grid(lf: &Loft) -> Widget {
     // Search hits carry their sub-path in `name`, so the label reads
     // "wallpapers/aurora" and shows where the match lives.
     let source = lf.source();
+    let icon_px = ZOOM_STEPS[lf.zoom].1;
     let grid_children: Vec<Widget> = lf.filtered.iter().enumerate().map(|(ui_idx, &entry_idx)| {
         let e = &source[entry_idx];
         let look = item_look(lf, ui_idx);
@@ -1983,10 +2601,13 @@ fn render_grid(lf: &Loft) -> Widget {
             Some(ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32)),
             None,
         );
+        if let Widget::Column { children, .. } = &mut item {
+            if let Some(Widget::Icon { size, .. }) = children.first_mut() { *size = icon_px; }
+        }
         look.apply(&mut item);
         item
     }).collect();
-    prefab::grid(grid_children, GRID_COLS)
+    prefab::grid(grid_children, lf.grid_cols())
 }
 
 /// How one item is drawn: highlighted when marked (or, with nothing
@@ -2237,13 +2858,20 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         Event::Key(KeyCode::PageUp)    => { lf.select_delta_y(-PAGE_ROWS); Outcome::Rerender }
         Event::Key(KeyCode::PageDown)  => { lf.select_delta_y( PAGE_ROWS); Outcome::Rerender }
         Event::Key(KeyCode::Enter)     => { lf.open_cursor(); Outcome::Rerender }
-        Event::Key(KeyCode::F(2))      => { lf.open_rename(); Outcome::Rerender }
+        Event::Key(KeyCode::F(2))      => { if lf.idle_fs() { lf.open_rename(); } Outcome::Rerender }
         Event::Key(KeyCode::F(5))      => { lf.refresh(); Outcome::Rerender }
         // Some keyboard paths send Delete as the DEL byte.
-        Event::Key(KeyCode::Delete | KeyCode::Char(0x7F)) => { lf.delete_targets(); Outcome::Rerender }
+        Event::Key(KeyCode::Delete | KeyCode::Char(0x7F)) => {
+            if lf.idle_fs() { lf.delete_targets(); }
+            Outcome::Rerender
+        }
         // Backspace in a non-empty search is consumed by the editor;
         // reaching us means "go up" (Finder convention).
-        Event::Key(KeyCode::Backspace) => { lf.go_up(); Outcome::Rerender }
+        Event::Key(KeyCode::Backspace) => {
+            if lf.location.is_some() { return Outcome::Idle; }
+            lf.go_up();
+            Outcome::Rerender
+        }
         Event::Key(KeyCode::Char(b' ')) => {
             if let Some(c) = lf.cursor { lf.toggle_mark(c); }
             Outcome::Rerender
@@ -2253,28 +2881,43 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         // Printable keys reach the app only while no text field has focus.
         Event::Key(KeyCode::Char(b)) if b.is_ascii_graphic() => { lf.type_ahead(b); Outcome::Rerender }
         Event::Chord { letter: b'a', .. } => { lf.select_all(); Outcome::Rerender }
+        Event::Chord { letter: b'l', .. } => { lf.open_location(); Outcome::Rerender }
+        Event::Chord { letter: b'h', .. } => { lf.toggle_hidden(); Outcome::Rerender }
+        Event::Chord { letter: b'd', .. } => { if lf.idle_fs() { lf.duplicate(); } Outcome::Rerender }
+        Event::Chord { letter: b'z', shift: false, .. } => { if lf.idle_fs() { lf.undo_last(); } Outcome::Rerender }
+        Event::Zoom { delta } => {
+            if lf.view_mode != ViewMode::Grid { return Outcome::Idle; }
+            lf.set_zoom(delta);
+            Outcome::Rerender
+        }
         Event::Chord { letter: b'n', shift: true, .. } => {
-            if !lf.in_trash_tree() { lf.open_new_folder(); }
+            if !lf.in_trash_tree() && lf.idle_fs() { lf.open_new_folder(); }
             Outcome::Rerender
         }
         // Ctrl+C / X / V, delivered because loft is a clipboard sink and
         // its file area is not a text widget.
         Event::Clipboard(ClipKind::Copy)  => { lf.arm_clipboard(ClipMode::Copy); Outcome::Rerender }
         Event::Clipboard(ClipKind::Cut)   => {
-            if !lf.in_trash_tree() { lf.arm_clipboard(ClipMode::Cut); }
+            if !lf.in_trash_tree() && lf.idle_fs() { lf.arm_clipboard(ClipMode::Cut); }
             Outcome::Rerender
         }
         Event::Clipboard(ClipKind::Paste) => {
-            if !lf.in_trash_tree() { lf.do_paste(); }
+            if !lf.in_trash_tree() && lf.idle_fs() { lf.do_paste(); }
             Outcome::Rerender
         }
-        Event::InputChange { value } => {
+        // Every field carries a NodeId; the plain InputChange that comes
+        // first says nothing about which field it was.
+        Event::InputChangeAt { node: NODE_SEARCH, value } => {
             // Past QUERY_CAP we hard-cap; the compositor reconciles on the
             // next round-trip. At a character boundary: typed text is UTF-8.
             lf.query.clear();
             lf.query.push_str(nopeek_widgets::rt::str_clamp(&value, QUERY_CAP));
             lf.refilter();
             Outcome::Rerender
+        }
+        Event::InputChangeAt { node: NODE_LOCATION, value } => {
+            lf.location = Some(value);
+            Outcome::Idle
         }
         Event::ContextAction(ActionId(id)) => handle_context(lf, id),
         Event::Action(ActionId(id)) => handle_action(lf, id),
@@ -2285,8 +2928,12 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
 /// The cancel ladder: menus, then marks and select mode, then the search,
 /// then the window.
 fn escape(lf: &mut Loft) -> Outcome {
-    if lf.ctx.is_some() || lf.open_menu.is_some() {
+    if lf.deleting.is_some() {
+        lf.stop_delete();
+    } else if lf.ctx.is_some() || lf.open_menu.is_some() {
         lf.close_menus();
+    } else if lf.location.is_some() {
+        lf.location = None;
     } else if !lf.marks.is_empty() || lf.select_mode {
         lf.marks.clear();
         lf.select_mode = false;
@@ -2305,14 +2952,37 @@ fn handle_dialog(lf: &mut Loft, ev: Event) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) | Event::Action(ActionId(ACT_DIALOG_CANCEL)) => {
             lf.dialog = None;
+            lf.stop_paste();
             Outcome::Rerender
         }
         Event::Key(KeyCode::Enter) | Event::Action(ActionId(ACT_DIALOG_SUBMIT)) => {
             lf.submit_dialog();
             Outcome::Rerender
         }
-        Event::InputChange { value } if matches!(lf.dialog, Some(Dialog::Name(_))) => {
+        Event::InputChangeAt { node: NODE_NAME, value } if matches!(lf.dialog, Some(Dialog::Name(_))) => {
             lf.set_name_buf(&value);
+            Outcome::Rerender
+        }
+        Event::Action(ActionId(ACT_OW_ALWAYS)) => {
+            if let Some(Dialog::OpenWith { always, .. }) = &mut lf.dialog { *always = !*always; }
+            Outcome::Rerender
+        }
+        Event::Action(ActionId(id @ ACT_OW_BASE..ACT_OW_END)) => {
+            lf.open_with_pick((id - ACT_OW_BASE) as usize);
+            Outcome::Rerender
+        }
+        Event::Action(ActionId(ACT_CF_ALL)) => {
+            if let Some(job) = &mut lf.paste { job.apply_all = !job.apply_all; }
+            Outcome::Rerender
+        }
+        Event::Action(ActionId(id @ ACT_CF_REPLACE..=ACT_CF_SKIP)) => {
+            let answer = match id {
+                ACT_CF_REPLACE => Clash::Replace,
+                ACT_CF_KEEP => Clash::Keep,
+                _ => Clash::Skip,
+            };
+            lf.dialog = None;
+            lf.run_paste(Some(answer));
             Outcome::Rerender
         }
         _ => Outcome::Idle,
@@ -2356,13 +3026,20 @@ fn handle_file_op(lf: &mut Loft, id: u32) {
         ACT_EDIT_COPY_PATH   => lf.copy_path(),
         ACT_EDIT_PROPERTIES  => lf.open_properties(),
         ACT_EDIT_REFRESH     => lf.refresh(),
+        ACT_EDIT_OPEN_WITH   => lf.open_with(),
+        ACT_EDIT_NEW_FILE    => lf.open_new_file(),
+        ACT_EDIT_DUPLICATE   => lf.duplicate(),
+        ACT_EDIT_UNDO        => lf.undo_last(),
         _ => {}
     }
 }
 
 fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
-    if (ACT_EDIT_COPY..=ACT_EDIT_REFRESH).contains(&id) {
-        handle_file_op(lf, id);
+    if (ACT_EDIT_COPY..=ACT_EDIT_UNDO).contains(&id) {
+        // Changing files while a delete runs could race it; looking is fine.
+        let looks = matches!(id, ACT_EDIT_OPEN | ACT_EDIT_SELECT_ALL | ACT_EDIT_COPY_PATH
+            | ACT_EDIT_PROPERTIES | ACT_EDIT_REFRESH | ACT_EDIT_OPEN_WITH | ACT_EDIT_COPY);
+        if looks || lf.idle_fs() { handle_file_op(lf, id); }
         return Outcome::Rerender;
     }
     match id {
@@ -2388,16 +3065,35 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
         }
         // Dropdown items.
         ACT_FILE_QUIT => Outcome::Exit,
-        ACT_VIEW_GRID => {
-            lf.view_mode = ViewMode::Grid;
+        ACT_VIEW_GRID | ACT_VIEW_LIST => {
+            lf.view_mode = if id == ACT_VIEW_GRID { ViewMode::Grid } else { ViewMode::List };
             lf.open_menu = None;
+            lf.save_settings();
             Outcome::Rerender
         }
-        ACT_VIEW_LIST => {
-            lf.view_mode = ViewMode::List;
+        ACT_SORT_NAME..=ACT_SORT_MTIME => {
             lf.open_menu = None;
+            lf.sort_from_menu(match id {
+                ACT_SORT_NAME => SortKey::Name,
+                ACT_SORT_SIZE => SortKey::Size,
+                ACT_SORT_FILES => SortKey::Files,
+                ACT_SORT_TYPE => SortKey::Type,
+                _ => SortKey::Modified,
+            });
             Outcome::Rerender
         }
+        ACT_SORT_ASC | ACT_SORT_DESC => {
+            lf.open_menu = None;
+            lf.set_direction(id == ACT_SORT_ASC);
+            Outcome::Rerender
+        }
+        ACT_VIEW_HIDDEN => { lf.open_menu = None; lf.toggle_hidden(); Outcome::Rerender }
+        ACT_ZOOM_IN | ACT_ZOOM_OUT => {
+            lf.set_zoom(if id == ACT_ZOOM_IN { 1 } else { -1 });
+            Outcome::Rerender
+        }
+        ACT_GO_LOCATION => { lf.open_location(); Outcome::Rerender }
+        ACT_LOCATION_SUBMIT => { lf.submit_location(); Outcome::Rerender }
         ACT_GO_HOME => {
             lf.open_menu = None;
             let home = lf.home.clone();
@@ -2457,18 +3153,17 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
 // ── Sidebar helpers ───────────────────────────────────────────────────
 
 fn default_sidebar(home: &str) -> Vec<Place> {
+    let place = |label: &str, icon, path: String, device| Place { label: label.into(), icon, path, device };
     alloc::vec![
-        Place { label: "Home".into(),       icon: IconId::Home,       path: home.into() },
-        Place { label: "Documents".into(),  icon: IconId::FileText,   path: alloc::format!("{}/documents",  home) },
-        Place { label: "Downloads".into(),  icon: IconId::Download,   path: alloc::format!("{}/downloads",  home) },
-        Place { label: "Pictures".into(),   icon: IconId::Image,      path: alloc::format!("{}/pictures",   home) },
-        Place { label: "Projects".into(),   icon: IconId::Folders,    path: alloc::format!("{}/projects",   home) },
-        Place { label: "Filesystem".into(), icon: IconId::HardDrives, path: String::new() },
-        Place { label: "Trash".into(),      icon: IconId::Trash,      path: alloc::format!("{}/.trash",     home) },
+        place(s().place_home,      IconId::Home,       home.into(),                         false),
+        place(s().place_documents, IconId::FileText,   alloc::format!("{}/documents", home), false),
+        place(s().place_downloads, IconId::Download,   alloc::format!("{}/downloads", home), false),
+        place(s().place_pictures,  IconId::Image,      alloc::format!("{}/pictures",  home), false),
+        place(s().place_projects,  IconId::Folders,    alloc::format!("{}/projects",  home), false),
+        place(s().go_filesystem,   IconId::HardDrives, String::new(),                        true),
+        place(s().place_trash,     IconId::Trash,      join(home, TRASH_DIR),                true),
     ]
 }
-
-fn is_device(label: &str) -> bool { label == "Filesystem" || label == "Trash" }
 
 /// Click on a menu-bar label: open it if no menu was open or a
 /// different one was, close it if the same one was already open.
@@ -2679,32 +3374,49 @@ fn unique_in(dir: &str, name: &str, is_dir: bool) -> String {
     }
 }
 
+/// A dotfile, or anything inside a dot folder (search names are sub-paths).
+fn is_hidden(name: &str) -> bool {
+    name.split('/').any(|c| c.starts_with('.'))
+}
+
+/// Lowercased extension of a file name, without the dot.
+fn extension(name: &str) -> Option<String> {
+    match basename(name).rsplit_once('.') {
+        Some((stem, e)) if !stem.is_empty() && !e.is_empty() => Some(e.to_ascii_lowercase()),
+        _ => None,
+    }
+}
+
+fn sort_key_name(k: SortKey) -> &'static str {
+    match k {
+        SortKey::Name => "name", SortKey::Size => "size", SortKey::Files => "files",
+        SortKey::Type => "type", SortKey::Modified => "modified",
+    }
+}
+
+fn sort_key_from(v: &str) -> Option<SortKey> {
+    Some(match v {
+        "name" => SortKey::Name, "size" => SortKey::Size, "files" => SortKey::Files,
+        "type" => SortKey::Type, "modified" => SortKey::Modified,
+        _ => return None,
+    })
+}
+
+/// Give the first `Widget::Input` in `w` the NodeId `node`. True if found.
+fn tag_input(w: &mut Widget, node: u32) -> bool {
+    match w {
+        Widget::Input { modifiers, .. } => { modifiers.push(Modifier::NodeId(NodeId(node))); true }
+        Widget::Row { children, .. } | Widget::Column { children, .. } | Widget::Stack { children, .. } =>
+            children.iter_mut().any(|c| tag_input(c, node)),
+        Widget::Scroll { child, .. } => tag_input(child, node),
+        _ => false,
+    }
+}
+
 /// True if `path` lies inside directory `dir` (not `dir` itself).
 fn is_below(path: &str, dir: &str) -> bool {
     if dir.is_empty() { return !path.is_empty(); }
     path.len() > dir.len() && path.starts_with(dir) && path.as_bytes()[dir.len()] == b'/'
-}
-
-/// Delete a file, or a folder with everything in it. npkFS removes only
-/// empty folders, so files go first, then folders deepest-first, then the
-/// folder itself; a listing cut short by its buffer takes another pass.
-fn delete_tree(path: &str, is_dir: bool) -> bool {
-    if !is_dir { return fs_delete(path); }
-    for _ in 0..DELETE_ROUNDS {
-        let entries = list_dir_internal(path, true);
-        let mut progress = false;
-        for e in entries.iter().filter(|e| !e.is_dir) {
-            progress |= fs_delete(&join(path, &e.name));
-        }
-        let mut dirs: Vec<&Entry> = entries.iter().filter(|e| e.is_dir).collect();
-        dirs.sort_by_key(|e| core::cmp::Reverse(e.name.matches('/').count()));
-        for d in dirs {
-            progress |= fs_delete(&join(path, &d.name));
-        }
-        if fs_delete(path) { return true; }
-        if !progress { return false; }
-    }
-    false
 }
 
 /// Parse the trash index. Lines that are not three tab-separated fields
@@ -2918,6 +3630,7 @@ pub extern "C" fn _start() {
                 // Progressively fill folder sizes/counts a few per tick.
                 // Skipped while searching (folder stats aren't shown then).
                 let mut dirty = loft.expire_status();
+                if loft.pump_delete(DELETE_BUDGET) { dirty = true; }
                 if loft.query.is_empty() && !loft.stats_queue.is_empty()
                     && loft.pump_stats(STATS_PUMP_BUDGET)
                 {
@@ -2933,6 +3646,7 @@ pub extern "C" fn _start() {
                     // search, menu or dialog is up so we don't disturb the user.
                     if loft.open_menu.is_none() && loft.ctx.is_none()
                         && loft.dialog.is_none() && loft.query.is_empty()
+                        && loft.deleting.is_none()
                     {
                         // Probe with a throwaway listing; only a real change
                         // re-lists and re-renders.
