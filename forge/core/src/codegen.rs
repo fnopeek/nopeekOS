@@ -89,6 +89,10 @@ const FHOMES: [Xmm; 8] = [
     Xmm::X8, Xmm::X9, Xmm::X10, Xmm::X11, Xmm::X12, Xmm::X13, Xmm::X14, Xmm::X15,
 ];
 
+/// The largest frame a leaf function may set up without a stack check. Far
+/// below the host reserve the kernel keeps under the limit.
+const LEAF_FRAME_MAX: usize = 2048;
+
 /// Weighted uses below which a local stays in memory: the save and restore
 /// cost two memory operations, so fewer accesses than that cannot pay.
 const HOME_MIN_USES: u64 = 4;
@@ -160,6 +164,18 @@ pub fn emit_entry(asm: &mut Asm) {
     asm.load64(MEMBASE, VMCTX, vmctx::MEM_BASE);
     asm.load64(FUEL, VMCTX, vmctx::FUEL);
 
+    // The entry is checked against the stack limit here, once, so that every
+    // frame below it is covered: a function checks its own frame, and a
+    // small leaf (which skips its check) can only sit on a checked one. `r11`
+    // is free: it carries no argument.
+    asm.load64(Reg::R11, VMCTX, vmctx::STACK_LIMIT);
+    asm.cmp_rr64(Reg::Rsp, Reg::R11);
+    let room = asm.jcc(Cond::Ae);
+    asm.mov_r32_imm32(Reg::Rax, trap::STACK_EXHAUSTED as i32);
+    asm.store64(VMCTX, vmctx::TRAP_CODE, Reg::Rax);
+    let refused = asm.jmp();
+    asm.bind(room);
+
     asm.mov_rr64(Reg::Rax, Reg::Rsi); // the function to enter
     asm.mov_rr64(Reg::Rsi, Reg::Rdx); // and its arguments, shifted down
     asm.mov_rr64(Reg::Rdx, Reg::Rcx);
@@ -167,6 +183,7 @@ pub fn emit_entry(asm: &mut Asm) {
     asm.call_reg(Reg::Rax);
 
     // Both the ordinary return and every trap arrive here.
+    asm.bind(refused);
     let resume = asm.pos();
     asm.patch_i32(lea_at, (resume as i64 - (lea_at as i64 + 4)) as i32);
 
@@ -1379,12 +1396,28 @@ pub fn compile_func(
     f.asm.mov_rr64(Reg::Rbp, Reg::Rsp);
     f.asm.sub_r64_imm32(Reg::Rsp, 0);
     f.frame_patch = f.asm.pos() - 4;
-    // Stack check, before the frame is written to, against the limit in
-    // place. An unsigned compare: below the limit traps, and a limit of zero
-    // never does.
-    f.asm.load64(A, VMCTX, vmctx::STACK_LIMIT);
-    f.asm.cmp_rr64(Reg::Rsp, A);
-    f.trap_if(Cond::B, trap::STACK_EXHAUSTED);
+    // A function that calls nothing and has no loop runs a bounded number of
+    // instructions and cannot recurse: it needs no fuel check on entry (the
+    // count still runs, and the caller's next check sees it). If its frame
+    // is small as well it needs no stack check either. The caller checked
+    // its own frame against the limit, and below the limit lies the host
+    // reserve (`HOST_STACK_RESERVE` in the kernel, 512 KiB), of which a leaf
+    // can take at most `LEAF_FRAME_MAX`. The bound on the frame is taken
+    // before generating: every operator pushes at most one value.
+    let leaf = !ops
+        .iter()
+        .any(|o| matches!(o, Operator::Call { .. } | Operator::CallIndirect { .. } | Operator::Loop { .. }));
+    let frame_bound = 8 * (HOMES.len() + FHOMES.len() + n_locals as usize + ops.len() + 2);
+    let small_leaf = leaf && frame_bound <= LEAF_FRAME_MAX;
+
+    // Stack check, before the frame is written to. `rax` is free here: it
+    // carries no argument. An unsigned compare: below the limit traps, and
+    // a limit of zero never does.
+    if !small_leaf {
+        f.asm.load64(A, VMCTX, vmctx::STACK_LIMIT);
+        f.asm.cmp_rr64(Reg::Rsp, A);
+        f.trap_if(Cond::B, trap::STACK_EXHAUSTED);
+    }
     (f.homed, f.n_homes, f.fhomed, f.n_fhomes) = choose_homes(&f.local_types, ops);
     for k in 0..f.n_homes.min(CALLEE_SAVED_HOMES) {
         f.asm.store64(Reg::Rbp, -8 * (k as i32 + 1), HOMES[k]);
@@ -1458,8 +1491,10 @@ pub fn compile_func(
     }
 
     // Entry check: with one at every loop head and one here, no path can run
-    // unbounded without meeting one.
-    f.fuel_check();
+    // unbounded without meeting one. A leaf has neither loops nor calls.
+    if !leaf {
+        f.fuel_check();
+    }
 
     for op in ops {
         if let Err(name) = emit(&mut f, op) {

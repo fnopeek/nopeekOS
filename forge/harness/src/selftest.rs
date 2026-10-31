@@ -568,6 +568,18 @@ fn traps_report_themselves() -> bool {
     let big = format!("(module (func (export \"f\") (param i32) (result i32) \
         (local {}) i32.const 1))", "i64 ".repeat(40_000));
     want_stack(&big, 0, STACK_EXHAUSTED, "frame larger than the stack");
+    // A small leaf skips its own stack check; the entry trampoline's check
+    // must still refuse to enter it with no room left at all.
+    let leaf = "(module (func (export \"f\") (param i32) (result i32) \
+        local.get 0 i32.const 1 i32.add))";
+    want_stack(leaf, 1, NONE, "leaf with room");
+    match run_with_stack(leaf, 1, None, Some(0)) {
+        Some((_, got)) if got == STACK_EXHAUSTED => {}
+        other => {
+            println!("  Trap: leaf entered without room reported {:?}", other.map(|o| name(o.1)));
+            stack_ok = false;
+        }
+    }
 
     // `unreachable` is a trap the generator raises itself.
     let unr = "(module (func (export \"f\") (param i32) (result i32) \
