@@ -223,6 +223,9 @@ struct Ctrl {
     start: usize,
     /// Forward branches waiting for this frame's end.
     ends: Vec<Patch>,
+    /// Jump-table entries waiting for it: (entry offset, table offset). An
+    /// entry holds the target's distance from its table.
+    table_ends: Vec<(usize, usize)>,
     /// `If` only: the edge taken when the condition is false.
     else_patch: Option<Patch>,
     /// Was the frame entered from unreachable code? Then it emits nothing.
@@ -1340,6 +1343,7 @@ pub fn compile_func(
         out_ty: results.first().copied().unwrap_or(ValType::I32),
         start: 0,
         ends: Vec::new(),
+        table_ends: Vec::new(),
         else_patch: None,
         dead: false,
     });
@@ -1526,6 +1530,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
                 out_ty,
                 start: 0,
                 ends: Vec::new(),
+                table_ends: Vec::new(),
                 else_patch: None,
                 dead,
             });
@@ -1558,6 +1563,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
                 out_ty,
                 start: head,
                 ends: Vec::new(),
+                table_ends: Vec::new(),
                 else_patch: None,
                 dead,
             });
@@ -1585,6 +1591,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
                 out_ty,
                 start: 0,
                 ends: Vec::new(),
+                table_ends: Vec::new(),
                 else_patch,
                 dead,
             });
@@ -1638,9 +1645,13 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
                     f.asm.bind(ep);
                     f.reachable = true;
                 }
-                let branched = !fr.ends.is_empty();
+                let branched = !fr.ends.is_empty() || !fr.table_ends.is_empty();
                 while let Some(p) = fr.ends.pop() {
                     f.asm.bind(p);
+                }
+                let here = f.asm.pos();
+                for (entry, table) in core::mem::take(&mut fr.table_ends) {
+                    f.asm.patch_i32(entry, (here as i64 - table as i64) as i32);
                 }
                 f.reachable |= branched;
             } else {
@@ -2282,9 +2293,11 @@ fn branch_to(f: &mut Ctx, relative_depth: u32) -> Result<(), &'static str> {
 /// A jump table, not a chain of compares: `br_table` is how a `switch`
 /// arrives, and a chain would make the cost depend on which case was taken.
 ///
-/// Layout is dispatch, then one stub per case, then the table itself. The
-/// table sits last because every stub ends in a jump, so control can never
-/// fall into it — and putting it there means no jump has to skip over it.
+/// Layout is dispatch, then a stub for each case that carries a value, then
+/// the table itself. A case without a value has no stub: its entry points at
+/// the label, filled in when the label's position is known. The table sits
+/// last because the dispatch and every stub end in a jump, so control can
+/// never fall into it.
 fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str> {
     let n = t.len() as usize;
     let mut labels: Vec<u32> = Vec::with_capacity(n);
@@ -2292,10 +2305,25 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
         labels.push(x.map_err(|_| "brtable-read")?);
     }
     let default = t.default();
+    let frame = |f: &Ctx, d: u32| f.ctrl.len().checked_sub(1 + d as usize).ok_or("br-depth");
+    let default_idx = frame(f, default)?;
 
     f.pop_to(B);
     f.asm.cmp_r32_imm32(B, n as i32);
-    let to_default = f.asm.jcc(Cond::Ae);
+    // Out of range goes to the default. A default that carries no value is
+    // jumped to directly; one that does gets a stub below.
+    let to_default_stub = if f.ctrl[default_idx].branch_arity == 0 {
+        if f.ctrl[default_idx].kind == Kind::Loop {
+            let start = f.ctrl[default_idx].start;
+            f.asm.jcc_back(Cond::Ae, start);
+        } else {
+            let p = f.asm.jcc(Cond::Ae);
+            f.ctrl[default_idx].ends.push(p);
+        }
+        None
+    } else {
+        Some(f.asm.jcc(Cond::Ae))
+    };
     // Clamp the index on a mispredicted path: the jump table is read with it,
     // and what follows the table is not a target. The table is padded to a
     // power of two with entries for the default, so a constant mask keeps
@@ -2308,25 +2336,55 @@ fn br_table(f: &mut Ctx, t: &wasmparser::BrTable<'_>) -> Result<(), &'static str
     f.asm.add_rr64(A, T);
     f.asm.jmp_reg(A);
 
-    // Every case gets a stub, because a branch may have to move a value into
-    // its label's slot before jumping, and that move differs per target.
-    let mut stubs = Vec::with_capacity(n);
-    for &d in &labels {
-        stubs.push(f.asm.pos());
-        branch_to(f, d)?;
+    // Where each entry points. A target that carries no value is the label
+    // itself, so the dispatch lands there in one jump. One that carries a
+    // value needs a stub that moves it into the result register first.
+    enum Dest {
+        Code(usize),
+        Label(usize),
     }
-    f.asm.bind(to_default);
-    let dflt = f.asm.pos();
-    branch_to(f, default)?;
+    let mut dest_of = |f: &mut Ctx, d: u32| -> Result<Dest, &'static str> {
+        let idx = frame(f, d)?;
+        if f.ctrl[idx].branch_arity == 0 {
+            if f.ctrl[idx].kind == Kind::Loop {
+                return Ok(Dest::Code(f.ctrl[idx].start));
+            }
+            return Ok(Dest::Label(idx));
+        }
+        let at = f.asm.pos();
+        branch_to(f, d)?;
+        Ok(Dest::Code(at))
+    };
+    let mut dests = Vec::with_capacity(n);
+    for &d in &labels {
+        dests.push(dest_of(f, d)?);
+    }
+    let dflt = match to_default_stub {
+        Some(p) => {
+            f.asm.bind(p);
+            let at = f.asm.pos();
+            branch_to(f, default)?;
+            Dest::Code(at)
+        }
+        None => dest_of(f, default)?,
+    };
 
     let table = f.asm.pos();
     f.asm
         .patch_i32(lea_at, (table as i64 - (lea_at as i64 + 4)) as i32);
-    for p in stubs {
-        f.asm.emit_i32((p as i64 - table as i64) as i32);
+    let mut put = |f: &mut Ctx, d: &Dest| match *d {
+        Dest::Code(at) => f.asm.emit_i32((at as i64 - table as i64) as i32),
+        Dest::Label(idx) => {
+            let entry = f.asm.pos();
+            f.asm.emit_i32(0);
+            f.ctrl[idx].table_ends.push((entry, table));
+        }
+    };
+    for d in &dests {
+        put(f, d);
     }
     for _ in n..slots {
-        f.asm.emit_i32((dflt as i64 - table as i64) as i32);
+        put(f, &dflt);
     }
     Ok(())
 }

@@ -726,12 +726,29 @@ impl Gen {
         let i = *self.rng.pick(&ls);
         let (name, c) = (self.labels[i].name.clone(), self.labels[i].counter.unwrap());
         self.step(c);
-        if self.rng.chance(50) {
-            self.emit(&format!("br_if {name}"));
-        } else {
-            self.emit("if");
-            self.emit(&format!("br {name}"));
-            self.emit("end");
+        // A block to leave when the count is spent, for the br_table forms.
+        let out: Vec<String> = (0..self.labels.len())
+            .filter(|&k| self.labels[k].kind == LabelKind::Block && self.labels[k].result.is_none())
+            .map(|k| self.labels[k].name.clone())
+            .collect();
+        match self.rng.below(4) {
+            0 => self.emit(&format!("br_if {name}")),
+            1 => {
+                self.emit("if");
+                self.emit(&format!("br {name}"));
+                self.emit("end");
+            }
+            // (count > 0) picks the loop through a table entry...
+            2 if !out.is_empty() => {
+                let b = self.rng.pick(&out).clone();
+                self.emit(&format!("br_table {b} {name} {b}"));
+            }
+            // ...or, out of range, through the default.
+            _ if !out.is_empty() => {
+                let b = self.rng.pick(&out).clone();
+                self.emit(&format!("br_table {b} {name}"));
+            }
+            _ => self.emit(&format!("br_if {name}")),
         }
     }
 
