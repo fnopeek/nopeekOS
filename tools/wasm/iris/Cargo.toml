@@ -1,6 +1,6 @@
 [package]
 name = "iris"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Image viewer — nopeekOS."
@@ -9,8 +9,7 @@ description = "Image viewer — nopeekOS."
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
-miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap", "png"] }
 
 [dependencies.postcard]
 version = "1.0"

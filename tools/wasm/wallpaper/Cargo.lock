@@ -55,8 +55,9 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.36.0"
+version = "0.38.0"
 dependencies = [
+ "miniz_oxide",
  "npk_sys",
  "postcard",
  "serde",
@@ -192,8 +193,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "wallpaper"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
- "miniz_oxide",
  "nopeek_widgets",
 ]

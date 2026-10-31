@@ -15,11 +15,14 @@ crate-type = ["rlib"]
 # served fine by a bump allocator. Enable it if you allocate and free per
 # frame.
 heap = ["dep:talc", "dep:spin"]
+# The PNG decoder (`png` module); pulls in `miniz_oxide`.
+png = ["dep:miniz_oxide"]
 
 [dependencies]
 npk_sys = { path = "../npk_sys", features = ["alloc"] }
 talc = { version = "5", default-features = false, optional = true }
 spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex", "lock_api"], optional = true }
+miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"], optional = true }
 
 [dependencies.serde]
 version = "1.0"

@@ -1,6 +1,6 @@
 [package]
 name = "wallpaper"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 
@@ -8,8 +8,7 @@ license = "AGPL-3.0-or-later"
 crate-type = ["cdylib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
-miniz_oxide = { version = "0.9", default-features = false, features = ["with-alloc"] }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap", "png"] }
 
 [build-dependencies]
 nopeek_widgets = { path = "../sdk/widgets" }
