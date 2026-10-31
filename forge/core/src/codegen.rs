@@ -555,23 +555,24 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// Before a call into native code: every float local in a register goes
-    /// to its slot, because the callee may clobber the register.
+    /// Before a call into native code, which may change every xmm register.
+    /// All of `FHOMES` go below `rsp`, not only this function's: between wasm
+    /// functions they are callee-saved, so any caller further up may hold
+    /// float locals in the ones this function leaves alone. 64 bytes keep
+    /// `rsp` 16-byte aligned for the call.
     fn fhomes_out(&mut self) {
-        for k in 0..self.n_fhomes {
-            let i = self.fhomed[k];
-            let (t, off) = (self.local_types[i as usize], self.local(i));
-            self.asm.fstore_slot(fw_of(t), Reg::Rbp, off, FHOMES[k]);
+        self.asm.sub_r64_imm32(Reg::Rsp, 8 * FHOMES.len() as i32);
+        for (k, &x) in FHOMES.iter().enumerate() {
+            self.asm.fstore_slot(Fw::Double, Reg::Rsp, 8 * k as i32, x);
         }
     }
 
     /// After it: back into their registers.
     fn fhomes_in(&mut self) {
-        for k in 0..self.n_fhomes {
-            let i = self.fhomed[k];
-            let (t, off) = (self.local_types[i as usize], self.local(i));
-            self.asm.fload_slot(fw_of(t), FHOMES[k], Reg::Rbp, off);
+        for (k, &x) in FHOMES.iter().enumerate() {
+            self.asm.fload_slot(Fw::Double, x, Reg::Rsp, 8 * k as i32);
         }
+        self.asm.add_r64_imm32(Reg::Rsp, 8 * FHOMES.len() as i32);
     }
 
     fn mov_ty(&mut self, t: ValType, dst: Reg, src: Reg) {
@@ -2753,14 +2754,18 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
     let base = f.stack.len() - n;
     f.spill_arg_conflicts(&places, base);
 
+    let import = function_index < f.m.n_imported;
+    // Below the stack arguments, which must sit at `rsp` for the call.
+    if import {
+        f.fhomes_out();
+    }
     let arg_bytes = load_args(f, params, &places, n_stack);
 
-    if function_index < f.m.n_imported {
+    if import {
         // An import is a native function: it expects the context as its first
         // argument the ordinary way. A wasm callee reads it out of the pinned
         // register instead, so nothing has to be set up for one.
         // The homes go out first: `rdi` may be one.
-        f.fhomes_out();
         f.vhomes_out();
         f.asm.mov_rr64(Reg::Rdi, VMCTX);
         // A native function may want to read the counter, or charge against
@@ -2770,8 +2775,13 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
         f.asm.load64(T, T, 8 * function_index as i32);
         f.asm.call_reg(T);
         f.vhomes_in();
+        if arg_bytes > 0 {
+            f.asm.add_r64_imm32(Reg::Rsp, arg_bytes);
+        }
         f.fhomes_in();
         f.asm.load64(FUEL, VMCTX, vmctx::FUEL);
+        after_call(f, n, results, 0);
+        return Ok(());
     } else {
         f.vhomes_out();
         let at = f.asm.call_rel32_blank();

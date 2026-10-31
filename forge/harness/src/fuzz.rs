@@ -921,6 +921,17 @@ struct Outcome {
     globals: Vec<u64>,
 }
 
+/// Fuel slice for runs through the refuel path.
+const SLICE: i64 = 25;
+
+/// Refill a small slice and leave every register native code may change
+/// changed, so a value generated code wrongly expects to survive is lost.
+extern "C" fn refuel(ctx: *mut u64) {
+    // SAFETY: called by generated code with its own instance context.
+    unsafe { *ctx.add(forge_core::vmctx::FUEL as usize / 8) = SLICE as u64 };
+    crate::selftest::clobber();
+}
+
 fn under_forge(wasm: &[u8], arg: u32) -> Result<Outcome, String> {
     use crate::selftest::{Exec, Inst};
     let m = forge_core::compile(wasm).map_err(|e| format!("compile: {e}"))?;
@@ -935,6 +946,11 @@ fn under_forge(wasm: &[u8], arg: u32) -> Result<Outcome, String> {
     exec.arm_traps(&m);
     let mut inst = Inst::new(&m, exec.base()).ok_or("inst")?;
     inst.set_stack_budget(512 * 1024);
+    // Every other argument runs on small slices, through the refuel stub.
+    if arg % 2 == 1 {
+        inst.set_fuel(SLICE);
+        inst.set_refuel(refuel);
+    }
     let r = exec.call_entry(m.entry_offset, off, inst.ptr(), arg, 0, 0);
     let trap = inst.trap_code();
     let globals = (0..GLOBALS.len())

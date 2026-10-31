@@ -287,6 +287,11 @@ impl Inst {
         self.ctx[forge_core::vmctx::FUEL as usize / 8] = v as u64;
     }
 
+    /// Install a refuel routine (`BUILTIN_FUEL`).
+    pub(crate) fn set_refuel(&mut self, f: extern "C" fn(*mut u64)) {
+        self.ctx[forge_core::vmctx::BUILTIN_FUEL as usize / 8] = f as *const () as u64;
+    }
+
     /// Let the module's frames use at most `bytes` below the current stack
     /// pointer, as the kernel does with its fiber stacks.
     pub(crate) fn set_stack_budget(&mut self, bytes: u64) {
@@ -297,9 +302,34 @@ impl Inst {
     }
 }
 
+/// Change every register native code may change (SysV caller-saved), so
+/// generated code that expects one to survive a native call is caught.
+#[inline(always)]
+pub(crate) fn clobber() {
+    // SAFETY: writes only registers it declares clobbered.
+    unsafe {
+        std::arch::asm!(
+            "mov rax, -1", "mov rcx, -1", "mov rdx, -1", "mov rsi, -1", "mov rdi, -1",
+            "mov r8, -1", "mov r9, -1", "mov r10, -1", "mov r11, -1",
+            "pcmpeqd xmm0, xmm0", "pcmpeqd xmm1, xmm1", "pcmpeqd xmm2, xmm2", "pcmpeqd xmm3, xmm3",
+            "pcmpeqd xmm4, xmm4", "pcmpeqd xmm5, xmm5", "pcmpeqd xmm6, xmm6", "pcmpeqd xmm7, xmm7",
+            "pcmpeqd xmm8, xmm8", "pcmpeqd xmm9, xmm9", "pcmpeqd xmm10, xmm10", "pcmpeqd xmm11, xmm11",
+            "pcmpeqd xmm12, xmm12", "pcmpeqd xmm13, xmm13", "pcmpeqd xmm14, xmm14", "pcmpeqd xmm15, xmm15",
+            out("rax") _, out("rcx") _, out("rdx") _, out("rsi") _, out("rdi") _,
+            out("r8") _, out("r9") _, out("r10") _, out("r11") _,
+            out("xmm0") _, out("xmm1") _, out("xmm2") _, out("xmm3") _,
+            out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
+            out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
+            out("xmm12") _, out("xmm13") _, out("xmm14") _, out("xmm15") _,
+            options(nostack),
+        );
+    }
+}
+
 // The host side, defined once and handed to both engines so a disagreement
 // can only come from the generated code.
 extern "C" fn h_add(_ctx: *const u64, a: u32, b: u32, _c: u32) -> u32 {
+    clobber();
     a.wrapping_add(b)
 }
 extern "C" fn h_double(_ctx: *const u64, a: u32, _b: u32, _c: u32) -> u32 {
