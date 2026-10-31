@@ -462,6 +462,8 @@ struct Spell {
     /// Editor node of the last commit: a different one means the tab
     /// changed, and that document's caret is put back.
     shown_node:    u32,
+    /// Shift from the `Event::Mods` sent right before a key.
+    shift:         bool,
 }
 
 /// The fields that can ask for the keyboard.
@@ -502,6 +504,7 @@ impl Spell {
             focus:         None,
             bar:           None,
             shown_node:    u32::MAX,
+            shift:         false,
         };
 
         // Launched to open a specific file (loft file association)?
@@ -2265,7 +2268,10 @@ fn markup_spans(text: &str) -> Vec<Span> {
 enum Outcome { Idle, Rerender, Exit }
 
 fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
+    // `Event::Mods` describes only the event right behind it.
+    let shift = core::mem::take(&mut sp.shift);
     match ev {
+        Event::Mods { shift, .. } => { sp.shift = shift; Outcome::Idle }
         // Esc backs out of whatever is open. It does not quit: in an
         // editor Esc is the cancel key, and a stray press should never
         // end the session. Closing is Mod+Q, the window's ×, or
@@ -2276,8 +2282,13 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             else if sp.bar.is_some() { sp.close_bar(); Outcome::Rerender }
             else { Outcome::Idle }
         }
+        // F3 next hit, Shift+F3 the previous one.
         Event::Key(KeyCode::F(3)) => {
-            if matches!(sp.bar, Some(Bar::Find(_))) { sp.step_hit(1); } else { sp.open_find(false); }
+            if matches!(sp.bar, Some(Bar::Find(_))) {
+                sp.step_hit(if shift { -1 } else { 1 });
+            } else {
+                sp.open_find(false);
+            }
             Outcome::Rerender
         }
         // The window manager is asking whether it may close us.
