@@ -513,6 +513,22 @@ fn traps_report_themselves() -> bool {
     // …and the one that must not trap, because wasm wants an answer there.
     want(&minmax("i32.rem_s"), 0xFFFF_FFFF, None, NONE, "INT_MIN%-1 darf NICHT trappen");
 
+    // A trap leaves without any epilogue, two frames deep, both holding
+    // locals in the callee-saved registers. The harness keeps running on its
+    // own values of them only if the trampoline put them back.
+    let home = "(module \
+        (func $g (param i32) (result i32) (local i32 i32) \
+           (loop $l local.get 1 i32.const 1 i32.add local.set 1 \
+             local.get 2 local.get 1 i32.add local.set 2 \
+             local.get 1 i32.const 3 i32.lt_u br_if $l) \
+           local.get 2 local.get 0 i32.div_u) \
+        (func (export \"f\") (param i32) (result i32) (local i32 i32) \
+           (loop $l local.get 1 local.get 0 call $g i32.add local.set 1 \
+             local.get 2 i32.const 1 i32.add local.tee 2 i32.const 3 i32.lt_u br_if $l) \
+           local.get 1))";
+    want(home, 0, None, DIVIDE_ERROR, "Trap mit Locals in Registern");
+    want(home, 2, None, NONE, "derselbe Weg ohne Trap");
+
     // The stack limit: recursion and a single oversized frame both stop at
     // it instead of running off the native stack. Without the limit both
     // would take the harness down.
@@ -847,6 +863,27 @@ const CASES: &[Case] = &[
            drop i32.const 5)", params: 2 },
     Case { name: "fuse_eqz_if", decl: "", body:
         "local.get 0 i32.eqz (if (result i32) (then i32.const 7) (else local.get 0))", params: 1 },
+
+    // --- locals in registers ---
+    // The callee keeps locals in the same registers; the caller's must
+    // survive the call.
+    Case { name: "home_call", decl: "(func $g (param i32) (result i32) (local i32 i32) \
+         (loop $l local.get 1 local.get 0 i32.add local.set 1 \
+           local.get 2 i32.const 1 i32.add local.tee 2 i32.const 5 i32.lt_u br_if $l) \
+         local.get 1)", body:
+        "(local i32 i32 i64) \
+         (loop $l local.get 0 local.get 2 call $g i32.add local.set 2 \
+           local.get 3 local.get 2 i64.extend_i32_u i64.add local.set 3 \
+           local.get 1 i32.const 1 i32.add local.tee 1 i32.const 4 i32.lt_u br_if $l) \
+         local.get 3 i32.wrap_i64 local.get 2 i32.xor", params: 1 },
+    // Copies taken before the local changes keep the old value.
+    Case { name: "home_pending", decl: "", body:
+        "(local i32) i32.const 3 local.set 1 \
+         local.get 1 local.get 1 local.get 1 local.get 0 local.set 1 \
+         i32.add i32.add local.get 1 i32.mul", params: 1 },
+    Case { name: "home_params", decl: "", body:
+        "local.get 0 local.get 1 i32.add local.get 0 i32.mul local.get 1 i32.sub \
+         local.get 0 local.get 1 i32.gt_u local.get 1 local.get 0 i32.sub i32.mul i32.add", params: 2 },
 
     // --- select ---
     Case { name: "select", decl: "", body:
