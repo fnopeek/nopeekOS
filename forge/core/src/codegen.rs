@@ -71,8 +71,12 @@ const MEMBASE: Reg = Reg::R13;
 /// because a trap leaves without running any epilogue.
 ///
 /// `r10` is the third, taken from the operand cache. It is caller-saved, so
-/// a local in it goes to its slot around each call instead.
-const HOMES: [Reg; 3] = [Reg::Rbx, Reg::R12, Reg::R10];
+/// a local in it goes to its slot around each call instead. `rdi` is the
+/// fourth, likewise caller-saved, and it leaves the operand cache only in a
+/// function that has a fourth local worth a register (`Ctx::pool`). Where
+/// code writes `rdi` itself (`rep movsb`/`stosb`, the context argument of a
+/// native call), the homes go to their slots first.
+const HOMES: [Reg; 4] = [Reg::Rbx, Reg::R12, Reg::R10, Reg::Rdi];
 
 /// How many of `HOMES`, from the front, are callee-saved. The rest are
 /// caller-saved: a function need not keep them for its caller, but around
@@ -369,8 +373,9 @@ struct Val {
 /// All of them are caller-saved in SysV, so spilling before a call is enough;
 /// `rbx` and `r12` stay out rather than being saved in every prologue.
 /// `rsi`/`rdi` are in the pool even though `rep movsb` needs them, because
-/// bulk memory spills everything first anyway.
-const GPRS: [Reg; 4] = [Reg::Rsi, Reg::Rdi, Reg::R8, Reg::R9];
+/// bulk memory spills everything first anyway. `rdi` comes last: a function
+/// that homes four locals keeps it out (`Ctx::pool`).
+const GPRS: [Reg; 4] = [Reg::Rsi, Reg::R8, Reg::R9, Reg::Rdi];
 
 const XMMS: [Xmm; 5] = [Xmm::X3, Xmm::X4, Xmm::X5, Xmm::X6, Xmm::X7];
 
@@ -397,7 +402,7 @@ struct Ctx<'a> {
     /// `k < n_homes`. Always integer locals, and an i32 in one has a zero
     /// upper half like any other 32-bit register write. The caller's values
     /// of those registers are saved in the same order below `rbp`.
-    homed: [u32; 3],
+    homed: [u32; HOMES.len()],
     n_homes: usize,
     /// The same for float locals in `FHOMES`, saved below the integer ones.
     fhomed: [u32; 8],
@@ -616,8 +621,13 @@ impl<'a> Ctx<'a> {
 
     // --- registers ---
 
+    /// The operand cache of this function: without `rdi` when that is a home.
+    fn pool(&self) -> &'static [Reg] {
+        if self.n_homes == HOMES.len() { &GPRS[..GPRS.len() - 1] } else { &GPRS }
+    }
+
     fn alloc_gpr(&mut self) -> Reg {
-        for r in GPRS {
+        for &r in self.pool() {
             if !self.gpr_used[r as usize] {
                 self.gpr_used[r as usize] = true;
                 return r;
@@ -626,7 +636,7 @@ impl<'a> Ctx<'a> {
         // Nothing free: the value that has waited longest goes to memory.
         // Spilling the deepest keeps the ones an operator is about to want.
         self.spill_deepest_gpr();
-        for r in GPRS {
+        for &r in self.pool() {
             if !self.gpr_used[r as usize] {
                 self.gpr_used[r as usize] = true;
                 return r;
@@ -1197,9 +1207,9 @@ impl<'a> Ctx<'a> {
             let none = self.asm.jcc(Cond::E);
             self.trap_patch(trap::OUT_OF_FUEL, none);
             self.asm.store64(VMCTX, vmctx::FUEL, FUEL);
-            self.asm.mov_rr64(Reg::Rdi, VMCTX);
             self.fhomes_out();
             self.vhomes_out();
+            self.asm.mov_rr64(Reg::Rdi, VMCTX);
             self.asm.call_reg(T);
             self.vhomes_in();
             self.fhomes_in();
@@ -1254,8 +1264,8 @@ fn block_out(ty: BlockType) -> Result<(u32, ValType), &'static str> {
 /// Give the integer locals used most a register each (`HOMES`). A use inside
 /// a loop counts eight times as much per level of nesting, which is a rough
 /// guess at how often it runs, and all a single pass can know in advance.
-fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; 3], usize, [u32; 8], usize) {
-    let mut homed = [0u32; 3];
+fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; HOMES.len()], usize, [u32; 8], usize) {
+    let mut homed = [0u32; HOMES.len()];
     let mut fhomed = [0u32; 8];
     if local_types.is_empty() {
         return (homed, 0, fhomed, 0);
@@ -1358,7 +1368,7 @@ pub fn compile_func(
         traps: Vec::new(),
         trap_relocs: Vec::new(),
         n_locals,
-        homed: [0; 3],
+        homed: [0; HOMES.len()],
         n_homes: 0,
         fhomed: [0; 8],
         n_fhomes: 0,
@@ -2164,11 +2174,11 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             }
             f.spill_all();
             f.pop_to(A);
+            f.fhomes_out();
+            f.vhomes_out();
             f.asm.mov_rr64(Reg::Rsi, A);
             f.asm.mov_rr64(Reg::Rdi, VMCTX);
             f.asm.load64(T, VMCTX, vmctx::BUILTIN_GROW);
-            f.fhomes_out();
-            f.vhomes_out();
             f.asm.call_reg(T);
             f.vhomes_in();
             f.fhomes_in();
@@ -2199,6 +2209,8 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             // registers — so the cache goes to memory first.
             f.spill_all();
             bulk_fuel(f);
+            // `rdi` may hold a local; it goes to its slot and comes back.
+            f.vhomes_out();
             f.pop_to(B); // rcx = len
             f.pop_to(Reg::Rsi); // src
             f.pop_to(Reg::Rdi); // dst
@@ -2226,6 +2238,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             f.asm.bind(forward);
             f.asm.rep_movsb();
             f.asm.bind(done);
+            f.vhomes_in();
         }
         MemoryFill { mem } => {
             if *mem != 0 {
@@ -2233,12 +2246,14 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             }
             f.spill_all();
             bulk_fuel(f);
+            f.vhomes_out();
             f.pop_to(B); // rcx = len
             f.pop_to(A); // al = the byte
             f.pop_to(Reg::Rdi); // dst
             bulk_bounds(f, Reg::Rdi)?;
             f.asm.add_rr64(Reg::Rdi, MEMBASE);
             f.asm.rep_stosb();
+            f.vhomes_in();
         }
 
         // --- calls ---
@@ -2744,14 +2759,15 @@ fn call_direct(f: &mut Ctx, function_index: u32) -> Result<(), &'static str> {
         // An import is a native function: it expects the context as its first
         // argument the ordinary way. A wasm callee reads it out of the pinned
         // register instead, so nothing has to be set up for one.
+        // The homes go out first: `rdi` may be one.
+        f.fhomes_out();
+        f.vhomes_out();
         f.asm.mov_rr64(Reg::Rdi, VMCTX);
         // A native function may want to read the counter, or charge against
         // it for work of its own, so it is handed over and taken back.
         f.asm.store64(VMCTX, vmctx::FUEL, FUEL);
         f.asm.load64(T, VMCTX, vmctx::HOST_FNS);
         f.asm.load64(T, T, 8 * function_index as i32);
-        f.fhomes_out();
-        f.vhomes_out();
         f.asm.call_reg(T);
         f.vhomes_in();
         f.fhomes_in();

@@ -448,6 +448,13 @@ impl Gen {
     }
 
     fn call_expr(&mut self, t: T) {
+        // The import: a native call, with the context in `rdi`.
+        if t == T::I32 && self.budget >= 4 && self.rng.chance(20) {
+            self.expr(T::I32);
+            self.expr(T::I32);
+            self.emit("call $add");
+            return;
+        }
         let from = self.cur.map(|c| c + 1).unwrap_or(0);
         let cands: Vec<usize> = (from..self.helpers.len()).filter(|&j| self.helpers[j].result == t).collect();
         if cands.is_empty() || self.budget < 4 {
