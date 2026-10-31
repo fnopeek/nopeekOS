@@ -562,15 +562,18 @@ impl Compositor {
         self.retile();
     }
 
-    /// Mod+V and the Float button: floating or back into the tiling.
+    /// Mod+V and the Float button: lifted off the tiling, or back into it.
     pub fn toggle_floating(&mut self, id: WindowId) {
+        let lift = self.window(id).is_some_and(|w| w.state != WindowState::Floating);
         if let Some(win) = self.window_mut(id) {
-            win.state = match win.state {
-                WindowState::Floating => WindowState::Tiled,
-                _ => WindowState::Floating,
-            };
+            win.state = if lift { WindowState::Floating } else { WindowState::Tiled };
+        }
+        if lift {
+            self.detach_geometry(id);
+            self.focus_window(id);
         }
         self.retile();
+        self.needs_full_redraw = true;
     }
 
     /// Scene items of `win`'s pill, painted right after its content.
@@ -734,4 +737,189 @@ fn loop_bar_title(terminal_idx: u8) -> String {
         None
     };
     running.unwrap_or_else(|| String::from("loop"))
+}
+
+// Floating windows: lifted off the tiling, moved by their bar, resized at
+// their edges.
+
+/// Edge bits of a `DragMode::Edge`.
+pub const EDGE_L: u8 = 1;
+pub const EDGE_R: u8 = 2;
+pub const EDGE_T: u8 = 4;
+pub const EDGE_B: u8 = 8;
+
+/// Pointer travel before a press on a bar becomes a move, physical px.
+pub fn drag_threshold() -> i32 {
+    scale::len(6) as i32
+}
+
+/// Grab band of an edge: outside the window, and inside it, physical px.
+fn edge_out() -> i32 { scale::len(5) as i32 }
+fn edge_in() -> i32 { scale::len(4) as i32 }
+/// Length along an edge that counts as its corner, physical px.
+fn corner_len() -> i32 { scale::len(16) as i32 }
+
+/// Smallest floating window, logical px.
+const FLOAT_MIN_W: u32 = 240;
+const FLOAT_MIN_H: u32 = 160;
+
+use super::compositor::{DragMode, DragState};
+use super::cursor::Shape;
+
+impl Compositor {
+    /// A visible floating window of ours on this workspace.
+    pub(super) fn is_floating_window(&self, id: WindowId) -> bool {
+        self.window(id).is_some_and(|w| w.state == WindowState::Floating
+            && w.workspace == self.active_workspace && w.visible
+            && !w.is_overlay && !w.is_panel && w.popup_of.is_none())
+    }
+
+    /// Floating windows lie above the tiles: a stable reorder of `z_order`
+    /// that keeps every other relation.
+    pub(super) fn floats_above_tiles(&mut self) {
+        let floating: Vec<WindowId> = self.z_order.iter().copied()
+            .filter(|id| self.window(*id).is_some_and(|w| w.state == WindowState::Floating
+                && !w.is_overlay && !w.is_panel && w.popup_of.is_none()))
+            .collect();
+        if floating.is_empty() { return; }
+        let first_tile = self.z_order.iter().position(|id| self.window(*id)
+            .is_some_and(|w| w.state == WindowState::Tiled && !w.is_overlay));
+        let Some(first_tile) = first_tile else { return };
+        let late: Vec<WindowId> = floating.iter().copied()
+            .filter(|id| self.z_order.iter().position(|z| z == id).is_some_and(|p| p > first_tile))
+            .collect();
+        if late.is_empty() { return; }
+        self.z_order.retain(|id| !late.contains(id));
+        let at = self.z_order.iter().position(|id| self.window(*id)
+            .is_some_and(|w| w.state == WindowState::Tiled && !w.is_overlay))
+            .unwrap_or(self.z_order.len());
+        for (i, id) in late.into_iter().enumerate() {
+            self.z_order.insert(at + i, id);
+        }
+    }
+
+    /// Lift `win` off its tile: smaller, centred over where it was, inside
+    /// the work area, so it is plain that it floats.
+    pub(super) fn detach_geometry(&mut self, id: WindowId) {
+        let (ax, ay, aw, ah) = self.workspace_area_pub();
+        let Some(win) = self.window_mut(id) else { return };
+        let w = (win.width * 3 / 5).max(scale::len(FLOAT_MIN_W)).min(aw * 4 / 5).max(1);
+        let h = (win.height * 3 / 5).max(scale::len(FLOAT_MIN_H)).min(ah * 4 / 5).max(1);
+        let x = (win.x + win.width / 2).saturating_sub(w / 2).clamp(ax, (ax + aw).saturating_sub(w).max(ax));
+        let y = (win.y + win.height / 2).saturating_sub(h / 2).clamp(ay, (ay + ah).saturating_sub(h).max(ay));
+        (win.x, win.y, win.width, win.height) = (x, y, w, h);
+        win.dirty = true;
+    }
+
+    /// The floating window whose edge is under `(x, y)`, and which edges.
+    pub(super) fn floating_edge_at(&self, x: i32, y: i32) -> Option<(WindowId, u8)> {
+        let (o, i, c) = (edge_out(), edge_in(), corner_len());
+        for &id in &self.z_order {
+            let Some(w) = self.window(id) else { continue };
+            if !self.is_floating_window(id) { continue; }
+            let (x0, y0) = (w.x as i32, w.y as i32);
+            let (x1, y1) = (x0 + w.width as i32, y0 + w.height as i32);
+            if x < x0 - o || x >= x1 + o || y < y0 - o || y >= y1 + o { continue; }
+            let inner = x >= x0 + i && x < x1 - i && y >= y0 + i && y < y1 - i;
+            if inner { return None; }
+            let mut e = 0;
+            if x < x0 + c.max(i) && (x < x0 + i || y < y0 + i || y >= y1 - i) { e |= EDGE_L; }
+            if x >= x1 - c.max(i) && (x >= x1 - i || y < y0 + i || y >= y1 - i) { e |= EDGE_R; }
+            if y < y0 + c.max(i) && (y < y0 + i || x < x0 + i || x >= x1 - i) { e |= EDGE_T; }
+            if y >= y1 - c.max(i) && (y >= y1 - i || x < x0 + i || x >= x1 - i) { e |= EDGE_B; }
+            if e == 0 { return None; }
+            return Some((id, e));
+        }
+        None
+    }
+
+    /// The corner of a floating window nearest `(x, y)` (Mod+RMB).
+    pub(super) fn nearest_corner(&self, id: WindowId, x: i32, y: i32) -> u8 {
+        let Some(w) = self.window(id) else { return EDGE_R | EDGE_B };
+        let h = if x < (w.x + w.width / 2) as i32 { EDGE_L } else { EDGE_R };
+        let v = if y < (w.y + w.height / 2) as i32 { EDGE_T } else { EDGE_B };
+        h | v
+    }
+
+    /// `(x, y)` lies on a free spot of a floating window's top bar: in the
+    /// bar, off the controls, on nothing the app reacts to.
+    pub(super) fn bar_grab_at(&self, id: WindowId, x: i32, y: i32) -> bool {
+        if !self.is_floating_window(id) { return false; }
+        let Some(win) = self.window(id) else { return false };
+        let b = self.border;
+        let bar = Rect::new(win.x + b, win.y + b, win.content_w(b), scale::len(BAND));
+        if !contains(bar, x, y) { return false; }
+        if self.controls_corner(win).is_some_and(|c| contains(c, x, y)) { return false; }
+        match win.kind {
+            WindowKind::Terminal => true,
+            WindowKind::Widget => super::widgets::hit_test(id.0, x, y).is_none(),
+            WindowKind::Surface => false,
+        }
+    }
+
+    pub(super) fn start_float_drag(&mut self, id: WindowId, mode: DragMode, mx: i32, my: i32) {
+        let Some(w) = self.window(id) else { return };
+        let start_geom = (w.x, w.y, w.width, w.height);
+        self.drag = Some(DragState {
+            window: id, mode, last_target: None,
+            start_mx: mx, start_my: my, start_rw: 0, start_rh: 0,
+            w_target: None, h_target: None, start_geom,
+        });
+        self.focus_window(id);
+        self.controls.hover = None;
+    }
+
+    /// Follow the pointer during a Move or Edge drag. The window keeps a
+    /// grip on the screen: at least `keep` of it stays inside.
+    pub(super) fn apply_float_drag(&mut self, drag: &DragState, mx: i32, my: i32) {
+        let (sw, sh) = (self.screen_w as i32, self.screen_h as i32);
+        let (dx, dy) = (mx - drag.start_mx, my - drag.start_my);
+        let (gx, gy, gw, gh) = drag.start_geom;
+        let (gx, gy, gw, gh) = (gx as i32, gy as i32, gw as i32, gh as i32);
+        let keep = scale::len(64) as i32;
+        let (min_w, min_h) = (scale::len(FLOAT_MIN_W) as i32, scale::len(FLOAT_MIN_H) as i32);
+        let (x, y, w, h) = match drag.mode {
+            DragMode::Move => {
+                let x = (gx + dx).clamp(keep - gw, sw - keep).max(0);
+                let y = (gy + dy).clamp(0, sh - scale::len(BAND) as i32);
+                (x, y, gw, gh)
+            }
+            DragMode::Edge(e) => {
+                let (mut x0, mut y0, mut x1, mut y1) = (gx, gy, gx + gw, gy + gh);
+                if e & EDGE_L != 0 { x0 = (gx + dx).clamp(0, x1 - min_w); }
+                if e & EDGE_R != 0 { x1 = (gx + gw + dx).clamp(x0 + min_w, sw); }
+                if e & EDGE_T != 0 { y0 = (gy + dy).clamp(0, y1 - min_h); }
+                if e & EDGE_B != 0 { y1 = (gy + gh + dy).clamp(y0 + min_h, sh); }
+                (x0, y0, x1 - x0, y1 - y0)
+            }
+            _ => return,
+        };
+        if let Some(win) = self.window_mut(drag.window) {
+            (win.x, win.y, win.width, win.height) = (x.max(0) as u32, y.max(0) as u32, w.max(1) as u32, h.max(1) as u32);
+            win.dirty = true;
+        }
+    }
+
+    /// The pointer's shape at `(x, y)`: a resize arrow over a floating
+    /// window's edge or during an edge drag.
+    pub fn pointer_shape(&self, x: i32, y: i32) -> Shape {
+        let edges = match self.drag {
+            Some(DragState { mode: DragMode::Edge(e), .. }) => e,
+            Some(_) => return Shape::Arrow,
+            None => match self.floating_edge_at(x, y) {
+                Some((_, e)) => e,
+                None => return Shape::Arrow,
+            },
+        };
+        let h = edges & (EDGE_L | EDGE_R) != 0;
+        let v = edges & (EDGE_T | EDGE_B) != 0;
+        match (h, v) {
+            (true, true) if edges & (EDGE_L | EDGE_T) == (EDGE_L | EDGE_T)
+                || edges & (EDGE_R | EDGE_B) == (EDGE_R | EDGE_B) => Shape::ResizeNwse,
+            (true, true) => Shape::ResizeNesw,
+            (true, false) => Shape::ResizeH,
+            (false, true) => Shape::ResizeV,
+            _ => Shape::Arrow,
+        }
+    }
 }

@@ -505,7 +505,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
         return;
     }
     let (cw, ch) = cursor::cursor_size();
-    let (cx, cy) = cursor::atomic_pos();
+    let (cx, cy) = cursor::cursor_origin();
     let (x0, y0, x1, y1) = if had_old {
         (old.0.min(cx), old.1.min(cy),
          old.0.max(cx) + cw as i32, old.1.max(cy) + ch as i32)
@@ -628,7 +628,7 @@ fn render_frame_surface() {
         // One copy of the bounding box on the GPU when a module serves
         // copies, else the rects and the cursor box on the CPU.
         let (cw, ch) = cursor::cursor_size();
-        let (cx, cy) = cursor::atomic_pos();
+        let (cx, cy) = cursor::cursor_origin();
         let mut bbox = painted.iter().fold(crate::shade::scene::Rect::new(0, 0, 0, 0), |a, r| a.union(r));
         bbox = bbox.union(&crate::shade::scene::Rect::new(cx.max(0) as u32, cy.max(0) as u32, cw, ch));
         if had_old {
@@ -1614,9 +1614,13 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // Hover routing — deduplicated per window. Runs on every move so the
     // app can react even when no buttons changed.
     let (hx, hy) = cursor::atomic_pos();
-    let controls_changed = with_compositor(|comp| {
-        comp.drag.is_none() && comp.controls_pointer(hx, hy, crate::interrupts::ticks())
-    }).unwrap_or(false);
+    let (controls_changed, shape) = with_compositor(|comp| {
+        let changed = comp.drag.is_none() && comp.controls_pointer(hx, hy, crate::interrupts::ticks());
+        (changed, comp.pointer_shape(hx, hy))
+    }).unwrap_or((false, cursor::Shape::Arrow));
+    if cursor::set_shape(shape) {
+        CURSOR_MOVED.store(true, Ordering::Relaxed);
+    }
     if controls_changed {
         render_damaged();
     }
@@ -1667,7 +1671,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
             let redraw = comp.handle_mouse_buttons();
             let full = comp.needs_full_redraw;
             comp.needs_full_redraw = false;
-            (redraw, full, comp.drag.is_some())
+            (redraw, full, comp.drag.is_some() || comp.pending_move.is_some())
         }).unwrap_or((false, false, false));
 
         DRAG_ACTIVE.store(dragging, Ordering::Relaxed);

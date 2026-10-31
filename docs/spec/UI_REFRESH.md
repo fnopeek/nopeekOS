@@ -413,6 +413,18 @@ popups and `Surface` windows.
 | Narrow window | content narrower than 345: `More` (`DotsThree`) and Close; `More` opens a menu with the other three, their labels and keys |
 | Fullscreen | no pill in the band; the pointer resting 300 ms on the top screen row brings the pill in at the top right on a `SurfaceElevated` backdrop, and it leaves with the pointer |
 
+### Floating windows
+
+| Property | Value |
+|---|---|
+| Lifting (Float, Mod+V) | 3/5 of the tile, at least 240 x 160 and at most 4/5 of the work area, centred over the tile it left; the tiles close the gap |
+| Order | above every tile, below overlays, popups and modal dialogs |
+| Move | press on a free spot of the top bar (no action there, not the controls) and travel 6 px; or Mod+LMB anywhere on it |
+| Resize | the edges and corners, 5 px outside to 4 px inside, corners 16 px along each edge; or Mod+RMB from the nearest corner |
+| Pointer | resize arrows over an edge (sideways, up and down, both diagonals) |
+| Limits | at least 240 x 160; at least 64 px of it and its bar stay on screen |
+| Back | Float again (Mod+V) puts it back where it was in the tiling |
+
 `shade.controls` sets how much is shown: `full` (default) all four,
 `compact` only Close until the pointer is over the corner, `none` no
 buttons. The reserve is the same in every mode, so a change never moves

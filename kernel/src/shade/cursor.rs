@@ -10,12 +10,69 @@
 
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 
-/// Cursor dimensions.
+/// Arrow dimensions.
 const CURSOR_W: u32 = 15;
 const CURSOR_H: u32 = 22;
+/// Edge of the square resize shapes.
+const RESIZE_E: u32 = 22;
 
-/// Effective cursor size (w, h) — for callers that blit just the cursor rect.
-pub fn cursor_size() -> (u32, u32) { eff_dims() }
+/// What the pointer looks like.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Shape {
+    Arrow = 0,
+    /// Resize sideways.
+    ResizeH = 1,
+    /// Resize up and down.
+    ResizeV = 2,
+    /// Resize along the top-left to bottom-right diagonal.
+    ResizeNwse = 3,
+    /// Resize along the top-right to bottom-left diagonal.
+    ResizeNesw = 4,
+}
+
+static SHAPE: AtomicU8 = AtomicU8::new(Shape::Arrow as u8);
+
+fn shape() -> Shape {
+    match SHAPE.load(Ordering::Relaxed) {
+        1 => Shape::ResizeH,
+        2 => Shape::ResizeV,
+        3 => Shape::ResizeNwse,
+        4 => Shape::ResizeNesw,
+        _ => Shape::Arrow,
+    }
+}
+
+/// Set the pointer's shape. True when it changed; the caller re-bakes.
+pub fn set_shape(s: Shape) -> bool {
+    SHAPE.swap(s as u8, Ordering::Relaxed) != s as u8
+}
+
+/// A box that holds the cursor in every shape, for callers that blit the
+/// cursor's surroundings.
+pub fn cursor_size() -> (u32, u32) {
+    let s = SIZE.load(Ordering::Relaxed) as u32;
+    let w = CURSOR_W.max(RESIZE_E);
+    let h = CURSOR_H.max(RESIZE_E);
+    ((w * s / 100).max(1), (h * s / 100).max(1))
+}
+
+/// Top-left of the cursor image at the current position: the position less
+/// the shape's hotspot.
+pub fn cursor_origin() -> (i32, i32) {
+    let (cx, cy) = atomic_pos();
+    let (ew, eh) = eff_dims();
+    let (hx, hy) = hotspot(ew, eh);
+    (cx - hx as i32, cy - hy as i32)
+}
+
+/// The pixel of the image that sits on the pointer's position.
+fn hotspot(ew: u32, eh: u32) -> (u32, u32) {
+    match shape() {
+        Shape::Arrow => (0, 0),
+        _ => (ew / 2, eh / 2),
+    }
+}
 
 // ── Save-under cursor (no recomposite on a pure move) ───────────────────
 //
@@ -27,7 +84,11 @@ pub fn cursor_size() -> (u32, u32) { eff_dims() }
 // Core-0 / CONSOLE-lock serialized; the Mutex just satisfies the borrow
 // checker for the static array.
 // Sized for the largest cursor (SIZE_MAX_PCT) so scaling never overflows it.
-const SU_N: usize = ((CURSOR_W * SIZE_MAX_PCT / 100) * (CURSOR_H * SIZE_MAX_PCT / 100)) as usize;
+const SU_N: usize = {
+    let arrow = (CURSOR_W * SIZE_MAX_PCT / 100) * (CURSOR_H * SIZE_MAX_PCT / 100);
+    let resize = (RESIZE_E * SIZE_MAX_PCT / 100) * (RESIZE_E * SIZE_MAX_PCT / 100);
+    (if arrow > resize { arrow } else { resize }) as usize
+};
 static SAVE_UNDER: spin::Mutex<[u32; SU_N]> = spin::Mutex::new([0; SU_N]);
 static SU_X: AtomicI32 = AtomicI32::new(0);
 static SU_Y: AtomicI32 = AtomicI32::new(0);
@@ -44,16 +105,20 @@ pub fn hw_active() -> bool {
     crate::gpu::gpudev::cursor_supported()
 }
 
-/// The size of the image the module has (0 = none yet).
+/// The size and shape of the image the module has (0 = none yet).
 static HW_W: AtomicU32 = AtomicU32::new(0);
 static HW_H: AtomicU32 = AtomicU32::new(0);
+static HW_SHAPE: AtomicU8 = AtomicU8::new(0);
 
 /// The hardware cursor to the pointer's position, with the image first when
 /// the module has none at this size. False when the module refused, and
 /// the caller bakes.
 fn hw_show() -> bool {
     let (ew, eh) = eff_dims();
-    if HW_W.load(Ordering::Relaxed) != ew || HW_H.load(Ordering::Relaxed) != eh {
+    let sh = shape() as u8;
+    if HW_W.load(Ordering::Relaxed) != ew || HW_H.load(Ordering::Relaxed) != eh
+        || HW_SHAPE.load(Ordering::Relaxed) != sh
+    {
         // The sprite is color | alpha << 24; the hardware wants it
         // premultiplied.
         let pixels = with_sprite(ew, eh, |sprite| {
@@ -65,11 +130,13 @@ fn hw_show() -> bool {
             }
             out
         });
-        if !crate::gpu::gpudev::cursor_image(ew, eh, 0, 0, pixels) {
+        let (hx, hy) = hotspot(ew, eh);
+        if !crate::gpu::gpudev::cursor_image(ew, eh, hx, hy, pixels) {
             return false;
         }
         HW_W.store(ew, Ordering::Relaxed);
         HW_H.store(eh, Ordering::Relaxed);
+        HW_SHAPE.store(sh, Ordering::Relaxed);
     }
     let (cx, cy) = atomic_pos();
     crate::gpu::gpudev::cursor_move(cx, cy, true)
@@ -91,7 +158,7 @@ pub fn save_under_and_bake(buf: *mut u8, info: &crate::framebuffer::FbInfo) {
     let pitch = info.pitch as usize;
     let sw = info.width as i32;
     let sh = info.height as i32;
-    let (cx, cy) = atomic_pos();
+    let (cx, cy) = cursor_origin();
     let (ew, eh) = eff_dims();
     let mut su = SAVE_UNDER.lock();
     with_sprite(ew, eh, |sprite| {
@@ -181,7 +248,8 @@ pub fn size() -> i32 { SIZE.load(Ordering::Relaxed) }
 /// Effective (scaled) cursor dimensions in pixels.
 fn eff_dims() -> (u32, u32) {
     let s = SIZE.load(Ordering::Relaxed) as u32;
-    ((CURSOR_W * s / 100).max(1), (CURSOR_H * s / 100).max(1))
+    let (w, h) = if shape() == Shape::Arrow { (CURSOR_W, CURSOR_H) } else { (RESIZE_E, RESIZE_E) };
+    ((w * s / 100).max(1), (h * s / 100).max(1))
 }
 
 /// Alpha-blend `fg` over `bg` at coverage `a` (0..=255).
@@ -239,26 +307,93 @@ fn cursor_sample_aa(col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
     ((lum << 16) | (lum << 8) | lum, ((a * 255.0) as u32).min(255))
 }
 
-/// The cursor at one size, `color | alpha << 24` per pixel, row-major.
-/// Rasterized once per size; every bake reads it.
-static SPRITE: spin::Mutex<(u32, u32, alloc::vec::Vec<u32>)> =
-    spin::Mutex::new((0, 0, alloc::vec::Vec::new()));
+/// Double arrow pointing left and right in a RESIZE_REF square, centred;
+/// the other resize shapes are this one turned.
+static DOUBLE_ARROW: [(f32, f32); 10] = [
+    (6.0, 22.0), (15.0, 13.0), (15.0, 19.0), (29.0, 19.0), (29.0, 13.0),
+    (38.0, 22.0), (29.0, 31.0), (29.0, 25.0), (15.0, 25.0), (15.0, 31.0),
+];
+const RESIZE_REF: f32 = 44.0;
+/// Width of the light outline around the dark fill, reference units.
+const RESIZE_OUTLINE: f32 = 2.6;
 
-/// Run `f` on the sprite for `ew` x `eh`, rasterizing it on a size change.
+/// Squared distance from `(x, y)` to the nearest edge of `poly`.
+fn poly_dist2(poly: &[(f32, f32)], x: f32, y: f32) -> f32 {
+    let mut best = f32::MAX;
+    let mut j = poly.len() - 1;
+    for i in 0..poly.len() {
+        let (ax, ay) = poly[j];
+        let (bx, by) = poly[i];
+        let (dx, dy) = (bx - ax, by - ay);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 { (((x - ax) * dx + (y - ay) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        let (px, py) = (ax + t * dx - x, ay + t * dy - y);
+        let d2 = px * px + py * py;
+        if d2 < best { best = d2; }
+        j = i;
+    }
+    best
+}
+
+/// A resize shape at output pixel (col,row): the double arrow turned by the
+/// shape's angle, dark fill with a light outline, supersampled.
+fn resize_sample_aa(shape: Shape, col: u32, row: u32, ew: u32, eh: u32) -> (u32, u32) {
+    const SS: u32 = 4;
+    // cos/sin of the turn that brings the shape back to horizontal.
+    let (c, s) = match shape {
+        Shape::ResizeV => (0.0, 1.0),
+        Shape::ResizeNwse => (core::f32::consts::FRAC_1_SQRT_2, -core::f32::consts::FRAC_1_SQRT_2),
+        Shape::ResizeNesw => (core::f32::consts::FRAC_1_SQRT_2, core::f32::consts::FRAC_1_SQRT_2),
+        _ => (1.0, 0.0),
+    };
+    let mid = RESIZE_REF / 2.0;
+    let (sx, sy) = (RESIZE_REF / ew as f32, RESIZE_REF / eh as f32);
+    let (mut cover, mut fill) = (0u32, 0u32);
+    for sj in 0..SS {
+        for si in 0..SS {
+            let x = (col as f32 + (si as f32 + 0.5) / SS as f32) * sx - mid;
+            let y = (row as f32 + (sj as f32 + 0.5) / SS as f32) * sy - mid;
+            let (rx, ry) = (x * c - y * s + mid, x * s + y * c + mid);
+            if in_poly(&DOUBLE_ARROW, rx, ry) {
+                cover += 1;
+                fill += 1;
+            } else if poly_dist2(&DOUBLE_ARROW, rx, ry) < RESIZE_OUTLINE * RESIZE_OUTLINE {
+                cover += 1;
+            }
+        }
+    }
+    if cover == 0 { return (0, 0); }
+    let i = fill as f32 / cover as f32;
+    let lum = ((235.0 * (1.0 - i) + 30.0 * i) as u32) & 0xff;
+    ((lum << 16) | (lum << 8) | lum, (cover * 255 / (SS * SS)).min(255))
+}
+
+/// The cursor at one size and shape, `color | alpha << 24` per pixel,
+/// row-major. Rasterized once per size and shape; every bake reads it.
+static SPRITE: spin::Mutex<(u32, u32, u8, alloc::vec::Vec<u32>)> =
+    spin::Mutex::new((0, 0, 0, alloc::vec::Vec::new()));
+
+/// Run `f` on the sprite for `ew` x `eh` in the current shape, rasterizing
+/// it on a change.
 fn with_sprite<R>(ew: u32, eh: u32, f: impl FnOnce(&[u32]) -> R) -> R {
+    let sh = shape();
     let mut sp = SPRITE.lock();
-    if sp.0 != ew || sp.1 != eh || sp.2.len() != (ew * eh) as usize {
-        sp.2.clear();
+    if sp.0 != ew || sp.1 != eh || sp.2 != sh as u8 || sp.3.len() != (ew * eh) as usize {
+        sp.3.clear();
         for row in 0..eh {
             for col in 0..ew {
-                let (color, a) = cursor_sample_aa(col, row, ew, eh);
-                sp.2.push(color | a << 24);
+                let (color, a) = match sh {
+                    Shape::Arrow => cursor_sample_aa(col, row, ew, eh),
+                    _ => resize_sample_aa(sh, col, row, ew, eh),
+                };
+                sp.3.push(color | a << 24);
             }
         }
         sp.0 = ew;
         sp.1 = eh;
+        sp.2 = sh as u8;
     }
-    f(&sp.2)
+    f(&sp.3)
 }
 
 /// Update mouse position atomically, without a lock. Called from Core 0

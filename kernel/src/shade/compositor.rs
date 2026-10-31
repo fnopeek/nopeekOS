@@ -55,9 +55,10 @@ pub struct SwapAnimation {
     pub duration: u64, // ticks (100Hz → 25 = 250ms)
 }
 
-/// Drag mode: swap windows or resize split.
+/// Drag mode: swap windows, resize a split, move a floating window, or
+/// pull at the edges (`controls::EDGE_*` bits) of one.
 #[derive(Clone, Copy, PartialEq)]
-pub enum DragMode { Swap, Resize }
+pub enum DragMode { Swap, Resize, Move, Edge(u8) }
 
 /// Window + geometry under the cursor for a scrollbar hit-test/drag.
 #[derive(Clone, Copy)]
@@ -92,6 +93,8 @@ pub struct DragState {
     /// delta.
     pub w_target: Option<WindowId>,
     pub h_target: Option<WindowId>,
+    /// The window's `(x, y, w, h)` when a Move or Edge drag started.
+    pub start_geom: (u32, u32, u32, u32),
 }
 
 /// What the panel names a window by: its caption if it set one, else its title.
@@ -182,6 +185,9 @@ pub struct Compositor {
     pub term_layers: alloc::collections::BTreeMap<u32, PixelBuffer>,
     /// Pointer state of the window controls.
     pub controls: controls::State,
+    /// A left press on a floating window's free bar: the window, and where
+    /// the press was. Becomes a Move drag once the pointer travels.
+    pub pending_move: Option<(WindowId, i32, i32)>,
     /// Screen areas to repaint on the next partial render that no dirty
     /// window covers (a hint or menu of the window controls).
     pub extra_damage: Vec<Rect>,
@@ -228,6 +234,7 @@ impl Compositor {
             popup_prev_focus: None,
             term_layers: alloc::collections::BTreeMap::new(),
             controls: controls::State::default(),
+            pending_move: None,
             extra_damage: Vec::new(),
         }
     }
@@ -364,6 +371,11 @@ impl Compositor {
     }
 
     /// Usable workspace area (excluding the bottom panel band).
+    /// `workspace_area` for the controls.
+    pub(super) fn workspace_area_pub(&self) -> (u32, u32, u32, u32) {
+        self.workspace_area()
+    }
+
     fn workspace_area(&self) -> (u32, u32, u32, u32) {
         let x = self.gaps;
         let y = self.gaps;
@@ -1399,6 +1411,7 @@ impl Compositor {
     /// Keep popups and the modal window at the front of the z-order. Render
     /// passes iterate `z_order.rev()`, drawing index 0 last → on top.
     fn pin_overlays_to_front(&mut self) {
+        self.floats_above_tiles();
         // Popups above every panel and window they open from.
         let popups: Vec<WindowId> = self.z_order.iter().rev().copied()
             .filter(|id| self.windows.iter().any(|w| w.id == *id && w.popup_of.is_some()))
@@ -1648,7 +1661,7 @@ impl Compositor {
     /// Tiles are moving through sizes nobody keeps: a split line is being
     /// dragged.
     fn geometry_in_motion(&self) -> bool {
-        self.drag.is_some_and(|d| d.mode == DragMode::Resize)
+        self.drag.is_some_and(|d| matches!(d.mode, DragMode::Resize | DragMode::Edge(_)))
     }
 
     /// Push every Surface window's content rect into the surface
@@ -2081,11 +2094,23 @@ impl Compositor {
             return true;
         }
 
+        // A press on a floating window's bar turns into a move once the
+        // pointer has travelled; a release before that was only a click.
+        if let Some((wid, sx, sy)) = self.pending_move {
+            if !self.mouse.left_held() {
+                self.pending_move = None;
+            } else if (mx - sx).abs() + (my - sy).abs() > controls::drag_threshold() {
+                self.pending_move = None;
+                self.start_float_drag(wid, DragMode::Move, sx, sy);
+            }
+        }
+
         // Active drag
         if let Some(mut drag) = self.drag {
             let held = match drag.mode {
                 DragMode::Swap => self.mouse.left_held(),
                 DragMode::Resize => self.mouse.right_held(),
+                DragMode::Move | DragMode::Edge(_) => self.mouse.left_held() || self.mouse.right_held(),
             };
             if held {
                 match drag.mode {
@@ -2111,11 +2136,18 @@ impl Compositor {
                         self.needs_full_redraw = true;
                         return true;
                     }
+                    DragMode::Move | DragMode::Edge(_) => {
+                        self.apply_float_drag(&drag, mx, my);
+                        self.drag = Some(drag);
+                        self.needs_full_redraw = true;
+                        return true;
+                    }
                 }
             } else {
                 self.drag = None;
                 self.sync_surface_tile_sizes();
-                return drag.mode == DragMode::Resize;
+                if drag.mode != DragMode::Swap { self.needs_full_redraw = true; }
+                return drag.mode != DragMode::Swap;
             }
         }
 
@@ -2129,22 +2161,32 @@ impl Compositor {
             }
         }
 
-        // Mod+LMB: start swap-drag
+        // Mod+LMB: move a floating window, swap a tile.
         if mod_held && self.mouse.left_clicked() {
+            if let Some(wid) = self.window_at(mx, my).filter(|id| self.is_floating_window(*id)) {
+                self.start_float_drag(wid, DragMode::Move, mx, my);
+                return true;
+            }
             if let Some(wid) = self.window_at(mx, my) {
                 self.drag = Some(DragState {
                     window: wid, mode: DragMode::Swap,
                     last_target: None,
                     start_mx: 0, start_my: 0, start_rw: 0, start_rh: 0,
-                    w_target: None, h_target: None,
+                    w_target: None, h_target: None, start_geom: (0, 0, 0, 0),
                 });
                 self.focus_window(wid);
                 return true;
             }
         }
 
-        // Mod+RMB: start resize-drag
+        // Mod+RMB: resize a floating window from its nearest corner, else
+        // push the split lines.
         if mod_held && self.mouse.right_clicked() {
+            if let Some(wid) = self.window_at(mx, my).filter(|id| self.is_floating_window(*id)) {
+                let edges = self.nearest_corner(wid, mx, my);
+                self.start_float_drag(wid, DragMode::Edge(edges), mx, my);
+                return true;
+            }
             if let Some(wid) = self.window_at(mx, my) {
                 self.begin_resize_drag(wid, mx, my);
                 return true;
@@ -2156,6 +2198,18 @@ impl Compositor {
         // beneath it; Mod+LMB is the swap-drag above.
         if !mod_held && self.mouse.left_clicked() && self.controls_click(mx, my) {
             return true;
+        }
+
+        // Plain LMB on the edge of a floating window: resize it.
+        if !mod_held && self.mouse.left_clicked() {
+            if let Some((wid, edges)) = self.floating_edge_at(mx, my) {
+                self.start_float_drag(wid, DragMode::Edge(edges), mx, my);
+                return true;
+            }
+            // On its free bar: a move, once the pointer travels.
+            if let Some(wid) = self.window_at(mx, my).filter(|id| self.bar_grab_at(*id, mx, my)) {
+                self.pending_move = Some((wid, mx, my));
+            }
         }
 
         // Regular LMB click: focus window + dispatch widget event
@@ -2385,7 +2439,7 @@ impl Compositor {
             start_mx: mx, start_my: my,
             start_rw: delta_of(self, w_target, true),
             start_rh: delta_of(self, h_target, false),
-            w_target, h_target,
+            w_target, h_target, start_geom: (0, 0, 0, 0),
         });
         self.focus_window(wid);
     }
