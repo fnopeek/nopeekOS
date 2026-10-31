@@ -19,7 +19,7 @@
 
 extern crate alloc;
 
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -34,11 +34,12 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
     = *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
 // Declared capabilities: read + write (copy/move/rename/delete files) +
-// exec (npk_open launches the handler app) + render. Without this section
-// loft would get the default READ|EXEC|RENDER and could not mutate the FS.
+// exec (npk_open launches the handler app) + render + canvas (thumbnails).
+// Without this section loft would get the default READ|EXEC|RENDER and
+// could not mutate the FS.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER];
+static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER | caps::CANVAS];
 
 use nopeek_widgets::host;
 
@@ -254,6 +255,8 @@ struct Strings {
     bm_up:          &'static str,
     /// `{}` = the folder's name.
     bm_added:       &'static str,
+    preview_pane:   &'static str,
+    preview_none:   &'static str,
     // Renaming several items.
     /// `{}` = the number of items.
     br_title:       &'static str,
@@ -353,6 +356,7 @@ const EN: Strings = Strings {
     bm_here: "Bookmark this folder", bm_item: "Add bookmark",
     bm_remove: "Remove bookmark", bm_up: "Move up",
     bm_added: "Bookmarked: {}",
+    preview_pane: "Preview pane", preview_none: "Nothing selected",
     br_title: "Rename {} items", br_find: "Find:", br_replace: "Replace with:",
     br_hint: "Enter renames · Esc cancels",
     br_more: "… and {} more",
@@ -428,6 +432,16 @@ const PAGE_ROWS: isize = 10;
 /// Trash folder under home, and its index of original locations.
 const TRASH_DIR: &str = ".trash";
 const TRASH_INDEX: &str = ".index";
+/// Longest side of a thumbnail, the largest grid icon.
+const THUMB_PX: u32 = 128;
+/// The preview pane: its canvas (thumbnails count from 1), picture size,
+/// width, and how much of a text file it reads and shows.
+const PREVIEW_CANVAS: u32 = 0;
+const PREVIEW_PX: u32 = 256;
+const PREVIEW_W: u16 = 280;
+const PREVIEW_BYTES: usize = 4096;
+const PREVIEW_LINES: usize = 40;
+
 /// Upper bound on list-and-delete passes for one directory tree; each pass
 /// removes at least what one `npk_fs_list` buffer holds.
 const DELETE_ROUNDS: usize = 64;
@@ -482,6 +496,7 @@ const ACT_SORT_DESC:          u32 = 6_108;
 const ACT_VIEW_HIDDEN:        u32 = 6_109;
 const ACT_ZOOM_IN:            u32 = 6_110;
 const ACT_ZOOM_OUT:           u32 = 6_111;
+const ACT_VIEW_PREVIEW:       u32 = 6_112;
 const ACT_GO_HOME:            u32 = 6_200;
 const ACT_GO_FILESYSTEM:      u32 = 6_201;
 const ACT_GO_LOCATION:        u32 = 6_202;
@@ -707,6 +722,24 @@ struct PasteJob {
     last:      Option<String>,
 }
 
+/// A thumbnail of one picture, kept as a canvas in the kernel.
+struct Thumb {
+    /// Canvas id, or `None` when the file could not be decoded.
+    canvas: Option<u32>,
+    /// Size and mtime it was made from; a change makes it stale.
+    stamp:  (u64, u64),
+}
+
+/// What the preview pane shows for one item.
+struct Preview {
+    path:  String,
+    stamp: (u64, u64),
+    /// The picture is on `PREVIEW_CANVAS`.
+    image: bool,
+    /// The first lines, for a file that reads as text.
+    text:  Option<Vec<String>>,
+}
+
 /// One path of a background delete.
 struct DelItem {
     path:   String,
@@ -851,6 +884,15 @@ struct Loft {
     anchor:         Option<usize>,
     /// `Event::Open`s that arrived while a dialog was up.
     pending_open:   Vec<String>,
+    /// Thumbnails by full path, for the pictures the grid shows now.
+    thumbs:         BTreeMap<String, Thumb>,
+    /// Pictures still to decode, next one last.
+    thumb_queue:    Vec<(String, (u64, u64))>,
+    /// Canvas ids given back, for the next thumbnail.
+    free_canvas:    Vec<u32>,
+    next_canvas:    u32,
+    preview_on:     bool,
+    preview:        Option<Preview>,
 }
 
 impl Loft {
@@ -901,6 +943,12 @@ impl Loft {
             mods:          (false, false),
             anchor:        None,
             pending_open:  Vec::new(),
+            thumbs:        BTreeMap::new(),
+            thumb_queue:   Vec::new(),
+            free_canvas:   Vec::new(),
+            next_canvas:   1,
+            preview_on:    false,
+            preview:       None,
         };
         lf.load_settings();
         lf.rebuild_sidebar();
@@ -1095,6 +1143,104 @@ impl Loft {
         self.anchor = None;
         self.cursor = keep.and_then(|n| self.index_of(&n))
             .or(if self.filtered.is_empty() { None } else { Some(0) });
+        self.sync_thumbs();
+    }
+
+    // ── Thumbnails ────────────────────────────────────────────────────
+
+    /// Keep thumbnails for exactly the pictures the grid shows: drop the
+    /// others (their canvases go back to the kernel), queue the missing
+    /// and the stale ones.
+    fn sync_thumbs(&mut self) {
+        let mut want: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+        if self.view_mode == ViewMode::Grid {
+            for ui in 0..self.filtered.len() {
+                let Some(e) = self.entry_at(ui) else { continue };
+                if e.is_dir || extension(&e.name).as_deref() != Some("png") { continue; }
+                want.insert(join(&self.current, &e.name), (e.size, e.mtime));
+            }
+        }
+        let gone: Vec<String> = self.thumbs.iter()
+            .filter(|(p, t)| want.get(*p) != Some(&t.stamp))
+            .map(|(p, _)| p.clone())
+            .collect();
+        for p in gone {
+            if let Some(id) = self.thumbs.remove(&p).and_then(|t| t.canvas) {
+                host::canvas_drop(id);
+                self.free_canvas.push(id);
+            }
+        }
+        self.thumb_queue = want.into_iter()
+            .filter(|(p, _)| !self.thumbs.contains_key(p))
+            .collect();
+        // The queue pops from the end: decode in display order.
+        self.thumb_queue.reverse();
+    }
+
+    /// Decode one queued picture. True if a thumbnail appeared.
+    fn pump_thumbs(&mut self) -> bool {
+        let Some((path, stamp)) = self.thumb_queue.pop() else { return false };
+        let img = host::fetch(&path)
+            .and_then(|bytes| nopeek_widgets::png::decode(&bytes))
+            .map(|img| nopeek_widgets::png::fit(img, THUMB_PX));
+        let canvas = img.and_then(|img| {
+            let id = self.free_canvas.pop().unwrap_or_else(|| {
+                self.next_canvas += 1;
+                self.next_canvas - 1
+            });
+            if host::canvas_commit(id, &img.bgra, img.width, img.height) {
+                Some(id)
+            } else {
+                self.free_canvas.push(id);
+                None
+            }
+        });
+        let shown = canvas.is_some();
+        self.thumbs.insert(path, Thumb { canvas, stamp });
+        shown
+    }
+
+    /// Load the preview for the cursor item if it changed. True if the pane
+    /// has something new to show.
+    fn pump_preview(&mut self) -> bool {
+        let want = if self.preview_on {
+            self.cursor.and_then(|c| self.entry_at(c))
+                .map(|e| (join(&self.current, &e.name), (e.size, e.mtime), e.is_dir))
+        } else {
+            None
+        };
+        let same = match (&self.preview, &want) {
+            (Some(p), Some((path, stamp, _))) => p.path == *path && p.stamp == *stamp,
+            (None, None) => true,
+            _ => false,
+        };
+        if same { return false; }
+        if self.preview.take().is_some_and(|p| p.image) { host::canvas_drop(PREVIEW_CANVAS); }
+        let Some((path, stamp, is_dir)) = want else { return true };
+        let mut image = false;
+        let mut text = None;
+        if !is_dir {
+            if extension(&path).as_deref() == Some("png") {
+                image = host::fetch(&path)
+                    .and_then(|b| nopeek_widgets::png::decode(&b))
+                    .map(|img| nopeek_widgets::png::fit(img, PREVIEW_PX))
+                    .is_some_and(|img| host::canvas_commit(PREVIEW_CANVAS, &img.bgra, img.width, img.height));
+            } else {
+                text = text_head(&path);
+            }
+        }
+        self.preview = Some(Preview { path, stamp, image, text });
+        true
+    }
+
+    fn toggle_preview(&mut self) {
+        self.preview_on = !self.preview_on;
+        self.save_settings();
+    }
+
+    /// The canvas of `e`'s thumbnail, if it is ready.
+    fn thumb_of(&self, e: &Entry) -> Option<u32> {
+        self.thumbs.get(&join(&self.current, &e.name)).and_then(|t| t.canvas)
     }
 
     fn prune_marks(&mut self) {
@@ -2248,6 +2394,7 @@ impl Loft {
                 "hidden" => self.show_hidden = v == "show",
                 "zoom" => if let Ok(z) = v.parse::<usize>() { self.zoom = z.min(ZOOM_STEPS.len() - 1) },
                 "bookmark" => if !v.is_empty() { self.bookmarks.push(v.to_string()) },
+                "preview" => self.preview_on = v == "on",
                 _ => {}
             }
         }
@@ -2262,6 +2409,7 @@ impl Loft {
         out.push('\n');
         out.push_str(if self.sort_asc { "order: asc\n" } else { "order: desc\n" });
         out.push_str(if self.show_hidden { "hidden: show\n" } else { "hidden: hide\n" });
+        out.push_str(if self.preview_on { "preview: on\n" } else { "preview: off\n" });
         out.push_str("zoom: ");
         push_usize(&mut out, self.zoom);
         out.push('\n');
@@ -2526,6 +2674,7 @@ fn view_menu_items(lf: &Loft, m: &mut MenuBuf) {
     m.add(s().sort_asc, ACT_SORT_ASC, on(lf.sort_asc));
     m.add(s().sort_desc, ACT_SORT_DESC, on(!lf.sort_asc));
     m.add(s().show_hidden, ACT_VIEW_HIDDEN, if lf.show_hidden { "• Ctrl+H" } else { "Ctrl+H" });
+    m.add(s().preview_pane, ACT_VIEW_PREVIEW, if lf.preview_on { "• F9" } else { "F9" });
     if lf.view_mode == ViewMode::Grid {
         if lf.zoom + 1 < ZOOM_STEPS.len() { m.add(s().zoom_in, ACT_ZOOM_IN, "Ctrl+Wheel"); }
         if lf.zoom > 0 { m.add(s().zoom_out, ACT_ZOOM_OUT, "Ctrl+Wheel"); }
@@ -3078,8 +3227,10 @@ fn render_body(lf: &Loft) -> Widget {
         modifiers: alloc::vec![Modifier::Flex(1)],
     };
 
+    let mut columns = alloc::vec![sidebar, content];
+    if lf.preview_on { columns.push(render_preview(lf)); }
     Widget::Row {
-        children: alloc::vec![sidebar, content],
+        children: columns,
         spacing: 0,
         align:   Align::Stretch,
         // Flex(1) makes the body absorb all leftover vertical space in
@@ -3088,6 +3239,59 @@ fn render_body(lf: &Loft) -> Widget {
         // height. Without this the body is intrinsic-sized and the bg
         // ends where its tallest child does.
         modifiers: alloc::vec![Modifier::Flex(1)],
+    }
+}
+
+/// The preview pane: the picture or the first lines of text, then the
+/// item's facts. Filled off the idle loop (`pump_preview`).
+fn render_preview(lf: &Loft) -> Widget {
+    let text = |t: String, style| Widget::Text { content: t, style, modifiers: alloc::vec![] };
+    let mut rows: Vec<Widget> = Vec::new();
+    match (lf.cursor.and_then(|c| lf.entry_at(c)), &lf.preview) {
+        (Some(e), Some(p)) if p.path == join(&lf.current, &e.name) => {
+            rows.push(text(basename(&e.name).to_string(), TextStyle::Heading));
+            if p.image {
+                rows.push(Widget::Canvas {
+                    id: CanvasId(PREVIEW_CANVAS), width: PREVIEW_PX as u16, height: PREVIEW_PX as u16,
+                    modifiers: alloc::vec![],
+                });
+            }
+            if let Some(lines) = &p.text {
+                let body: Vec<Widget> = lines.iter()
+                    .map(|l| Widget::Text { content: l.clone(), style: TextStyle::Mono, modifiers: alloc::vec![] })
+                    .collect();
+                rows.push(Widget::Column {
+                    children:  body,
+                    spacing:   0,
+                    align:     Align::Start,
+                    modifiers: alloc::vec![
+                        Modifier::Padding(Padding::Sm.as_u16()),
+                        Modifier::Background(Token::Page),
+                        Modifier::Rounded(Radius::Sm.as_u8()),
+                    ],
+                });
+            }
+            rows.push(prop_row(s().props_type, &type_for(e)));
+            if !e.is_dir || !e.stats_pending {
+                rows.push(prop_row(s().props_size, &format_size(e.size)));
+            }
+            rows.push(prop_row(s().props_modified, &format_mtime(e.mtime)));
+        }
+        _ => rows.push(text(s().preview_none.to_string(), TextStyle::Muted)),
+    }
+    Widget::Scroll {
+        child: alloc::boxed::Box::new(Widget::Column {
+            children:  rows,
+            spacing:   Spacing::Sm.as_u16(),
+            align:     Align::Stretch,
+            modifiers: alloc::vec![Modifier::Padding(Padding::Md.as_u16())],
+        }),
+        axis:      Axis::Vertical,
+        modifiers: alloc::vec![
+            Modifier::MinWidth(PREVIEW_W),
+            Modifier::MaxWidth(PREVIEW_W),
+            Modifier::Background(Token::SurfaceMuted),
+        ],
     }
 }
 
@@ -3106,7 +3310,17 @@ fn render_grid(lf: &Loft) -> Widget {
             None,
         );
         if let Widget::Column { children, .. } = &mut item {
-            if let Some(Widget::Icon { size, .. }) = children.first_mut() { *size = icon_px; }
+            if let Some(first) = children.first_mut() {
+                match lf.thumb_of(e) {
+                    Some(id) => *first = Widget::Canvas {
+                        id:        CanvasId(id),
+                        width:     icon_px,
+                        height:    icon_px,
+                        modifiers: alloc::vec![],
+                    },
+                    None => if let Widget::Icon { size, .. } = first { *size = icon_px; },
+                }
+            }
         }
         look.apply(&mut item);
         item
@@ -3399,6 +3613,7 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         Event::Key(KeyCode::Enter)     => { lf.open_cursor(); Outcome::Rerender }
         Event::Key(KeyCode::F(2))      => { if lf.idle_fs() { lf.open_rename(); } Outcome::Rerender }
         Event::Key(KeyCode::F(5))      => { lf.refresh(); Outcome::Rerender }
+        Event::Key(KeyCode::F(9))      => { lf.toggle_preview(); Outcome::Rerender }
         // Some keyboard paths send Delete as the DEL byte.
         Event::Key(KeyCode::Delete | KeyCode::Char(0x7F)) => {
             if lf.idle_fs() { lf.delete_targets(); }
@@ -3626,6 +3841,7 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
         ACT_VIEW_GRID | ACT_VIEW_LIST => {
             lf.view_mode = if id == ACT_VIEW_GRID { ViewMode::Grid } else { ViewMode::List };
             lf.open_menu = None;
+            lf.sync_thumbs();
             lf.save_settings();
             Outcome::Rerender
         }
@@ -3646,6 +3862,7 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             Outcome::Rerender
         }
         ACT_VIEW_HIDDEN => { lf.open_menu = None; lf.toggle_hidden(); Outcome::Rerender }
+        ACT_VIEW_PREVIEW => { lf.open_menu = None; lf.toggle_preview(); Outcome::Rerender }
         ACT_ZOOM_IN | ACT_ZOOM_OUT => {
             lf.set_zoom(if id == ACT_ZOOM_IN { 1 } else { -1 });
             Outcome::Rerender
@@ -3955,6 +4172,19 @@ fn is_hidden(name: &str) -> bool {
 }
 
 /// Lowercased extension of a file name, without the dot.
+/// The first lines of `path` if its start reads as text (no NUL byte),
+/// whatever its name says.
+fn text_head(path: &str) -> Option<Vec<String>> {
+    let f = host::File::open(path)?;
+    let mut buf = alloc::vec![0u8; PREVIEW_BYTES.min(f.size() as usize)];
+    if buf.is_empty() { return Some(Vec::new()); }
+    let n = f.read_at(0, &mut buf)?;
+    let head = &buf[..n];
+    if head.contains(&0) { return None; }
+    let text = String::from_utf8_lossy(head);
+    Some(text.lines().take(PREVIEW_LINES).map(|l| l.replace('\t', "    ")).collect())
+}
+
 /// Only plain `[a-z0-9]{1,16}` extensions count: the extension is written
 /// into `sys/config/associations` as `ext=app`, and a name may hold `=`
 /// or a newline.
@@ -4210,6 +4440,8 @@ pub extern "C" fn _start() {
                 // Skipped while searching (folder stats aren't shown then).
                 let mut dirty = loft.expire_status();
                 if loft.pump_delete(DELETE_BUDGET) { dirty = true; }
+                if loft.pump_thumbs() { dirty = true; }
+                if loft.pump_preview() { dirty = true; }
                 if loft.query.is_empty() && !loft.stats_queue.is_empty()
                     && loft.pump_stats(STATS_PUMP_BUDGET)
                 {

@@ -69,6 +69,7 @@ unsafe extern "C" {
     fn npk_audio_format(slot: i32, rate: i32, encoding: i32, channels: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
+    fn npk_canvas_drop(canvas_id: i32) -> i32;
     fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
                 suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
 
@@ -588,6 +589,12 @@ pub fn canvas_commit(canvas_id: i32, px: &[u8], w: i32, h: i32) -> i32 {
 pub fn canvas_rect(canvas_id: i32, out: &mut [u8; 16]) -> i32 {
     // SAFETY: FFI; `out` is the 16 bytes the kernel writes.
     unsafe { npk_canvas_rect(canvas_id, out.as_mut_ptr() as i32) }
+}
+
+/// Free canvas `canvas_id` of this window. 0, or -1 if there was none.
+pub fn canvas_drop(canvas_id: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_canvas_drop(canvas_id) }
 }
 
 pub fn pick(mode: i32, start: &[u8], suggest: &[u8], tag: i32) -> i32 {

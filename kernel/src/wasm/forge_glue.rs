@@ -591,6 +591,12 @@ host_imports! {
     // (commit a scene with the Canvas first, then query on the next frame).
     mem fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
 
+    // npk_canvas_drop(canvas_id) -> 0 / -1
+    // Free one canvas bitmap of the caller's window: an app that keeps many
+    // (thumbnails) gives back the ones it no longer shows, instead of only
+    // at window close. RENDER-gated; -1 if there was none.
+    ctx fn npk_canvas_drop(canvas_id: i32) -> i32;
+
     // npk_cursor_pos() -> (x << 16) | y, or -1
     //
     // Screen coordinates, the same space `Event::MouseMove` and

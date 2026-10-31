@@ -3158,6 +3158,15 @@ pub(crate) fn npk_canvas_rect(mem: &mut [u8], ctx: &mut HostState, canvas_id: i3
     0
 }
 
+pub(crate) fn npk_canvas_drop(ctx: &mut HostState, canvas_id: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+        return -1;
+    }
+    let wid = ctx.widget_window_id;
+    if wid == 0 { return -1; }
+    if crate::shade::widgets::canvas::remove(wid, canvas_id as u32) { 0 } else { -1 }
+}
+
 pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::CAPTURE).is_err() {

@@ -179,6 +179,12 @@ pub fn rect_of(window_id: u32, canvas_id: u32) -> Option<(i32, i32, u32, u32)> {
     RECTS.lock().get(&(window_id, canvas_id)).copied()
 }
 
+/// Drop one bitmap and its rect. True if there was a bitmap.
+pub fn remove(window_id: u32, canvas_id: u32) -> bool {
+    RECTS.lock().remove(&(window_id, canvas_id));
+    CANVASES.lock().remove(&(window_id, canvas_id)).is_some()
+}
+
 /// Drop every bitmap + rect owned by a window — called from `remove_scene`
 /// when a widget window closes.
 pub fn remove_window(window_id: u32) {

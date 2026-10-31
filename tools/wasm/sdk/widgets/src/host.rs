@@ -242,6 +242,9 @@ pub fn canvas_commit(id: u32, px: &[u8], w: u32, h: u32) -> bool {
     sys::canvas_commit(id as i32, px, w as i32, h as i32) >= 0
 }
 
+/// Free canvas `id`. False if there was none.
+pub fn canvas_drop(id: u32) -> bool { sys::canvas_drop(id as i32) == 0 }
+
 /// Where canvas `id` was laid out: `(x, y, w, h)` in window space.
 pub fn canvas_rect(id: u32) -> Option<(i32, i32, i32, i32)> {
     let mut out = [0u8; 16];
