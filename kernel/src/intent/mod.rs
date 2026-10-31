@@ -1502,6 +1502,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                         };
                         if consumed { continue; }
                     }
+                    let m = event.modifiers;
+                    if (m.shift || m.ctrl) && !matches!(event.key, crate::input::KeyCode::Char(_)) {
+                        crate::shade::widgets::push_event(
+                            widget_wid,
+                            crate::shade::widgets::abi::Event::Mods { shift: m.shift, ctrl: m.ctrl },
+                        );
+                    }
                     crate::shade::widgets::push_event(
                         widget_wid,
                         crate::shade::widgets::abi::Event::Key(event.key),

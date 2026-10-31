@@ -243,6 +243,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::PopupDone { .. }  => 16,
         Event::InputChangeAt { .. } => 17,
         Event::Caret { .. }         => 18,
+        Event::Mods { .. }          => 19,
     }
 }
 

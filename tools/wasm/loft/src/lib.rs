@@ -446,8 +446,14 @@ const NOT_HANDLERS: &[&str] = &["loft", "dock", "bar", "drun", "deck", "pick", "
 // any directory without running into the next surface.
 const ACT_GRID_CLICK_BASE:    u32 = 1_000_000;
 const ACT_GRID_CLICK_END:     u32 = 2_000_000;
-const ACT_SIDEBAR_CLICK_BASE: u32 = 2_000;
-const ACT_SIDEBAR_HOVER_BASE: u32 = 2_500;
+// Sidebar rows and tabs grow with the user's bookmarks and tabs, so they
+// get bands as wide as the item band.
+const ACT_SIDEBAR_CLICK_BASE: u32 = 2_000_000;
+const ACT_SIDEBAR_HOVER_BASE: u32 = 3_000_000;
+const ACT_SIDEBAR_HOVER_END:  u32 = 4_000_000;
+const ACT_TAB_BASE:           u32 = 4_000_000;
+const ACT_TAB_CLOSE_BASE:     u32 = 5_000_000;
+const ACT_TAB_CLOSE_END:      u32 = 6_000_000;
 const ACT_BREADCRUMB_BASE:    u32 = 3_000;
 const ACT_TOOLBAR_BACK:       u32 = 4_000;
 const ACT_TOOLBAR_FORWARD:    u32 = 4_001;
@@ -525,9 +531,7 @@ const ACT_BACKGROUND:         u32 = 8_300;
 // "Open with" app rows, one id per app.
 const ACT_OW_BASE:            u32 = 8_400;
 const ACT_OW_END:             u32 = 9_000;
-// Tab strip: switch, close, and the + button.
-const ACT_TAB_BASE:           u32 = 9_000;
-const ACT_TAB_CLOSE_BASE:     u32 = 9_400;
+// The tab strip's + button.
 const ACT_TAB_NEW:            u32 = 9_800;
 // Sidebar context menu.
 const ACT_SB_OPEN_TAB:        u32 = 9_900;
@@ -695,18 +699,31 @@ struct PasteJob {
     /// The answer to reuse once "same for all" is ticked.
     policy:    Option<Clash>,
     apply_all: bool,
+    /// The source the clash dialog asked about; an answer applies to it only.
+    asked:     Option<String>,
     steps:     Vec<Step>,
     ok:        usize,
     failed:    usize,
     last:      Option<String>,
 }
 
+/// One path of a background delete.
+struct DelItem {
+    path:   String,
+    is_dir: bool,
+    /// A selected item (counted in the report), not something inside one.
+    top:    bool,
+    /// How often this folder was expanded, and how many entries the last
+    /// listing had: a folder that does not shrink between two tries holds
+    /// something that cannot go, and is given up.
+    tries:  usize,
+    last:   usize,
+}
+
 /// A permanent delete running off the idle loop.
 struct DeleteJob {
-    /// Paths still to delete, next one last. `top` marks a selected item
-    /// (counted in the report) as opposed to something inside one.
-    todo:   Vec<(String, bool, bool)>,
-    rounds: usize,
+    /// Paths still to delete, next one last.
+    todo:   Vec<DelItem>,
     ok:     usize,
     failed: usize,
 }
@@ -828,6 +845,12 @@ struct Loft {
     bookmarks:      Vec<String>,
     find_buf:       String,
     repl_buf:       String,
+    /// (shift, ctrl) from the `Event::Mods` just before the current event.
+    mods:           (bool, bool),
+    /// Item a Shift range starts from.
+    anchor:         Option<usize>,
+    /// `Event::Open`s that arrived while a dialog was up.
+    pending_open:   Vec<String>,
 }
 
 impl Loft {
@@ -875,6 +898,9 @@ impl Loft {
             bookmarks:     Vec::new(),
             find_buf:      String::new(),
             repl_buf:      String::new(),
+            mods:          (false, false),
+            anchor:        None,
+            pending_open:  Vec::new(),
         };
         lf.load_settings();
         lf.rebuild_sidebar();
@@ -985,6 +1011,7 @@ impl Loft {
             self.sort_asc = matches!(key, SortKey::Name | SortKey::Type);
         }
         sort_entries(&mut self.entries, self.sort_key, self.sort_asc);
+        self.stats_queue = pending_folder_indices(&self.entries);
         self.refilter();
         self.save_settings();
     }
@@ -1064,6 +1091,8 @@ impl Loft {
             }
         }
         self.prune_marks();
+        // Rows move under a new filter or order; a range starts afresh.
+        self.anchor = None;
         self.cursor = keep.and_then(|n| self.index_of(&n))
             .or(if self.filtered.is_empty() { None } else { Some(0) });
     }
@@ -1136,6 +1165,7 @@ impl Loft {
         self.last_click = None;
         self.ctx = None;
         self.location = None;
+        self.anchor = None;
         self.refresh();
     }
 
@@ -1186,6 +1216,7 @@ impl Loft {
     /// One row down. In the grid a row is `GRID_COLS` entries; in the list
     /// — the default view — a row is one entry.
     fn select_delta_y(&mut self, dy: isize) {
+        self.anchor = None;
         self.move_cursor(dy * self.row_stride());
     }
 
@@ -1194,6 +1225,7 @@ impl Loft {
     /// for no reason.
     fn select_delta_x(&mut self, dx: isize) {
         if matches!(self.view_mode, ViewMode::List) { return; }
+        self.anchor = None;
         self.move_cursor(dx);
     }
 
@@ -1227,6 +1259,45 @@ impl Loft {
         if let Some(ui) = hit { self.cursor = Some(ui); }
     }
 
+    /// Shift/Ctrl + left click. Ctrl toggles the item; Shift marks the
+    /// range from the anchor (the last plain click) to it.
+    fn modified_click(&mut self, ui: usize, shift: bool, ctrl: bool) {
+        self.close_menus();
+        if ui >= self.filtered.len() { return; }
+        self.last_click = None;
+        if shift {
+            let from = self.anchor.or(self.cursor).unwrap_or(ui);
+            if !ctrl { self.marks.clear(); }
+            self.mark_range(from, ui);
+        } else {
+            // The first Ctrl+click keeps the item selected so far.
+            if self.marks.is_empty() {
+                if let Some(c) = self.cursor.filter(|&c| c != ui) { self.toggle_mark(c); }
+            }
+            self.toggle_mark(ui);
+            self.anchor = Some(ui);
+        }
+        self.cursor = Some(ui);
+    }
+
+    /// Shift+arrow: move the cursor and mark from the anchor to it.
+    fn extend_marks(&mut self, delta: isize) {
+        if self.filtered.is_empty() { return; }
+        let from = self.anchor.or(self.cursor).unwrap_or(0);
+        self.anchor = Some(from);
+        self.move_cursor(delta);
+        let to = self.cursor.unwrap_or(from);
+        self.marks.clear();
+        self.mark_range(from, to);
+    }
+
+    fn mark_range(&mut self, a: usize, b: usize) {
+        let (lo, hi) = (a.min(b), a.max(b).min(self.filtered.len().saturating_sub(1)));
+        for ui in lo..=hi {
+            if let Some(name) = self.entry_at(ui).map(|e| e.name.clone()) { self.marks.insert(name); }
+        }
+    }
+
     fn toggle_mark(&mut self, ui: usize) {
         let Some(name) = self.entry_at(ui).map(|e| e.name.clone()) else { return };
         if !self.marks.remove(&name) { self.marks.insert(name); }
@@ -1250,6 +1321,7 @@ impl Loft {
             self.last_click = None;
             return;
         }
+        self.anchor = Some(ui);
         let now = host::ticks_ms();
         let double = matches!(self.last_click,
             Some((i, t)) if i == ui && now.saturating_sub(t) <= DOUBLE_CLICK_MS);
@@ -1345,7 +1417,7 @@ impl Loft {
         let mut todo = clip.items.clone();
         todo.reverse();
         self.paste = Some(PasteJob {
-            mode: clip.mode, all: clip.items, todo, policy: None, apply_all: false,
+            mode: clip.mode, all: clip.items, todo, policy: None, apply_all: false, asked: None,
             steps: Vec::new(), ok: 0, failed: 0, last: None,
         });
         self.run_paste(None);
@@ -1361,6 +1433,8 @@ impl Loft {
                 job.todo.pop();
                 continue;
             }
+            if job.asked.as_deref().is_some_and(|a| a != src) { answer = None; }
+            job.asked = None;
             let name = basename(&src).to_string();
             let is_dir = dir_exists(&src);
             let plain = join(&self.current, &name);
@@ -1373,11 +1447,14 @@ impl Loft {
                 c
             } else {
                 self.dialog = Some(Dialog::Clash { name });
+                job.asked = Some(src);
                 self.paste = Some(job);
                 return;
             };
             job.todo.pop();
             if choice == Clash::Skip { continue; }
+            // Replacing a folder that holds the source would trash the source.
+            if choice == Clash::Replace && is_below(&src, &plain) { job.failed += 1; continue; }
             if choice == Clash::Replace {
                 let old = Target { name: name.clone(), full: plain.clone(), is_dir: dir_exists(&plain) };
                 match self.trash_items(core::slice::from_ref(&old)).0.pop() {
@@ -1545,12 +1622,12 @@ impl Loft {
     /// slice per idle tick so a big tree never freezes the window.
     fn delete_permanently(&mut self, targets: Vec<Target>) {
         if self.deleting.is_some() { return; }
-        let mut todo: Vec<(String, bool, bool)> = targets.into_iter()
-            .map(|t| (t.full, t.is_dir, true))
+        let mut todo: Vec<DelItem> = targets.into_iter()
+            .map(|t| DelItem { path: t.full, is_dir: t.is_dir, top: true, tries: 0, last: 0 })
             .collect();
         todo.reverse();
         self.marks.clear();
-        self.deleting = Some(DeleteJob { todo, rounds: 0, ok: 0, failed: 0 });
+        self.deleting = Some(DeleteJob { todo, ok: 0, failed: 0 });
     }
 
     /// Delete up to `budget` paths. A folder is expanded into its contents
@@ -1559,24 +1636,24 @@ impl Loft {
     fn pump_delete(&mut self, budget: usize) -> bool {
         let Some(job) = self.deleting.as_mut() else { return false };
         for _ in 0..budget {
-            let Some((path, is_dir, top)) = job.todo.pop() else { break };
-            if fs_delete(&path) {
-                if top { job.ok += 1; }
+            let Some(item) = job.todo.pop() else { break };
+            if fs_delete(&item.path) {
+                if item.top { job.ok += 1; }
                 continue;
             }
-            let children = if is_dir { list_dir_internal(&path, true) } else { Vec::new() };
-            if children.is_empty() || job.rounds >= DELETE_ROUNDS {
-                if top { job.failed += 1; }
+            let children = if item.is_dir { list_dir_internal(&item.path, true) } else { Vec::new() };
+            let stuck = item.tries > 0 && children.len() >= item.last;
+            if children.is_empty() || stuck || item.tries >= DELETE_ROUNDS {
+                if item.top { job.failed += 1; }
                 continue;
             }
-            job.rounds += 1;
-            job.todo.push((path.clone(), true, top));
+            let path = item.path.clone();
+            job.todo.push(DelItem { tries: item.tries + 1, last: children.len(), ..item });
             let mut dirs: Vec<&Entry> = children.iter().filter(|e| e.is_dir).collect();
             dirs.sort_by_key(|e| e.name.matches('/').count());
-            for d in dirs { job.todo.push((join(&path, &d.name), true, false)); }
-            for f in children.iter().filter(|e| !e.is_dir) {
-                job.todo.push((join(&path, &f.name), false, false));
-            }
+            let child = |name: &str, is_dir| DelItem { path: join(&path, name), is_dir, top: false, tries: 0, last: 0 };
+            for d in dirs { job.todo.push(child(&d.name, true)); }
+            for f in children.iter().filter(|e| !e.is_dir) { job.todo.push(child(&f.name, false)); }
         }
         if job.todo.is_empty() { self.finish_delete(); }
         true
@@ -1865,24 +1942,32 @@ impl Loft {
             return;
         };
         let mut failed = 0usize;
-        let mut created: Vec<Target> = Vec::new();
+        let trash = self.trash_dir();
+        // In reverse and one by one: a replace trashed an item and then put
+        // the new one at its name, so the new one must leave first.
         for step in steps.into_iter().rev() {
             match step {
                 Step::Move { from, to } => {
                     let back = path_exists(&to) && !path_exists(&from)
                         && (parent_path(&from).is_empty() || dir_exists(&parent_path(&from)));
-                    if !(back && fs_rename(&to, &from)) { failed += 1; }
+                    if !(back && fs_rename(&to, &from)) { failed += 1; continue; }
+                    // Undoing a restore puts the item back into the trash;
+                    // it gets its index line back too.
+                    if parent_path(&from) == trash {
+                        let mut records = self.read_trash_index();
+                        records.push(TrashRecord { name: basename(&from).to_string(), origin: to, time: host::unix_time() });
+                        self.write_trash_index(&records);
+                    }
                 }
                 Step::Create { path, is_dir } => {
-                    if path_exists(&path) {
-                        created.push(Target { name: basename(&path).to_string(), full: path, is_dir });
-                    } else {
-                        failed += 1;
-                    }
+                    let gone = path_exists(&path).then(|| {
+                        let t = Target { name: basename(&path).to_string(), full: path, is_dir };
+                        self.trash_items(core::slice::from_ref(&t)).1 == 0
+                    });
+                    if gone != Some(true) { failed += 1; }
                 }
             }
         }
-        if !created.is_empty() { failed += self.trash_items(&created).1; }
         self.prune_trash_index();
         self.marks.clear();
         self.refresh();
@@ -1924,6 +2009,7 @@ impl Loft {
     /// Point `ext` at `app` in `sys/config/associations`, keeping every
     /// other line (comments included) as it is.
     fn set_association(&mut self, ext: &str, app: &str) -> bool {
+        if app.is_empty() || app.contains(['=', '\n', '\r', '#']) { return false; }
         let old = host::fetch(ASSOC_PATH).unwrap_or_default();
         let text = String::from_utf8_lossy(&old);
         let mut out = String::with_capacity(text.len() + 32);
@@ -2142,6 +2228,7 @@ impl Loft {
     fn set_direction(&mut self, asc: bool) {
         self.sort_asc = asc;
         sort_entries(&mut self.entries, self.sort_key, self.sort_asc);
+        self.stats_queue = pending_folder_indices(&self.entries);
         self.refilter();
         self.save_settings();
     }
@@ -3260,7 +3347,42 @@ fn breadcrumb_for(path: &str) -> Widget {
 enum Outcome { Idle, Rerender, Exit }
 
 fn handle(lf: &mut Loft, ev: Event) -> Outcome {
-    if lf.dialog.is_some() { return handle_dialog(lf, ev); }
+    // Shift/Ctrl apply to the one event that follows `Mods`.
+    if let Event::Mods { shift, ctrl } = ev {
+        lf.mods = (shift, ctrl);
+        return Outcome::Idle;
+    }
+    let mods = core::mem::take(&mut lf.mods);
+    if lf.dialog.is_some() {
+        // An open waits for the dialog; it would change the folder under it.
+        if let Event::Open(arg) = ev {
+            lf.pending_open.push(arg);
+            return Outcome::Idle;
+        }
+        let out = handle_dialog(lf, ev);
+        if lf.dialog.is_none() {
+            for arg in core::mem::take(&mut lf.pending_open) { lf.open_path(&arg); }
+        }
+        return out;
+    }
+    let (shift, ctrl) = mods;
+    match ev {
+        Event::Key(KeyCode::Up) if shift => { lf.extend_marks(-lf.row_stride()); return Outcome::Rerender; }
+        Event::Key(KeyCode::Down) if shift => { lf.extend_marks(lf.row_stride()); return Outcome::Rerender; }
+        Event::Key(KeyCode::Left) if shift && lf.view_mode == ViewMode::Grid => {
+            lf.extend_marks(-1);
+            return Outcome::Rerender;
+        }
+        Event::Key(KeyCode::Right) if shift && lf.view_mode == ViewMode::Grid => {
+            lf.extend_marks(1);
+            return Outcome::Rerender;
+        }
+        Event::Action(ActionId(id @ ACT_GRID_CLICK_BASE..ACT_GRID_CLICK_END)) if shift || ctrl => {
+            lf.modified_click((id - ACT_GRID_CLICK_BASE) as usize, shift, ctrl);
+            return Outcome::Rerender;
+        }
+        _ => {}
+    }
 
     match ev {
         Event::Key(KeyCode::Escape) => escape(lf),
@@ -3339,7 +3461,7 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
             Outcome::Rerender
         }
         Event::InputChangeAt { node: NODE_LOCATION, value } => {
-            lf.location = Some(value);
+            if lf.location.is_some() { lf.location = Some(value); }
             Outcome::Idle
         }
         Event::ContextAction(ActionId(id)) => handle_context(lf, id),
@@ -3536,7 +3658,7 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             lf.switch_tab((id - ACT_TAB_BASE) as usize);
             Outcome::Rerender
         }
-        ACT_TAB_CLOSE_BASE..ACT_TAB_NEW => {
+        ACT_TAB_CLOSE_BASE..ACT_TAB_CLOSE_END => {
             lf.close_menus();
             if lf.close_tab((id - ACT_TAB_CLOSE_BASE) as usize) { Outcome::Rerender } else { Outcome::Exit }
         }
@@ -3586,7 +3708,7 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             lf.navigate(target);
             Outcome::Rerender
         }
-        ACT_SIDEBAR_HOVER_BASE..ACT_BREADCRUMB_BASE => {
+        ACT_SIDEBAR_HOVER_BASE..ACT_SIDEBAR_HOVER_END => {
             let i = (id - ACT_SIDEBAR_HOVER_BASE) as usize;
             if i >= lf.sidebar.len() || lf.sidebar_sel == Some(i) { return Outcome::Idle; }
             lf.sidebar_sel = Some(i);
@@ -3833,9 +3955,13 @@ fn is_hidden(name: &str) -> bool {
 }
 
 /// Lowercased extension of a file name, without the dot.
+/// Only plain `[a-z0-9]{1,16}` extensions count: the extension is written
+/// into `sys/config/associations` as `ext=app`, and a name may hold `=`
+/// or a newline.
 fn extension(name: &str) -> Option<String> {
     match basename(name).rsplit_once('.') {
-        Some((stem, e)) if !stem.is_empty() && !e.is_empty() => Some(e.to_ascii_lowercase()),
+        Some((stem, e)) if !stem.is_empty() && (1..=16).contains(&e.len())
+            && e.bytes().all(|b| b.is_ascii_alphanumeric()) => Some(e.to_ascii_lowercase()),
         _ => None,
     }
 }

@@ -758,6 +758,13 @@ pub enum Event {
     /// no selection. `node` is the widget's `Modifier::NodeId`, or
     /// `u32::MAX` without one. Not sent for a `Widget::Input`.
     Caret { node: u32, cursor: u32, anchor: u32 },
+    /// Shift and/or Ctrl were held for the event that follows: a left
+    /// click's `Action` or a non-printable `Key` (arrows, Home, Enter, …).
+    /// Sent only when one of them is held, and always right before that
+    /// event, so an app keeps it for exactly the next event. Lets a list
+    /// do Shift+click ranges and Ctrl+click toggles, which `Action` and
+    /// `Key` cannot say.
+    Mods { shift: bool, ctrl: bool },
     // Appended only.
 }
 

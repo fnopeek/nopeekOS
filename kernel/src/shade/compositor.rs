@@ -2277,6 +2277,11 @@ impl Compositor {
                         }
                     }
                     if let Some(action) = crate::shade::widgets::hit_test(wid.0, mx, my) {
+                        let shift = crate::keyboard::is_shift_held();
+                        let ctrl = crate::keyboard::is_ctrl_held();
+                        if shift || ctrl {
+                            crate::shade::widgets::push_event(wid.0, Event::Mods { shift, ctrl });
+                        }
                         crate::shade::widgets::push_event(wid.0, Event::Action(action));
                     }
                     // Always queue the raw button too — apps that want
