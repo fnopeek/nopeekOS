@@ -314,6 +314,9 @@ pub fn init() {
         IDT[WORKER_WAKE_VECTOR as usize]
             .set_handler(worker_wake_handler as *const () as u64);
 
+        IDT[FREQ_SAMPLE_VECTOR as usize]
+            .set_handler(freq_sample_handler as *const () as u64);
+
         // Cross-vCPU kick IPI (guest SMP) — prompt inter-vCPU IPI delivery.
         IDT[VCPU_KICK_VECTOR as usize]
             .set_handler(vcpu_kick_handler as *const () as u64);
@@ -799,6 +802,18 @@ pub const VCPU_KICK_VECTOR: u8 = 51;
 /// since the next entry folds the descriptor in (`kvm_posted_intr_ipi`).
 /// Must differ from `VCPU_KICK_VECTOR`, which has to force an exit.
 pub const POSTED_INTR_VECTOR: u8 = 55;
+
+/// IPI asking a core for its APERF/MPERF (`per_core::aperf_mperf_now`). A
+/// core that computes without halting has no other point where it would
+/// take them.
+pub const FREQ_SAMPLE_VECTOR: u8 = 56;
+
+extern "x86-interrupt" fn freq_sample_handler(_frame: InterruptStackFrame) {
+    crate::smp::per_core::sample_aperf_mperf(crate::smp::per_core::current_core_id());
+    if let Some(lapic) = worker_lapic() {
+        lapic.w32(LAPIC_EOI, 0); // each core EOIs its own LAPIC
+    }
+}
 
 extern "x86-interrupt" fn vcpu_kick_handler(_frame: InterruptStackFrame) {
     if let Some(lapic) = worker_lapic() {

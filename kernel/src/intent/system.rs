@@ -59,11 +59,13 @@ pub fn intent_status(vault: &Vault) {
 
 /// `cores` / `cpu` — trustworthy per-core CPU instrumentation.
 ///
-/// Self-reported busy time cannot see spinning cores, and APERF/MPERF are
-/// absent on AMD/qemu. This instead double-samples the per-core halted-cycle
-/// counters (recorded at every HLT/MWAIT site) over a fixed window.
+/// Self-reported busy time cannot see spinning cores. This instead
+/// double-samples the per-core halted-cycle counters (recorded at every
+/// HLT/MWAIT site) over a fixed window.
 ///
 ///   BUSY% = 100 − halted%  → a spinning core never halts → shows ~100%
+///   MHz   = ΔAPERF/ΔMPERF × nominal → the clock while running, — when the
+///                             core slept through the window or has no MSRs
 ///   HALTS/s + avg residency → many short halts = spurious-wake spin;
 ///                             few long halts = healthy deep idle.
 ///
@@ -124,6 +126,8 @@ pub fn intent_cores() {
     let tx0 = crate::microvm::devices::nat::tx_stats();
     let rp0 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // clears gap_max
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
+    let mut ap0 = [(0u64, 0u64); 256];
+    crate::smp::per_core::aperf_mperf_now(&mut ap0[..cores]);
     let wall0 = crate::interrupts::rdtsc();
 
     // Sample window. The shell's fiber parks instead of busy-waiting, so
@@ -138,6 +142,9 @@ pub fn intent_cores() {
 
     // Snapshot 2
     let wall1 = crate::interrupts::rdtsc();
+    let mut ap1 = [(0u64, 0u64); 256];
+    crate::smp::per_core::aperf_mperf_now(&mut ap1[..cores]);
+    let nominal_mhz = tsc_hz / 1_000_000;
     let mut s1 = [(0u64, 0u64); 256];
     let mut w1 = [[0u64; crate::smp::per_core::WAKE_CAUSES]; 256];
     let mut t1 = [(0u64, 0u64); 256];
@@ -175,7 +182,7 @@ pub fn intent_cores() {
     kprintln!();
     kprintln!("  Per-core CPU (idle-measured, {} ms window; every core wakes on deadline/IRQ/IPI)", window_ms);
     kprintln!("  ─────────────────────────────────────────────────────");
-    kprintln!("  CORE   BUSY%   HALTS/s   AVG-RESIDENCY   QUEUE  ROLE");
+    kprintln!("  CORE   BUSY%    MHz   HALTS/s   AVG-RESIDENCY   QUEUE  ROLE");
     for c in 0..cores {
         let dhalt = s1[c].0.saturating_sub(s0[c].0);
         let dcount = s1[c].1.saturating_sub(s0[c].1);
@@ -191,6 +198,14 @@ pub fn intent_cores() {
         let avg_us = if dcount > 0 { (dhalt / dcount) / tsc_per_us } else { 0 };
 
         let qlen = crate::smp::scheduler::queue_len(c);
+
+        let da = ap1[c].0.wrapping_sub(ap0[c].0);
+        let dm = ap1[c].1.wrapping_sub(ap0[c].1);
+        let mhz = if dm == 0 {
+            alloc::string::String::from("—")
+        } else {
+            alloc::format!("{}", (da as u128 * nominal_mhz as u128 / dm as u128) as u64)
+        };
 
         // ROLE: classify from the measured signals, not a hardcoded guess.
         let role: &str = if c == 0 {
@@ -216,11 +231,11 @@ pub fn intent_cores() {
         };
 
         if dcount > 0 {
-            kprintln!("  {:>4}   {:>4}%   {:>7}   {:>10} us   {:>5}  {}",
-                c, busy, halts_per_s, avg_us, qlen, role);
+            kprintln!("  {:>4}   {:>4}%  {:>5}   {:>7}   {:>10} us   {:>5}  {}",
+                c, busy, mhz, halts_per_s, avg_us, qlen, role);
         } else {
-            kprintln!("  {:>4}   {:>4}%   {:>7}   {:>13}   {:>5}  {}",
-                c, busy, halts_per_s, "—", qlen, role);
+            kprintln!("  {:>4}   {:>4}%  {:>5}   {:>7}   {:>13}   {:>5}  {}",
+                c, busy, mhz, halts_per_s, "—", qlen, role);
         }
 
         // Wake-source breakdown: which cause returned each halt this

@@ -34,7 +34,8 @@ static SCHEDULER_READY: AtomicBool = AtomicBool::new(false);
 static HAS_MWAIT: AtomicBool = AtomicBool::new(false);
 
 /// True if CPU supports IA32_APERF/IA32_MPERF MSRs (CPUID.06H:ECX[0]).
-/// Intel since Nehalem; not present on AMD / qemu64. Guarded at every rdmsr.
+/// Intel since Nehalem, AMD since family 10h; absent under `-cpu qemu64`.
+/// Guarded at every rdmsr.
 static HAS_APERFMPERF: AtomicBool = AtomicBool::new(false);
 
 /// Per-core average frequency in MHz (APERF/MPERF ratio)
@@ -147,18 +148,59 @@ pub fn halt_begin(core_id: usize, t0: u64) {
         // core (`update_core_freq`): APERF/MPERF are core-local MSRs and
         // stand still while the core is halted, so this snapshot is exact
         // until the core runs again.
-        if HAS_APERFMPERF.load(Ordering::Relaxed) {
-            let (a, m) = read_aperf_mperf();
-            RUN_APERF[core_id].store(a, Ordering::Relaxed);
-            RUN_MPERF[core_id].store(m, Ordering::Relaxed);
-        }
+        sample_aperf_mperf(core_id);
         HALT_SINCE[core_id].store(t0, Ordering::Relaxed);
     }
 }
 
-/// APERF/MPERF as of the core's last halt entry (see `halt_begin`).
+/// APERF/MPERF as of the core's last halt entry (see `halt_begin`) or its
+/// last `FREQ_SAMPLE_VECTOR` IPI.
 static RUN_APERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 static RUN_MPERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+/// Samples taken per core, so a reader that asked for one sees it arrive.
+static RUN_SAMPLES: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+/// Record the calling core's APERF/MPERF for readers on other cores.
+pub fn sample_aperf_mperf(core_id: usize) {
+    if core_id >= 256 || !HAS_APERFMPERF.load(Ordering::Relaxed) { return; }
+    let (a, m) = read_aperf_mperf();
+    RUN_APERF[core_id].store(a, Ordering::Relaxed);
+    RUN_MPERF[core_id].store(m, Ordering::Relaxed);
+    RUN_SAMPLES[core_id].fetch_add(1, Ordering::Release);
+}
+
+/// APERF/MPERF of every core now, (0, 0) without the MSRs. The caller reads
+/// its own; every other core is asked with `FREQ_SAMPLE_VECTOR`, since a
+/// core that runs without halting takes no other interrupt. A core that has
+/// not answered within a millisecond keeps its last sample.
+pub fn aperf_mperf_now(out: &mut [(u64, u64)]) {
+    if !HAS_APERFMPERF.load(Ordering::Relaxed) {
+        out.fill((0, 0));
+        return;
+    }
+    let me = current_core_id();
+    let n = out.len().min(core_count()).min(256);
+    let mut before = [0u64; 256];
+    for c in 0..n {
+        if c != me {
+            before[c] = RUN_SAMPLES[c].load(Ordering::Acquire);
+            super::send_freq_sample_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+        }
+    }
+    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
+    for c in 0..n {
+        if c == me {
+            out[c] = read_aperf_mperf();
+            continue;
+        }
+        while RUN_SAMPLES[c].load(Ordering::Acquire) == before[c]
+            && crate::interrupts::rdtsc() < deadline
+        {
+            core::hint::spin_loop();
+        }
+        out[c] = halted_aperf_mperf(c);
+    }
+}
 
 /// APERF/MPERF of `core_id` as of its last halt entry; (0, 0) without the
 /// MSRs. A reader on another core gets the running cycles up to that halt.
@@ -634,8 +676,8 @@ pub fn update_core_freq(core_id: usize) {
         return;
     }
 
-    // APERF/MPERF are gated by CPUID.06H:ECX[0] — absent on AMD and on KVM
-    // guests with `-cpu qemu64`. Reading them unconditionally raises #GP.
+    // APERF/MPERF are gated by CPUID.06H:ECX[0], absent on KVM guests with
+    // `-cpu qemu64`. Reading them unconditionally raises #GP.
     let has_apmp = HAS_APERFMPERF.load(Ordering::Relaxed);
 
     let (aperf, mperf): (u64, u64) = if !has_apmp {

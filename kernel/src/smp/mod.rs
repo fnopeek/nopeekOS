@@ -354,6 +354,13 @@ pub fn send_wake_ipi(apic_id: u32) {
         0x0000_4000 | crate::interrupts::WORKER_WAKE_VECTOR as u32);
 }
 
+/// Ask the core with xAPIC id `apic_id` for its APERF/MPERF
+/// (`per_core::aperf_mperf_now`).
+pub fn send_freq_sample_ipi(apic_id: u32) {
+    send_ipi(crate::interrupts::lapic(), apic_id,
+        0x0000_4000 | crate::interrupts::FREQ_SAMPLE_VECTOR as u32);
+}
+
 /// Send IPI via Local APIC ICR (wait for idle first).
 ///
 /// IF is masked across the two ICR writes: an ISR on this core that sends
