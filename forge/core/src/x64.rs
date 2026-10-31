@@ -154,23 +154,35 @@ impl Asm {
         self.b(0xC0 | (reg.low() << 3) | rm.low());
     }
 
-    /// `[base + disp32]`, always mod=10. `rsp`/`r12` need a SIB byte because
-    /// rm=100 means "SIB follows" rather than "register 4".
+    /// `[base + disp]`: mod=01 with one displacement byte when it fits,
+    /// mod=10 with four otherwise. `rsp`/`r12` need a SIB byte because rm=100
+    /// means "SIB follows" rather than "register 4". Nothing patches these
+    /// displacements later, so their length may vary.
     fn modrm_mem(&mut self, reg: Reg, base: Reg, disp: i32) {
-        self.b(0x80 | (reg.low() << 3) | base.low());
+        let short = i8::try_from(disp).is_ok();
+        self.b(if short { 0x40 } else { 0x80 } | (reg.low() << 3) | base.low());
         if base.low() == 4 {
             self.b(0x24); // scale=0, index=none(100), base=100
         }
-        self.d32(disp);
+        self.disp(short, disp);
     }
 
-    /// `[base + index*2^scale + disp32]`. Linear memory uses scale 0; the
+    fn disp(&mut self, short: bool, disp: i32) {
+        if short {
+            self.b(disp as u8);
+        } else {
+            self.d32(disp);
+        }
+    }
+
+    /// `[base + index*2^scale + disp]`. Linear memory uses scale 0; the
     /// function table uses 3 for its eight-byte entries and 2 for the
     /// four-byte signature ids beside them.
     fn modrm_mem_sib(&mut self, reg: Reg, base: Reg, index: Reg, scale: u8, disp: i32) {
-        self.b(0x80 | (reg.low() << 3) | 4); // rm=100 -> SIB follows
+        let short = i8::try_from(disp).is_ok();
+        self.b(if short { 0x40 } else { 0x80 } | (reg.low() << 3) | 4); // rm=100 -> SIB follows
         self.b((scale << 6) | (index.low() << 3) | base.low());
-        self.d32(disp);
+        self.disp(short, disp);
     }
 
     fn modrm_mem_idx(&mut self, reg: Reg, base: Reg, index: Reg, disp: i32) {
@@ -917,18 +929,19 @@ impl Asm {
         self.b(0xC0 | (dst.low() << 3) | src.low());
     }
 
-    /// `op dst, [base + disp32]`.
+    /// `op dst, [base + disp]`.
     fn sse_rm(&mut self, prefix: Option<u8>, w: bool, op: u8, dst: Xmm, base: Reg, disp: i32) {
         self.sse_pre(prefix, w, dst.ext(), 0, base.ext());
         self.b(op);
-        self.b(0x80 | (dst.low() << 3) | base.low());
+        let short = i8::try_from(disp).is_ok();
+        self.b(if short { 0x40 } else { 0x80 } | (dst.low() << 3) | base.low());
         if base.low() == 4 {
             self.b(0x24);
         }
-        self.d32(disp);
+        self.disp(short, disp);
     }
 
-    /// `op dst, [base + index + disp32]` — linear memory.
+    /// `op dst, [base + index + disp]` — linear memory.
     fn sse_rmi(
         &mut self,
         prefix: Option<u8>,
@@ -940,9 +953,10 @@ impl Asm {
     ) {
         self.sse_pre(prefix, false, dst.ext(), index.ext(), base.ext());
         self.b(op);
-        self.b(0x80 | (dst.low() << 3) | 4);
+        let short = i8::try_from(disp).is_ok();
+        self.b(if short { 0x40 } else { 0x80 } | (dst.low() << 3) | 4);
         self.b((index.low() << 3) | base.low());
-        self.d32(disp);
+        self.disp(short, disp);
     }
 
     // --- moves ---

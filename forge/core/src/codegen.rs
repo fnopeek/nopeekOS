@@ -1191,7 +1191,8 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
     // is what tells us when control becomes reachable again.
     match op {
         Block { blockty } => {
-            f.fuel_flush();
+            // No charge here: a block entry does not branch, and whatever is
+            // pending is charged by the next branch or `end` on every path.
             let (out, out_ty) = block_out(*blockty)?;
             let dead = !f.reachable;
             f.ctrl.push(Ctrl {
