@@ -212,10 +212,45 @@ impl Asm {
         self.d32(v);
     }
 
+    /// The shortest of three forms: a 32-bit move zero-extends, a 64-bit
+    /// `mov r/m, imm32` sign-extends, and only what neither reaches takes all
+    /// eight bytes.
     pub fn mov_r64_imm64(&mut self, dst: Reg, v: i64) {
-        self.rex(true, 0, 0, dst.ext());
-        self.b(0xB8 + dst.low());
-        self.d64(v);
+        if v as u64 <= u32::MAX as u64 {
+            self.mov_r32_imm32(dst, v as i32);
+        } else if let Ok(v) = i32::try_from(v) {
+            self.rex(true, 0, 0, dst.ext());
+            self.b(0xC7);
+            self.modrm_rr(Reg::Rax, dst);
+            self.d32(v);
+        } else {
+            self.rex(true, 0, 0, dst.ext());
+            self.b(0xB8 + dst.low());
+            self.d64(v);
+        }
+    }
+
+    /// `mov [base + disp], imm32`, sign-extended to eight bytes when `w`.
+    pub fn store_imm(&mut self, w: bool, base: Reg, disp: i32, v: i32) {
+        self.rex(w, 0, 0, base.ext());
+        self.b(0xC7);
+        self.modrm_mem(Reg::Rax, base, disp);
+        self.d32(v);
+    }
+
+    /// Group-1 arithmetic with an immediate: one byte of it when the value
+    /// fits, sign-extended, four otherwise.
+    fn group1_imm(&mut self, w: bool, ext: u8, r: Reg, v: i32) {
+        self.rex(w, 0, 0, r.ext());
+        if let Ok(v) = i8::try_from(v) {
+            self.b(0x83);
+            self.b(0xC0 | (ext << 3) | r.low());
+            self.b(v as u8);
+        } else {
+            self.b(0x81);
+            self.b(0xC0 | (ext << 3) | r.low());
+            self.d32(v);
+        }
     }
 
     /// `mov dst, [base + disp]` (32-bit load, zero-extending)
@@ -351,10 +386,7 @@ impl Asm {
 
     /// `and reg, imm32` (sign-extended in the 64-bit form).
     pub fn and_r_imm32(&mut self, w: bool, r: Reg, v: i32) {
-        self.rex(w, 0, 0, r.ext());
-        self.b(0x81);
-        self.b(0xE0 | r.low());
-        self.d32(v);
+        self.group1_imm(w, 4, r, v);
     }
 
     pub fn shl(&mut self, w: bool, dst: Reg) {
@@ -414,10 +446,7 @@ impl Asm {
     /// `cmp reg, imm32`. In the 64-bit form the immediate is sign-extended,
     /// which is what a comparison against -1 wants.
     pub fn cmp_r_imm32(&mut self, w: bool, r: Reg, v: i32) {
-        self.rex(w, 0, 0, r.ext());
-        self.b(0x81);
-        self.b(0xF8 | r.low());
-        self.d32(v);
+        self.group1_imm(w, 7, r, v);
     }
     pub fn cmp_r32_imm32(&mut self, r: Reg, v: i32) {
         self.cmp_r_imm32(false, r, v);
@@ -606,10 +635,7 @@ impl Asm {
     /// 5 sub, 6 xor, 7 cmp. In the 64-bit form the immediate is
     /// sign-extended, so the caller must have checked that it fits.
     pub fn alu_r_imm32(&mut self, w: bool, ext: u8, dst: Reg, v: i32) {
-        self.rex(w, 0, 0, dst.ext());
-        self.b(0x81);
-        self.b(0xC0 | (ext << 3) | dst.low());
-        self.d32(v);
+        self.group1_imm(w, ext, dst, v);
     }
 
     /// `imul dst, [base + disp32]`
@@ -624,9 +650,15 @@ impl Asm {
     /// constant needs no register for the constant.
     pub fn imul_r_imm32(&mut self, w: bool, dst: Reg, src: Reg, v: i32) {
         self.rex(w, dst.ext(), 0, src.ext());
-        self.b(0x69);
-        self.modrm_rr(dst, src);
-        self.d32(v);
+        if let Ok(v) = i8::try_from(v) {
+            self.b(0x6B);
+            self.modrm_rr(dst, src);
+            self.b(v as u8);
+        } else {
+            self.b(0x69);
+            self.modrm_rr(dst, src);
+            self.d32(v);
+        }
     }
 
     /// Shift or rotate by a constant. Same `ext` numbering as `shift_cl`.
@@ -818,6 +850,11 @@ impl Asm {
 
     /// `jmp` backwards to an already-known position (loop back edge).
     pub fn jmp_back(&mut self, target: usize) {
+        if let Ok(rel) = i8::try_from(target as i64 - (self.pos() as i64 + 2)) {
+            self.b(0xEB);
+            self.b(rel as u8);
+            return;
+        }
         self.b(0xE9);
         let rel = (target as i64 - (self.pos() as i64 + 4)) as i32;
         self.d32(rel);
@@ -825,6 +862,11 @@ impl Asm {
 
     /// `jcc` backwards to an already-known position.
     pub fn jcc_back(&mut self, cc: Cond, target: usize) {
+        if let Ok(rel) = i8::try_from(target as i64 - (self.pos() as i64 + 2)) {
+            self.b(0x70 + cc as u8);
+            self.b(rel as u8);
+            return;
+        }
         self.b(0x0F);
         self.b(0x80 + cc as u8);
         let rel = (target as i64 - (self.pos() as i64 + 4)) as i32;

@@ -864,6 +864,21 @@ const CASES: &[Case] = &[
     Case { name: "fuse_eqz_if", decl: "", body:
         "local.get 0 i32.eqz (if (result i32) (then i32.const 7) (else local.get 0))", params: 1 },
 
+    // --- immediate encodings at the edge of their short forms ---
+    Case { name: "imm8_edges", decl: "", body:
+        "local.get 0 i32.const 127 i32.add i32.const -128 i32.add i32.const 128 i32.xor \
+         i32.const -129 i32.sub i32.const 127 i32.mul i32.const -128 i32.and \
+         local.get 1 i32.const 128 i32.mul i32.add \
+         local.get 1 i32.const 127 i32.gt_s i32.add local.get 1 i32.const -128 i32.lt_s i32.add", params: 2 },
+    Case { name: "imm64_forms", decl: "", body:
+        "(local i64) local.get 0 i64.extend_i32_u \
+         i64.const 0xFFFFFFFF i64.add i64.const -1 i64.xor i64.const 0x80000000 i64.add \
+         i64.const -2147483648 i64.add i64.const -2147483649 i64.xor i64.const 0x100000000 i64.mul \
+         local.tee 1 i64.const 32 i64.shr_u local.get 1 i64.xor i32.wrap_i64", params: 1 },
+    Case { name: "imm_spill", decl: "", body:
+        "(block $b (result i64) i64.const -5 i64.const 0x7FFFFFFF i64.const 0xFFFFFFFF \
+           local.get 0 br_if $b drop drop drop i64.const -2147483649) i32.wrap_i64", params: 1 },
+
     // --- locals in registers ---
     // The callee keeps locals in the same registers; the caller's must
     // survive the call.

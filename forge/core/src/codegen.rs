@@ -353,12 +353,12 @@ struct Ctx<'a> {
     /// them at the trap routine.
     trap_relocs: Vec<usize>,
     n_locals: u32,
-    /// The register a local lives in, if it has one (`HOMES`); its frame slot
-    /// is then never used. Always an integer local, and an i32 in one has a
-    /// zero upper half like any other 32-bit register write.
-    home: Vec<Option<Reg>>,
-    /// The `HOMES` this function uses, saved in that order below `rbp`.
-    saved: Vec<Reg>,
+    /// The locals that live in `HOMES[k]` instead of their frame slots, for
+    /// `k < n_homes`. Always integer locals, and an i32 in one has a zero
+    /// upper half like any other 32-bit register write. The caller's values
+    /// of those registers are saved in the same order below `rbp`.
+    homed: [u32; 2],
+    n_homes: usize,
     /// The operand stack. Its length is the depth — one source of truth, so a
     /// push that forgets its type cannot happen.
     stack: Vec<Val>,
@@ -457,18 +457,18 @@ pub mod census {
 impl<'a> Ctx<'a> {
     /// Frame slot for local `i`, relative to `rbp`.
     fn local(&self, i: u32) -> i32 {
-        -8 * (i as i32 + self.saved.len() as i32 + 1)
+        -8 * (i as i32 + self.n_homes as i32 + 1)
     }
 
     /// Frame slot for operand-stack entry `d`. Every value has one whether it
     /// is currently in a register or not — a spill needs somewhere to go, and
     /// the place must not depend on when the spill happens.
     fn slot(&self, d: u32) -> i32 {
-        -8 * (self.saved.len() as i32 + self.n_locals as i32 + d as i32 + 1)
+        -8 * (self.n_homes as i32 + self.n_locals as i32 + d as i32 + 1)
     }
 
     fn home(&self, i: u32) -> Option<Reg> {
-        self.home.get(i as usize).copied().flatten()
+        (0..self.n_homes).find(|&k| self.homed[k] == i).map(|k| HOMES[k])
     }
 
     fn mov_ty(&mut self, t: ValType, dst: Reg, src: Reg) {
@@ -572,13 +572,11 @@ impl<'a> Ctx<'a> {
         let _mark = self.asm.pos();
         let off = self.slot(i as u32);
         match v.loc {
+            Loc::Imm(c) if !wide(v.ty) => self.asm.store_imm(false, Reg::Rbp, off, c as i32),
+            Loc::Imm(c) if let Ok(c) = i32::try_from(c) => self.asm.store_imm(true, Reg::Rbp, off, c),
             Loc::Imm(c) => {
                 self.asm.mov_r64_imm64(T, c);
-                if wide(v.ty) {
-                    self.asm.store64(Reg::Rbp, off, T);
-                } else {
-                    self.asm.store32(Reg::Rbp, off, T);
-                }
+                self.asm.store64(Reg::Rbp, off, T);
             }
             Loc::Local(idx) => {
                 let src = self.local(idx);
@@ -1037,25 +1035,32 @@ fn block_out(ty: BlockType) -> Result<(u32, ValType), &'static str> {
 /// Give the integer locals used most a register each (`HOMES`). A use inside
 /// a loop counts eight times as much per level of nesting, which is a rough
 /// guess at how often it runs, and all a single pass can know in advance.
-fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> Vec<Option<Reg>> {
+fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> ([u32; 2], usize) {
+    let mut homed = [0u32; 2];
+    if local_types.is_empty() {
+        return (homed, 0);
+    }
     let mut score = alloc::vec![0u64; local_types.len()];
-    let mut frames: Vec<bool> = Vec::new();
-    let mut loops = 0u32;
+    // Block depth at which each open loop began; a function without loops
+    // never allocates it.
+    let mut loop_at: Vec<u32> = Vec::new();
+    let mut depth = 0u32;
     for op in ops {
         let idx = match op {
             Operator::Block { .. } | Operator::If { .. } => {
-                frames.push(false);
+                depth += 1;
                 continue;
             }
             Operator::Loop { .. } => {
-                frames.push(true);
-                loops += 1;
+                depth += 1;
+                loop_at.push(depth);
                 continue;
             }
             Operator::End => {
-                if frames.pop() == Some(true) {
-                    loops -= 1;
+                if loop_at.last() == Some(&depth) {
+                    loop_at.pop();
                 }
+                depth = depth.saturating_sub(1);
                 continue;
             }
             Operator::LocalGet { local_index }
@@ -1064,19 +1069,25 @@ fn choose_homes(local_types: &[ValType], ops: &[Operator<'_>]) -> Vec<Option<Reg
             _ => continue,
         };
         if let Some(s) = score.get_mut(idx as usize) {
-            *s = s.saturating_add(1 << (3 * loops.min(6)));
+            *s = s.saturating_add(1 << (3 * loop_at.len().min(6)));
         }
     }
-    let mut order: Vec<usize> = (0..local_types.len())
-        .filter(|&i| int_ty(local_types[i]) && !is_float(local_types[i]))
-        .filter(|&i| score[i] >= HOME_MIN_USES)
-        .collect();
-    order.sort_by(|&a, &b| score[b].cmp(&score[a]).then(a.cmp(&b)));
-    let mut home = alloc::vec![None; local_types.len()];
-    for (&i, &r) in order.iter().zip(HOMES.iter()) {
-        home[i] = Some(r);
+    // The best two, in one scan; ties go to the lower index.
+    let mut n = 0;
+    for i in 0..local_types.len() {
+        if is_float(local_types[i]) || score[i] < HOME_MIN_USES {
+            continue;
+        }
+        let at = (0..n).find(|&k| score[i] > score[homed[k] as usize]).unwrap_or(n);
+        if at < HOMES.len() {
+            for k in (at + 1..HOMES.len()).rev() {
+                homed[k] = homed[k - 1];
+            }
+            homed[at] = i as u32;
+            n = (n + 1).min(HOMES.len());
+        }
     }
-    home
+    (homed, n)
 }
 
 pub fn compile_func(
@@ -1118,8 +1129,8 @@ pub fn compile_func(
         traps: Vec::new(),
         trap_relocs: Vec::new(),
         n_locals,
-        home: Vec::new(),
-        saved: Vec::new(),
+        homed: [0; 2],
+        n_homes: 0,
         fuel_pending: 0,
         refuels: Vec::new(),
         stack: Vec::new(),
@@ -1157,11 +1168,9 @@ pub fn compile_func(
     f.asm.load64(A, VMCTX, vmctx::STACK_LIMIT);
     f.asm.cmp_rr64(Reg::Rsp, A);
     f.trap_if(Cond::B, trap::STACK_EXHAUSTED);
-    f.home = choose_homes(&f.local_types, ops);
-    f.saved = f.home.iter().flatten().copied().collect();
-    for k in 0..f.saved.len() {
-        let r = f.saved[k];
-        f.asm.store64(Reg::Rbp, -8 * (k as i32 + 1), r);
+    (f.homed, f.n_homes) = choose_homes(&f.local_types, ops);
+    for k in 0..f.n_homes {
+        f.asm.store64(Reg::Rbp, -8 * (k as i32 + 1), HOMES[k]);
     }
     let (places, _) = arg_places(params);
     for (i, t) in params.iter().enumerate() {
@@ -1241,9 +1250,8 @@ pub fn compile_func(
             f.asm.load32(A, Reg::Rbp, off);
         }
     }
-    for k in 0..f.saved.len() {
-        let r = f.saved[k];
-        f.asm.load64(r, Reg::Rbp, -8 * (k as i32 + 1));
+    for k in 0..f.n_homes {
+        f.asm.load64(HOMES[k], Reg::Rbp, -8 * (k as i32 + 1));
     }
     f.asm.mov_rr64(Reg::Rsp, Reg::Rbp);
     f.asm.pop(Reg::Rbp);
@@ -1264,7 +1272,7 @@ pub fn compile_func(
         f.trap_relocs.push(at);
     }
 
-    let slots = f.saved.len() as u32 + n_locals + f.max_stack.max(1);
+    let slots = f.n_homes as u32 + n_locals + f.max_stack.max(1);
     let frame = (8 * slots + 15) & !15;
     let patch = f.frame_patch;
     f.asm.code[patch..patch + 4].copy_from_slice(&(frame as i32).to_le_bytes());
