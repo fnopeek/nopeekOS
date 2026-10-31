@@ -13,6 +13,10 @@ crate-type = ["rlib"]
 # Per-function opcode sets. Host tooling only — the kernel has no use for
 # them and should not pay the allocations.
 census = []
+# Shift every function by a pseudo-random amount below 128 bytes, from a salt
+# set at run time. Host benchmarking only: timing one layout measures the
+# layout as much as the code.
+layout-salt = []
 
 # Exactly the wasmparser the kernel already carries through wasmi — same
 # version, same features, so the tree keeps ONE copy of it.

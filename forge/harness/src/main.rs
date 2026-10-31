@@ -6,6 +6,7 @@
 //!   forge_harness --selftest                  generated code vs wasmi
 //!   forge_harness --fuzz [start] [count]      random modules vs wasmi
 //!   forge_harness --app <file.wasm>           an SDK app's _start (fbench)
+//!   forge_harness --dump <file> [func]        disassemble generated code
 //!   forge_harness --run <wasm> [page w h n]   run it, and time it
 
 mod app;
@@ -49,6 +50,10 @@ fn main() {
     if args.first().map(|a| a == "--app").unwrap_or(false) {
         args.remove(0);
         std::process::exit(if app::run(&args) { 0 } else { 1 });
+    }
+    if args.first().map(|a| a == "--dump").unwrap_or(false) {
+        args.remove(0);
+        std::process::exit(if app::dump(&args) { 0 } else { 1 });
     }
     if args.first().map(|a| a == "--fuzz").unwrap_or(false) {
         args.remove(0);

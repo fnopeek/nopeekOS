@@ -4,6 +4,7 @@
 //! its native build.
 //!
 //!   forge_harness --app <file.wasm>
+//!   forge_harness --dump <file.wasm|file.wat> [function index]
 
 use crate::selftest::{Exec, Inst};
 use std::sync::OnceLock;
@@ -75,6 +76,11 @@ pub fn run(args: &[String]) -> bool {
         }
     };
     crate::faults::install();
+    // FORGE_SALT=<n>: a different code layout per n, for measuring across
+    // layouts instead of one.
+    if let Some(salt) = std::env::var("FORGE_SALT").ok().and_then(|v| v.parse().ok()) {
+        forge_core::LAYOUT_SALT.store(salt, std::sync::atomic::Ordering::Relaxed);
+    }
     tsc_mhz();
     let t = std::time::Instant::now();
     let m = match forge_core::compile(&wasm) {
@@ -114,5 +120,56 @@ pub fn run(args: &[String]) -> bool {
         eprintln!("trap: {}", forge_core::trap::name(trap));
         return false;
     }
+    true
+}
+
+/// Disassemble the code forge generated for one function (all when no index
+/// is given), through `objdump`.
+pub fn dump(args: &[String]) -> bool {
+    let Some(path) = args.first() else {
+        eprintln!("usage: forge_harness --dump <file.wasm|file.wat> [function index]");
+        return false;
+    };
+    let wasm = match wat::parse_file(path) {
+        Ok(w) => w,
+        Err(e) => {
+            eprintln!("{path}: {e}");
+            return false;
+        }
+    };
+    let m = match forge_core::compile(&wasm) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("compile: {e}");
+            return false;
+        }
+    };
+    let n_imp = m.plan.imported_funcs.len() as u32;
+    let want: Option<u32> = args.get(1).and_then(|a| a.parse().ok());
+    let mut starts: Vec<(u32, usize)> = (0..m.offsets.len() as u32)
+        .filter_map(|i| m.offsets[i as usize].map(|o| (n_imp + i, o)))
+        .collect();
+    starts.sort_by_key(|s| s.1);
+    let tmp = std::env::temp_dir().join(format!("forge_dump_{}.bin", std::process::id()));
+    for (k, &(fi, off)) in starts.iter().enumerate() {
+        if want.is_some_and(|w| w != fi) {
+            continue;
+        }
+        let end = starts.get(k + 1).map(|s| s.1).unwrap_or(m.code.len());
+        if std::fs::write(&tmp, &m.code[off..end]).is_err() {
+            return false;
+        }
+        println!("== function {fi}: {} bytes", end - off);
+        let out = std::process::Command::new("objdump")
+            .args(["-D", "-b", "binary", "-mi386:x86-64", "-M", "intel", "--no-show-raw-insn"])
+            .arg(&tmp)
+            .output();
+        if let Ok(o) = out {
+            for l in String::from_utf8_lossy(&o.stdout).lines().skip(7) {
+                println!("{l}");
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
     true
 }

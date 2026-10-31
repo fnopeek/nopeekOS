@@ -9,7 +9,7 @@ name = "forge_harness"
 path = "src/main.rs"
 
 [dependencies]
-forge_core = { path = "../core", features = ["census"] }
+forge_core = { path = "../core", features = ["census", "layout-salt"] }
 
 # Host-only. `wat` builds the differential test cases from text, `libc` maps
 # the generated code W^X the way the kernel will have to, and wasmi is the

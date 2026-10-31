@@ -469,6 +469,12 @@ struct Linker {
     de_entry: usize,
 }
 
+/// Nonzero: shift each function by a pseudo-random amount below 128 bytes,
+/// derived from it
+/// (feature `layout-salt`, host benchmarking only).
+#[cfg(feature = "layout-salt")]
+pub static LAYOUT_SALT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 impl Linker {
     /// `wasm_len` only sizes the first allocation. Generated code runs between
     /// one and a half and two and a half times the whole module's bytes, so
@@ -523,6 +529,18 @@ impl Linker {
             self.offsets.push(None);
             return;
         };
+        #[cfg(feature = "layout-salt")]
+        {
+            let salt = LAYOUT_SALT.load(core::sync::atomic::Ordering::Relaxed);
+            if salt != 0 {
+                let mut h = (salt ^ self.offsets.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                h ^= h >> 29;
+                // Never executed; `int3` makes a stray jump into it stop.
+                for _ in 0..h % 128 {
+                    self.code.push(0xCC);
+                }
+            }
+        }
         let base = self.code.len();
         self.offsets.push(Some(base));
         self.code.extend_from_slice(&cf.code);

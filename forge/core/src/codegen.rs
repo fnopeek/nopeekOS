@@ -674,6 +674,17 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// Before an unconditional branch: the value it carries goes to the
+    /// result register, so only what lies beneath has to reach its slot.
+    fn spill_for_branch(&mut self, relative_depth: u32) {
+        let carries = self
+            .ctrl
+            .len()
+            .checked_sub(1 + relative_depth as usize)
+            .is_some_and(|i| self.ctrl[i].branch_arity == 1);
+        self.spill_below(if carries { 1 } else { 0 });
+    }
+
     /// Everything below the top `keep` values into the slots. Before a call
     /// this is mandatory — the callee owns every cache register.
     ///
@@ -935,6 +946,52 @@ impl<'a> Ctx<'a> {
         }
     }
 
+    /// The float counterpart of `peek_to`.
+    fn fpeek_to(&mut self, x: Xmm) {
+        let Some(v) = self.stack.last().copied() else { return };
+        match v.loc {
+            Loc::Xmm(y) => self.asm.fmov(x, y),
+            Loc::Gpr(r) => self.asm.gpr_to_xmm(wide(v.ty), x, r),
+            Loc::Slot => {
+                let off = self.slot(self.depth() - 1);
+                self.asm.fload_slot(fw_of(v.ty), x, Reg::Rbp, off);
+            }
+            Loc::Local(idx) if let Some(h) = self.home(idx) => self.asm.gpr_to_xmm(wide(v.ty), x, h),
+            Loc::Local(idx) => {
+                let off = self.local(idx);
+                self.asm.fload_slot(fw_of(v.ty), x, Reg::Rbp, off);
+            }
+            Loc::Imm(c) => {
+                self.asm.mov_r64_imm64(T, c);
+                self.asm.gpr_to_xmm(wide(v.ty), x, T);
+            }
+            Loc::Flags(cc) => {
+                self.asm.set_cond(cc, T);
+                self.asm.gpr_to_xmm(false, x, T);
+            }
+        }
+    }
+
+    /// A frame's result travels to its join in a register, never through
+    /// memory: `A` for an integer, `FA` for a float. Copy the top there.
+    fn peek_result(&mut self) {
+        if is_float(self.peek_ty().unwrap_or(ValType::I32)) {
+            self.fpeek_to(FA);
+        } else {
+            self.peek_to(A);
+        }
+    }
+
+    /// Take the top into the result register (`peek_result`) and off the
+    /// stack: the fall-through edge into a join.
+    fn pop_result(&mut self) {
+        if is_float(self.peek_ty().unwrap_or(ValType::I32)) {
+            self.fpop_to(FA);
+        } else {
+            self.pop_to(A);
+        }
+    }
+
     /// Load the globals array base into `r`.
     fn globals_base(&mut self, r: Reg) {
         self.asm.load64(r, VMCTX, vmctx::GLOBALS);
@@ -1162,9 +1219,9 @@ pub fn compile_func(
     f.asm.mov_rr64(Reg::Rbp, Reg::Rsp);
     f.asm.sub_r64_imm32(Reg::Rsp, 0);
     f.frame_patch = f.asm.pos() - 4;
-    // Stack check, before the frame is written to. `rax` is free here: it
-    // carries no argument. An unsigned compare: below the limit traps, and
-    // a limit of zero never does.
+    // Stack check, before the frame is written to, against the limit in
+    // place. An unsigned compare: below the limit traps, and a limit of zero
+    // never does.
     f.asm.load64(A, VMCTX, vmctx::STACK_LIMIT);
     f.asm.cmp_rr64(Reg::Rsp, A);
     f.trap_if(Cond::B, trap::STACK_EXHAUSTED);
@@ -1239,17 +1296,8 @@ pub fn compile_func(
 
     f.fuel_flush();
 
-    // Epilogue. Every path arrives with the result, if any, in slot 0.
-    if let Some(rt) = results.first().copied() {
-        let off = f.slot(0);
-        if is_float(rt) {
-            f.asm.fload_slot(fw_of(rt), FA, Reg::Rbp, off);
-        } else if wide(rt) {
-            f.asm.load64(A, Reg::Rbp, off);
-        } else {
-            f.asm.load32(A, Reg::Rbp, off);
-        }
-    }
+    // Epilogue. Every path arrives with the result, if any, already in `A`
+    // or `FA`, which is where the caller looks for it.
     for k in 0..f.n_homes {
         f.asm.load64(HOMES[k], Reg::Rbp, -8 * (k as i32 + 1));
     }
@@ -1401,6 +1449,9 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
             }
             // The then-arm, if it can fall out, skips the else-arm.
             if f.reachable {
+                if f.ctrl[top].out_arity == 1 {
+                    f.pop_result();
+                }
                 f.spill_all();
                 let p = f.asm.jmp();
                 f.ctrl[top].ends.push(p);
@@ -1417,8 +1468,12 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         End => {
             f.fuel_flush();
             // Control joins here — the fall-through and every branch that
-            // aimed at this end must leave the operand stack looking the same.
+            // aimed at this end must leave the operand stack looking the same:
+            // everything below in its slot, the result in its register.
             if f.reachable {
+                if f.ctrl.last().is_some_and(|c| c.out_arity == 1) {
+                    f.pop_result();
+                }
                 f.spill_all();
             }
             let Some(mut fr) = f.ctrl.pop() else {
@@ -1440,15 +1495,24 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
                 f.reachable = false;
             }
             f.truncate_to(fr.height);
-            if fr.out_arity == 1 {
-                f.push_slot(fr.out_ty);
+            // The function's own result stays in its register for the
+            // epilogue. Anywhere else it joins the operand stack; on a dead
+            // join only the shape matters.
+            if fr.out_arity == 1 && fr.kind != Kind::Func {
+                if !f.reachable {
+                    f.push_slot(fr.out_ty);
+                } else if is_float(fr.out_ty) {
+                    f.fpush_from(FA, fr.out_ty);
+                } else {
+                    f.push_from_ty(A, fr.out_ty);
+                }
             }
             return Ok(());
         }
         Br { relative_depth } => {
             f.fuel_flush();
             if f.reachable {
-                f.spill_all();
+                f.spill_for_branch(*relative_depth);
                 branch_to(f, *relative_depth)?;
                 f.reachable = false;
             }
@@ -1457,8 +1521,8 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
         Return => {
             f.fuel_flush();
             if f.reachable {
-                f.spill_all();
                 let d = f.ctrl.len() as u32 - 1;
+                f.spill_for_branch(d);
                 branch_to(f, d)?;
                 f.reachable = false;
             }
@@ -2014,7 +2078,7 @@ fn emit(f: &mut Ctx, op: &Operator<'_>) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Move the branch's values into the target frame's slots and jump. A loop's
+/// Move the branch's value into the result register and jump. A loop's
 /// label is its head; every other frame's label is its end.
 fn branch_to(f: &mut Ctx, relative_depth: u32) -> Result<(), &'static str> {
     let idx = f
@@ -2022,18 +2086,8 @@ fn branch_to(f: &mut Ctx, relative_depth: u32) -> Result<(), &'static str> {
         .len()
         .checked_sub(1 + relative_depth as usize)
         .ok_or("br-depth")?;
-    let arity = f.ctrl[idx].branch_arity;
-    let height = f.ctrl[idx].height;
-
-    if arity == 1 {
-        let t = f.peek_ty().unwrap_or(ValType::I32);
-        f.peek_to(A);
-        let dst = f.slot(height);
-        if wide(t) {
-            f.asm.store64(Reg::Rbp, dst, A);
-        } else {
-            f.asm.store32(Reg::Rbp, dst, A);
-        }
+    if f.ctrl[idx].branch_arity == 1 {
+        f.peek_result();
     }
     if f.ctrl[idx].kind == Kind::Loop {
         let start = f.ctrl[idx].start;
