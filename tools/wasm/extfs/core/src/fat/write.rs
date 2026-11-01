@@ -154,23 +154,26 @@ impl<D: Dev> Fat<D> {
         Ok(())
     }
 
-    /// FAT sector `k` from the cache to every FAT (`fat_mirror_bhs`), or to
-    /// the active one when mirroring is off.
-    pub(super) fn write_fat_sector(&mut self, k: u64) -> Result<(), Error> {
-        let Some(buf) = self.cache.iter().find(|(s, _)| *s == k).map(|(_, b)| b.clone()) else {
-            return Err(Error::Io);
-        };
-        for f in 0..self.fats {
-            if !self.mirror && f != self.active_fat { continue; }
-            self.write_sectors(self.fat_start + f * self.fat_length + k, &buf)?;
-        }
-        self.dirty_fat.retain(|&d| d != k);
-        Ok(())
-    }
-
-    fn fat_flush(&mut self) -> Result<(), Error> {
-        while let Some(&k) = self.dirty_fat.first() {
-            self.write_fat_sector(k)?;
+    /// Every changed FAT sector to the FATs, runs of neighbours in one write.
+    pub(super) fn fat_flush(&mut self) -> Result<(), Error> {
+        let mut dirty = core::mem::take(&mut self.dirty_fat);
+        dirty.sort_unstable();
+        dirty.dedup();
+        let ss = self.sector_size as usize;
+        let mut i = 0;
+        while i < dirty.len() {
+            let mut j = i + 1;
+            while j < dirty.len() && dirty[j] == dirty[j - 1] + 1 && (j - i + 1) * ss <= MAX_READ { j += 1; }
+            let mut buf = alloc::vec![0u8; (j - i) * ss];
+            for (n, k) in dirty[i..j].iter().enumerate() {
+                let Some((_, b)) = self.cache.iter().find(|(s, _)| s == k) else { return Err(Error::Io) };
+                buf[n * ss..(n + 1) * ss].copy_from_slice(b);
+            }
+            for f in 0..self.fats {
+                if !self.mirror && f != self.active_fat { continue; }
+                self.write_sectors(self.fat_start + f * self.fat_length + dirty[i], &buf)?;
+            }
+            i = j;
         }
         Ok(())
     }
@@ -290,6 +293,7 @@ impl<D: Dev> Fat<D> {
     /// The end of an operation: FAT through, FSINFO (`fat_clusters_flush`),
     /// the dirty bit cleared, the device's cache flushed.
     pub fn sync(&mut self) -> Result<(), Error> {
+        self.settle()?;
         self.fat_flush()?;
         if self.fat_bits == 32 {
             let mut b = alloc::vec![0u8; self.sector_size as usize];
@@ -539,9 +543,20 @@ impl<D: Dev> Fat<D> {
 
     // === Operations ===
 
+    /// The file being appended to gets its entry and FAT written. A stream
+    /// of appends defers this: the entry and the FAT sectors would be
+    /// rewritten for every piece, which costs flash far more than the data.
+    pub fn settle(&mut self) -> Result<(), Error> {
+        let Some((_, n)) = self.open.take() else { return Ok(()) };
+        let loc = n.loc.ok_or(Error::Corrupt)?;
+        self.update_entry(loc, n.first, n.size, unix2fat(self.now))?;
+        self.fat_flush()
+    }
+
     /// An empty file at `path`; an existing file is cut to nothing.
     pub fn create(&mut self, path: &str) -> Result<(), Error> {
         self.cursor = None;
+        self.settle()?;
         self.mark()?;
         let now = unix2fat(self.now);
         match self.lookup(path)? {
@@ -561,6 +576,8 @@ impl<D: Dev> Fat<D> {
 
     /// Append `data` to the file at `path`, whose size must be `off`.
     pub fn append(&mut self, path: &str, off: u64, data: &[u8]) -> Result<(), Error> {
+        let key = path.trim_matches('/');
+        if self.open.as_ref().is_some_and(|(p, _)| p != key) { self.settle()?; }
         let n = self.lookup(path)?.ok_or(Error::NotFound)?;
         if n.is_dir { return Err(Error::WrongKind); }
         if off != n.size { return Err(Error::Corrupt); }
@@ -625,13 +642,15 @@ impl<D: Dev> Fat<D> {
         }
         let tail = *clusters.last().unwrap_or(&last);
         self.cursor = Some(super::Cursor { first, idx: need - 1, clus: tail });
-        self.update_entry(loc, first, new_size, unix2fat(self.now))?;
-        self.fat_flush()
+        let _ = loc;
+        self.open = Some((alloc::string::String::from(key), Node { first, size: new_size, ..n }));
+        Ok(())
     }
 
     /// `vfat_mkdir`: a folder with its `.` and `..` (`fat_alloc_new_dir`).
     pub fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         self.cursor = None;
+        self.settle()?;
         if self.lookup(path)?.is_some() { return Err(Error::Exists); }
         let (dir, name) = self.parent(path)?;
         self.mark()?;
@@ -664,6 +683,7 @@ impl<D: Dev> Fat<D> {
     /// A file, or an empty folder (`vfat_unlink`, `vfat_rmdir`).
     pub fn remove(&mut self, path: &str) -> Result<(), Error> {
         self.cursor = None;
+        self.settle()?;
         let n = self.lookup(path)?.ok_or(Error::NotFound)?;
         let loc = n.loc.ok_or(Error::WrongKind)?;
         if n.is_dir && !self.read_dir(&n)?.is_empty() { return Err(Error::NotEmpty); }
@@ -678,6 +698,7 @@ impl<D: Dev> Fat<D> {
     /// there never is.
     pub fn rename(&mut self, from: &str, to: &str, replace: bool) -> Result<(), Error> {
         self.cursor = None;
+        self.settle()?;
         let src = self.lookup(from)?.ok_or(Error::NotFound)?;
         let src_loc = src.loc.ok_or(Error::WrongKind)?;
         let (f, t) = (from.trim_matches('/'), to.trim_matches('/'));

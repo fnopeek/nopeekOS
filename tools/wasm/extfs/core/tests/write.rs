@@ -10,6 +10,7 @@ use extfs_core::{Dev, IoError};
 struct Img {
     data: Vec<u8>,
     flushes: usize,
+    writes: usize,
 }
 
 impl Dev for Img {
@@ -23,6 +24,7 @@ impl Dev for Img {
     fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
         let off = (lba * 512) as usize;
         self.data.get_mut(off..off + buf.len()).ok_or(IoError)?.copy_from_slice(buf);
+        self.writes += 1;
         Ok(())
     }
     fn flush(&mut self) -> Result<(), IoError> { self.flushes += 1; Ok(()) }
@@ -53,7 +55,7 @@ fn fresh(path: &Path, fat: &str, mb: u64, cluster_sectors: Option<&str>) -> Fat<
     if let Some(c) = cluster_sectors { args.extend(["-s", c]); }
     args.extend([path.to_str().unwrap(), kib.as_str()]);
     run("mkfs.fat", &args);
-    let mut fs = Fat::mount(Img { data: std::fs::read(path).unwrap(), flushes: 0 }).unwrap();
+    let mut fs = Fat::mount(Img { data: std::fs::read(path).unwrap(), flushes: 0, writes: 0 }).unwrap();
     fs.set_now(1_793_548_800);
     fs
 }
@@ -143,7 +145,7 @@ fn exercise(fat: &str, mb: u64, cluster: Option<&str>) {
     assert_eq!(mtype(&p, "empty.dat"), b"");
 
     // And this crate reads it back the same way.
-    let mut fs = Fat::mount(Img { data: img.data, flushes: 0 }).unwrap();
+    let mut fs = Fat::mount(Img { data: img.data, flushes: 0, writes: 0 }).unwrap();
     let n = fs.lookup("Photos/2026 Sommer/Grüße aus Zürich.jpg").unwrap().unwrap();
     let mut back = vec![0u8; big.len()];
     let mut at = 0;
@@ -196,4 +198,30 @@ fn full_root_and_full_volume() {
     save(fs, &p);
     let out = run("fsck.fat", &["-n", "-v", p.to_str().unwrap()]);
     assert!(!out.contains("Free cluster summary wrong"), "fsck:\n{out}");
+}
+
+/// A stream of appends writes its data and little else: the entry and the
+/// FAT follow once, at the end.
+#[test]
+fn appends_write_mostly_data() {
+    let d = dir();
+    let p = d.join("stream.img");
+    let mut fs = fresh(&p, "32", 64, None);
+    fs.create("stream.bin").unwrap();
+    fs.sync().unwrap();
+    let before = fs.into_dev();
+    let w0 = before.writes;
+    let mut fs = Fat::mount(before).unwrap();
+    let chunk = vec![0xA5u8; 1 << 20];
+    for k in 0..16u64 {
+        fs.append("stream.bin", k << 20, &chunk).unwrap();
+    }
+    fs.sync().unwrap();
+    let img = save(fs, &p);
+    // 16 data writes; with 512-byte clusters the FAT of 16 MiB is 256
+    // sectors, written in runs of the cache's 32 to both copies (16); the
+    // dirty bit twice, the entry, FSINFO.
+    assert!(img.writes - w0 <= 60, "{} writes for 16 MiB", img.writes - w0);
+    run("fsck.fat", &["-n", p.to_str().unwrap()]);
+    assert_eq!(mtype(&p, "stream.bin").len(), 16 << 20);
 }

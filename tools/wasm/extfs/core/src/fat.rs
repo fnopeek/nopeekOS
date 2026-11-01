@@ -137,6 +137,9 @@ pub struct Fat<D: Dev> {
     marked: bool,
     /// The time new and changed entries get, UTC seconds.
     now: u64,
+    /// The file being appended to, with the start and size its entry does
+    /// not show yet: written with the FAT when another operation comes.
+    open: Option<(String, Node)>,
 }
 
 fn le16(b: &[u8], o: usize) -> u16 { u16::from_le_bytes([b[o], b[o + 1]]) }
@@ -221,7 +224,7 @@ impl<D: Dev> Fat<D> {
             free_clusters: 0, label: String::new(), dirty, cache: Vec::new(), cursor: None,
             fats, fat_length, active_fat, mirror, fsinfo_sector, prev_free: FAT_START_ENT - 1,
             state_off: if fat_bits == 32 { 65 } else { 37 },
-            dirty_fat: Vec::new(), marked: false, now: 0,
+            dirty_fat: Vec::new(), marked: false, now: 0, open: None,
         };
         fs.free_clusters = fs.count_free()?;
         fs.label = fs.read_label(&b)?;
@@ -266,7 +269,7 @@ impl<D: Dev> Fat<D> {
         } else {
             if self.cache.len() == FAT_CACHE {
                 let old = self.cache[0].0;
-                if self.dirty_fat.contains(&old) { self.write_fat_sector(old)?; }
+                if self.dirty_fat.contains(&old) { self.fat_flush()?; }
                 self.cache.remove(0);
             }
             let mut b = alloc::vec![0u8; self.sector_size as usize];
@@ -387,6 +390,7 @@ impl<D: Dev> Fat<D> {
     /// out (`fat_readdir` / `__fat_readdir`).
     pub fn read_dir(&mut self, node: &Node) -> Result<Vec<DirEntry>, Error> {
         if !node.is_dir { return Err(Error::Corrupt); }
+        self.settle()?;
         let raw = self.dir_bytes(node)?;
         let n = raw.len() / MSDOS_DPS_ENTRY;
         let de = |i: usize| &raw[i * MSDOS_DPS_ENTRY..(i + 1) * MSDOS_DPS_ENTRY];
@@ -479,6 +483,9 @@ impl<D: Dev> Fat<D> {
     /// The node at `path` below the root (`/`-separated, empty = root),
     /// names matched as `vfat_find` does: long name or alias, any case.
     pub fn lookup(&mut self, path: &str) -> Result<Option<Node>, Error> {
+        if let Some((p, n)) = &self.open {
+            if p == path.trim_matches('/') { return Ok(Some(*n)); }
+        }
         let mut node = self.root();
         for seg in path.split('/').filter(|s| !s.is_empty()) {
             if !node.is_dir { return Ok(None); }
