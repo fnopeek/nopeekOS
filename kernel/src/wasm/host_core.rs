@@ -5613,3 +5613,22 @@ pub(crate) fn npk_ext_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, statu
     let Some(b) = guest(mem, ptr, n) else { return -1 };
     if crate::ext::reply(&ctx.cap_id, seq as u32, status, b) { 0 } else { -1 }
 }
+
+pub(crate) fn npk_ext_volumes(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
+    if !ext_allowed(ctx, crate::ext::ROOT, capability::Rights::READ) { return -1; }
+    let mut out = alloc::vec::Vec::new();
+    for v in crate::ext::volumes() {
+        out.extend_from_slice(&(v.label.len() as u16).to_le_bytes());
+        out.push(v.read_only as u8);
+        out.extend_from_slice(&v.total.to_le_bytes());
+        out.extend_from_slice(&v.free.to_le_bytes());
+        out.extend_from_slice(v.label.as_bytes());
+    }
+    write_whole(mem, buf_ptr, buf_max, &out)
+}
+
+pub(crate) fn npk_ext_eject(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32, label_len: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::EXTERNAL).is_err() { return -1; }
+    let Some(label) = read_str(mem, label_ptr, label_len) else { return -1 };
+    if crate::ext::eject(&label).is_ok() { 0 } else { -1 }
+}

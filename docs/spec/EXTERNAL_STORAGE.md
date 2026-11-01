@@ -80,6 +80,15 @@ path segment of UTF-8 without control characters, at most 1024 bytes and
 stops the volume. A request without an answer after 90 seconds fails and
 stops the volume.
 
+## Apps
+
+| Call | Use |
+|---|---|
+| `npk_ext_volumes(buf, max)` | the mounted volumes: per volume label length u16, read-only u8, size u64, free u64, label |
+| `npk_ext_eject(label, len)` | the drive of that volume takes no new request, finishes the running ones (at most 30 s), is flushed and stopped, and goes |
+
+Both need EXTERNAL; the list also READ.
+
 ## Who sees `ext/`
 
 The right `EXTERNAL` (second `.npk.caps` byte, bit `0x04`), together with

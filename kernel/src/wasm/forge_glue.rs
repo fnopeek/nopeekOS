@@ -1374,4 +1374,12 @@ host_imports! {
     // size u64, mtime u64, name. STAT: is_dir u8, size u64, mtime u64.
     // READ: the bytes, at most the length asked.
     mem fn npk_ext_reply(seq: i32, status: i32, ptr: i32, len: i32) -> i32;
+
+    // For apps with EXTERNAL. npk_ext_volumes(buf, max) -> bytes,
+    // -(needed + 2) or -1: per mounted volume label length u16, read-only
+    // u8, size u64, free u64 (bytes), label.
+    mem fn npk_ext_volumes(buf_ptr: i32, buf_max: i32) -> i32;
+    // npk_ext_eject(label_ptr, label_len) -> 0 or -1: the drive of that
+    // volume finishes what runs, is flushed and stopped, and goes.
+    mem fn npk_ext_eject(label_ptr: i32, label_len: i32) -> i32;
 }

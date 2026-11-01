@@ -193,6 +193,12 @@ struct Strings {
     sec_places:      &'static str,
     sec_devices:     &'static str,
     copying:         &'static str,
+    eject:           &'static str,
+    ejected:         &'static str,
+    eject_failed:    &'static str,
+    eject_busy:      &'static str,
+    drive_ro:        &'static str,
+    drive_free:      &'static str,
     copy_scanning:   &'static str,
     copy_done:       &'static str,
     copy_failed:     &'static str,
@@ -329,6 +335,9 @@ const EN: Strings = Strings {
     place_home: "Home", place_documents: "Documents", place_downloads: "Downloads",
     place_music: "Music", place_pictures: "Pictures", place_videos: "Videos", place_projects: "Projects", place_trash: "Trash",
     sec_places: "PLACES", sec_devices: "DEVICES",
+    eject: "Eject", ejected: "{} can be removed", eject_failed: "Could not eject {}",
+    eject_busy: "Wait for the copy to finish, or press Esc",
+    drive_ro: "{} is write-protected", drive_free: "{} · {} free of {}",
     copying: "Copying {} of {} files · {} of {} · {}/s · {} left · Esc stops",
     copy_scanning: "Preparing copy… {} files, {} · Esc stops",
     copy_done: "Copied {} files ({})",
@@ -579,6 +588,7 @@ const ACT_TAB_NEW:            u32 = 9_800;
 const ACT_SB_OPEN_TAB:        u32 = 9_900;
 const ACT_SB_REMOVE:          u32 = 9_901;
 const ACT_SB_UP:              u32 = 9_902;
+const ACT_SB_EJECT:           u32 = 9_903;
 const ACT_GO_BOOKMARK:        u32 = 6_204;
 const TAB_W: u16 = 180;
 const TAB_H: u16 = 28;
@@ -771,6 +781,32 @@ struct Transfer {
     started_ms:  u64,
     /// Sources of a move, deleted once everything is copied.
     moved:       Vec<(String, bool)>,
+}
+
+/// A mounted external volume, as `npk_ext_volumes` reports it.
+#[derive(Clone, PartialEq)]
+struct Drive {
+    label:     String,
+    read_only: bool,
+    total:     u64,
+    free:      u64,
+}
+
+/// The mounted volumes, empty when the kernel refuses.
+fn read_drives() -> Vec<Drive> {
+    let mut buf = alloc::vec![0u8; 4096];
+    let n = npk_sys::ext_volumes(&mut buf);
+    if n <= 0 { return Vec::new(); }
+    let mut b = &buf[..n as usize];
+    let mut out = Vec::new();
+    while b.len() >= 19 {
+        let len = u16::from_le_bytes([b[0], b[1]]) as usize;
+        let u64_at = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap_or([0; 8]));
+        let Some(label) = b.get(19..19 + len).and_then(|l| core::str::from_utf8(l).ok()) else { break };
+        out.push(Drive { label: label.to_string(), read_only: b[2] != 0, total: u64_at(3), free: u64_at(11) });
+        b = &b[19 + len..];
+    }
+    out
 }
 
 /// The file being copied: read and write handles, bytes so far.
@@ -977,8 +1013,8 @@ struct Loft {
     paste:          Option<PasteJob>,
     deleting:       Option<DeleteJob>,
     transfer:       Option<Transfer>,
-    /// The mounted external drives, as `ext` lists them.
-    drives:         Vec<String>,
+    /// The mounted external drives.
+    drives:         Vec<Drive>,
     /// Saved state of every tab; the entry at `active` is stale while the
     /// tab is shown.
     tabs:           Vec<Tab>,
@@ -1791,6 +1827,7 @@ impl Loft {
     /// A name that exists already asks first (see `Dialog::Clash`).
     fn do_paste(&mut self) {
         if self.paste.is_some() || self.transfer.is_some() { return; }
+        if self.refuse_ro(&self.current.clone()) { return; }
         self.load_clip();
         let Some(clip) = self.clipboard.take() else { return };
         let mut todo = clip.items.clone();
@@ -1819,6 +1856,7 @@ impl Loft {
     /// on the trash moves them there as Delete does.
     fn drop_into(&mut self, dest: String, paths: Vec<String>, copy: bool) {
         if self.paste.is_some() || self.transfer.is_some() || !self.idle_fs() || paths.is_empty() { return; }
+        if self.refuse_ro(&dest) { return; }
         // Between volumes a drop copies, as elsewhere; Ctrl+X moves.
         let copy = copy || paths.iter().any(|p| volume_of(p) != volume_of(&dest));
         if dest == self.trash_dir() {
@@ -1950,13 +1988,46 @@ impl Loft {
 
     // ── External drives ───────────────────────────────────────────────
 
+    /// A write-protected drive refuses changes: say so instead of failing.
+    fn refuse_ro(&mut self, path: &str) -> bool {
+        let Some(label) = volume_of(path) else { return false };
+        if !self.drives.iter().any(|d| d.label == label && d.read_only) { return false; }
+        let msg = fill(s().drive_ro, &[label]);
+        self.close_menus();
+        self.say(msg, true);
+        true
+    }
+
+    /// The drive the current folder is on.
+    fn drive_here(&self) -> Option<&Drive> {
+        let label = volume_of(&self.current)?;
+        self.drives.iter().find(|d| d.label == label)
+    }
+
+    /// Eject the drive `path` lies on, once no copy here uses it.
+    fn eject(&mut self, path: &str) {
+        let Some(label) = volume_of(path).map(String::from) else { return };
+        if self.transfer.is_some() || self.deleting.is_some() {
+            self.say(s().eject_busy.to_string(), true);
+            return;
+        }
+        if npk_sys::ext_eject(label.as_bytes()) == 0 {
+            self.poll_drives();
+            self.say(fill(s().ejected, &[&label]), false);
+        } else {
+            self.say(fill(s().eject_failed, &[&label]), true);
+        }
+    }
+
     /// Re-read the mounted drives; true if the list changed. A folder on
     /// a drive that went away is left for home.
     fn poll_drives(&mut self) -> bool {
-        let now: Vec<String> = list_dir_internal(EXT_ROOT, false).into_iter()
-            .filter(|e| e.is_dir).map(|e| e.name).collect();
+        let now = read_drives();
         if now == self.drives { return false; }
+        let same_set = now.len() == self.drives.len()
+            && now.iter().zip(&self.drives).all(|(a, b)| a.label == b.label);
         self.drives = now;
+        if same_set { return true; }
         if is_ext(&self.current) && !path_exists(&self.current) {
             self.navigate(self.home.clone());
         }
@@ -2087,6 +2158,7 @@ impl Loft {
     fn delete_targets(&mut self) {
         let targets = self.targets();
         if targets.is_empty() { return; }
+        if self.refuse_ro(&self.current.clone()) { return; }
         self.close_menus();
         // A drive has no trash: deleting there is for good, after asking.
         if self.in_trash_tree() || targets.iter().any(|t| is_ext(&t.full)) {
@@ -2309,6 +2381,7 @@ impl Loft {
     /// Open the rename dialog for the cursor item, or the find-and-replace
     /// dialog when several items are marked.
     fn open_rename(&mut self) {
+        if self.refuse_ro(&self.current.clone()) { return; }
         let targets = self.targets();
         if targets.len() > 1 {
             self.close_menus();
@@ -2324,6 +2397,7 @@ impl Loft {
     }
 
     fn open_new_folder(&mut self) {
+        if self.refuse_ro(&self.current.clone()) { return; }
         self.close_menus();
         let dest = unique_in(&self.current, s().folder_default, true);
         let name = basename(&dest).to_string();
@@ -2332,6 +2406,7 @@ impl Loft {
     }
 
     fn open_new_file(&mut self) {
+        if self.refuse_ro(&self.current.clone()) { return; }
         self.close_menus();
         let dest = unique_in(&self.current, s().file_default, false);
         let name = basename(&dest).to_string();
@@ -2487,7 +2562,7 @@ impl Loft {
 
     /// Ctrl+D: a copy of each target next to it, under a free name.
     fn duplicate(&mut self) {
-        if self.transfer.is_some() { return; }
+        if self.transfer.is_some() || self.refuse_ro(&self.current.clone()) { return; }
         self.close_menus();
         let targets = self.targets();
         if targets.is_empty() || self.in_trash_tree() { return; }
@@ -2748,7 +2823,7 @@ impl Loft {
             .collect();
         places.retain(|p| p.section == Section::Places);
         let drives: Vec<Place> = self.drives.iter().map(|d| Place {
-            label: d.clone(), icon: IconId::HardDrives, path: join(EXT_ROOT, d), section: Section::Devices,
+            label: d.label.clone(), icon: IconId::HardDrives, path: join(EXT_ROOT, &d.label), section: Section::Devices,
         }).collect();
         let mut devices = devices;
         // After Filesystem, before the trash.
@@ -2795,6 +2870,7 @@ impl Loft {
         let bm = self.bookmarks.iter().position(|b| *b == path);
         match (id, bm) {
             (ACT_SB_OPEN_TAB, _) => self.new_tab(path),
+            (ACT_SB_EJECT, _) => { self.eject(&path); return; }
             (ACT_SB_REMOVE, Some(k)) => { self.bookmarks.remove(k); }
             (ACT_SB_UP, Some(k)) if k > 0 => self.bookmarks.swap(k, k - 1),
             _ => return,
@@ -3079,6 +3155,9 @@ fn ctx_menu_items(lf: &Loft, ctx: &CtxMenu, m: &mut MenuBuf) {
                 m.add(s().bm_up, ACT_SB_UP, "");
                 m.add(s().bm_remove, ACT_SB_REMOVE, "");
             }
+            if lf.sidebar.get(*i).is_some_and(|p| volume_of(&p.path).is_some()) {
+                m.add(s().eject, ACT_SB_EJECT, "");
+            }
         }
         CtxMenu::Item(_) => {
             target_items(lf, m, true);
@@ -3177,7 +3256,11 @@ fn selection_summary(lf: &Loft) -> String {
     let n = lf.filtered.len();
     let k = lf.visible_marks();
     if k == 0 {
-        return fill(if n == 1 { s().items_one } else { s().items_many }, &[&num(n)]);
+        let items = fill(if n == 1 { s().items_one } else { s().items_many }, &[&num(n)]);
+        return match lf.drive_here() {
+            Some(d) => fill(s().drive_free, &[&items, &format_size(d.free), &format_size(d.total)]),
+            None => items,
+        };
     }
     let size: u64 = (0..n)
         .filter(|&ui| lf.is_marked(ui))
@@ -4439,7 +4522,7 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             lf.close_menus();
             if lf.close_tab((id - ACT_TAB_CLOSE_BASE) as usize) { Outcome::Rerender } else { Outcome::Exit }
         }
-        ACT_SB_OPEN_TAB..=ACT_SB_UP => {
+        ACT_SB_OPEN_TAB..=ACT_SB_EJECT => {
             if let Some(CtxMenu::Sidebar(i)) = lf.ctx.clone() { lf.sidebar_op(i, id); }
             lf.close_menus();
             Outcome::Rerender

@@ -133,6 +133,8 @@ struct Inst {
     gone: bool,
     /// The instance broke a deadline or a rule; nothing is routed to it.
     failed: bool,
+    /// Its drive is being ejected: no new request, the running ones end.
+    closing: bool,
     born: u64,
     /// The instance's fiber while it waits in `next`.
     waker: Waker,
@@ -178,7 +180,7 @@ fn spawn(disk: u32, role: u32, start: u64, blocks: u64, block_size: u32, read_on
     let Ok(cap) = capability::create_module_cap(Rights::empty(), None) else { return false };
     INSTS.lock().push(Inst {
         cap, disk, role, start, blocks, block_size, read_only,
-        gone: false, failed: false, born: now(), waker: NO_WAKER,
+        gone: false, failed: false, closing: false, born: now(), waker: NO_WAKER,
         label: None, total: 0, free: 0,
         queue: VecDeque::new(), taken: Vec::new(), done: Vec::new(),
     });
@@ -530,7 +532,7 @@ fn split(path: &str) -> Result<Option<(String, String)>, Error> {
 pub fn volumes() -> Vec<VolumeInfo> {
     reap_stuck();
     INSTS.lock().iter()
-        .filter(|i| !i.gone && !i.failed)
+        .filter(|i| !i.gone && !i.failed && !i.closing)
         .filter_map(|i| i.label.as_ref().map(|l| VolumeInfo {
             label: l.clone(), disk: i.disk, total: i.total, free: i.free, read_only: i.read_only,
         }))
@@ -547,7 +549,7 @@ fn call_with(label: &str, op: u8, path: &str, off: u64, len: u32, data: Vec<u8>)
     let cap = {
         let mut g = INSTS.lock();
         let i = g.iter_mut()
-            .find(|i| i.label.as_deref() == Some(label) && !i.gone && !i.failed)
+            .find(|i| i.label.as_deref() == Some(label) && !i.gone && !i.failed && !i.closing)
             .ok_or(Error::Gone)?;
         if (op == OP_CREATE || op == OP_WRITE || op == OP_MKDIR || op == OP_DELETE || op == OP_RENAME)
             && i.read_only
@@ -689,4 +691,26 @@ pub fn rename(from: &str, to: &str, replace: bool) -> Result<(), Error> {
     if la != lb { return Err(Error::OtherVolume); }
     if inner_to.is_empty() { return Err(Error::BadPath); }
     change(from, OP_RENAME, replace as u64, Vec::from(inner_to.as_bytes()))
+}
+
+/// How long an eject waits for the requests already running.
+const EJECT_WAIT_MS: u64 = 30_000;
+
+/// Eject the drive volume `label` is on: its volumes take no new request,
+/// the running ones finish, then the drive is flushed, stopped and gone
+/// from the list (`usb_storage::eject`).
+pub fn eject(label: &str) -> Result<(), Error> {
+    let disk = INSTS.lock().iter()
+        .find(|i| i.label.as_deref() == Some(label) && !i.gone && !i.failed && !i.closing)
+        .map(|i| i.disk)
+        .ok_or(Error::Gone)?;
+    for i in INSTS.lock().iter_mut().filter(|i| i.disk == disk) { i.closing = true; }
+    let deadline = now() + ms_to_tsc(EJECT_WAIT_MS);
+    loop {
+        let busy = INSTS.lock().iter()
+            .any(|i| i.disk == disk && (!i.queue.is_empty() || !i.taken.is_empty()));
+        if !busy || now() >= deadline { break; }
+        if !fiber::yield_sleep(10) { fiber::spin_or_yield(); }
+    }
+    usb_storage::eject(disk).map_err(|_| Error::Io)
 }

@@ -787,6 +787,22 @@ unsafe extern "C" {
     fn npk_ext_mount(label_ptr: i32, label_len: i32, total: i64, free: i64) -> i32;
     fn npk_ext_next(buf_ptr: i32, buf_max: i32, timeout_ms: i32) -> i32;
     fn npk_ext_reply(seq: i32, status: i32, ptr: i32, len: i32) -> i32;
+    fn npk_ext_volumes(buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_ext_eject(label_ptr: i32, label_len: i32) -> i32;
+}
+
+/// The mounted external volumes (needs EXTERNAL): per volume label length
+/// u16, read-only u8, size u64, free u64, label. The `fill` protocol.
+pub fn ext_volumes(buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `buf.len()` bytes into `buf`,
+    // borrowed for the call.
+    unsafe { npk_ext_volumes(buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+/// Eject the drive of volume `label`: 0 once it can be removed, or -1.
+pub fn ext_eject(label: &[u8]) -> i32 {
+    // SAFETY: FFI; `label` is borrowed for the call.
+    unsafe { npk_ext_eject(label.as_ptr() as i32, label.len() as i32) }
 }
 
 /// The block handle: role (1 probe, 2 volume), block size, block count,
