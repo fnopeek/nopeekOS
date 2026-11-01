@@ -185,7 +185,9 @@ struct Strings {
     place_home:      &'static str,
     place_documents: &'static str,
     place_downloads: &'static str,
+    place_music:     &'static str,
     place_pictures:  &'static str,
+    place_videos:    &'static str,
     place_projects:  &'static str,
     place_trash:     &'static str,
     sec_places:      &'static str,
@@ -319,7 +321,7 @@ const EN: Strings = Strings {
     name_invalid: "Invalid name",
     rename_failed: "Could not rename",
     place_home: "Home", place_documents: "Documents", place_downloads: "Downloads",
-    place_pictures: "Pictures", place_projects: "Projects", place_trash: "Trash",
+    place_music: "Music", place_pictures: "Pictures", place_videos: "Videos", place_projects: "Projects", place_trash: "Trash",
     sec_places: "PLACES", sec_devices: "DEVICES",
     sort_name: "Sort by name", sort_size: "Sort by size", sort_files: "Sort by file count",
     sort_type: "Sort by type", sort_modified: "Sort by date",
@@ -3241,7 +3243,7 @@ fn storage_meter() -> Option<Widget> {
 }
 
 fn render_body(lf: &Loft) -> Widget {
-    // Sidebar — Places (Home/Documents/Downloads/Pictures/Projects)
+    // Sidebar — Places (Home/Documents/Downloads/Music/Pictures/Videos/Projects)
     // + Devices (Filesystem/Trash). `nav_row` selected-state lights
     // up when the current dir matches a sidebar path verbatim.
     let mut places_rows: Vec<Widget> = Vec::new();
@@ -4088,7 +4090,9 @@ fn default_sidebar(home: &str) -> Vec<Place> {
         place(s().place_home,      IconId::Home,       home.into(),                         Places),
         place(s().place_documents, IconId::FileText,   alloc::format!("{}/documents", home), Places),
         place(s().place_downloads, IconId::Download,   alloc::format!("{}/downloads", home), Places),
+        place(s().place_music,     IconId::MusicNotes, alloc::format!("{}/music",     home), Places),
         place(s().place_pictures,  IconId::Image,      alloc::format!("{}/pictures",  home), Places),
+        place(s().place_videos,    IconId::PlayCircle, alloc::format!("{}/videos",    home), Places),
         place(s().place_projects,  IconId::Folders,    alloc::format!("{}/projects",  home), Places),
         place(s().go_filesystem,   IconId::HardDrives, String::new(),                        Devices),
         place(s().place_trash,     IconId::Trash,      join(home, TRASH_DIR),                Devices),
