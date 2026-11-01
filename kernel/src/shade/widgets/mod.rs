@@ -850,8 +850,14 @@ pub fn focused_click(window_id: u32) -> Option<abi::ActionId> {
     let scenes = SCENES.lock();
     let s = scenes.get(&window_id)?;
     if s.focus_path.is_empty() || s.input_edit.is_some() { return None; }
-    let w = widget_at_path(&s.tree, &s.focus_path)?;
+    // Disabled anywhere on the way down disables the control, as for a
+    // click and the Tab order.
+    let mut w: &abi::Widget = &s.tree;
     if is_disabled(w) { return None; }
+    for &i in &s.focus_path {
+        w = widget_children_ref(w).get(i as usize)?;
+        if is_disabled(w) { return None; }
+    }
     let id = match w {
         abi::Widget::Button { on_click, .. } => *on_click,
         abi::Widget::Checkbox { on_toggle, .. } => *on_toggle,
@@ -1878,22 +1884,22 @@ fn clamp_boundary(s: &str, mut i: usize) -> usize {
 /// Move the caret `delta` rows up (negative) or down, keeping its x as
 /// closely as the target row allows. Past the first row it goes to the
 /// start of the document, past the last to the end.
-fn move_rows(value: &str, rows: &[wrap::Row], cursor: usize, delta: isize, px: u16) -> usize {
-    if rows.is_empty() { return cursor; }
-    let r = wrap::row_of(rows, cursor);
+fn move_rows(value: &str, rows: &wrap::Rows, cursor: usize, delta: isize, px: u16) -> usize {
+    if rows.len() == 0 { return cursor; }
+    let r = rows.row_of(value, cursor);
     let last = rows.len() - 1;
     let t = r as isize + delta;
     if t < 0 { return 0; }
     if t as usize > last { return value.len(); }
     let t = t as usize;
     let style = abi::TextStyle::Mono;
-    let x = ceil_u32(crate::gui::text::measure_px(&value[rows[r].start..cursor], style, px));
-    let row = rows[t];
+    let x = ceil_u32(crate::gui::text::measure_px(&value[rows.get(value, r).start..cursor], style, px));
+    let row = rows.get(value, t);
     let mut pos = row.start + byte_at_x_px(&value[row.start..row.end], style, px, x);
     // The end of a row a wrap continues is drawn at the start of the next
     // one; stop a character short so the caret stays on the row it was
     // sent to.
-    if wrap::continues(rows, t) && pos == row.end && pos > row.start {
+    if rows.continues(t) && pos == row.end && pos > row.start {
         pos = clamp_boundary(value, pos - 1);
     }
     pos
@@ -1902,7 +1908,7 @@ fn move_rows(value: &str, rows: &[wrap::Row], cursor: usize, delta: isize, px: u
 /// The TextArea at `path` over `value`: its rows, font px and how many
 /// rows its viewport shows.
 fn textarea_geometry(s: &WidgetScene, path: &[u32], value: &str)
-    -> Option<(Vec<wrap::Row>, u16, usize)>
+    -> Option<(wrap::Rows, u16, usize)>
 {
     let w = widget_at_path(&s.tree, path)?;
     let node = layout_node_at_path(&s.layout_tree, path)?;
@@ -2232,8 +2238,8 @@ fn follow_caret_at(s: &mut WidgetScene, path: &[u32], e: &InputEditState) {
         let cur = e.cursor.min(e.value.len());
         let (row, rstart) = match textarea_geometry(s, path, &e.value) {
             Some((rows, _, _)) => {
-                let r = wrap::row_of(&rows, cur);
-                (r, rows[r].start)
+                let r = rows.row_of(&e.value, cur);
+                (r, rows.get(&e.value, r).start)
             }
             None => (e.value[..cur].matches('\n').count(), line_start(&e.value, cur)),
         };
@@ -2524,11 +2530,11 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
             let scroll = ((scene.scroll_y / line_h) as usize).min(max_scroll);
             let row = ((y - top_y).max(0) as u32 / line_h) as usize;
             let ri = (scroll + row).min(rows.len().saturating_sub(1));
-            let r = rows[ri];
+            let r = rows.get(value, ri);
             let mut at = r.start + byte_at_x_px(&value[r.start..r.end], style, px,
                                                 (x - text_x).max(0) as u32);
             // A click past the end of a continued row stays on that row.
-            if wrap::continues(&rows, ri) && at == r.end && at > r.start {
+            if rows.continues(ri) && at == r.end && at > r.start {
                 at = clamp_boundary(value, at - 1);
             }
             Some(at)

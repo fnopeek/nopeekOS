@@ -526,8 +526,7 @@ pub(super) fn textarea_wraps<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -
 /// broken at the text column with `Modifier::Wrap`. Layout, render,
 /// caret-follow, hit test and the arrow keys all take their rows from
 /// here.
-pub(super) fn textarea_rows<'a, M>(value: &str, rect: Rect, mods: M)
-    -> alloc::vec::Vec<super::wrap::Row>
+pub(super) fn textarea_rows<'a, M>(value: &str, rect: Rect, mods: M) -> super::wrap::Rows
 where M: IntoIterator<Item = &'a Modifier> + Copy
 {
     let wrap = textarea_wraps(mods).then(|| {
@@ -902,8 +901,8 @@ fn paint_node_eff(
             let (caret_row, caret_prefix) = match edit_state {
                 Some(e) => {
                     let cur = e.cursor.min(live.len());
-                    let r = super::wrap::row_of(&rows, cur);
-                    (Some(r), &live[rows[r].start..cur])
+                    let r = rows.row_of(live, cur);
+                    (Some(r), &live[rows.get(live, r).start..cur])
                 }
                 None => (None, ""),
             };
@@ -916,6 +915,8 @@ fn paint_node_eff(
             let total_rows = rows.len();
             let max_scroll = total_rows.saturating_sub(visible);
             let scroll = ((scroll_y / line_h) as usize).min(max_scroll);
+            // The rows on screen, found once for numbers and text.
+            let shown = rows.window(live, scroll, visible);
 
             // Line-number gutter: a right-aligned column of numbers and a
             // hairline separating it from the text. Drawn here rather than
@@ -927,14 +928,13 @@ fn paint_node_eff(
                 rast.rect(target,
                           Rect { x: rule_x, y: rect.y, w: hair, h: rect.h },
                           Fill::Solid(Token::Border));
-                for row in 0..visible {
-                    let ri = scroll + row;
-                    if ri >= total_rows { break; }
+                for &(ri, r) in &shown {
+                    let row = ri - scroll;
                     // A wrapped line is numbered once, on its first row.
-                    if !rows[ri].first { continue; }
+                    if !r.first { continue; }
                     let mut num = alloc::string::String::new();
                     let _ = core::fmt::Write::write_fmt(
-                        &mut num, format_args!("{}", rows[ri].line + 1));
+                        &mut num, format_args!("{}", r.line + 1));
                     let w = ceil_u32_local(crate::gui::text::measure_px(&num, style, px)) as i32;
                     let y = top_y + (row as u32 * line_h) as i32;
                     rast.text_px(target, &num, style, px, Token::OnSurfaceFaint,
@@ -970,14 +970,14 @@ fn paint_node_eff(
 
             // Paint the visible window of rows, colouring each row by the
             // spans covering its bytes (uncovered → default colour).
-            for (ri, r) in rows.iter().enumerate().skip(scroll).take(visible) {
+            for &(ri, r) in &shown {
                 let line = &live[r.start..r.end];
                 let line_start = r.start;
                 let row = ri - scroll;
                 let y = top_y + (row as u32 * line_h) as i32;
                 // A row that a wrap continues ends on the next row's start,
                 // not on a '\n'.
-                let cont = super::wrap::continues(&rows, ri);
+                let cont = rows.continues(ri);
                 // Selection highlight under the text (before glyphs so they
                 // stay on top). A selection crossing this line's end (the
                 // '\n') or an empty selected line gets a small trailing block.

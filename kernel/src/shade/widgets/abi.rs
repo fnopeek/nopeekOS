@@ -573,7 +573,9 @@ pub enum Modifier {
     /// column instead of scrolling sideways. A line breaks after its last
     /// space or tab that still fits, mid-word only when one word is wider
     /// than the column. Line numbers count the `\n`-separated lines; Up
-    /// and Down move by row, Home and End stay on the whole line.
+    /// and Down move by row, Home and End stay on the whole line. A value
+    /// longer than 256 KiB, or a column narrower than four glyphs, does
+    /// not wrap.
     Wrap,
     /// Things dragged with `npk_drag_start` may be dropped here. On
     /// release over this widget (the deepest one carrying it wins) the
