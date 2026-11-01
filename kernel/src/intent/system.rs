@@ -1293,7 +1293,7 @@ pub fn intent_gpu(args: &str) {
                             if s.kind == "AMD-Vi" { "flags" } else { "reason" }, f.reason);
                     }
                 }
-                None if !crate::gpu::iommu_wanted() => kprintln!("  IOMMU:    off (`set gpu_iommu on`, then reboot)"),
+                None if !crate::gpu::iommu_wanted() => kprintln!("  IOMMU:    off (`set gpu_iommu off` is set; remove it and reboot)"),
                 None => kprintln!("  IOMMU:    no device protected (a display driver's bus master does it; \
                                    see the boot log if it should have)"),
             }
@@ -1311,7 +1311,7 @@ pub fn intent_gpu(args: &str) {
         }
         "iommu protect" => {
             if !crate::gpu::iommu_wanted() {
-                kprintln!("[npk] gpu: `set gpu_iommu on` first");
+                kprintln!("[npk] gpu: `gpu_iommu off` is set");
                 return;
             }
             let Some(dev) = crate::drivers::pci::find_by_class(0x03, 0x00) else {
@@ -1328,7 +1328,7 @@ pub fn intent_gpu(args: &str) {
             if !crate::drivers::amd_vi::present() {
                 kprintln!("[npk] gpu: no AMD IOMMU described by the firmware");
             } else if !crate::gpu::iommu_wanted() {
-                kprintln!("[npk] gpu: `set gpu_iommu on` first");
+                kprintln!("[npk] gpu: `gpu_iommu off` is set");
             } else {
                 let r = match crate::drivers::amd_vi::status() {
                     Some(_) => crate::drivers::amd_vi::flush_all(),

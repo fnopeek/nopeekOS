@@ -625,7 +625,7 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
         if caps & CAP_BACKLIGHT != 0 { ", backlight" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
         else if crate::drivers::iommu::protected(dev) { ", native contexts for guests" }
-        else { ", native contexts need the IOMMU (set gpu_iommu on)" });
+        else { ", native contexts need the IOMMU (gpu_iommu off, or see the boot log)" });
     0
 }
 
@@ -1510,7 +1510,7 @@ pub fn native_refused() -> Option<&'static str> {
     if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
         return None;
     }
-    native_device().is_none().then_some("the card is not behind the IOMMU (set gpu_iommu on)")
+    native_device().is_none().then_some("the card is not behind the IOMMU (gpu_iommu off, or see the boot log)")
 }
 
 /// `npk_gpudev_capset`: the capset of the card (`struct

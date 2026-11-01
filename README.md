@@ -237,11 +237,12 @@ compiled at build time (`gpu_scene`, `gpu_shaders`). `gpu_intel_tgl` is
 i915 for Tiger Lake (display readout and takeover of the firmware
 framebuffer, all engines with execlists, DP audio). `gpu_amd_renoir` is
 amdgpu for Renoir/Lucienne (PSP firmware load, SMU, GFX, SDMA, VCN + JPEG
-video, GPU recovery); its display core (DC, DCN 2.1) runs only when
-`gpu_amd_renoir.dc` is set. On both, a microVM guest's Mesa reaches the
+video, GPU recovery); its display core (DC, DCN 2.1) drives the panel
+unless `set gpu_amd_renoir.dc off`. On both, a microVM guest's Mesa reaches the
 card through a **virtio-gpu native context:** the guest gets real 3D and
 hardware video decode, the module checks every command, and the kernel
-offers it only once the IOMMU confines the card (`set gpu_iommu on`).
+offers it only once the IOMMU confines the card (on unless
+`set gpu_iommu off`).
 
 **WiFi:** rtw88 (RTL8822CE), ported from Linux and kept as close to it as
 possible: firmware load, scan, roaming, A-MPDU aggregation and CCMP
@@ -506,8 +507,8 @@ nopeekOS/
    a module's memory grows only while it leaves the rest of the system
    its reserve, so a runaway module fails, not the machine
 7. **Devices behind the IOMMU:** VT-d / AMD-Vi can confine a device's
-   DMA to the pages it was given (today opt-in, for the GPU, with
-   `set gpu_iommu on`); guest native contexts require it
+   DMA to the pages it was given (for the GPU, on unless
+   `set gpu_iommu off`); guest native contexts require it
 8. **Secrets in the keyvault:** never a file, handed out by policy
 9. **Signed OTA:** signed manifests with rollback protection, every
    artifact checked against its SHA-384

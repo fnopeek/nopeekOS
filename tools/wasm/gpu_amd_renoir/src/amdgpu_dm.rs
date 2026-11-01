@@ -699,12 +699,22 @@ pub fn dm_hw_init(adev: &mut amdgpu_device) -> i32 {
     amdgpu_dm_init(adev)
 }
 
-/// Whether `set gpu_amd_renoir.dc on` (or `live`) asks for Display Core on
-/// this boot.
-pub fn dc_requested() -> bool {
+/// `gpu_amd_renoir.dc`: unset or `live` drives the display through DC,
+/// `on` brings DC up without taking the display, `off` leaves it out.
+fn dc_mode() -> &'static [u8] {
     let mut buf = [0u8; 8];
     let n = npk_sys::config_get(b"gpu_amd_renoir.dc", &mut buf);
-    n > 0 && matches!(&buf[..n as usize], b"on" | b"1" | b"live")
+    if n <= 0 { return b"live"; }
+    match &buf[..n as usize] {
+        b"off" | b"0" => b"off",
+        b"on" | b"1" => b"on",
+        _ => b"live",
+    }
+}
+
+/// Whether Display Core comes up on this boot.
+pub fn dc_requested() -> bool {
+    dc_mode() != b"off"
 }
 
 /// What `dm_hw_init` built and found, one line per object, for reading
@@ -896,11 +906,9 @@ pub fn dm_read_firmware_scanout(adev: &amdgpu_device, dc: &crate::dc::dc) -> Opt
     None
 }
 
-/// Whether `set gpu_amd_renoir.dc live` asks DC to drive the display.
+/// Whether DC drives the display (see `dc_mode`).
 pub fn dc_live_requested() -> bool {
-    let mut buf = [0u8; 8];
-    let n = npk_sys::config_get(b"gpu_amd_renoir.dc", &mut buf);
-    n > 0 && &buf[..n as usize] == b"live"
+    dc_mode() == b"live"
 }
 
 /// The framebuffer the kernel draws into, as a DRM framebuffer gives it to

@@ -607,7 +607,7 @@ pub fn iommu_probe() {
         return;
     };
     if !crate::drivers::iommu::protected(dev) {
-        crate::kprintln!("[npk] iommu test: the card is not behind its IOMMU (`set gpu_iommu on`, then reboot)");
+        crate::kprintln!("[npk] iommu test: the card is not behind its IOMMU (`gpu_iommu off`, or see the boot log)");
         return;
     }
     if !gpudev::scenes_offered() {
