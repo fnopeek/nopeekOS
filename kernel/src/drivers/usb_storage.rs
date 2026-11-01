@@ -237,11 +237,12 @@ impl Data<'_> {
 }
 
 /// A transport failure: the device needs `reset_recovery`.
-struct Broken;
+/// Where the transport broke, and the transfer error if one caused it.
+struct Broken(&'static str, Option<MscError>);
 
 fn moved(r: Result<usize, MscError>) -> Result<Result<usize, MscError>, Broken> {
     match r {
-        Err(MscError::Gone) => Err(Broken),
+        Err(MscError::Gone) => Err(Broken("gone", Some(MscError::Gone))),
         r => Ok(r),
     }
 }
@@ -253,8 +254,8 @@ fn command(c: &Claim, lun: u8, cdb: &[u8], mut data: Data<'_>) -> Result<usize, 
     match transport(c, lun, cdb, &mut data) {
         Ok(Ok(n)) => Ok(n),
         Ok(Err(())) => Err(request_sense(c, lun)),
-        Err(Broken) => {
-            reset_recovery(c);
+        Err(b) => {
+            reset_recovery(c, &b);
             Err(if xhci::msc_subclass(c.pipe).is_none() { Error::Gone } else { Error::Io })
         }
     }
@@ -265,7 +266,7 @@ fn command(c: &Claim, lun: u8, cdb: &[u8], mut data: Data<'_>) -> Result<usize, 
 fn transport(c: &Claim, lun: u8, cdb: &[u8], data: &mut Data<'_>) -> Result<Result<usize, ()>, Broken> {
     let pipe = c.pipe;
     let len = data.len();
-    if len > MSC_MAX_XFER || cdb.len() > 16 { return Err(Broken); }
+    if len > MSC_MAX_XFER || cdb.len() > 16 { return Err(Broken("size", None)); }
     // `usb_stor_pad12_command`: ATAPI and SFF-8070i take 12-byte commands.
     let cmd_len = match c.subclass {
         USB_SC_8020 | USB_SC_8070 => 12,
@@ -280,10 +281,10 @@ fn transport(c: &Claim, lun: u8, cdb: &[u8], data: &mut Data<'_>) -> Result<Resu
     cbw[13] = lun;
     cbw[14] = cmd_len as u8;
     cbw[15..15 + cdb.len()].copy_from_slice(cdb);
-    xhci::msc_buf_write(pipe, 0, &cbw).map_err(|_| Broken)?;
+    xhci::msc_buf_write(pipe, 0, &cbw).map_err(|e| Broken("cbw", Some(e)))?;
     match moved(xhci::msc_transfer(pipe, false, US_BULK_CB_WRAP_LEN, WRAP_TIMEOUT_MS))? {
         Ok(US_BULK_CB_WRAP_LEN) => {}
-        _ => return Err(Broken),
+        r => return Err(Broken("cbw", r.err())),
     }
 
     // Data stage. A stall ends it early; the CSW still follows.
@@ -291,17 +292,17 @@ fn transport(c: &Claim, lun: u8, cdb: &[u8], data: &mut Data<'_>) -> Result<Resu
     if len > 0 {
         let dir_in = matches!(data, Data::In(_));
         if let Data::Out(b) = data {
-            xhci::msc_buf_write(pipe, 0, b).map_err(|_| Broken)?;
+            xhci::msc_buf_write(pipe, 0, b).map_err(|e| Broken("data", Some(e)))?;
         }
         match moved(xhci::msc_transfer(pipe, dir_in, len, SD_TIMEOUT_MS))? {
             Ok(n) => done = n,
             Err(MscError::Stall) => {
-                if !xhci::msc_clear_halt(pipe, dir_in) { return Err(Broken); }
+                if !xhci::msc_clear_halt(pipe, dir_in) { return Err(Broken("data clear halt", None)); }
             }
-            Err(_) => return Err(Broken),
+            Err(e) => return Err(Broken("data", Some(e))),
         }
         if let Data::In(b) = data {
-            xhci::msc_buf_read(pipe, 0, &mut b[..done]).map_err(|_| Broken)?;
+            xhci::msc_buf_read(pipe, 0, &mut b[..done]).map_err(|e| Broken("data", Some(e)))?;
         }
     }
 
@@ -309,19 +310,19 @@ fn transport(c: &Claim, lun: u8, cdb: &[u8], data: &mut Data<'_>) -> Result<Resu
     let mut csw = [0u8; US_BULK_CS_WRAP_LEN];
     let mut got = moved(xhci::msc_transfer(pipe, true, US_BULK_CS_WRAP_LEN, WRAP_TIMEOUT_MS))?;
     if got == Err(MscError::Stall) {
-        if !xhci::msc_clear_halt(pipe, true) { return Err(Broken); }
+        if !xhci::msc_clear_halt(pipe, true) { return Err(Broken("csw clear halt", None)); }
         got = moved(xhci::msc_transfer(pipe, true, US_BULK_CS_WRAP_LEN, WRAP_TIMEOUT_MS))?;
     }
-    if got != Ok(US_BULK_CS_WRAP_LEN) { return Err(Broken); }
-    xhci::msc_buf_read(pipe, 0, &mut csw).map_err(|_| Broken)?;
+    if got != Ok(US_BULK_CS_WRAP_LEN) { return Err(Broken("csw", got.err())); }
+    xhci::msc_buf_read(pipe, 0, &mut csw).map_err(|e| Broken("csw", Some(e)))?;
     let sign = u32::from_le_bytes([csw[0], csw[1], csw[2], csw[3]]);
     let ctag = u32::from_le_bytes([csw[4], csw[5], csw[6], csw[7]]);
-    if sign != US_BULK_CS_SIGN || ctag != tag { return Err(Broken); }
+    if sign != US_BULK_CS_SIGN || ctag != tag { return Err(Broken("csw signature", None)); }
     match csw[12] {
         US_BULK_STAT_OK => Ok(Ok(done)),
         US_BULK_STAT_FAIL => Ok(Err(())),
         // Phase error or anything else.
-        _ => Err(Broken),
+        _ => Err(Broken("csw phase error", None)),
     }
 }
 
@@ -333,8 +334,8 @@ fn request_sense(c: &Claim, lun: u8) -> Error {
         Ok(Ok(n)) if n >= 14 => Error::Sense(b[2] & 0x0F, b[12], b[13]),
         Ok(Ok(n)) if n >= 3 => Error::Sense(b[2] & 0x0F, 0, 0),
         Ok(_) => Error::Io,
-        Err(Broken) => {
-            reset_recovery(c);
+        Err(b) => {
+            reset_recovery(c, &b);
             Error::Io
         }
     }
@@ -342,8 +343,11 @@ fn request_sense(c: &Claim, lun: u8) -> Error {
 
 /// `usb_stor_Bulk_reset`: Bulk-Only Mass Storage Reset, a pause, then both
 /// bulk endpoints cleared.
-fn reset_recovery(c: &Claim) {
-    kprintln!("[npk] usb-storage: pipe {} reset", c.pipe);
+fn reset_recovery(c: &Claim, why: &Broken) {
+    match why.1 {
+        Some(e) => kprintln!("[npk] usb-storage: pipe {} reset ({}: {:?})", c.pipe, why.0, e),
+        None => kprintln!("[npk] usb-storage: pipe {} reset ({})", c.pipe, why.0),
+    }
     if !xhci::msc_class_request(c.pipe, 0x21, US_BULK_RESET_REQUEST, 0, &mut []) {
         return;
     }

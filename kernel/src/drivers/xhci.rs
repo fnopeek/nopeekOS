@@ -2976,11 +2976,12 @@ fn msc_post(state: &mut XhciState, i: usize, dir_in: bool, len: usize) -> (u64, 
     for k in (0..trbs).rev() {
         let off = k * MSC_TRB_BYTES;
         let n = (len - off.min(len)).min(MSC_TRB_BYTES);
-        // TD Size (xHCI 4.11.2.4) left 0: these rings are not using it for
-        // anything the controller needs; the last TRB carries IOC.
-        let flags = if k + 1 == trbs { TRB_IOC } else { TRB_CHAIN };
+        let last = k + 1 == trbs;
+        let flags = if last { TRB_IOC } else { TRB_CHAIN };
         let c = if k == 0 { *cycle ^ 1 } else { *cycle };
-        write_trb(ring, first + k, m.buf.phys() + off as u64, n as u32, TRB_NORMAL | TRB_ISP | flags | c);
+        let size = td_remainder(state.hci_version, off, n, len, m.max_pkt as usize, !last);
+        write_trb(ring, first + k, m.buf.phys() + off as u64, n as u32 | (size << 17),
+            TRB_NORMAL | TRB_ISP | flags | c);
     }
     fence(Ordering::SeqCst);
     let (p, st, ctl) = read_trb(ring, first);
@@ -2996,6 +2997,20 @@ fn msc_post(state: &mut XhciState, i: usize, dir_in: bool, len: usize) -> (u64, 
     m.events.clear();
     ring_doorbell(state, slot, dci);
     (base + (first * 16) as u64, base + ((first + trbs - 1) * 16) as u64)
+}
+
+/// TD Size of a TRB (`xhci_td_remainder`, xHCI 4.11.2.4): the packets
+/// still to come after this TRB, or before 1.0 the bytes left in KiB.
+fn td_remainder(hci_version: u16, queued: usize, trb_len: usize, total: usize, max_pkt: usize, more: bool) -> u32 {
+    let r = if hci_version < 0x100 {
+        (total - queued) >> 10
+    } else if !more || trb_len == total {
+        0
+    } else {
+        let max_pkt = max_pkt.max(1);
+        total.div_ceil(max_pkt) - (queued + trb_len) / max_pkt
+    };
+    r.min(31) as u32
 }
 
 /// Stop the endpoint if `stop`, then move its dequeue pointer to the
