@@ -81,11 +81,9 @@ struct Strings {
     overwrite_b:  &'static str,
     replace:      &'static str,
     new_folder:   &'static str,
-    name_label:   &'static str,
     folder_title: &'static str,
     folder_hint:  &'static str,
     create:       &'static str,
-    folder_click_hint: &'static str,
 }
 
 const EN: Strings = Strings {
@@ -100,11 +98,9 @@ const EN: Strings = Strings {
     overwrite_b: "{} already exists in this folder.",
     replace:     "Replace",
     new_folder:  "New folder",
-    name_label:  "Name",
     folder_title: "New folder",
     folder_hint: "Folder name",
     create:      "Create",
-    folder_click_hint: "Click the field, then Enter \u{00b7} Esc cancels",
 };
 
 const DE: Strings = Strings {
@@ -119,11 +115,9 @@ const DE: Strings = Strings {
     overwrite_b: "{} gibt es in diesem Ordner schon.",
     replace:     "Ersetzen",
     new_folder:  "Neuer Ordner",
-    name_label:  "Name",
     folder_title: "Neuer Ordner",
     folder_hint: "Ordnername",
     create:      "Anlegen",
-    folder_click_hint: "Ins Feld klicken, dann Enter \u{00b7} Esc bricht ab",
 };
 
 fn s() -> &'static Strings {
@@ -212,6 +206,9 @@ struct Pick {
     /// that one already holds the filename and must survive the detour.
     new_folder: bool,
     folder_name: String,
+    /// Raised when a sheet opens or closes, so the field now on screen
+    /// takes the keyboard.
+    focus_seq: u32,
 }
 
 impl Pick {
@@ -238,6 +235,7 @@ impl Pick {
             confirm_overwrite: false,
             new_folder: false,
             folder_name: String::with_capacity(NAME_CAP),
+            focus_seq: 0,
         };
         p.name.push_str(clamp_str(suggest, NAME_CAP));
         p.reload();
@@ -348,6 +346,7 @@ impl Pick {
         let path = self.join(&name);
         let ok = pick_mkdir(&path);
         self.new_folder = false;
+        self.focus_seq += 1;
         if ok {
             self.enter_dir(path);
         } else {
@@ -462,51 +461,68 @@ const ROW_PAD: u16 = 4;
 /// Right-hand column: "4 items" / "12 KB" / "—".
 const COL_META_W: u16 = 96;
 const FIELD_H: u16 = 30;
+const HEADER_H: u16 = 36;
+
+const NODE_NAME:   u32 = 1;
+const NODE_FOLDER: u32 = 2;
 
 fn render(p: &Pick) -> Widget {
-    if p.confirm_overwrite {
-        return render_overwrite(p);
-    }
-    if p.new_folder {
-        return render_new_folder(p);
-    }
-
     let title = if p.mode == Mode::Save { s().save_title } else { s().open_title };
 
-    // Flat in the panel's own Column, with Flex(1) on the Scroll itself.
-    // `measure` reports only a 24 px floor for a scroll container on its
-    // axis (that's what lets a flex parent size it), so a Flex wrapper
-    // around an unflexed Scroll hands the list 24 px and squashes the
-    // rows. loft puts the Flex on the Scroll for the same reason.
-    let mut children: Vec<Widget> = Vec::with_capacity(9);
-    children.push(render_title_bar(title));
+    // Flush column, as in loft: the bands reach the window edges and the
+    // dividers sit directly between them.
+    let mut children: Vec<Widget> = Vec::with_capacity(7);
+    children.push(render_header(p, title));
     children.push(Widget::Divider);
-    children.push(render_toolbar(p));
-    children.push(Widget::Divider);
-    children.push(render_list(p));
 
-    if p.mode == Mode::Save {
-        children.push(Widget::Divider);
-        children.push(render_name_field(p));
+    // A sheet replaces toolbar, list and footer, so its field is the only
+    // editable widget and `InputChange` stays unambiguous.
+    let sheet = if p.confirm_overwrite {
+        Some(render_overwrite(p))
+    } else if p.new_folder {
+        Some(render_new_folder(p))
+    } else {
+        None
+    };
+    match sheet {
+        Some(card) => children.push(Widget::Column {
+            children:  alloc::vec![Widget::Spacer { flex: 1 }, card, Widget::Spacer { flex: 1 }],
+            spacing:   0,
+            align:     Align::Center,
+            modifiers: alloc::vec![Modifier::Flex(1), Modifier::Padding(Padding::Lg.as_u16())],
+        }),
+        None => {
+            children.push(render_toolbar(p));
+            children.push(Widget::Divider);
+            children.push(render_list(p));
+            children.push(Widget::Divider);
+            children.push(render_footer(p));
+        }
     }
 
-    children.push(Widget::Divider);
-    children.push(render_footer(p));
-
-    prefab::panel(children)
+    Widget::Column {
+        children,
+        spacing:   0,
+        align:     Align::Stretch,
+        modifiers: alloc::vec![],
+    }
 }
 
-/// Title row — icon + title, close button on the right.
-fn render_title_bar(title: &str) -> Widget {
+/// Top band: the 36 px menu-bar band of the other apps (UI_REFRESH §5),
+/// with the title in place of the menus. An overlay gets no window
+/// controls from the compositor, so the close button is ours.
+fn render_header(p: &Pick, title: &str) -> Widget {
+    let icon = if p.mode == Mode::Save { IconId::Folder } else { IconId::FolderOpen };
     Widget::Row {
         children: alloc::vec![
             Widget::Icon {
-                id:        IconId::Folder,
+                id:        icon,
                 size:      16,
-                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
+                modifiers: alloc::vec![
+                    Modifier::Tint(Token::Accent),
+                    Modifier::Padding(Padding::Xs.as_u16()),
+                ],
             },
-            // Body, not Title: Title is 24 px bold and shouted over a
-            // dialog whose every other line is 14 px.
             Widget::Text {
                 content:   title.to_string(),
                 style:     TextStyle::Body,
@@ -515,57 +531,37 @@ fn render_title_bar(title: &str) -> Widget {
             Widget::Spacer { flex: 1 },
             prefab::icon_button(IconId::X, 16, Some(ActionId(ACT_CANCEL)), None),
         ],
-        spacing:   Spacing::Sm.as_u16(),
-        align:     Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
-    }
-}
-
-/// Back / up / breadcrumb, with "New folder" pinned right.
-fn render_toolbar(p: &Pick) -> Widget {
-    let can_go_up = !p.dir.is_empty();
-    Widget::Row {
-        children: alloc::vec![
-            nav_icon(IconId::ArrowLeft, ACT_BACK, !p.history.is_empty()),
-            nav_icon(IconId::ArrowUp,   ACT_PARENT, can_go_up),
-            prefab::breadcrumb(&crumbs(&p.dir)),
-            Widget::Spacer { flex: 1 },
-            // Only when saving. Opening an existing file has no use for a
-            // new directory, and offering it there just invites a stray
-            // write on a dialog that is meant to be read-only.
-            if p.mode == Mode::Save { new_folder_button() } else { Widget::Spacer { flex: 0 } },
-        ],
-        spacing:   Spacing::Xs.as_u16(),
-        align:     Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
-    }
-}
-
-fn new_folder_button() -> Widget {
-    Widget::Row {
-        children: alloc::vec![
-            Widget::Icon {
-                id:        IconId::Folders,
-                size:      16,
-                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
-            },
-            Widget::Text {
-                content:   s().new_folder.to_string(),
-                style:     TextStyle::Body,
-                modifiers: alloc::vec![],
-            },
-        ],
         spacing:   Spacing::Xs.as_u16(),
         align:     Align::Center,
         modifiers: alloc::vec![
             Modifier::Padding(Padding::Xs.as_u16()),
-            Modifier::Rounded(Radius::Sm.as_u8()),
-            Modifier::OnClick(ActionId(ACT_NEW_FOLDER)),
-            Modifier::Hover(alloc::vec![
-                Modifier::Background(Token::SurfaceHover),
-                Modifier::Rounded(Radius::Sm.as_u8()),
-            ]),
+            Modifier::MinHeight(HEADER_H),
+            Modifier::Background(Token::SurfaceElevated),
         ],
+    }
+}
+
+/// Back / up / breadcrumb; in save mode a new-folder button on the right.
+fn render_toolbar(p: &Pick) -> Widget {
+    let mut children = alloc::vec![
+        nav_icon(IconId::ArrowLeft, ACT_BACK, !p.history.is_empty()),
+        nav_icon(IconId::ArrowUp,   ACT_PARENT, !p.dir.is_empty()),
+        prefab::breadcrumb(&crumbs(&p.dir)),
+        Widget::Spacer { flex: 1 },
+    ];
+    // Opening has no use for a new directory, and offering it there
+    // invites a stray write on a dialog that is meant to be read-only.
+    if p.mode == Mode::Save {
+        let mut add = prefab::button(s().new_folder, prefab::ButtonStyle::Ghost,
+                                     ActionId(ACT_NEW_FOLDER));
+        if let Widget::Button { icon, .. } = &mut add { *icon = IconId::Plus; }
+        children.push(add);
+    }
+    Widget::Row {
+        children,
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
     }
 }
 
@@ -716,7 +712,7 @@ fn meta_cell(e: &Entry) -> Widget {
         style:     TextStyle::Mono,
         modifiers: alloc::vec![
             Modifier::MinWidth(COL_META_W),
-            Modifier::Tint(Token::OnSurfaceFaint),
+            Modifier::Tint(Token::OnSurfaceMuted),
         ],
     }
 }
@@ -729,79 +725,80 @@ fn chevron(show: bool) -> Widget {
     }
 }
 
-/// "Name" label + the field, separated from the list so it reads as the
-/// thing you are creating rather than another list entry. A known
-/// extension trails the caret dimmed, so it reads as a suffix, not as
-/// part of the name you are typing.
-fn render_name_field(p: &Pick) -> Widget {
-    // One field, whole filename. `measure` floors an Input at 120 px so
-    // empty fields don't collapse, so a separate dimmed extension beside
-    // it would drift away from a short name. A single field also lets the
-    // user change the extension, which "save as" wants.
-    let field: Vec<Widget> = alloc::vec![
-        Widget::Input {
-            value:       p.name.clone(),
-            placeholder: s().name_hint.to_string(),
-            on_submit:   ActionId(ACT_NAME_SUBMIT),
-            modifiers:   alloc::vec![Modifier::Autofocus, Modifier::Flex(1)],
-        },
-    ];
-
+/// The framed text field of loft's toolbar (UI_REFRESH §3 `text_field`).
+/// `focus` raises a focus request with that number; 0 asks for nothing.
+fn text_field(value: &str, hint: &str, on_submit: u32, node: u32, autofocus: bool,
+              focus: u32) -> Widget {
+    let mut mods = alloc::vec![Modifier::NodeId(NodeId(node)), Modifier::Flex(1)];
+    if autofocus { mods.push(Modifier::Autofocus); }
+    if focus != 0 { mods.push(Modifier::FocusRequest(focus)); }
     Widget::Row {
-        children: alloc::vec![
-            Widget::Text {
-                content:   s().name_label.to_string(),
-                style:     TextStyle::Body,
-                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
-            },
-            Widget::Row {
-                children:  field,
-                spacing:   0,
-                align:     Align::Center,
-                modifiers: alloc::vec![
-                    Modifier::Flex(1),
-                    Modifier::MinHeight(FIELD_H),
-                    Modifier::Padding(Padding::Xs.as_u16()),
-                    Modifier::Rounded(Radius::Md.as_u8()),
-                    Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
-                    Modifier::Focus(alloc::vec![
-                        Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
-                    ]),
-                ],
-            },
-        ],
-        spacing:   Spacing::Sm.as_u16(),
+        children: alloc::vec![Widget::Input {
+            value:       value.to_string(),
+            placeholder: hint.to_string(),
+            on_submit:   ActionId(on_submit),
+            modifiers:   mods,
+        }],
+        spacing:   0,
         align:     Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+        modifiers: alloc::vec![
+            Modifier::Flex(1),
+            Modifier::PaddingXY { x: 8, y: 0 },
+            Modifier::MinHeight(FIELD_H),
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
+            Modifier::Focus(alloc::vec![
+                Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
+                Modifier::Ring { token: Token::AccentRing, width: 3 },
+            ]),
+        ],
     }
 }
 
-/// The two buttons, right-aligned. No key-hint strip: the arrows, Enter
-/// and Esc do what they do everywhere, and spelling that out under every
-/// dialog is noise.
-fn render_footer(p: &Pick) -> Widget {
-    let confirm = if p.mode == Mode::Save { s().save_btn } else { s().open_btn };
-    // A button that looks live but does nothing is worse than one that
-    // says it can't act yet: save needs a name, open needs a file picked.
-    let ready = match p.mode {
-        Mode::Save => can_commit_name(&p.name),
-        Mode::Open => p.selected_entry().map(|e| !e.is_dir).unwrap_or(false),
-    };
-    let confirm_btn = if ready {
-        prefab::button(confirm, prefab::ButtonStyle::Primary, ActionId(ACT_CONFIRM))
-    } else {
-        prefab::button(confirm, prefab::ButtonStyle::Ghost, prefab::NO_ACTION)
-    };
+/// Cancel and the main action. The main action is always the filled
+/// button; until it can act it is disabled, not restyled.
+fn buttons(cancel_act: u32, label: &str, style: prefab::ButtonStyle, act: u32,
+           ready: bool) -> [Widget; 2] {
+    let mut main = prefab::button(label, style, ActionId(act));
+    if !ready {
+        if let Widget::Button { modifiers, .. } = &mut main {
+            modifiers.push(Modifier::Disabled(alloc::vec![Modifier::Opacity(110)]));
+        }
+    }
+    [
+        prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(cancel_act)),
+        main,
+    ]
+}
 
+/// One band at the bottom: the file name (save) or the picked file
+/// (open), then the buttons.
+fn render_footer(p: &Pick) -> Widget {
+    let (lead, label, ready) = match p.mode {
+        Mode::Save => (
+            text_field(&p.name, s().name_hint, ACT_NAME_SUBMIT, NODE_NAME, true, p.focus_seq),
+            s().save_btn,
+            can_commit_name(&p.name),
+        ),
+        Mode::Open => {
+            let file = p.selected_entry().filter(|e| !e.is_dir);
+            let lead = Widget::Text {
+                content:   file.map(|e| e.name.clone()).unwrap_or_default(),
+                style:     TextStyle::Body,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted), Modifier::Flex(1)],
+            };
+            (lead, s().open_btn, file.is_some())
+        }
+    };
+    let [cancel, main] = buttons(ACT_CANCEL, label, prefab::ButtonStyle::Primary, ACT_CONFIRM, ready);
     Widget::Row {
-        children: alloc::vec![
-            Widget::Spacer { flex: 1 },
-            prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_CANCEL)),
-            confirm_btn,
-        ],
+        children:  alloc::vec![lead, cancel, main],
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
-        modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+        modifiers: alloc::vec![
+            Modifier::Padding(Padding::Sm.as_u16()),
+            Modifier::Background(Token::SurfaceElevated),
+        ],
     }
 }
 
@@ -811,37 +808,34 @@ fn can_commit_name(name: &str) -> bool {
     !n.is_empty() && !n.contains('/') && n != "." && n != ".."
 }
 
-/// Name-the-new-folder sheet. The list and the save field are hidden
-/// while this is up, so there is still exactly one editable widget and
-/// `InputChange` stays unambiguous.
+/// Card body as in loft's dialogs: text, then the buttons right-aligned.
+fn sheet_body(top: Widget, buttons: [Widget; 2]) -> Widget {
+    let [cancel, main] = buttons;
+    Widget::Column {
+        children: alloc::vec![
+            top,
+            Widget::Row {
+                children:  alloc::vec![Widget::Spacer { flex: 1 }, cancel, main],
+                spacing:   Spacing::Sm.as_u16(),
+                align:     Align::Center,
+                modifiers: alloc::vec![],
+            },
+        ],
+        spacing:   Spacing::Md.as_u16(),
+        align:     Align::Stretch,
+        modifiers: alloc::vec![],
+    }
+}
+
 fn render_new_folder(p: &Pick) -> Widget {
+    let field = text_field(&p.folder_name, s().folder_hint, ACT_FOLDER_CREATE, NODE_FOLDER,
+                           false, p.focus_seq);
+    let ready = can_commit_name(&p.folder_name);
     prefab::dialog(
         s().folder_title,
-        Widget::Column {
-            children: alloc::vec![
-                // Plain `input`, not the autofocus variant: the compositor
-                // only auto-focuses on a window's first commit, and this
-                // sheet appears later — hence the hint below.
-                prefab::input(&p.folder_name, s().folder_hint, prefab::InputKind::Text,
-                              ActionId(ACT_FOLDER_CREATE), None),
-                Widget::Row {
-                    children: alloc::vec![
-                        Widget::Spacer { flex: 1 },
-                        prefab::button(s().cancel, prefab::ButtonStyle::Ghost,
-                                       ActionId(ACT_FOLDER_CANCEL)),
-                        prefab::button(s().create, prefab::ButtonStyle::Primary,
-                                       ActionId(ACT_FOLDER_CREATE)),
-                    ],
-                    spacing:   Spacing::Sm.as_u16(),
-                    align:     Align::Center,
-                    modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
-                },
-            ],
-            spacing:   Spacing::Md.as_u16(),
-            align:     Align::Stretch,
-            modifiers: alloc::vec![],
-        },
-        Some(s().folder_click_hint),
+        sheet_body(field, buttons(ACT_FOLDER_CANCEL, s().create, prefab::ButtonStyle::Primary,
+                                  ACT_FOLDER_CREATE, ready)),
+        None,
         360,
     )
 }
@@ -849,26 +843,9 @@ fn render_new_folder(p: &Pick) -> Widget {
 fn render_overwrite(p: &Pick) -> Widget {
     prefab::dialog(
         s().overwrite_t,
-        Widget::Column {
-            children: alloc::vec![
-                prefab::body(&fill(s().overwrite_b, &p.full_name())),
-                Widget::Row {
-                    children: alloc::vec![
-                        Widget::Spacer { flex: 1 },
-                        prefab::button(s().cancel, prefab::ButtonStyle::Ghost,
-                                       ActionId(ACT_OVERWRITE_CANCEL)),
-                        prefab::button(s().replace, prefab::ButtonStyle::Destructive,
-                                       ActionId(ACT_OVERWRITE)),
-                    ],
-                    spacing:   Spacing::Sm.as_u16(),
-                    align:     Align::Center,
-                    modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
-                },
-            ],
-            spacing:   Spacing::Md.as_u16(),
-            align:     Align::Stretch,
-            modifiers: alloc::vec![],
-        },
+        sheet_body(prefab::body(&fill(s().overwrite_b, &p.full_name())),
+                   buttons(ACT_OVERWRITE_CANCEL, s().replace, prefab::ButtonStyle::Destructive,
+                           ACT_OVERWRITE, true)),
         None,
         360,
     )
@@ -909,8 +886,8 @@ fn handle(p: &mut Pick, ev: Event, payload: &str) -> Outcome {
     match ev {
         Event::Key(KeyCode::Escape) => {
             // Back out of a sheet first; only a bare Esc cancels the dialog.
-            if p.confirm_overwrite { p.confirm_overwrite = false; return Outcome::Rerender; }
-            if p.new_folder { p.new_folder = false; return Outcome::Rerender; }
+            if p.confirm_overwrite { p.confirm_overwrite = false; p.focus_seq += 1; return Outcome::Rerender; }
+            if p.new_folder { p.new_folder = false; p.focus_seq += 1; return Outcome::Rerender; }
             answer("");
             Outcome::Done
         }
@@ -956,17 +933,18 @@ fn handle_action(p: &mut Pick, id: u32) -> Outcome {
         ACT_NEW_FOLDER => {
             p.folder_name.clear();
             p.new_folder = true;
+            p.focus_seq += 1;
             Outcome::Rerender
         }
         ACT_FOLDER_CREATE => finish(p.create_folder()),
-        ACT_FOLDER_CANCEL => { p.new_folder = false; Outcome::Rerender }
+        ACT_FOLDER_CANCEL => { p.new_folder = false; p.focus_seq += 1; Outcome::Rerender }
         ACT_OVERWRITE => {
             // Already asked — commit straight through.
             let path = p.join(&p.full_name());
             answer(&path);
             Outcome::Done
         }
-        ACT_OVERWRITE_CANCEL => { p.confirm_overwrite = false; Outcome::Rerender }
+        ACT_OVERWRITE_CANCEL => { p.confirm_overwrite = false; p.focus_seq += 1; Outcome::Rerender }
         _ => {
             if id >= ACT_CRUMB_BASE {
                 let want = (id - ACT_CRUMB_BASE) as usize;
