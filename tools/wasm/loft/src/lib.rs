@@ -129,7 +129,6 @@ struct Strings {
     no_action:      &'static str,
     rename_title:   &'static str,
     rename_label:   &'static str,
-    rename_hint:    &'static str,
     cancel:         &'static str,
     confirm_rename: &'static str,
     folder_title:   &'static str,
@@ -213,7 +212,6 @@ struct Strings {
     /// `{}` = the extension without the dot.
     ow_always:      &'static str,
     ow_none:        &'static str,
-    ow_hint:        &'static str,
     assoc_failed:   &'static str,
     // New file, duplicate.
     new_file:       &'static str,
@@ -262,7 +260,6 @@ struct Strings {
     br_title:       &'static str,
     br_find:        &'static str,
     br_replace:     &'static str,
-    br_hint:        &'static str,
     /// `{}` = how many more are not shown.
     br_more:        &'static str,
     br_clash:       &'static str,
@@ -284,14 +281,13 @@ const EN: Strings = Strings {
     copy_path: "Copy path", properties: "Properties",
     no_action: "(no action)",
     rename_title: "Rename", rename_label: "New name:",
-    rename_hint: "Click the field, then Enter · Esc cancels",
     cancel: "Cancel", confirm_rename: "Rename",
     folder_title: "New folder", folder_label: "Folder name:",
     folder_default: "New folder", create: "Create",
     delete_title: "Delete permanently",
     delete_one: "Delete “{}” permanently?",
     delete_many: "Delete {} items permanently?",
-    delete_hint: "This cannot be undone · Esc cancels",
+    delete_hint: "This cannot be undone.",
     delete: "Delete",
     props_title: "Properties",
     props_name: "Name", props_type: "Type", props_size: "Size",
@@ -336,7 +332,7 @@ const EN: Strings = Strings {
     open_with: "Open with…", ow_title: "Open with",
     ow_always: "Always use for .{} files",
     ow_none: "No app is installed that can open files",
-    ow_hint: "Click an app · Esc cancels",
+   
     assoc_failed: "Could not save the association",
     new_file: "New file…", file_title: "New file", file_label: "File name:",
     file_default: "Untitled.txt", file_failed: "Could not create file",
@@ -347,7 +343,7 @@ const EN: Strings = Strings {
     cf_text: "“{}” already exists here.",
     cf_replace: "Replace", cf_keep: "Keep both", cf_skip: "Skip",
     cf_all: "Same for all",
-    cf_hint: "Replace moves the existing item to the trash · Esc stops",
+    cf_hint: "Replace moves the existing item to the trash.",
     deleting: "Deleting… {} left · Esc stops",
     delete_stopped: "Stopped after {} deleted",
     busy: "Still deleting, wait or press Esc",
@@ -358,7 +354,7 @@ const EN: Strings = Strings {
     bm_added: "Bookmarked: {}",
     preview_pane: "Preview pane", preview_none: "Nothing selected",
     br_title: "Rename {} items", br_find: "Find:", br_replace: "Replace with:",
-    br_hint: "Enter renames · Esc cancels",
+   
     br_more: "… and {} more",
     br_clash: "Two items would get the same name, or a name is taken or invalid",
     renamed: "Renamed: {}",
@@ -1660,7 +1656,7 @@ impl Loft {
                 if job.apply_all { job.policy = Some(c); }
                 c
             } else {
-                self.dialog = Some(Dialog::Clash { name });
+                self.open_dialog(Dialog::Clash { name });
                 job.asked = Some(src);
                 self.paste = Some(job);
                 return;
@@ -1723,7 +1719,7 @@ impl Loft {
         if targets.is_empty() { return; }
         self.close_menus();
         if self.in_trash_tree() {
-            self.dialog = Some(Dialog::ConfirmDelete(targets));
+            self.open_dialog(Dialog::ConfirmDelete(targets));
         } else {
             self.move_to_trash(targets);
         }
@@ -1821,7 +1817,7 @@ impl Loft {
         let targets = self.targets();
         if targets.is_empty() { return; }
         self.close_menus();
-        self.dialog = Some(Dialog::ConfirmDelete(targets));
+        self.open_dialog(Dialog::ConfirmDelete(targets));
     }
 
     fn request_empty_trash(&mut self) {
@@ -1947,13 +1943,13 @@ impl Loft {
             self.close_menus();
             self.find_buf.clear();
             self.repl_buf.clear();
-            self.dialog = Some(Dialog::BatchRename(targets));
+            self.open_dialog(Dialog::BatchRename(targets));
             return;
         }
         let Some(t) = self.cursor_target() else { return };
         self.close_menus();
         self.set_name_buf(basename(&t.name));
-        self.dialog = Some(Dialog::Name(NameKind::Rename { old: t.full }));
+        self.open_dialog(Dialog::Name(NameKind::Rename { old: t.full }));
     }
 
     fn open_new_folder(&mut self) {
@@ -1961,7 +1957,7 @@ impl Loft {
         let dest = unique_in(&self.current, s().folder_default, true);
         let name = basename(&dest).to_string();
         self.set_name_buf(&name);
-        self.dialog = Some(Dialog::Name(NameKind::NewFolder));
+        self.open_dialog(Dialog::Name(NameKind::NewFolder));
     }
 
     fn open_new_file(&mut self) {
@@ -1969,7 +1965,7 @@ impl Loft {
         let dest = unique_in(&self.current, s().file_default, false);
         let name = basename(&dest).to_string();
         self.set_name_buf(&name);
-        self.dialog = Some(Dialog::Name(NameKind::NewFile));
+        self.open_dialog(Dialog::Name(NameKind::NewFile));
     }
 
     fn open_properties(&mut self) {
@@ -1989,7 +1985,13 @@ impl Loft {
             location: if parent.is_empty() { "/".to_string() } else { parent },
         };
         self.close_menus();
-        self.dialog = Some(Dialog::Properties(props));
+        self.open_dialog(Dialog::Properties(props));
+    }
+
+    /// Show `d`; its first field takes the keyboard focus.
+    fn open_dialog(&mut self, d: Dialog) {
+        self.dialog = Some(d);
+        self.focus_seq = self.focus_seq.wrapping_add(1).max(1);
     }
 
     /// Enter / the dialog's primary button.
@@ -2000,16 +2002,19 @@ impl Loft {
             // Enter on a clash keeps both, the choice that loses nothing.
             Some(Dialog::Clash { .. }) => self.run_paste(Some(Clash::Keep)),
             Some(Dialog::BatchRename(targets)) => self.commit_batch_rename(targets),
-            Some(Dialog::OpenWith { .. }) | Some(Dialog::Properties(_)) | None => {}
+            Some(Dialog::OpenWith { target, apps, always }) => {
+                self.dialog = Some(Dialog::OpenWith { target, apps, always });
+            }
+            Some(Dialog::Properties(_)) | None => {}
         }
     }
 
     /// Apply the name dialog. On a bad or taken name the dialog stays up.
     fn commit_name(&mut self, kind: NameKind) {
         let new = self.name_buf.trim().to_string();
-        if new.is_empty() || new.contains('/') || new == "." || new == ".." {
+        if !name_ok(&new) {
             self.say(s().name_invalid.to_string(), true);
-            self.dialog = Some(Dialog::Name(kind));
+            self.open_dialog(Dialog::Name(kind));
             return;
         }
         let dir = match &kind {
@@ -2022,7 +2027,7 @@ impl Loft {
         }
         if path_exists(&dest) {
             self.say(s().name_exists.to_string(), true);
-            self.dialog = Some(Dialog::Name(kind));
+            self.open_dialog(Dialog::Name(kind));
             return;
         }
         let done = match &kind {
@@ -2088,7 +2093,7 @@ impl Loft {
         }
         if !ok {
             self.say(s().br_clash.to_string(), true);
-            self.dialog = Some(Dialog::BatchRename(targets));
+            self.open_dialog(Dialog::BatchRename(targets));
             return;
         }
         let (mut done, mut failed) = (0usize, 0usize);
@@ -2204,7 +2209,7 @@ impl Loft {
             .filter(|a| a.kind == app_catalog::EntryKind::Module)
             .map(|a| (a.launch_name, a.display_name))
             .collect();
-        self.dialog = Some(Dialog::OpenWith { target, apps, always: false });
+        self.open_dialog(Dialog::OpenWith { target, apps, always: false });
     }
 
     /// The user picked app `i` in the "Open with" dialog.
@@ -2814,14 +2819,29 @@ fn render_dialog(lf: &Loft, d: &Dialog) -> Widget {
     }
 }
 
-/// Cancel plus a primary button, right-aligned.
-fn dialog_buttons(primary: Option<(&str, prefab::ButtonStyle)>, cancel: &str) -> Widget {
-    let mut children = alloc::vec![
-        Widget::Spacer { flex: 1 },
-        prefab::button(cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_DIALOG_CANCEL)),
-    ];
-    if let Some((label, style)) = primary {
-        children.push(prefab::button(label, style, ActionId(ACT_DIALOG_SUBMIT)));
+/// A name a file or folder can take: not empty, no path.
+fn name_ok(name: &str) -> bool {
+    let n = name.trim();
+    !n.is_empty() && !n.contains('/') && n != "." && n != ".."
+}
+
+/// Cancel plus the main button, right-aligned. The main button is always
+/// filled; until it can act (`ready`) it is disabled, not restyled. With
+/// no main button the cancel one is the only way out and is filled itself.
+fn dialog_buttons(primary: Option<(&str, prefab::ButtonStyle, bool)>, cancel: &str) -> Widget {
+    let mut children = alloc::vec![Widget::Spacer { flex: 1 }];
+    match primary {
+        Some((label, style, ready)) => {
+            children.push(prefab::button(cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_DIALOG_CANCEL)));
+            let mut main = prefab::button(label, style, ActionId(ACT_DIALOG_SUBMIT));
+            if !ready {
+                if let Widget::Button { modifiers, .. } = &mut main {
+                    modifiers.push(Modifier::Disabled(alloc::vec![Modifier::Opacity(110)]));
+                }
+            }
+            children.push(main);
+        }
+        None => children.push(prefab::button(cancel, prefab::ButtonStyle::Primary, ActionId(ACT_DIALOG_CANCEL))),
     }
     Widget::Row {
         children,
@@ -2840,24 +2860,48 @@ fn dialog_body(children: Vec<Widget>) -> Widget {
     }
 }
 
-/// Rename / new folder. Focus doesn't auto-jump on a re-commit, so the
-/// field may need a click before typing (the footer hint says so); Enter
-/// commits, Esc cancels.
+/// A framed field like the toolbar's (docs/spec/UI_REFRESH.md §3
+/// `text_field`). `focus` raises a focus request with that number; 0 asks
+/// for nothing.
+fn dialog_field(value: &str, node: u32, focus: u32) -> Widget {
+    let mut mods = alloc::vec![Modifier::NodeId(NodeId(node)), Modifier::Flex(1)];
+    if focus != 0 { mods.push(Modifier::FocusRequest(focus)); }
+    Widget::Row {
+        children: alloc::vec![Widget::Input {
+            value:       value.to_string(),
+            placeholder: String::new(),
+            on_submit:   ActionId(ACT_DIALOG_SUBMIT),
+            modifiers:   mods,
+        }],
+        spacing:   0,
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::PaddingXY { x: 8, y: 0 },
+            Modifier::MinHeight(FIELD_H),
+            Modifier::Background(Token::SurfaceMuted),
+            Modifier::Border { token: Token::Border, width: 1, radius: Radius::Md.as_u8() },
+            Modifier::Focus(alloc::vec![
+                Modifier::Border { token: Token::Accent, width: 1, radius: Radius::Md.as_u8() },
+                Modifier::Ring { token: Token::AccentRing, width: 3 },
+            ]),
+        ],
+    }
+}
+
+/// Rename / new folder / new file. The field has the focus as the dialog
+/// opens; Enter commits, Esc cancels.
 fn name_dialog(lf: &Loft, kind: &NameKind) -> Widget {
     let (title, label, ok) = match kind {
         NameKind::Rename { .. } => (s().rename_title, s().rename_label, s().confirm_rename),
         NameKind::NewFolder => (s().folder_title, s().folder_label, s().create),
         NameKind::NewFile => (s().file_title, s().file_label, s().create),
     };
-    let mut field = prefab::input_autofocus(&lf.name_buf, "name", prefab::InputKind::Text,
-                                            ActionId(ACT_DIALOG_SUBMIT), None);
-    tag_input(&mut field, NODE_NAME);
     let body = dialog_body(alloc::vec![
         Widget::Text { content: label.to_string(), style: TextStyle::Muted, modifiers: alloc::vec![] },
-        field,
-        dialog_buttons(Some((ok, prefab::ButtonStyle::Primary)), s().cancel),
+        dialog_field(&lf.name_buf, NODE_NAME, lf.focus_seq),
+        dialog_buttons(Some((ok, prefab::ButtonStyle::Primary, name_ok(&lf.name_buf))), s().cancel),
     ]);
-    prefab::dialog(title, body, Some(s().rename_hint), 360)
+    prefab::dialog(title, body, None, 360)
 }
 
 fn confirm_dialog(targets: &[Target]) -> Widget {
@@ -2867,9 +2911,10 @@ fn confirm_dialog(targets: &[Target]) -> Widget {
     };
     let body = dialog_body(alloc::vec![
         Widget::Text { content: question, style: TextStyle::Body, modifiers: alloc::vec![] },
-        dialog_buttons(Some((s().delete, prefab::ButtonStyle::Destructive)), s().cancel),
+        Widget::Text { content: s().delete_hint.to_string(), style: TextStyle::Muted, modifiers: alloc::vec![] },
+        dialog_buttons(Some((s().delete, prefab::ButtonStyle::Destructive, true)), s().cancel),
     ]);
-    prefab::dialog(s().delete_title, body, Some(s().delete_hint), 360)
+    prefab::dialog(s().delete_title, body, None, 360)
 }
 
 fn properties_dialog(p: &Props) -> Widget {
@@ -2911,26 +2956,16 @@ fn open_with_dialog(target: &Target, apps: &[(String, String)], always: bool) ->
         });
     }
     rows.push(dialog_buttons(None, s().cancel));
-    prefab::dialog(s().ow_title, dialog_body(rows), Some(s().ow_hint), 360)
+    prefab::dialog(s().ow_title, dialog_body(rows), None, 360)
 }
 
 fn batch_rename_dialog(lf: &Loft, targets: &[Target]) -> Widget {
-    let field = |value: &str, node: u32, focus: bool| {
-        let mut mods = alloc::vec![Modifier::NodeId(NodeId(node))];
-        if focus { mods.push(Modifier::Autofocus); }
-        Widget::Input {
-            value:       value.to_string(),
-            placeholder: String::new(),
-            on_submit:   ActionId(ACT_DIALOG_SUBMIT),
-            modifiers:   mods,
-        }
-    };
     let muted = |t: &str| Widget::Text { content: t.to_string(), style: TextStyle::Muted, modifiers: alloc::vec![] };
     let mut rows = alloc::vec![
         muted(s().br_find),
-        field(&lf.find_buf, NODE_FIND, true),
+        dialog_field(&lf.find_buf, NODE_FIND, lf.focus_seq),
         muted(s().br_replace),
-        field(&lf.repl_buf, NODE_REPL, false),
+        dialog_field(&lf.repl_buf, NODE_REPL, 0),
     ];
     let names = lf.batch_names(targets);
     let changed: Vec<(&Target, &String)> = targets.iter().zip(names.iter())
@@ -2946,8 +2981,9 @@ fn batch_rename_dialog(lf: &Loft, targets: &[Target]) -> Widget {
     if changed.len() > PREVIEW_ROWS {
         rows.push(muted(&fill(s().br_more, &[&num(changed.len() - PREVIEW_ROWS)])));
     }
-    rows.push(dialog_buttons(Some((s().confirm_rename, prefab::ButtonStyle::Primary)), s().cancel));
-    prefab::dialog(&fill(s().br_title, &[&num(targets.len())]), dialog_body(rows), Some(s().br_hint), 420)
+    let ready = !changed.is_empty();
+    rows.push(dialog_buttons(Some((s().confirm_rename, prefab::ButtonStyle::Primary, ready)), s().cancel));
+    prefab::dialog(&fill(s().br_title, &[&num(targets.len())]), dialog_body(rows), None, 420)
 }
 
 fn clash_dialog(lf: &Loft, name: &str) -> Widget {
@@ -2974,9 +3010,10 @@ fn clash_dialog(lf: &Loft, name: &str) -> Widget {
             align:     Align::Center,
             modifiers: alloc::vec![],
         },
+        Widget::Text { content: s().cf_hint.to_string(), style: TextStyle::Muted, modifiers: alloc::vec![] },
         buttons,
     ]);
-    prefab::dialog(s().cf_title, body, Some(s().cf_hint), 400)
+    prefab::dialog(s().cf_title, body, None, 400)
 }
 
 fn prop_row(label: &str, value: &str) -> Widget {
@@ -4310,17 +4347,6 @@ fn sort_key_from(v: &str) -> Option<SortKey> {
         "type" => SortKey::Type, "modified" => SortKey::Modified,
         _ => return None,
     })
-}
-
-/// Give the first `Widget::Input` in `w` the NodeId `node`. True if found.
-fn tag_input(w: &mut Widget, node: u32) -> bool {
-    match w {
-        Widget::Input { modifiers, .. } => { modifiers.push(Modifier::NodeId(NodeId(node))); true }
-        Widget::Row { children, .. } | Widget::Column { children, .. } | Widget::Stack { children, .. } =>
-            children.iter_mut().any(|c| tag_input(c, node)),
-        Widget::Scroll { child, .. } => tag_input(child, node),
-        _ => false,
-    }
 }
 
 /// True if `path` lies inside directory `dir` (not `dir` itself).
