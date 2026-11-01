@@ -2895,8 +2895,8 @@ fn msc_probe(state: &mut XhciState, slot: u8, cfg: &[u8], m: MscIntfDesc) {
     if !usb_set_config(state, slot, config_val) {
         kprintln!("[npk] xhci: port {} mass storage: set configuration failed", path);
         crate::memory::deallocate_contiguous(phys, MSC_BUF_PAGES);
-        state.free_pages.push(in_ring);
-        state.free_pages.push(out_ring);
+        // The endpoints point at the rings until the slot is disabled, so
+        // they are not handed to another device before then.
         return;
     }
     let id = MSC_NEXT_ID.fetch_add(1, Ordering::Relaxed) as u32;
@@ -4163,10 +4163,18 @@ struct Evt {
 /// Does not write ERDP; `flush_erdp` does that once per pass, since an MMIO
 /// write per event is expensive.
 fn next_event(state: &mut XhciState) -> Option<Evt> {
-    let (param, status, control) = read_trb(state.evt_ring, state.evt_dequeue);
+    // The cycle bit first, then the rest (`xhci_handle_event`: read the
+    // flags, `rmb()`, then the event): read the other way round, an event
+    // the controller is writing gives the old pointer with the new cycle
+    // bit, and its completion goes to a TRB of the ring's last lap.
+    let off = state.evt_dequeue * 16;
+    let control = state.evt_ring.r32(off + 12);
     if control & TRB_CYCLE != state.evt_cycle {
         return None;
     }
+    fence(Ordering::Acquire);
+    let param = state.evt_ring.r32(off) as u64 | (state.evt_ring.r32(off + 4) as u64) << 32;
+    let status = state.evt_ring.r32(off + 8);
     state.evt_dequeue += 1;
     if state.evt_dequeue >= NUM_EVT_TRBS {
         state.evt_dequeue = 0;
