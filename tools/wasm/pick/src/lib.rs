@@ -864,9 +864,29 @@ fn folder_ok(dir: &str) -> bool {
 }
 
 /// `ext` itself only lists the drives; a file or folder goes on one of
-/// them (docs/spec/EXTERNAL_STORAGE.md).
+/// them, unless it is write-protected (docs/spec/EXTERNAL_STORAGE.md).
 fn can_save_in(dir: &str) -> bool {
-    dir != EXT
+    match dir.strip_prefix(EXT) {
+        Some("") => false,
+        Some(rest) if rest.starts_with('/') => !read_only_volume(rest[1..].split('/').next().unwrap_or("")),
+        _ => true,
+    }
+}
+
+/// Volume `label` is mounted read-only. Entries: label_len u16, read_only
+/// u8, total u64, free u64, label.
+fn read_only_volume(label: &str) -> bool {
+    let mut buf = alloc::vec![0u8; 4096];
+    let n = npk_sys::ext_volumes(&mut buf);
+    if n <= 0 { return false; }
+    let mut b = &buf[..n as usize];
+    while b.len() >= 19 {
+        let len = u16::from_le_bytes([b[0], b[1]]) as usize;
+        let Some(name) = b.get(19..19 + len) else { break };
+        if name == label.as_bytes() { return b[2] != 0; }
+        b = &b[19 + len..];
+    }
+    false
 }
 
 /// A name is committable when it's non-empty and names a file, not a path.

@@ -1,6 +1,6 @@
 [package]
 name = "pick"
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "File dialog portal — nopeekOS."
@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
+npk_sys = { path = "../sdk/npk_sys" }
 
 [dependencies.postcard]
 version = "1.0"
