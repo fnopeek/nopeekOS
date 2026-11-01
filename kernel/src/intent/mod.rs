@@ -2135,7 +2135,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "firefox" => {
             // The browsers are microvm apps, each with its own image and
-            // home image; what the user types or what drun spawns.
+            // home image; what the user types or what the launcher spawns.
             // `microvm` stays the dev/test surface (substrate self-test +
             // bare-boot diag).
             if require_cap(vault, &session, Rights::EXECUTE, "firefox") {

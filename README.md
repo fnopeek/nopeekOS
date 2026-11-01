@@ -54,7 +54,7 @@ an AMD Ryzen 5 5500U laptop) and in QEMU.
 
 ```
 # Desktop
-Mod+D                    # App launcher (drun): search + Enter to launch
+Mod+D                    # App launcher in the deck: search + Enter to launch
 Mod+F                    # Fullscreen for any window (Firefox: F11 / video too)
 loft                     # File browser: grid/list, copy/cut/paste, sortable columns
 spell                    # Text editor: tabs, syntax highlight, markdown preview
@@ -97,7 +97,7 @@ Everything npkFS stores is encrypted at rest.
  ┌────────────────────────────────────────────────────────────┐
  │  WASM apps & drivers (sandboxed, capability-gated)         │
  │  deck: the panel, status items, popup cards                │
- │  drun / loft / spell / iris / tune / snap / vault / link   │
+ │  loft / spell / iris / tune / snap / vault / link          │
  │  beak: from-scratch web browser (HTML/CSS/JS engine)       │
  │  gpu_intel_tgl / gpu_amd_renoir: GPU drivers (from Linux)  │
  │  wifi_rtl8822ce / wifid / acpi / i2c_hid / audio_hda       │
@@ -301,8 +301,7 @@ syntax highlight, markdown preview), `iris` (PNG viewer), `tune`
 (player: MP3 + WAV with the folder as playlist, MP4 with H.264 video and
 AAC audio, seek), `snap` (screenshot), `vault` (password manager:
 entries, generator), `link` (network card), `volume` (volume card),
-`pick` (the file dialog, as a portal), `drun` (launcher), `top` (system
-monitor).
+`pick` (the file dialog, as a portal), `top` (system monitor).
 
 **Keyvault:** a secret is not a file. Secrets live in one encrypted
 vault object with two tiers and two data keys: a **system tier** (WiFi
@@ -477,7 +476,7 @@ nopeekOS/
     ├── beak/ + beak-engine/  #   Native browser + portable engine
     ├── loft/ spell/ iris/    #   File browser, editor, image viewer
     ├── tune/                 #   Audio and video player
-    ├── snap/ drun/ top/      #   Screenshot, launcher, monitor
+    ├── snap/ top/            #   Screenshot, monitor
     ├── vault/ link/          #   Password manager, network card
     ├── deck/ volume/         #   Panel + volume card
     ├── pick/ wallpaper/      #   File-dialog portal, wallpaper decoder

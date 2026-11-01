@@ -4,8 +4,8 @@
 //! app's `.npk.app_meta` custom section (icon / name / description),
 //! and appends the standard built-in intents (apps that live as
 //! microvm bundles / Surface windows rather than WASM modules, e.g.
-//! the browser). Both `drun` and `dock` consume this so they show the
-//! same set of launchable apps.
+//! the browser). The deck's launcher and loft's "Open with" read this,
+//! so they show the same set of launchable apps.
 //!
 //! wasm32-only: it calls the `npk_list_modules` / `npk_app_meta` host fns,
 //! so it's compiled out of host-side test builds of the SDK. The kernel
@@ -40,7 +40,7 @@ pub struct AppEntry {
 }
 
 /// System / background / dev modules that are never user-launchable apps, so
-/// they don't clutter the launcher or dock. (Panels dock/bar/drun are excluded
+/// they don't clutter the launcher or dock. (Panels are excluded
 /// per-caller via `exclude`.) Background drivers that ship no `.npk.app_meta`
 /// section are hidden automatically — this list is only for modules that do
 /// carry app_meta but still aren't apps.

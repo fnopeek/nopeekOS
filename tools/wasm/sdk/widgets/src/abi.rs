@@ -132,7 +132,7 @@ pub struct IconId(pub u16);
 /// The named icons. `IconId` is a number, not a closed enum: a module that
 /// only passes an icon on (the dock showing an app's icon) must not have to
 /// know every icon there is, or every new icon would force a rebuild of
-/// dock, drun and bar. The atlas is looked up by number, and a number it
+/// deck and loft. The atlas is looked up by number, and a number it
 /// lacks draws nothing.
 ///
 /// On the wire a `u16` encodes like an enum variant index (same varint), so
@@ -792,6 +792,10 @@ pub enum Event {
     /// dragged items; `copy` is true when Ctrl was held at the release.
     /// Sent only to a window of the module that started the drag.
     Drop { target: ActionId, paths: alloc::vec::Vec<alloc::string::String>, copy: bool },
+    /// Mod+D while this app is the launcher (`sys/config/launcher`) and
+    /// already running: open the launcher surface. Counts as user input,
+    /// so a panel may answer it with a popup, which takes the keyboard.
+    Summon,
     // Appended only.
 }
 

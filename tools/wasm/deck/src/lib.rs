@@ -4,9 +4,10 @@
 //! (`npk_window_set_panel(Bottom, Strut)`), so the tiles end above it. Left to right: the launcher button, the workspaces, the
 //! windows of the active workspace, the status readouts and the clock.
 //!
-//! The launcher opens a menu above the button: a search field over the app
-//! catalog, the user, power. The window list gives way when the screen runs
-//! out: narrower buttons, then one button per app, then icons, then "+N"
+//! The launcher opens a menu above the button, or on Mod+D (`Event::Summon`):
+//! a search field over the app catalog, the user, power. The window list
+//! gives way when the screen runs out: narrower buttons, then one button per
+//! app, then icons, then "+N"
 //! (`plan_tasks`); a group and the "+N" open a list of their windows.
 //!
 //! Menus and lists are popups (`npk_popup`): windows of their own, exactly
@@ -465,7 +466,7 @@ struct Deck {
 impl Deck {
     fn new() -> Self {
         let (w, _) = host::screen_size();
-        let mut catalog = app_catalog::load(&["deck", "drun", "pick", "volume"]);
+        let mut catalog = app_catalog::load(&["deck", "pick", "volume"]);
         // One list, as a person reads it: "beak" next to "Firefox", not
         // after every capital.
         catalog.sort_by_key(|e| e.display_name.to_ascii_lowercase());
@@ -635,6 +636,11 @@ impl Deck {
             // The compositor closed it already: forget it, do not close again.
             Event::PopupDone { popup } if popup == POPUP as u32 => { self.menu = None; true }
             Event::Key(KeyCode::Escape) if self.menu.is_some() => { self.close_menu(); true }
+            // Mod+D: the same toggle as the launcher button.
+            Event::Summon => {
+                if self.launcher_open() { self.close_menu(); } else { self.open_menu(); }
+                true
+            }
             Event::Key(k) if self.launcher_open() => match k {
                 KeyCode::Enter => { self.launch_selected(); self.close_menu(); true }
                 KeyCode::Up => {

@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "deck"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "nopeek_widgets",
  "postcard",
@@ -48,7 +48,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.36.0"
+version = "0.46.0"
 dependencies = [
  "npk_sys",
  "postcard",

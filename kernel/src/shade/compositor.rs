@@ -687,7 +687,7 @@ impl Compositor {
         // Re-tile: the promoted window kept whatever geometry it had as a
         // terminal (often fullscreen). Without this a second app launched
         // from the panel would stack behind the first instead of splitting.
-        // Overlay/panel apps (drun, deck) call set_overlay/set_panel
+        // Overlay/panel apps (volume, deck) call set_overlay/set_panel
         // right after, which un-tiles them again, so this is a no-op for them.
         self.retile();
         self.needs_full_redraw = true;
@@ -697,7 +697,7 @@ impl Compositor {
     /// Reconfigure an existing window as a centred overlay: floating
     /// state, caller-chosen size, clamped to screen bounds. Used by the
     /// `npk_window_set_overlay` host fn — the compositor stays ignorant
-    /// of which app (drun, future launchers, …) requested the change.
+    /// of which app requested the change.
     ///
     /// Does not touch focus. Caller decides whether to focus the window
     /// afterwards.

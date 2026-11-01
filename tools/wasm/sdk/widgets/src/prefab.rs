@@ -511,7 +511,7 @@ pub fn grid(items: Vec<Widget>, per_row: usize) -> Widget {
 // UI. They use the v2 modifier set (Hover, Rounded, WhenDensity) so
 // callers get hover-feedback, responsive padding, and consistent
 // elevation by default. The prefabs above (panel, list_row, nav_row,
-// ...) are still used by drun and loft.
+// ...) are still used by loft.
 
 /// Visual weight tier for `card`. Maps semantically to design tokens
 /// rather than concrete pixel values so a future theme can retune all
@@ -638,7 +638,7 @@ pub enum InputKind {
 ///
 /// `on_submit` is the ActionId fired when the user submits the input
 /// (Enter while focused). Pass [`NO_ACTION`] to opt out — apps that
-/// route Enter themselves (e.g. drun's launcher) typically do.
+/// route Enter themselves (e.g. deck's launcher) typically do.
 pub fn input(
     value: &str,
     placeholder: &str,

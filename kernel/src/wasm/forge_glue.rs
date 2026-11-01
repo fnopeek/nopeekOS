@@ -161,7 +161,7 @@ host_imports! {
     // npk_log_serial(ptr, len) — write directly to the serial port,
     // bypassing the shade-terminal write path used by kprintln.
     //
-    // Needed by widget-only apps (drun) that run when no terminal
+    // Needed by widget-only apps (deck) that run when no terminal
     // window exists: kprintln locks SERIAL and routes a copy through
     // `shade::terminal::write`, which can stall during early boot or
     // when the active-terminal slot has no backing buffer. Direct
@@ -645,12 +645,12 @@ host_imports! {
     // buffer, or -1 on cap denied. The trailing entry is not terminated —
     // caller splits on 0x00.
     //
-    // RENDER-gated because only GUI apps (drun) need it.
+    // RENDER-gated because only GUI apps (deck) need it.
     mem fn npk_list_modules(buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_app_meta(name_ptr, name_len, buf_ptr, buf_max) -> bytes, -(needed + 2) or -1
     // Returns only the `.npk.app_meta` custom-section payload of the module
-    // `sys/wasm/<name>`, extracted kernel-side. Launchers (drun, deck) read an
+    // `sys/wasm/<name>`, extracted kernel-side. Launchers (deck) read an
     // app's icon/name/description with this without fetching the whole
     // module, which can be several MB (the section sits at the end).
     // `name` is confined to a bare child of `sys/wasm/` (no path traversal).
@@ -661,7 +661,7 @@ host_imports! {
     // Launch `sys/wasm/<name>` in a fresh terminal window and focus it.
     //
     // Modelled on `Mod+Enter` + `run <name>` — the user-expected flow
-    // when drun picks a module. Terminal-kind apps (top, debug) print
+    // when the launcher picks a module. Terminal-kind apps (top, debug) print
     // into the new loop's terminal; widget-kind apps can convert their
     // window via `npk_window_set_overlay` from `_start`.
     //
@@ -717,7 +717,7 @@ host_imports! {
     // npk_window_set_light_dismiss(on: i32) -> i32
     // Opt the caller's widget window into light-dismiss: the compositor
     // closes it when a click lands outside it (transient overlays like the
-    // volume slider). Off by default, so other overlays (loft, drun) are
+    // volume slider). Off by default, so other overlays (loft, pick) are
     // unaffected. Returns 0 on success, -1 if no widget window / cap denied.
     ctx fn npk_window_set_light_dismiss(on: i32) -> i32;
 

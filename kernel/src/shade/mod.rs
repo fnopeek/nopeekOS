@@ -1049,7 +1049,7 @@ pub fn handle_action(action: input::ShadeAction) {
             // Lock handled by intent loop
         }
         ShadeAction::SpawnLauncher => {
-            spawn_launcher();
+            summon_launcher();
         }
         // Ctrl+Shift+C / V. In a terminal (where Ctrl+C stays SIGINT) copy
         // the mouse selection / paste into the input line; in a widget app
@@ -1071,46 +1071,40 @@ pub fn handle_action(action: input::ShadeAction) {
     }
 }
 
-/// Spawn the configured launcher module as a widget app.
-///
-/// Module name is read from `sys/config/launcher` (single line, e.g.
-/// `drun`). When the file is missing or unreadable we fall back to
-/// `drun` so a fresh install still has a working Mod+D out of the box.
-///
-/// The kernel knows nothing else about the module — overlay size,
-/// modal behaviour, and UI are entirely the module's responsibility
-/// (see `npk_window_set_overlay` / `npk_window_set_modal`).
-fn spawn_launcher() {
-    const DEFAULT_LAUNCHER: &str = "drun";
-
-    // Resolve the configured name. Limit to 64 bytes to prevent
-    // surprises from a giant config file.
-    let name: alloc::string::String = match crate::npkfs::fetch("sys/config/launcher") {
-        Ok((bytes, _)) => {
-            let raw = core::str::from_utf8(&bytes).unwrap_or("").trim();
-            let cleaned: alloc::string::String = raw
-                .chars()
-                .take_while(|c| !c.is_control())
-                .take(64)
-                .collect();
-            if cleaned.is_empty() || cleaned.contains('/') || cleaned.contains("..") {
-                alloc::string::String::from(DEFAULT_LAUNCHER)
-            } else {
-                cleaned
-            }
-        }
-        Err(_) => alloc::string::String::from(DEFAULT_LAUNCHER),
+/// The launcher module: `sys/config/launcher` (one line, at most 64
+/// characters), else `deck`. The kernel knows nothing else about it;
+/// its UI is the module's own.
+pub fn launcher_name() -> alloc::string::String {
+    const DEFAULT_LAUNCHER: &str = "deck";
+    let cleaned: alloc::string::String = match crate::npkfs::fetch("sys/config/launcher") {
+        Ok((bytes, _)) => core::str::from_utf8(&bytes).unwrap_or("").trim()
+            .chars()
+            .take_while(|c| !c.is_control())
+            .take(64)
+            .collect(),
+        Err(_) => alloc::string::String::new(),
     };
+    if cleaned.is_empty() || cleaned.contains('/') || cleaned.contains("..") {
+        alloc::string::String::from(DEFAULT_LAUNCHER)
+    } else {
+        cleaned
+    }
+}
 
-    // Already running? Re-focus instead of spawning a second instance.
+/// Mod+D: a running launcher gets `Event::Summon` (and the keyboard,
+/// unless it is a panel); otherwise the module is started.
+fn summon_launcher() {
+    let name = launcher_name();
+
     // Window title matches the module name, set by the spawn path.
-    let already_open = with_compositor(|comp| {
+    let running = with_compositor(|comp| {
         comp.windows.iter()
-            .find(|w| w.kind == window::WindowKind::Widget && w.title == name)
+            .find(|w| w.kind == window::WindowKind::Widget && w.popup_of.is_none() && w.title == name)
             .map(|w| w.id)
     }).flatten();
-    if let Some(id) = already_open {
+    if let Some(id) = running {
         with_compositor(|comp| comp.focus_window(id));
+        widgets::push_event(id.0, widgets::abi::Event::Summon);
         render_frame();
         return;
     }

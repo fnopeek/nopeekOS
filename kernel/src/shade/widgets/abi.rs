@@ -166,7 +166,7 @@ pub struct IconId(pub u16);
 /// The named icons. `IconId` is a number, not a closed enum: a module that
 /// only passes an icon on (the panel showing an app's icon) must not have to
 /// know every icon there is, or each new icon would mean rebuilding deck
-/// and drun. The atlas is looked up by number, and a number it lacks
+/// and loft. The atlas is looked up by number, and a number it lacks
 /// draws nothing.
 ///
 /// Wire format: postcard writes an enum variant index and a `u16` as the
@@ -902,6 +902,10 @@ pub enum Event {
     /// dragged items; `copy` is true when Ctrl was held at the release.
     /// Sent only to a window of the module that started the drag.
     Drop { target: ActionId, paths: alloc::vec::Vec<alloc::string::String>, copy: bool },
+    /// Mod+D while this app is the launcher (`sys/config/launcher`) and
+    /// already running: open the launcher surface. Counts as user input,
+    /// so a panel may answer it with a popup, which takes the keyboard.
+    Summon,
     // Appended only.
 }
 

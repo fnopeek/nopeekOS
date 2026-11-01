@@ -245,6 +245,7 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::Mods { .. }          => 19,
         Event::Navigate { .. }      => 20,
         Event::Drop { .. }          => 21,
+        Event::Summon               => 22,
     }
 }
 

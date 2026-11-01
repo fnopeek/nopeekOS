@@ -400,12 +400,12 @@ pub fn apply_module(p: &ModulePlan) -> bool {
 /// guards that prevent the user from bricking their system:
 ///
 ///  1. Hard block: the module configured as the active launcher
-///     (`sys/config/launcher`, default `drun`) cannot be uninstalled —
+///     (`sys/config/launcher`, default `deck`) cannot be uninstalled —
 ///     without it, Mod+D / spawn flow has nothing to open. The user
 ///     must point `sys/config/launcher` somewhere else first.
 ///
 ///  2. `--force` gate for bundled modules: every kernel-bundled
-///     module (drun, loft, wifi, wallpaper, top, debug, …) is on the
+///     module (deck, loft, wifi, wallpaper, top, debug, …) is on the
 ///     OTA recovery path, so removing one is reversible — but easy
 ///     to do by accident. Without `--force` we refuse and print the
 ///     reinstall hint. User-installed third-party modules (none yet)
@@ -496,22 +496,9 @@ fn is_active_picker(name: &str) -> bool {
     configured == name
 }
 
-/// True iff `name` matches the active launcher (`sys/config/launcher`).
-/// Empty / unset config falls back to `drun` to mirror the boot path.
+/// True iff `name` is the active launcher (`sys/config/launcher`).
 fn is_active_launcher(name: &str) -> bool {
-    let configured = match crate::npkfs::fetch("sys/config/launcher") {
-        Ok((data, _)) => match core::str::from_utf8(&data) {
-            Ok(s) => s.trim().to_string(),
-            Err(_) => alloc::string::String::from("drun"),
-        },
-        Err(_) => alloc::string::String::from("drun"),
-    };
-    let configured = if configured.is_empty() {
-        alloc::string::String::from("drun")
-    } else {
-        configured
-    };
-    configured == name
+    crate::shade::launcher_name() == name
 }
 
 /// True iff `name` is one of the modules every install carries

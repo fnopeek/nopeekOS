@@ -301,8 +301,8 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
         let new_id = match promoted {
             Some(id) => {
                 ctx.terminal_idx = 255;
-                // Overlay path wants focus on the new widget (drun
-                // style); promotion does not focus, so fix up.
+                // Overlay path wants focus on the new widget; promotion
+                // does not focus, so fix up.
                 crate::shade::with_compositor(|comp| comp.focus_window(id));
                 id.0
             }
@@ -333,8 +333,8 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
                 comp.set_light_dismiss(id, true);
             }
         }
-        // The overlay path always wants this window focused — drun
-        // and any other launcher style app drives keyboard from
+        // The overlay path always wants this window focused — a
+        // launcher style app drives keyboard from
         // here. The branch above already focuses, but a repeated
         // set_overlay (or a focus shift in between) must re-claim it
         // so keys are not routed to a stale window.

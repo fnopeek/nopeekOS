@@ -405,7 +405,7 @@ pub fn button_pending(window_id: u32) -> bool {
 pub fn push_event(window_id: u32, event: abi::Event) {
     use core::sync::atomic::Ordering;
     let window_id = POPUP_PARENT.lock().get(&window_id).copied().unwrap_or(window_id);
-    if matches!(event, abi::Event::Key(_) | abi::Event::MouseButton { down: true, .. }) {
+    if matches!(event, abi::Event::Key(_) | abi::Event::MouseButton { down: true, .. } | abi::Event::Summon) {
         LAST_INPUT_TICK.store(crate::interrupts::ticks(), Ordering::Release);
         LAST_INPUT_WINDOW.store(window_id, Ordering::Release);
     }
@@ -1765,7 +1765,7 @@ fn widget_at_path<'a>(tree: &'a abi::Widget, path: &[u32]) -> Option<&'a abi::Wi
 
 /// DFS for the first focusable text widget (`Input` or `TextArea`) in
 /// document order. Used by `scene_commit` to auto-focus on first commit
-/// so apps with a search bar (drun) or an editing surface (spell) never
+/// so apps with a search bar (loft) or an editing surface (spell) never
 /// need their own focus-priming host fn.
 /// The first text widget carrying a non-zero `Modifier::FocusRequest`, with
 /// its path and number.
@@ -3045,7 +3045,7 @@ pub fn handle_input_key(
         K::PageDown if is_textarea               => Op::PageDown,
         // TextArea: Enter is a newline. Input: Enter only swallowed when
         // it declared a real on_submit; otherwise it falls through to
-        // `Event::Key` so window-level Enter handlers (drun's launcher)
+        // `Event::Key` so window-level Enter handlers (deck's launcher)
         // keep working without wiring on_submit just to receive it.
         K::Enter if is_textarea                  => Op::Newline,
         // Tab in a TextArea indents instead of moving focus; for an Input
@@ -3422,7 +3422,7 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     // pixels mid-frame. Falls back to empty for first commit.
     // `is_first_commit` is "no scene yet for this window" — true even
     // when the window itself was created earlier by
-    // `npk_window_set_overlay` (drun's path), which is exactly when we
+    // `npk_window_set_overlay`, which is exactly when we
     // want to auto-focus.
     let (prev_hover, prev_focus, prev_active, prev_input_edit, prev_parked,
          prev_scroll_x, prev_focus_request, prev_select_seq, prev_last_caret,

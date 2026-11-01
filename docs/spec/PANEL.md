@@ -37,7 +37,9 @@ The only accepted pair is `edge = 0` (bottom), `behavior = 1` (strut).
 
 Left to right inside one rounded card (`NodeId` 100000):
 
-1. **Launcher button**: opens the launcher popup (see below).
+1. **Launcher button**: opens the launcher popup (see below), as does
+   Mod+D: the kernel sends `Event::Summon` to the running module named in
+   `sys/config/launcher` (default `deck`), and the deck toggles the popup.
 2. **Workspaces**: one cell per workspace (count and active index from
    `npk_bar_state`). The active one is filled with the accent, empty ones
    are faint. A click calls `npk_workspace_switch(n)`.
@@ -61,8 +63,8 @@ windows, which closes when all of them are gone.
 
 **Launcher popup** (anchored at the card, 340 px wide): a search field
 (focused through `Modifier::FocusRequest`) over up to 8 rows of the app
-catalog (modules with app metadata except `deck`, `drun`, `pick`,
-`volume`, plus intent entries), sorted by display name, filtered by
+catalog (modules with app metadata except `deck`, `pick`, `volume`,
+plus intent entries), sorted by display name, filtered by
 substring of display or launch name. Up/Down and pointer hover move the
 selection, Enter or a click launches (`spawn_module` or `run_intent`) and
 closes. Footer: the user name (last component of the home directory) and

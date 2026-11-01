@@ -84,12 +84,8 @@ pub enum ShadeAction {
     ScrollDown,
     /// Mod+L: lock
     Lock,
-    /// Mod+D: spawn the configured launcher module.
-    ///
-    /// The module name is read from `sys/config/launcher` at dispatch
-    /// time (defaults to `drun` when the file is absent). Kernel has
-    /// no hardcoded module name — replacing drun with a different
-    /// launcher is a config change, not a rebuild.
+    /// Mod+D: summon the launcher module named in `sys/config/launcher`,
+    /// or start it when it is not running.
     SpawnLauncher,
     /// Ctrl+Shift+C: copy the focused window's selection (terminal drag
     /// selection, or focused Input/TextArea) to the kernel clipboard.
