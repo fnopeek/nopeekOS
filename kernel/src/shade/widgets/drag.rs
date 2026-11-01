@@ -25,12 +25,14 @@ struct Drag {
 
 static DRAG: Mutex<Option<Drag>> = Mutex::new(None);
 
-/// The module that owns each widget window, recorded when the window is
-/// created by its first scene commit.
+/// The module that owns each widget window, noted on its scene commits.
 static MODULE_OF: Mutex<BTreeMap<u32, String>> = Mutex::new(BTreeMap::new());
 
+/// Record the module of a widget window, once. An empty name is no
+/// identity and is not recorded.
 pub fn note_window(window_id: u32, module: &str) {
-    MODULE_OF.lock().insert(window_id, String::from(module));
+    if module.is_empty() { return; }
+    MODULE_OF.lock().entry(window_id).or_insert_with(|| String::from(module));
 }
 
 pub fn forget_window(window_id: u32) {
@@ -38,8 +40,10 @@ pub fn forget_window(window_id: u32) {
 }
 
 /// Start a drag of `paths` for `module`. Replaces one still running.
-pub fn start(module: &str, paths: Vec<String>) {
+pub fn start(module: &str, paths: Vec<String>) -> bool {
+    if module.is_empty() { return false; }
     *DRAG.lock() = Some(Drag { module: String::from(module), paths });
+    true
 }
 
 pub fn active() -> bool {

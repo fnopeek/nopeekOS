@@ -395,6 +395,12 @@ pub fn had_recent_input(window_id: u32) -> bool {
             .saturating_sub(LAST_INPUT_TICK.load(Ordering::Acquire)) <= POPUP_INPUT_TICKS
 }
 
+/// True if the window has a mouse button event it has not polled yet.
+pub fn button_pending(window_id: u32) -> bool {
+    EVENT_QUEUES.lock().get(&window_id)
+        .is_some_and(|q| q.iter().any(|e| matches!(e, abi::Event::MouseButton { .. })))
+}
+
 /// Push an event into the window's queue.
 pub fn push_event(window_id: u32, event: abi::Event) {
     use core::sync::atomic::Ordering;
@@ -3360,15 +3366,15 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
             let id = crate::shade::with_compositor(|c| c.create_widget_window(title))
                 .ok_or(-3i32);
             match id {
-                Ok(id) => {
-                    drag::note_window(id.0, module_name);
-                    (id.0, Some(id.0))
-                }
+                Ok(id) => (id.0, Some(id.0)),
                 Err(_) => return -3,
             }
         }
         id => (id, None),
     };
+    // A window may also come from a promoted terminal, so the owner is
+    // noted on any commit, not only the one that created it.
+    drag::note_window(target_id, module_name);
 
     let rect = crate::shade::with_compositor(|c| {
         let win = c.windows.iter().find(|w| w.id.0 == target_id)?;

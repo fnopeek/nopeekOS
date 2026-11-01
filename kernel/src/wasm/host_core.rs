@@ -748,7 +748,11 @@ pub(crate) fn npk_close_widget(ctx: &mut HostState) -> i32 {
     0
 }
 
-pub(crate) fn npk_get_fb_size(_ctx: &mut HostState) -> i64 {
+pub(crate) fn npk_get_fb_size(ctx: &mut HostState) -> i64 {
+    // Same rights as `npk_screen_size`.
+    let ok = capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_ok()
+        || capability::check_global(&ctx.cap_id, capability::Rights::CAPTURE).is_ok();
+    if !ok { return 0; }
     let (w, h) = crate::framebuffer::get_resolution();
     ((w as i64) << 32) | (h as i64)
 }
@@ -3167,24 +3171,34 @@ pub(crate) fn npk_canvas_drop(ctx: &mut HostState, canvas_id: i32) -> i32 {
     if crate::shade::widgets::canvas::remove(wid, canvas_id as u32) { 0 } else { -1 }
 }
 
+/// Most bytes and paths one drag may carry.
+const DRAG_MAX_BYTES: usize = 1024 * 1024;
+const DRAG_MAX_PATHS: usize = 16 * 1024;
+
 pub(crate) fn npk_drag_start(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
         return -1;
     }
     let wid = ctx.widget_window_id;
     if wid == 0 || crate::shade::focused_widget_id() != Some(wid) { return -1; }
-    // A drag starts from a press the user is still holding.
+    // A drag starts from a press the user is still holding, and one the
+    // app has already seen: with a press or release still queued, the
+    // call comes from motion of an earlier gesture.
     if crate::shade::cursor::atomic_buttons().0 & 1 == 0 { return -1; }
+    if crate::shade::widgets::button_pending(wid) { return -1; }
+    // Bounded so the list and the `Event::Drop` that carries it stay small
+    // kernel allocations.
+    if glen(len).is_none_or(|n| n > DRAG_MAX_BYTES) { return -1; }
     let Some(bytes) = read_bytes(mem, ptr, len) else { return -1 };
     let Ok(text) = core::str::from_utf8(&bytes) else { return -1 };
     let mut paths = alloc::vec::Vec::new();
     for p in text.split('\0').filter(|p| !p.is_empty()) {
+        if paths.len() == DRAG_MAX_PATHS || paths.try_reserve(1).is_err() { return -1; }
         if !read_allowed(ctx, p, "npk_drag_start") { return -1; }
         paths.push(String::from(p));
     }
     if paths.is_empty() { return -1; }
-    crate::shade::widgets::drag::start(&ctx.module_name, paths);
-    0
+    if crate::shade::widgets::drag::start(&ctx.module_name, paths) { 0 } else { -1 }
 }
 
 pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {

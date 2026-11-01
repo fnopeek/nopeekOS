@@ -1598,6 +1598,9 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     {
         let (smx, smy) = cursor::atomic_pos();
         let (btn, prev) = cursor::atomic_buttons();
+        // A press on a scrollbar never reaches the compositor's button
+        // handling; it still ends an app drag left over.
+        if btn & 1 != 0 && prev & 1 == 0 { widgets::drag::cancel(); }
         if handle_scrollbar_drag(smx, smy, btn & 1 != 0, prev & 1 != 0) {
             return;
         }

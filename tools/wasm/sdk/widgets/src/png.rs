@@ -333,6 +333,20 @@ impl Rows {
         Ok(used)
     }
 
+    /// Add the un-filtered scanline in `cur` to the running sums, B G R A.
+    fn accumulate<const C: usize>(&mut self) {
+        for tx in 0..self.tw {
+            let mut sum = [0u64; 4];
+            for px in self.cur[self.xs[tx] * C..self.xs[tx + 1] * C].chunks_exact(C) {
+                sum[0] += px[2] as u64;
+                sum[1] += px[1] as u64;
+                sum[2] += px[0] as u64;
+                sum[3] += if C == 4 { px[3] as u64 } else { 255 };
+            }
+            for k in 0..4 { self.acc[tx * 4 + k] += sum[k]; }
+        }
+    }
+
     /// Un-filter the scanline in `raw` and add it to the target row.
     fn row(&mut self) {
         let above = if self.y == 0 { None } else { Some(&self.prev[..]) };
@@ -341,17 +355,7 @@ impl Rows {
         } else {
             unfilter_row::<4>(self.raw[0], &mut self.cur, &self.raw[1..], above);
         }
-        let c = self.channels;
-        for tx in 0..self.tw {
-            let mut sum = [0u64; 4];
-            for px in self.cur[self.xs[tx] * c..self.xs[tx + 1] * c].chunks_exact(c) {
-                sum[0] += px[2] as u64;
-                sum[1] += px[1] as u64;
-                sum[2] += px[0] as u64;
-                sum[3] += if c == 4 { px[3] as u64 } else { 255 };
-            }
-            for k in 0..4 { self.acc[tx * 4 + k] += sum[k]; }
-        }
+        if self.channels == 3 { self.accumulate::<3>(); } else { self.accumulate::<4>(); }
         self.summed += 1;
         self.y += 1;
         core::mem::swap(&mut self.prev, &mut self.cur);

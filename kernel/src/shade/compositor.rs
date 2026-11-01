@@ -2098,6 +2098,19 @@ impl Compositor {
     /// Handle only button events (click, drag, release). Position already in self.mouse.
     /// Called from lock-free input path — only when buttons change.
     pub fn handle_mouse_buttons(&mut self) -> bool {
+        // An app drag belongs to one press: a new press ends a drag left
+        // over, and the release ends this one, before any path below can
+        // return. A release during a compositor gesture drops nothing.
+        if self.mouse.left_clicked() {
+            crate::shade::widgets::drag::cancel();
+        }
+        if self.mouse.left_released() && crate::shade::widgets::drag::active() {
+            let (mx, my) = (self.mouse.x, self.mouse.y);
+            let under = self.window_at(mx, my).filter(|wid| self.drag.is_none() && self.windows.iter()
+                .any(|w| w.id == *wid && w.kind == crate::shade::window::WindowKind::Widget));
+            crate::shade::widgets::drag::release(
+                under.map(|w| w.0), mx, my, crate::keyboard::is_ctrl_held());
+        }
         if self.drag.is_none()
             && (self.mouse.left_clicked() || self.mouse.right_clicked())
             && self.modal_blocks(self.mouse.x, self.mouse.y)
@@ -2242,9 +2255,6 @@ impl Compositor {
 
         // Regular LMB click: focus window + dispatch widget event
         if self.mouse.left_clicked() {
-            // A drag started as the button came up never saw its release;
-            // a new press ends it.
-            crate::shade::widgets::drag::cancel();
             if let Some(wid) = self.window_at(mx, my) {
                 // The panel must not steal keyboard focus from the tile you
                 // were working in; clicking an icon launches/focuses an
@@ -2372,14 +2382,6 @@ impl Compositor {
         // does work when the window's `active_path` was actually set.
         if self.mouse.left_released() {
             use crate::shade::widgets::abi::{Event, MouseButton};
-            // A drag ends here, dropped on the widget window under the
-            // pointer (Ctrl = copy) or on nothing.
-            if crate::shade::widgets::drag::active() {
-                let under = self.window_at(mx, my).filter(|wid| self.windows.iter()
-                    .any(|w| w.id == *wid && w.kind == crate::shade::window::WindowKind::Widget));
-                crate::shade::widgets::drag::release(
-                    under.map(|w| w.0), mx, my, crate::keyboard::is_ctrl_held());
-            }
             let widget_ids: alloc::vec::Vec<crate::shade::WindowId> = self.windows.iter()
                 .filter(|w| w.kind == crate::shade::window::WindowKind::Widget)
                 .map(|w| w.id)

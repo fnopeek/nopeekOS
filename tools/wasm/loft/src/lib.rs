@@ -764,6 +764,9 @@ struct PngJob {
 /// piece it reads at a time.
 const PNG_TICK_PIXELS: usize = 1 << 20;
 const PNG_PIECE: usize = 64 * 1024;
+/// File pieces a job reads per tick, so a file of skipped chunks or empty
+/// deflate blocks cannot hold one tick for the whole file either.
+const PNG_TICK_PIECES: usize = 16;
 
 impl PngJob {
     fn open(path: String, stamp: (u64, u64), max: u32) -> Option<PngJob> {
@@ -775,7 +778,7 @@ impl PngJob {
     /// `Some(None)` if the file is no PNG loft reads.
     fn step(&mut self, buf: &mut [u8]) -> Option<Option<nopeek_widgets::png::Image>> {
         let mut budget = PNG_TICK_PIXELS;
-        loop {
+        for _ in 0..PNG_TICK_PIECES {
             if self.dec.done() { return Some(self.dec.take()); }
             if budget == 0 { return None; }
             let n = match self.file.read_at(self.off, buf) {
@@ -787,6 +790,7 @@ impl PngJob {
             self.off += used as u64;
             if used == 0 && budget == before && !self.dec.done() { return Some(None); }
         }
+        if self.dec.done() { Some(self.dec.take()) } else { None }
     }
 }
 
@@ -968,6 +972,10 @@ struct Loft {
     /// a drag and go on a plain click (the release).
     press_keep:     bool,
     dragging:       bool,
+    /// The folder behind each item drop target of the committed scene, by
+    /// row: a drop is hit-tested against that scene, and the listing may
+    /// have changed since.
+    drop_dirs:      Vec<Option<String>>,
 }
 
 /// Resizing the preview pane. A press on the grip arrives as its `Action`
@@ -976,8 +984,8 @@ struct Loft {
 enum Grip {
     Idle,
     Armed,
-    /// Pointer x (physical px) and pane width at the press.
-    Drag { x0: i32, w0: u16 },
+    /// Pointer x (physical px), pane width and pixel scale at the press.
+    Drag { x0: i32, w0: u16, scale: i32 },
 }
 
 impl Loft {
@@ -1043,6 +1051,7 @@ impl Loft {
             press_armed:   false,
             press_keep:    false,
             dragging:      false,
+            drop_dirs:     Vec::new(),
         };
         lf.load_settings();
         lf.load_clip();
@@ -1368,8 +1377,7 @@ impl Loft {
     /// Follow the pointer while the grip is dragged. The pane is on the
     /// right, so moving left widens it.
     fn drag_grip(&mut self, x: i32) -> bool {
-        let Grip::Drag { x0, w0 } = self.grip else { return false };
-        let scale = host::pixel_scale_milli().max(1) as i32;
+        let Grip::Drag { x0, w0, scale } = self.grip else { return false };
         let dx = (x0 - x) * 1000 / scale;
         let (screen_w, _) = host::screen_size();
         let max = (screen_w * 2 / 3).clamp(PREVIEW_W_MIN as u32, u16::MAX as u32) as i32;
@@ -1754,10 +1762,8 @@ impl Loft {
             ACT_DROP_HERE => Some(self.current.clone()),
             ACT_DROP_SIDEBAR_BASE..ACT_DROP_SIDEBAR_END =>
                 self.sidebar.get((id - ACT_DROP_SIDEBAR_BASE) as usize).map(|p| p.path.clone()),
-            ACT_DROP_ITEM_BASE..ACT_DROP_ITEM_END => {
-                let e = self.entry_at((id - ACT_DROP_ITEM_BASE) as usize)?;
-                e.is_dir.then(|| join(&self.current, &e.name))
-            }
+            ACT_DROP_ITEM_BASE..ACT_DROP_ITEM_END =>
+                self.drop_dirs.get((id - ACT_DROP_ITEM_BASE) as usize).cloned().flatten(),
             _ => None,
         }
     }
@@ -3987,7 +3993,7 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         }
         Event::Action(ActionId(ACT_PREVIEW_GRIP)) => { lf.grip = Grip::Armed; Outcome::Idle }
         Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
-            lf.grip = if lf.grip == Grip::Armed { Grip::Drag { x0: x, w0: lf.preview_w } } else { Grip::Idle };
+            lf.grip = if lf.grip == Grip::Armed { Grip::Drag { x0: x, w0: lf.preview_w, scale: host::pixel_scale_milli().max(1) as i32 } } else { Grip::Idle };
             lf.press = core::mem::take(&mut lf.press_armed).then_some((x, y));
             Outcome::Idle
         }
@@ -4726,7 +4732,11 @@ fn push_decimal(s: &mut String, n: u64, unit: u64) {
 
 // ── Entry point ───────────────────────────────────────────────────────
 
-fn commit_tree(lf: &Loft) {
+fn commit_tree(lf: &mut Loft) {
+    lf.drop_dirs = (0..lf.filtered.len())
+        .map(|ui| lf.entry_at(ui).filter(|e| e.is_dir).map(|e| join(&lf.current, &e.name)))
+        .collect();
+    let lf = &*lf;
     let tree = render(lf);
     match wire::encode(&tree) {
         Ok(bytes) => { if !host::scene_commit(&bytes) { log("[loft] commit failed"); } }
@@ -4742,7 +4752,7 @@ pub extern "C" fn _start() {
     let mut event_buf = [0u8; EVENT_BUF_SIZE];
     let mut idle_ticks: u32 = 0;
 
-    commit_tree(&loft);
+    commit_tree(&mut loft);
     // The widget window exists after the first commit — opt into receiving
     // Ctrl+C/X/V as Event::Clipboard so the shortcuts drive file operations.
     window_set_clipboard_sink();
@@ -4753,7 +4763,7 @@ pub extern "C" fn _start() {
                 idle_ticks = 0;
                 match handle(&mut loft, ev) {
                     Outcome::Idle => {}
-                    Outcome::Rerender => commit_tree(&loft),
+                    Outcome::Rerender => commit_tree(&mut loft),
                     Outcome::Exit => { host::close_widget(); return; }
                 }
             }
@@ -4771,7 +4781,7 @@ pub extern "C" fn _start() {
                 {
                     dirty = true;
                 }
-                if dirty { commit_tree(&loft); }
+                if dirty { commit_tree(&mut loft); }
 
                 idle_ticks += 1;
                 if idle_ticks >= AUTO_REFRESH_TICKS {
@@ -4788,7 +4798,7 @@ pub extern "C" fn _start() {
                         let new_sig = dir_signature(&loft.list(&loft.current, false));
                         if new_sig != loft.dir_sig {
                             loft.refresh();
-                            commit_tree(&loft);
+                            commit_tree(&mut loft);
                         }
                     }
                 }
