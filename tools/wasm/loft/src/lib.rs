@@ -467,8 +467,7 @@ const ACT_GRID_CLICK_END:     u32 = 2_000_000;
 // Sidebar rows and tabs grow with the user's bookmarks and tabs, so they
 // get bands as wide as the item band.
 const ACT_SIDEBAR_CLICK_BASE: u32 = 2_000_000;
-const ACT_SIDEBAR_HOVER_BASE: u32 = 3_000_000;
-const ACT_SIDEBAR_HOVER_END:  u32 = 4_000_000;
+const ACT_SIDEBAR_CLICK_END:  u32 = 3_000_000;
 const ACT_TAB_BASE:           u32 = 4_000_000;
 const ACT_TAB_CLOSE_BASE:     u32 = 5_000_000;
 const ACT_TAB_CLOSE_END:      u32 = 6_000_000;
@@ -1327,11 +1326,13 @@ impl Loft {
         (0..self.filtered.len()).filter(|&ui| self.is_marked(ui)).count()
     }
 
+    /// Light the sidebar place the current folder lies in: the deepest
+    /// one that contains it, so `Music/Album` still lights Music.
     fn sync_sidebar_from_current(&mut self) {
-        self.sidebar_sel = None;
-        for (i, p) in self.sidebar.iter().enumerate() {
-            if p.path == self.current { self.sidebar_sel = Some(i); break; }
-        }
+        self.sidebar_sel = self.sidebar.iter().enumerate()
+            .filter(|(_, p)| p.path == self.current || is_below(&self.current, &p.path))
+            .max_by_key(|(_, p)| p.path.len())
+            .map(|(i, _)| i);
     }
 
     // ── Navigation ────────────────────────────────────────────────────
@@ -3180,7 +3181,7 @@ fn render_body(lf: &Loft) -> Widget {
         let row = prefab::nav_row(
             p.icon, &p.label, selected,
             Some(ActionId(ACT_SIDEBAR_CLICK_BASE + i as u32)),
-            Some(ActionId(ACT_SIDEBAR_HOVER_BASE + i as u32)),
+            None,
         );
         match p.section {
             Section::Places => places_rows.push(row),
@@ -3832,7 +3833,7 @@ fn handle_context(lf: &mut Loft, id: u32) -> Outcome {
             lf.close_menus();
             lf.ctx = Some(CtxMenu::Background);
         }
-        ACT_SIDEBAR_CLICK_BASE..ACT_SIDEBAR_HOVER_BASE => {
+        ACT_SIDEBAR_CLICK_BASE..ACT_SIDEBAR_CLICK_END => {
             let i = (id - ACT_SIDEBAR_CLICK_BASE) as usize;
             if i >= lf.sidebar.len() { return Outcome::Idle; }
             lf.close_menus();
@@ -3993,13 +3994,7 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             lf.navigate(target);
             Outcome::Rerender
         }
-        ACT_SIDEBAR_HOVER_BASE..ACT_SIDEBAR_HOVER_END => {
-            let i = (id - ACT_SIDEBAR_HOVER_BASE) as usize;
-            if i >= lf.sidebar.len() || lf.sidebar_sel == Some(i) { return Outcome::Idle; }
-            lf.sidebar_sel = Some(i);
-            Outcome::Rerender
-        }
-        ACT_SIDEBAR_CLICK_BASE..ACT_SIDEBAR_HOVER_BASE => {
+        ACT_SIDEBAR_CLICK_BASE..ACT_SIDEBAR_CLICK_END => {
             let Some(path) = lf.sidebar.get((id - ACT_SIDEBAR_CLICK_BASE) as usize)
                 .map(|p| p.path.clone()) else { return Outcome::Idle };
             lf.navigate(path);

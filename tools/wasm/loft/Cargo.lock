@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "loft"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "nopeek_widgets",
  "npk_sys",
