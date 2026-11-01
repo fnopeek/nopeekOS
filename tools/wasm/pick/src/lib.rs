@@ -1,7 +1,7 @@
 //! pick — the file dialog, as a portal.
 //!
 //! The kernel starts this module on `npk_pick` and hands it the request
-//! as a launch argument (`"<open|save>\0<start-dir>\0<suggested-name>"`).
+//! as a launch argument (`"<open|save|folder>\0<start-dir>\0<suggested-name>"`).
 //! We browse npkFS, let the user choose, and report the path back with
 //! `npk_pick_result`. The kernel turns that into an `Event::Picked` for
 //! whoever asked.
@@ -73,6 +73,8 @@ struct Strings {
     open_title:   &'static str,
     save_title:   &'static str,
     open_btn:     &'static str,
+    folder_open_title: &'static str,
+    select_btn:   &'static str,
     save_btn:     &'static str,
     cancel:       &'static str,
     name_hint:    &'static str,
@@ -90,6 +92,8 @@ const EN: Strings = Strings {
     open_title:  "Open file",
     save_title:  "Save file",
     open_btn:    "Open",
+    folder_open_title: "Open folder",
+    select_btn:  "Select folder",
     save_btn:    "Save",
     cancel:      "Cancel",
     name_hint:   "File name",
@@ -107,6 +111,8 @@ const DE: Strings = Strings {
     open_title:  "Datei öffnen",
     save_title:  "Datei speichern",
     open_btn:    "Öffnen",
+    folder_open_title: "Ordner öffnen",
+    select_btn:  "Ordner wählen",
     save_btn:    "Speichern",
     cancel:      "Abbrechen",
     name_hint:   "Dateiname",
@@ -179,7 +185,7 @@ const ACT_CRUMB_BASE: u32 = 5_000;
 // ── State ─────────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Mode { Open, Save }
+enum Mode { Open, Save, Folder }
 
 struct Entry {
     name:   String,
@@ -213,11 +219,12 @@ struct Pick {
 
 impl Pick {
     fn new() -> Self {
-        // Request wire: "<open|save>\0<start-dir>\0<suggested-name>".
+        // Request wire: "<open|save|folder>\0<start-dir>\0<suggested-name>".
         let arg = read_launch_arg();
         let mut parts = arg.split('\0');
         let mode = match parts.next() {
             Some("save") => Mode::Save,
+            Some("folder") => Mode::Folder,
             _ => Mode::Open,
         };
         let start = parts.next().unwrap_or("").trim();
@@ -306,7 +313,7 @@ impl Pick {
         }
         match self.mode {
             Mode::Open => { answer(&self.join(&name)); true }
-            Mode::Save => false,
+            Mode::Save | Mode::Folder => false,
         }
     }
 
@@ -322,6 +329,12 @@ impl Pick {
                     None => false,
                 }
             }
+            Mode::Folder => {
+                let dir = self.folder_target();
+                if !folder_ok(&dir) { return false; }
+                answer(&dir);
+                true
+            }
             Mode::Save => {
                 if !can_commit_name(&self.name) { return false; }
                 let name = self.full_name();
@@ -334,6 +347,14 @@ impl Pick {
                 answer(&self.join(&name));
                 true
             }
+        }
+    }
+
+    /// Folder mode: the highlighted folder, else the one being shown.
+    fn folder_target(&self) -> String {
+        match self.selected_entry() {
+            Some(e) if e.is_dir => self.join(&e.name),
+            _ => self.dir.clone(),
         }
     }
 
@@ -467,7 +488,11 @@ const NODE_NAME:   u32 = 1;
 const NODE_FOLDER: u32 = 2;
 
 fn render(p: &Pick) -> Widget {
-    let title = if p.mode == Mode::Save { s().save_title } else { s().open_title };
+    let title = match p.mode {
+        Mode::Save => s().save_title,
+        Mode::Open => s().open_title,
+        Mode::Folder => s().folder_open_title,
+    };
 
     // Flush column, as in loft: the bands reach the window edges and the
     // dividers sit directly between them.
@@ -551,7 +576,7 @@ fn render_toolbar(p: &Pick) -> Widget {
     ];
     // Opening has no use for a new directory, and offering it there
     // invites a stray write on a dialog that is meant to be read-only.
-    if p.mode == Mode::Save {
+    if p.mode != Mode::Open {
         let mut add = prefab::button(s().new_folder, prefab::ButtonStyle::Ghost,
                                      ActionId(ACT_NEW_FOLDER));
         if let Widget::Button { icon, .. } = &mut add { *icon = IconId::Plus; }
@@ -789,6 +814,15 @@ fn render_footer(p: &Pick) -> Widget {
             };
             (lead, s().open_btn, file.is_some())
         }
+        Mode::Folder => {
+            let dir = p.folder_target();
+            let lead = Widget::Text {
+                content:   if dir.is_empty() { String::from("/") } else { dir.clone() },
+                style:     TextStyle::Mono,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted), Modifier::Flex(1)],
+            };
+            (lead, s().select_btn, folder_ok(&dir))
+        }
     };
     let [cancel, main] = buttons(ACT_CANCEL, label, prefab::ButtonStyle::Primary, ACT_CONFIRM, ready);
     Widget::Row {
@@ -800,6 +834,14 @@ fn render_footer(p: &Pick) -> Widget {
             Modifier::Background(Token::SurfaceElevated),
         ],
     }
+}
+
+/// A folder an app may be handed for editing: not the root, and nothing in
+/// `sys`, `.system` or `priv`. The kernel refuses those grants anyway; the button
+/// says so before the click.
+fn folder_ok(dir: &str) -> bool {
+    let top = dir.split('/').next().unwrap_or("");
+    !dir.is_empty() && !matches!(top, "sys" | ".system" | "priv")
 }
 
 /// A name is committable when it's non-empty and names a file, not a path.
@@ -902,7 +944,7 @@ fn handle(p: &mut Pick, ev: Event, payload: &str) -> Outcome {
                 _ => finish(p.confirm()),
             }
         }
-        Event::Key(KeyCode::Backspace) if p.mode == Mode::Open && !p.new_folder => {
+        Event::Key(KeyCode::Backspace) if p.mode != Mode::Save && !p.new_folder => {
             p.go_parent();
             Outcome::Rerender
         }

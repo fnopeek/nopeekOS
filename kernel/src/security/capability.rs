@@ -278,7 +278,12 @@ pub fn release_module_cap(cap: &CapId) {
 // right.
 //
 // Narrow on purpose:
-//   - one exact path, no prefix matching, no directories
+//   - one exact path, or, for a folder the user opened in the dialog's
+//     folder mode, that folder and everything below it; a folder grant
+//     matches at path boundaries only and never a path with an empty,
+//     `.` or `..` segment
+//   - no folder grant on the root, `sys`, `.system` or `priv` (`grant_tree`
+//     refuses)
 //   - bound to the capability of the instance that asked, so it dies
 //     with the app
 //   - never covers `sys/wasm/` — that check runs before this one and a
@@ -295,6 +300,8 @@ struct PathGrant {
     cap: CapId,
     path: alloc::string::String,
     rights: Rights,
+    /// `path` is a folder and the grant covers everything below it.
+    tree: bool,
 }
 
 static PATH_GRANTS: Mutex<alloc::vec::Vec<PathGrant>> = Mutex::new(alloc::vec::Vec::new());
@@ -302,21 +309,49 @@ static PATH_GRANTS: Mutex<alloc::vec::Vec<PathGrant>> = Mutex::new(alloc::vec::V
 /// Record that `cap` may act on `path` with `rights`. Re-granting the
 /// same pair widens the existing entry rather than stacking duplicates.
 pub fn grant_path(cap: CapId, path: &str, rights: Rights) {
+    push_grant(cap, path, rights, false);
+}
+
+/// Record that `cap` may act on folder `dir` and everything below it.
+/// Refuses (false) the root, `sys`, `priv`, `.system` and anything below
+/// those, and a path that is not in canonical form.
+pub fn grant_tree(cap: CapId, dir: &str, rights: Rights) -> bool {
+    if !canonical(dir) { return false; }
+    let top = dir.split('/').next().unwrap_or("");
+    if top == "sys" || top == ".system" || top == crate::wasm::PRIVATE_ROOT { return false; }
+    push_grant(cap, dir, rights, true);
+    true
+}
+
+/// A non-empty relative path of plain names: no leading or trailing `/`,
+/// no empty, `.` or `..` segment. Only such paths are matched against a
+/// folder grant, so no spelling of a path can reach outside the folder.
+fn canonical(path: &str) -> bool {
+    !path.is_empty() && path.split('/').all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+}
+
+fn push_grant(cap: CapId, path: &str, rights: Rights, tree: bool) {
     let mut g = PATH_GRANTS.lock();
-    if let Some(e) = g.iter_mut().find(|e| e.cap == cap && e.path == path) {
+    if let Some(e) = g.iter_mut().find(|e| e.cap == cap && e.path == path && e.tree == tree) {
         e.rights |= rights;
         return;
     }
     if g.iter().filter(|e| e.cap == cap).count() >= MAX_PATH_GRANTS {
         if let Some(i) = g.iter().position(|e| e.cap == cap) { g.remove(i); }
     }
-    g.push(PathGrant { cap, path: alloc::string::String::from(path), rights });
+    g.push(PathGrant { cap, path: alloc::string::String::from(path), rights, tree });
 }
 
-/// True if `cap` holds a grant covering exactly `path` with `rights`.
+/// True if `cap` holds a grant covering `path` with `rights`: one for
+/// exactly that path, or a folder grant for a folder it lies below.
 pub fn check_path_grant(cap: &CapId, path: &str, rights: Rights) -> bool {
-    PATH_GRANTS.lock().iter()
-        .any(|e| &e.cap == cap && e.path == path && e.rights.contains(rights))
+    let canon = canonical(path);
+    PATH_GRANTS.lock().iter().any(|e| {
+        &e.cap == cap && e.rights.contains(rights) && (e.path == path
+            || (e.tree && canon && path.len() > e.path.len()
+                && path.starts_with(e.path.as_str())
+                && path.as_bytes()[e.path.len()] == b'/'))
+    })
 }
 
 /// Drop every grant held by `cap` — called when an instance ends, so a

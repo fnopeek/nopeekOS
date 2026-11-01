@@ -675,15 +675,25 @@ pub struct PickSession {
     /// Capability of the requesting instance — the grant for the chosen
     /// path is written against it, so it dies when that instance does.
     pub cap: crate::security::capability::CapId,
-    /// Save mode: the grant includes WRITE. Open mode: READ only.
-    pub writable: bool,
+    pub mode: PickMode,
+}
+
+/// What the dialog was asked for, and so what the chosen path grants.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PickMode {
+    /// One file, READ.
+    Open,
+    /// One file, READ and WRITE.
+    Save,
+    /// A folder and everything below it, READ and WRITE.
+    Folder,
 }
 
 /// Register a picker window as belonging to `requester`. Called by
 /// `npk_pick` right after it creates the picker's window.
 pub fn register_pick(picker: u32, requester: u32, tag: u32,
-                     cap: crate::security::capability::CapId, writable: bool) {
-    PICK_SESSIONS.lock().insert(picker, PickSession { requester, tag, cap, writable });
+                     cap: crate::security::capability::CapId, mode: PickMode) {
+    PICK_SESSIONS.lock().insert(picker, PickSession { requester, tag, cap, mode });
 }
 
 /// True if `requester` already has a picker open — one dialog per app, so
@@ -729,11 +739,19 @@ pub fn take_pick(picker: u32) -> Option<PickSession> {
 pub fn finish_pick(session: PickSession, path: alloc::string::String) {
     // The click is the authorisation: hand the requester a right to this
     // one path, so it can open or save it without holding a blanket one.
-    // Nothing is granted on a cancel (empty path).
+    // Nothing is granted on a cancel (empty path). A folder the kernel
+    // will not hand out (root, `sys`, `.system`, `priv`) answers like a cancel, so the
+    // app never holds a folder it cannot work in.
+    let mut path = path;
     if !path.is_empty() {
-        use crate::security::capability::Rights;
-        let rights = if session.writable { Rights::READ | Rights::WRITE } else { Rights::READ };
-        crate::security::capability::grant_path(session.cap, &path, rights);
+        use crate::security::capability::{self, Rights};
+        match session.mode {
+            PickMode::Open => capability::grant_path(session.cap, &path, Rights::READ),
+            PickMode::Save => capability::grant_path(session.cap, &path, Rights::READ | Rights::WRITE),
+            PickMode::Folder => if !capability::grant_tree(session.cap, &path, Rights::READ | Rights::WRITE) {
+                path.clear();
+            },
+        }
     }
     push_event(session.requester, abi::Event::Picked { path, tag: session.tag });
 }

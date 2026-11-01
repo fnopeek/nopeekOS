@@ -16,6 +16,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
@@ -107,6 +108,10 @@ struct Strings {
     /// "{} of {}" — position in the quit sequence.
     step_of:       &'static str,
     welcome:       &'static str,
+    open_folder:   &'static str,
+    close_folder:  &'static str,
+    toggle_tree:   &'static str,
+    tree_more:     &'static str,
     menu_edit:     &'static str,
     undo:          &'static str,
     redo:          &'static str,
@@ -153,6 +158,7 @@ const EN: Strings = Strings {
     unsaved_body: "{} has unsaved changes.",
     discard: "Discard", cancel: "Cancel",
     step_of: "{} of {}",
+    open_folder: "Open folder\u{2026}", close_folder: "Close folder", toggle_tree: "Show folder", tree_more: "\u{2026} more (fold a folder in)",
     welcome: "Welcome to Spell\n\nStart typing, or open a file via File \u{2192} Open\u{2026} \u{2014} or double-click in loft.\n\nMultiple files open as tabs. Save it with a name and the\nextension decides how it is highlighted.\n",
     menu_edit: "Edit",
     undo: "Undo", redo: "Redo",
@@ -294,6 +300,17 @@ const ACT_DELETE_LINE:  u32 = 6_206;
 const ACT_DISK_RELOAD:  u32 = 6_407;
 const ACT_DISK_KEEP:    u32 = 6_408;
 const ACT_PALETTE:      u32 = 6_106;
+const ACT_TREE_TOGGLE:  u32 = 6_107;
+const ACT_TREE_REFRESH: u32 = 6_108;
+const ACT_OPEN_FOLDER:  u32 = 6_011;
+const ACT_CLOSE_FOLDER: u32 = 6_012;
+/// Folder tree: the i-th row shown.
+const ACT_TREE_BASE:    u32 = 20_000;
+/// Rows the tree shows at most; past that a "more" line ends it. The
+/// whole tree goes to the compositor on every keystroke.
+const TREE_ROWS:        usize = 500;
+/// Width of the folder pane.
+const TREE_W:           u16 = 240;
 const ACT_PALETTE_RUN:  u32 = 6_409;
 /// Palette: run the i-th listed command.
 const ACT_PALETTE_BASE: u32 = 7_100;
@@ -306,11 +323,13 @@ const MAX_RECENT:       usize = 8;
 // `npk_pick` modes.
 const PICK_OPEN: host::PickMode = host::PickMode::Open;
 const PICK_SAVE: host::PickMode = host::PickMode::Save;
+const PICK_FOLDER: host::PickMode = host::PickMode::Folder;
 
 // Tags handed to `npk_pick` and returned in `Event::Picked`. The save tags
 // carry the tab index, so a reply lands on the document it was asked for
 // rather than on whatever happens to be active when it arrives.
 const TAG_OPEN:            u32 = 1;
+const TAG_FOLDER:          u32 = 2;
 const TAG_SAVE_BASE:       u32 = 1_000;
 const TAG_SAVE_CLOSE_BASE: u32 = 2_000;
 
@@ -424,36 +443,12 @@ impl Doc {
         self.spans_stale = false;
     }
 
-    fn ext(&self) -> Option<String> {
-        self.path.as_deref()
-            .and_then(|p| p.rsplit_once('.'))
-            .map(|(_, e)| e.to_ascii_lowercase())
-    }
-
     fn kind(&self) -> Kind {
-        let base = self.path.as_deref().map(basename).unwrap_or("");
-        if matches!(base, "Makefile" | "makefile" | "GNUmakefile") {
-            return Kind::Code(Lang::Make);
-        }
-        match self.ext().as_deref() {
-            Some("md") | Some("markdown")          => Kind::Markdown,
-            Some("rs")                             => Kind::Code(Lang::Rust),
-            Some("c") | Some("h")                  => Kind::Code(Lang::C),
-            Some("js") | Some("ts")                => Kind::Code(Lang::Js),
-            Some("py")                             => Kind::Code(Lang::Python),
-            Some("sh") | Some("bash")              => Kind::Code(Lang::Shell),
-            Some("json")                           => Kind::Code(Lang::Json),
-            Some("html") | Some("htm") | Some("xml") | Some("svg") => Kind::Code(Lang::Markup),
-            Some("toml")                           => Kind::Code(Lang::Toml),
-            Some("yaml") | Some("yml")             => Kind::Code(Lang::Yaml),
-            Some("css")                            => Kind::Code(Lang::Css),
-            Some("diff") | Some("patch")           => Kind::Code(Lang::Diff),
-            Some("mk")                             => Kind::Code(Lang::Make),
-            None                                   => Kind::Untyped, // unnamed buffer
-            _                                      => Kind::Plain,   // txt/log/toml/yaml/…
+        match self.path.as_deref() {
+            Some(p) => kind_of(p),
+            None    => Kind::Untyped, // unnamed buffer
         }
     }
-
 
     fn set_text(&mut self, s: &str) {
         self.text.clear();
@@ -466,6 +461,100 @@ impl Doc {
     fn is_pristine(&self) -> bool {
         self.path.is_none() && !self.dirty
     }
+}
+
+/// How a file is shown and highlighted, from its name.
+fn kind_of(path: &str) -> Kind {
+    let base = basename(path);
+    if matches!(base, "Makefile" | "makefile" | "GNUmakefile") {
+        return Kind::Code(Lang::Make);
+    }
+    let ext = base.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("md") | Some("markdown")          => Kind::Markdown,
+        Some("rs")                             => Kind::Code(Lang::Rust),
+        Some("c") | Some("h")                  => Kind::Code(Lang::C),
+        Some("js") | Some("ts")                => Kind::Code(Lang::Js),
+        Some("py")                             => Kind::Code(Lang::Python),
+        Some("sh") | Some("bash")              => Kind::Code(Lang::Shell),
+        Some("json")                           => Kind::Code(Lang::Json),
+        Some("html") | Some("htm") | Some("xml") | Some("svg") => Kind::Code(Lang::Markup),
+        Some("toml")                           => Kind::Code(Lang::Toml),
+        Some("yaml") | Some("yml")             => Kind::Code(Lang::Yaml),
+        Some("css")                            => Kind::Code(Lang::Css),
+        Some("diff") | Some("patch")           => Kind::Code(Lang::Diff),
+        Some("mk")                             => Kind::Code(Lang::Make),
+        None                                   => Kind::Untyped,
+        _                                      => Kind::Plain,   // txt/log/…
+    }
+}
+
+/// An opened folder. The dialog handed this instance the right to save
+/// anywhere below `root`; it is not kept across runs, because the right
+/// is not.
+struct Tree {
+    root: String,
+    /// Expanded folders, by path.
+    open: BTreeSet<String>,
+    /// Listings of the folders shown, by path: (name, is_dir), folders first.
+    lists: BTreeMap<String, Vec<(String, bool)>>,
+}
+
+impl Tree {
+    fn new(root: &str) -> Self {
+        let mut t = Tree { root: root.to_string(), open: BTreeSet::new(), lists: BTreeMap::new() };
+        t.load(root.to_string());
+        t
+    }
+
+    fn load(&mut self, dir: String) {
+        let list = list_folder(&dir);
+        self.lists.insert(dir, list);
+    }
+
+    /// Fold a folder in or out.
+    fn toggle(&mut self, dir: &str) {
+        if !self.open.remove(dir) {
+            self.open.insert(dir.to_string());
+            if !self.lists.contains_key(dir) { self.load(dir.to_string()); }
+        }
+    }
+
+    /// Re-read every listing shown, for files created or removed elsewhere.
+    fn refresh(&mut self) {
+        let dirs: Vec<String> = self.lists.keys().cloned().collect();
+        for d in dirs { self.load(d); }
+    }
+
+    /// The rows on screen, top to bottom: (path, name, is_dir, depth).
+    fn rows(&self) -> Vec<(String, String, bool, usize)> {
+        let mut out = Vec::new();
+        self.walk(&self.root, 0, &mut out);
+        out
+    }
+
+    fn walk(&self, dir: &str, depth: usize, out: &mut Vec<(String, String, bool, usize)>) {
+        let Some(list) = self.lists.get(dir) else { return };
+        for (name, is_dir) in list {
+            // One past the limit, so the pane can tell a cut from a fit.
+            if out.len() > TREE_ROWS { return; }
+            let path = alloc::format!("{}/{}", dir, name);
+            let open = *is_dir && self.open.contains(&path);
+            out.push((path.clone(), name.clone(), *is_dir, depth));
+            if open { self.walk(&path, depth + 1, out); }
+        }
+    }
+}
+
+/// `dir`'s entries, folders first, each group by name.
+fn list_folder(dir: &str) -> Vec<(String, bool)> {
+    let Some(listing) = host::fs_list(dir, false) else { return Vec::new() };
+    let mut v: Vec<(String, bool)> = nopeek_widgets::fs::list_entries(&listing)
+        .filter(|e| e.name != ".dir")
+        .map(|e| (e.name.to_string(), e.is_dir))
+        .collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    v
 }
 
 struct Spell {
@@ -490,6 +579,10 @@ struct Spell {
     wrap:          bool,
     /// Recently opened or saved files, newest first.
     recent:        Vec<String>,
+    /// The folder opened with File → Open folder, shown as a tree.
+    tree:          Option<Tree>,
+    /// The folder pane is shown (Ctrl+B).
+    show_tree:     bool,
     /// What the settings file holds. A wheel spin fires a dozen zoom
     /// events and each npkFS write costs an encrypt + hash + flush, so the
     /// file is written when leaving, not per change.
@@ -552,6 +645,8 @@ impl Spell {
             final_nl:      cfg.final_nl,
             wrap:          cfg.wrap,
             recent:        cfg.recent.clone(),
+            tree:          None,
+            show_tree:     false,
             quit_total:    0,
             quit_done:     0,
             next_uid:      0,
@@ -1168,6 +1263,24 @@ impl Spell {
         self.active = ((self.active as isize + dir).rem_euclid(n)) as usize;
     }
 
+    /// Ask the dialog for a folder to work in.
+    fn ask_folder(&mut self) {
+        self.open_menu = None;
+        let start = match (&self.tree, self.cur().path.as_deref()) {
+            (Some(t), _) => t.root.clone(),
+            (None, Some(p)) => dirname(p).to_string(),
+            (None, None) => String::new(),
+        };
+        pick(PICK_FOLDER, &start, "", TAG_FOLDER);
+    }
+
+    /// A row of the tree was clicked: fold a folder, open a file.
+    fn tree_click(&mut self, i: usize) {
+        let Some(t) = &mut self.tree else { return };
+        let Some((path, _, is_dir, _)) = t.rows().into_iter().nth(i) else { return };
+        if is_dir { t.toggle(&path); } else { self.open_path(&path); }
+    }
+
     fn open_palette(&mut self) {
         self.open_menu = None;
         self.bar = Some(Bar::Palette { query: String::new(), sel: 0 });
@@ -1486,8 +1599,6 @@ fn dirname(path: &str) -> &str {
 
 fn render(sp: &Spell) -> Widget {
     let mut children: Vec<Widget> = alloc::vec![
-        render_menu_bar(),
-        Widget::Divider,
         render_tabbar(sp),
         Widget::Divider,
     ];
@@ -1507,6 +1618,23 @@ fn render(sp: &Spell) -> Widget {
         children.push(Widget::Divider);
         children.push(render_status(sp));
     }
+    let main = Widget::Column {
+        children,
+        spacing:   Spacing::None.as_u16(),
+        align:     Align::Stretch,
+        modifiers: alloc::vec![Modifier::Flex(1)],
+    };
+    // The folder pane runs the full height beside tabs, editor and status.
+    let below_menu = match (&sp.tree, sp.show_tree) {
+        (Some(t), true) => Widget::Row {
+            children:  alloc::vec![render_tree(sp, t), main],
+            spacing:   0,
+            align:     Align::Stretch,
+            modifiers: alloc::vec![Modifier::Flex(1)],
+        },
+        _ => main,
+    };
+    let mut children: Vec<Widget> = alloc::vec![render_menu_bar(), Widget::Divider, below_menu];
 
     if let Some(kind) = sp.open_menu {
         let (anchor, content) = render_dropdown(sp, kind);
@@ -1526,6 +1654,92 @@ fn render(sp: &Spell) -> Widget {
     }
 }
 
+/// The folder pane: the folder's name with refresh and close, then the
+/// tree. The file in the active tab is highlighted.
+fn render_tree(sp: &Spell, t: &Tree) -> Widget {
+    let current = sp.cur().path.as_deref();
+    let mut rows: Vec<Widget> = Vec::new();
+    let all = t.rows();
+    let cut = all.len() > TREE_ROWS;
+    for (i, (path, name, is_dir, depth)) in all.into_iter().take(TREE_ROWS).enumerate() {
+        let on = !is_dir && current == Some(path.as_str());
+        let icon = match (is_dir, t.open.contains(&path)) {
+            (true, true)  => IconId::FolderOpen,
+            (true, false) => IconId::Folder,
+            _ => if matches!(kind_of(&path), Kind::Code(_)) { IconId::Code } else { IconId::FileText },
+        };
+        let mut mods = alloc::vec![
+            Modifier::PaddingXY { x: 4 + 12 * depth.min(16) as u16, y: 3 },
+            Modifier::Rounded(Radius::Sm.as_u8()),
+            Modifier::OnClick(ActionId(ACT_TREE_BASE + i as u32)),
+            Modifier::Hover(alloc::vec![
+                Modifier::Background(Token::SurfaceHover),
+                Modifier::Rounded(Radius::Sm.as_u8()),
+            ]),
+        ];
+        if on {
+            mods.push(Modifier::Background(Token::AccentMuted));
+            mods.push(Modifier::Tint(Token::Accent));
+        }
+        rows.push(Widget::Row {
+            children: alloc::vec![
+                Widget::Icon {
+                    id:        icon,
+                    size:      16,
+                    modifiers: if on { alloc::vec![] } else { alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)] },
+                },
+                Widget::Text { content: name, style: TextStyle::Body, modifiers: alloc::vec![] },
+            ],
+            spacing:   Spacing::Xs.as_u16(),
+            align:     Align::Center,
+            modifiers: mods,
+        });
+    }
+    if cut {
+        rows.push(Widget::Text {
+            content:   s().tree_more.to_string(),
+            style:     TextStyle::Caption,
+            modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint), Modifier::Padding(Padding::Xs.as_u16())],
+        });
+    }
+    let header = Widget::Row {
+        children: alloc::vec![
+            Widget::Text {
+                content:   basename(&t.root).to_string(),
+                style:     TextStyle::Mono,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint), Modifier::Flex(1)],
+            },
+            prefab::icon_button(IconId::ArrowClockwise, 16, Some(ActionId(ACT_TREE_REFRESH)), None),
+            prefab::icon_button(IconId::X, 16, Some(ActionId(ACT_CLOSE_FOLDER)), None),
+        ],
+        spacing:   Spacing::Xxs.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![Modifier::PaddingXY { x: 8, y: 4 }],
+    };
+    Widget::Column {
+        children: alloc::vec![
+            header,
+            Widget::Scroll {
+                child: Box::new(Widget::Column {
+                    children:  rows,
+                    spacing:   0,
+                    align:     Align::Stretch,
+                    modifiers: alloc::vec![Modifier::Padding(Padding::Xs.as_u16())],
+                }),
+                axis:      Axis::Vertical,
+                modifiers: alloc::vec![Modifier::Flex(1)],
+            },
+        ],
+        spacing:   0,
+        align:     Align::Stretch,
+        modifiers: alloc::vec![
+            Modifier::MinWidth(TREE_W),
+            Modifier::MaxWidth(TREE_W),
+            Modifier::Background(Token::SurfaceMuted),
+        ],
+    }
+}
+
 /// Everything the palette offers: label, shortcut, action. The same
 /// actions as the menus, so a command behaves the same wherever it runs.
 fn commands(sp: &Spell) -> Vec<(String, &'static str, u32)> {
@@ -1536,6 +1750,7 @@ fn commands(sp: &Spell) -> Vec<(String, &'static str, u32)> {
         (t.save.to_string(),           "Ctrl+S",       ACT_FILE_SAVE),
         (t.save_as.to_string(),        "Ctrl+Shift+S", ACT_FILE_SAVE_AS),
         (t.close.to_string(),          "Ctrl+W",       ACT_FILE_CLOSE),
+        (t.open_folder.to_string(),    "",             ACT_OPEN_FOLDER),
         (t.settings.to_string(),       "",             ACT_FILE_SETTINGS),
         (t.undo.to_string(),           "Ctrl+Z",       ACT_UNDO),
         (t.redo.to_string(),           "Ctrl+Y",       ACT_REDO),
@@ -1552,6 +1767,10 @@ fn commands(sp: &Spell) -> Vec<(String, &'static str, u32)> {
     if matches!(sp.cur().kind(), Kind::Markdown) {
         v.push((t.view_source.to_string(), "", ACT_VIEW_EDIT));
         v.push((t.view_preview.to_string(), "", ACT_VIEW_PREVIEW));
+    }
+    if sp.tree.is_some() {
+        v.push((t.toggle_tree.to_string(), "Ctrl+B", ACT_TREE_TOGGLE));
+        v.push((t.close_folder.to_string(), "", ACT_CLOSE_FOLDER));
     }
     v.push((t.about.to_string(), "", ACT_HELP_ABOUT));
     v
@@ -1584,9 +1803,15 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().save.to_string(), ActionId(ACT_FILE_SAVE)),
                 (s().save_as.to_string(), ActionId(ACT_FILE_SAVE_AS)),
                 (s().close.to_string(), ActionId(ACT_FILE_CLOSE)),
-                (s().settings.to_string(), ActionId(ACT_FILE_SETTINGS)),
+                (s().open_folder.to_string(), ActionId(ACT_OPEN_FOLDER)),
             ];
             let mut keys: Vec<&str> = alloc::vec!["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", ""];
+            if sp.tree.is_some() {
+                items.push((s().close_folder.to_string(), ActionId(ACT_CLOSE_FOLDER)));
+                keys.push("");
+            }
+            items.push((s().settings.to_string(), ActionId(ACT_FILE_SETTINGS)));
+            keys.push("");
             // Recent files, other than the ones open, under the name and
             // with the folder as the hint.
             let open: Vec<&str> = sp.docs.iter().filter_map(|d| d.path.as_deref()).collect();
@@ -3209,7 +3434,10 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
         // means the user cancelled.
         Event::Picked { tag, .. } => {
             if payload.is_empty() { return Outcome::Idle; }
-            if tag == TAG_OPEN {
+            if tag == TAG_FOLDER {
+                sp.tree = Some(Tree::new(payload));
+                sp.show_tree = true;
+            } else if tag == TAG_OPEN {
                 sp.open_path(payload);
             } else if tag >= TAG_SAVE_CLOSE_BASE {
                 let doc = (tag - TAG_SAVE_CLOSE_BASE) as usize;
@@ -3255,6 +3483,7 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             b'/' | b'#' => { sp.toggle_comment(); Outcome::Rerender }
             b'k' if shift => { sp.delete_lines(); Outcome::Rerender }
             b'p' if shift => { sp.open_palette(); Outcome::Rerender }
+            b'b' if sp.tree.is_some() => { sp.show_tree = !sp.show_tree; Outcome::Rerender }
             _ => Outcome::Idle,
         },
         // Ctrl+wheel. One px per notch: small enough to land on the size
@@ -3377,6 +3606,10 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_ZOOM_RESET => { sp.open_menu = None; sp.zoom(None);   Outcome::Rerender }
         ACT_WRAP => { sp.open_menu = None; sp.wrap = !sp.wrap; Outcome::Rerender }
         ACT_PALETTE => { sp.open_palette(); Outcome::Rerender }
+        ACT_OPEN_FOLDER => { sp.ask_folder(); Outcome::Rerender }
+        ACT_CLOSE_FOLDER => { sp.open_menu = None; sp.tree = None; sp.show_tree = false; Outcome::Rerender }
+        ACT_TREE_TOGGLE => { sp.show_tree = !sp.show_tree; Outcome::Rerender }
+        ACT_TREE_REFRESH => { if let Some(t) = &mut sp.tree { t.refresh(); } Outcome::Rerender }
         ACT_PALETTE_RUN => {
             let sel = match &sp.bar { Some(Bar::Palette { sel, .. }) => *sel, _ => 0 };
             sp.palette_run(sel)
@@ -3388,6 +3621,10 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         }
         _ => {
             // Ranges, highest base first.
+            if id >= ACT_TREE_BASE && id < ACT_TREE_BASE + TREE_ROWS as u32 {
+                sp.tree_click((id - ACT_TREE_BASE) as usize);
+                return Outcome::Rerender;
+            }
             if id >= ACT_TAB_CLOSE_BASE {
                 sp.request_close((id - ACT_TAB_CLOSE_BASE) as usize);
                 return Outcome::Rerender;

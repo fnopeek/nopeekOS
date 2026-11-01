@@ -4664,7 +4664,12 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
     if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
         return -1;
     }
-    if mode != 0 && mode != 1 { return -1; }
+    let pick_mode = match mode {
+        0 => crate::shade::widgets::PickMode::Open,
+        1 => crate::shade::widgets::PickMode::Save,
+        2 => crate::shade::widgets::PickMode::Folder,
+        _ => return -1,
+    };
 
     // Only a windowed app can receive the reply event.
     let requester = ctx.widget_window_id;
@@ -4712,9 +4717,13 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
     };
 
     // Wire the request as the launch argument:
-    //   "<open|save>\0<start-dir>\0<suggested-name>"
-    let arg = alloc::format!("{}\0{}\0{}",
-        if mode == 1 { "save" } else { "open" }, start, suggest);
+    //   "<open|save|folder>\0<start-dir>\0<suggested-name>"
+    let verb = match pick_mode {
+        crate::shade::widgets::PickMode::Open => "open",
+        crate::shade::widgets::PickMode::Save => "save",
+        crate::shade::widgets::PickMode::Folder => "folder",
+    };
+    let arg = alloc::format!("{}\0{}\0{}", verb, start, suggest);
 
     // Floating + centred, like the launcher — a dialog must not
     // re-tile the workspace behind it.
@@ -4726,7 +4735,7 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
         Some(id) => id,
         None => { capability::release_module_cap(&module_cap); return -1; }
     };
-    crate::shade::widgets::register_pick(win.0, requester, tag as u32, cap_id, mode == 1);
+    crate::shade::widgets::register_pick(win.0, requester, tag as u32, cap_id, pick_mode);
     crate::shade::focus_window(win);
     crate::shade::request_render();
 

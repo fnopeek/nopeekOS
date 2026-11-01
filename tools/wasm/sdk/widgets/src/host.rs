@@ -275,9 +275,11 @@ pub fn canvas_rect(id: u32) -> Option<(i32, i32, i32, i32)> {
     Some((rd(0), rd(4), rd(8), rd(12)))
 }
 
-/// What the system file dialog is for.
+/// What the system file dialog is for. Open grants the app READ on the
+/// chosen file, Save READ and WRITE on it, Folder READ and WRITE on the
+/// chosen folder and everything below it, for as long as the app runs.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PickMode { Open = 0, Save = 1 }
+pub enum PickMode { Open = 0, Save = 1, Folder = 2 }
 
 /// Open the system file dialog in `start` (a hint), with `suggest` as the
 /// proposed name when saving. The answer arrives as `Event::Picked` with

@@ -27,7 +27,12 @@ pub fn rows(text: &str, width: Option<u32>, px: u16) -> Vec<Row> {
     let Some(w) = width else { return rows_with(text, None, &|_| 0.0) };
     crate::gui::text::with_advance(super::abi::TextStyle::Mono, px, |adv| {
         let wrap = (w as f32 >= MIN_WRAP_GLYPHS * adv('0')).then_some(w);
-        rows_with(text, wrap, adv)
+        // The text is rewrapped on every keystroke, several times; ASCII
+        // advances come from a table instead of the font each time.
+        let mut ascii = [0.0f32; 128];
+        for (i, a) in ascii.iter_mut().enumerate() { *a = adv(i as u8 as char); }
+        let fast = |c: char| if (c as u32) < 128 { ascii[c as usize] } else { adv(c) };
+        rows_with(text, wrap, &fast)
     }).unwrap_or_else(|| rows_with(text, None, &|_| 0.0))
 }
 
