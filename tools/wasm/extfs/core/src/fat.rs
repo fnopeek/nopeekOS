@@ -631,3 +631,24 @@ pub fn fat_time_fat2unix(time: u16, date: u16) -> u64 {
     let days = era * 146_097 + doe - 719_468;
     (days * 86_400 + secs).max(0) as u64
 }
+
+impl<D: Dev> crate::Volume for Fat<D> {
+    type Node = Node;
+    fn label(&self) -> &str { &self.label }
+    fn dirty(&self) -> bool { self.dirty }
+    fn total_bytes(&self) -> u64 { Fat::total_bytes(self) }
+    fn free_bytes(&self) -> u64 { Fat::free_bytes(self) }
+    fn info(n: &Node) -> (bool, u64, u64) { (n.is_dir, n.size, n.mtime) }
+    fn lookup(&mut self, path: &str) -> Result<Option<Node>, Error> { Fat::lookup(self, path) }
+    fn list(&mut self, n: &Node) -> Result<Vec<(String, Node)>, Error> {
+        Ok(self.read_dir(n)?.into_iter().map(|e| (e.name, e.node)).collect())
+    }
+    fn read(&mut self, n: &Node, off: u64, out: &mut [u8]) -> Result<usize, Error> { Fat::read(self, n, off, out) }
+    fn set_now(&mut self, t: u64) { Fat::set_now(self, t) }
+    fn create(&mut self, p: &str) -> Result<(), Error> { Fat::create(self, p) }
+    fn append(&mut self, p: &str, off: u64, d: &[u8]) -> Result<(), Error> { Fat::append(self, p, off, d) }
+    fn mkdir(&mut self, p: &str) -> Result<(), Error> { Fat::mkdir(self, p) }
+    fn remove(&mut self, p: &str) -> Result<(), Error> { Fat::remove(self, p) }
+    fn rename(&mut self, a: &str, b: &str, r: bool) -> Result<(), Error> { Fat::rename(self, a, b, r) }
+    fn sync(&mut self) -> Result<(), Error> { Fat::sync(self) }
+}

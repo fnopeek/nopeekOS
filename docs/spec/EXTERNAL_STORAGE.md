@@ -11,7 +11,7 @@ none of its structures is parsed in the kernel.
 |---|---|---|
 | usb-storage | `kernel/src/drivers/usb_storage.rs` | Bulk-Only Transport and the SCSI commands of Linux `sd.c`; one disk per LUN |
 | volumes | `kernel/src/storage/ext.rs` | starts `extfs` instances, binds each to a block range, routes `ext/` calls, checks every answer |
-| file system | `tools/wasm/extfs` | partition tables (Linux `efi.c`, `msdos.c`), FAT12/16/32 with long names, read and write (Linux `fs/fat`) |
+| file system | `tools/wasm/extfs` | partition tables (Linux `efi.c`, `msdos.c`); FAT12/16/32 with long names (Linux `fs/fat`) and exFAT (Linux `fs/exfat`), read and write |
 
 ## Bring-up
 
@@ -22,7 +22,8 @@ none of its structures is parsed in the kernel.
 3. The kernel checks that every partition lies inside the disk and that
    none overlaps another, then starts one **volume** instance per partition
    with a handle bounded to that range.
-4. A volume instance mounts its file system and names it with
+4. A volume instance mounts its file system (exFAT is tried first, then
+   FAT) and names it with
    `npk_ext_mount`. The kernel cleans the label to one path segment and
    makes it unique (`NAME`, `NAME-2`). An instance that recognises nothing
    ends, and the partition is not shown.

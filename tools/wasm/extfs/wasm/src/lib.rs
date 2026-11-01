@@ -11,7 +11,9 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use extfs_core::fat::{self, Fat, Node};
+use extfs_core::exfat::Exfat;
+use extfs_core::fat::{self, Fat};
+use extfs_core::Volume;
 use extfs_core::{part, Dev, IoError};
 
 // No rights: the block handle is bound to the instance by the kernel.
@@ -119,12 +121,15 @@ fn probe(mut dev: Handle) {
     npk_sys::ext_parts(&b);
 }
 
+/// exFAT carries its own name in the boot sector, so it is tried first;
+/// a volume neither format takes is not shown.
 fn serve(dev: Handle) {
-    let mut fs = match Fat::mount(dev) {
-        Ok(fs) => fs,
-        // Other formats come as further ports; this volume is not shown.
-        Err(_) => return,
-    };
+    let (bs, blocks) = (dev.bs, dev.blocks);
+    if let Ok(fs) = Exfat::mount(dev) { return run(fs); }
+    if let Ok(fs) = Fat::mount(Handle { bs, blocks }) { run(fs); }
+}
+
+fn run<V: Volume>(mut fs: V) {
     if fs.dirty() { log("volume was not cleanly unmounted"); }
     let label = alloc::string::String::from(fs.label());
     if npk_sys::ext_mount(label.as_bytes(), fs.total_bytes(), fs.free_bytes()) != 0 { return; }
@@ -134,7 +139,7 @@ fn serve(dev: Handle) {
     let mut out: Vec<u8> = Vec::new();
     // The node of the last path asked for: reads of one file come in many
     // requests.
-    let mut last: Option<(Vec<u8>, Node)> = None;
+    let mut last: Option<(Vec<u8>, V::Node)> = None;
     loop {
         let n = npk_sys::ext_next(&mut req, 5000);
         if n == -2 || n < 0 { return; }
@@ -191,12 +196,13 @@ fn serve(dev: Handle) {
         let status = match op {
             OP_LIST => list(&mut fs, &node, &mut out),
             OP_STAT => {
-                out.push(node.is_dir as u8);
-                out.extend_from_slice(&node.size.to_le_bytes());
-                out.extend_from_slice(&node.mtime.to_le_bytes());
+                let (is_dir, size, mtime) = V::info(&node);
+                out.push(is_dir as u8);
+                out.extend_from_slice(&size.to_le_bytes());
+                out.extend_from_slice(&mtime.to_le_bytes());
                 ST_OK
             }
-            OP_READ if !node.is_dir => {
+            OP_READ if !V::info(&node).0 => {
                 out.resize(len.min(MAX_IO), 0);
                 match fs.read(&node, off, &mut out) {
                     Ok(k) => { out.truncate(k); ST_OK }
@@ -211,20 +217,21 @@ fn serve(dev: Handle) {
 
 /// A folder's entries in the reply format; names that cannot be one path
 /// segment are left out.
-fn list<D: Dev>(fs: &mut Fat<D>, node: &Node, out: &mut Vec<u8>) -> i32 {
-    if !node.is_dir { return ST_NOT_FOUND; }
-    let Ok(entries) = fs.read_dir(node) else { return ST_FAILED };
-    for e in entries {
-        let name = e.name.as_bytes();
-        if name.is_empty() || name.len() > 1024 || e.name == "." || e.name == ".."
-            || e.name.chars().any(|c| c == '/' || c.is_control())
+fn list<V: Volume>(fs: &mut V, node: &V::Node, out: &mut Vec<u8>) -> i32 {
+    if !V::info(node).0 { return ST_NOT_FOUND; }
+    let Ok(entries) = fs.list(node) else { return ST_FAILED };
+    for (name_s, n) in entries {
+        let name = name_s.as_bytes();
+        if name.is_empty() || name.len() > 1024 || name_s == "." || name_s == ".."
+            || name_s.chars().any(|c| c == '/' || c.is_control())
         {
             continue;
         }
+        let (is_dir, size, mtime) = V::info(&n);
         out.extend_from_slice(&(name.len() as u16).to_le_bytes());
-        out.push(e.node.is_dir as u8);
-        out.extend_from_slice(&e.node.size.to_le_bytes());
-        out.extend_from_slice(&e.node.mtime.to_le_bytes());
+        out.push(is_dir as u8);
+        out.extend_from_slice(&size.to_le_bytes());
+        out.extend_from_slice(&mtime.to_le_bytes());
         out.extend_from_slice(name);
     }
     ST_OK

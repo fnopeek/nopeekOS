@@ -9,6 +9,7 @@ extern crate alloc;
 
 pub mod cp437;
 mod crc32;
+pub mod exfat;
 pub mod fat;
 pub mod part;
 
@@ -42,4 +43,27 @@ pub fn read_bytes<D: Dev>(dev: &mut D, off: u64, len: usize) -> Result<alloc::ve
     dev.read(first, &mut buf)?;
     let skip = (off - first * bs) as usize;
     Ok(buf[skip..skip + len].into())
+}
+
+/// What a mounted file system offers the `extfs` module, whatever the
+/// format. Paths are `/`-separated below the root.
+pub trait Volume {
+    type Node: Copy;
+    fn label(&self) -> &str;
+    /// The volume was not cleanly unmounted.
+    fn dirty(&self) -> bool;
+    fn total_bytes(&self) -> u64;
+    fn free_bytes(&self) -> u64;
+    /// Folder or not, size, modification time (UTC seconds, 0 unknown).
+    fn info(node: &Self::Node) -> (bool, u64, u64);
+    fn lookup(&mut self, path: &str) -> Result<Option<Self::Node>, fat::Error>;
+    fn list(&mut self, dir: &Self::Node) -> Result<alloc::vec::Vec<(alloc::string::String, Self::Node)>, fat::Error>;
+    fn read(&mut self, node: &Self::Node, off: u64, out: &mut [u8]) -> Result<usize, fat::Error>;
+    fn set_now(&mut self, unix: u64);
+    fn create(&mut self, path: &str) -> Result<(), fat::Error>;
+    fn append(&mut self, path: &str, off: u64, data: &[u8]) -> Result<(), fat::Error>;
+    fn mkdir(&mut self, path: &str) -> Result<(), fat::Error>;
+    fn remove(&mut self, path: &str) -> Result<(), fat::Error>;
+    fn rename(&mut self, from: &str, to: &str, replace: bool) -> Result<(), fat::Error>;
+    fn sync(&mut self) -> Result<(), fat::Error>;
 }

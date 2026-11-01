@@ -31,7 +31,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "extfs"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "extfs_core",
  "nopeek_widgets",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.46.1"
+version = "0.46.2"
 dependencies = [
  "npk_sys",
  "postcard",
