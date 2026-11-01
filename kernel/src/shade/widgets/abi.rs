@@ -514,8 +514,9 @@ pub enum Modifier {
     /// the Public Suffix List); the toolkit only colours what it is told and
     /// knows nothing about URLs.
     ///
-    /// Uncovered bytes keep the default colour. Overlapping or unsorted
-    /// spans are allowed; the later one wins.
+    /// Uncovered bytes keep the default colour. Spans must be sorted by
+    /// `start` and must not overlap: the renderer stops at the first span
+    /// past an offset, so text before an out-of-order span stays uncoloured.
     Spans(alloc::vec::Vec<Span>),
     /// Fire `Event::Action(id)` while the pointer moves over this widget,
     /// at most every [`MOTION_INTERVAL_MS`] — and at once when the pointer
