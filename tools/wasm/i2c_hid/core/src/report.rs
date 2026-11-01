@@ -30,6 +30,15 @@ pub const USAGE_INPUT_MODE: u16 = 0x52;
 pub const USAGE_CONTACT_COUNT: u16 = 0x54;
 /// "Contact Count Maximum", a feature: how many fingers the device tracks.
 pub const USAGE_CONTACT_MAX: u16 = 0x55;
+pub const USAGE_IN_RANGE: u16 = 0x32;
+pub const USAGE_CONFIDENCE: u16 = 0x47;
+pub const USAGE_BARREL_SWITCH: u16 = 0x44;
+
+/// Application collections (`field->application` in Linux): page in the
+/// high half, usage in the low half.
+pub const APP_PEN: u32 = 0x000D_0002;
+pub const APP_TOUCH_SCREEN: u32 = 0x000D_0004;
+pub const APP_TOUCH_PAD: u32 = 0x000D_0005;
 
 /// Which report type a field belongs to.
 ///
@@ -54,6 +63,8 @@ pub struct Field {
     pub relative: bool,
     /// Bit 0: 1 = constant (padding), of no interest to us.
     pub constant: bool,
+    /// The innermost Application collection around the field, 0 if none.
+    pub application: u32,
 }
 
 /// The result: all input fields, in descriptor order.
@@ -101,8 +112,12 @@ pub fn parse(desc: &[u8]) -> ReportMap {
     // Stack for Push/Pop (tags 0xA4/0xB4) — rare, but without it everything
     // after it is misaligned.
     let mut stack: Vec<Global> = Vec::new();
-    let mut usages: Vec<u16> = Vec::new();
-    let mut usage_min: Option<u16> = None;
+    // Usages as written: a 4-byte one carries its page, a shorter one takes
+    // the Usage Page in effect at the Main item (`hid_concatenate_last_usage_page`).
+    let mut usages: Vec<(u32, bool)> = Vec::new();
+    let mut usage_min: Option<(u32, bool)> = None;
+    // Collections open around the current item: (is application, usage).
+    let mut collections: Vec<(bool, u32)> = Vec::new();
     // Bit offset per report ID, separate per type — see [`Kind`].
     let mut off_in: [u32; 256] = [0; 256];
     let mut off_out: [u32; 256] = [0; 256];
@@ -162,19 +177,24 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                     // `Usage Minimum`) there is one entry per element;
                     // otherwise one suffices and the offset skips the whole
                     // block.
+                    let full = |u: (u32, bool)| if u.1 { u.0 } else { ((g.usage_page as u32) << 16) | (u.0 & 0xFFFF) };
+                    let application = collections.iter().rev()
+                        .find(|c| c.0).map(|c| c.1).unwrap_or(0);
                     let distinct = usages.len() > 1 || usage_min.is_some();
                     if !distinct && g.report_count > 1 {
+                        let u = usages.last().map(|&u| full(u)).unwrap_or((g.usage_page as u32) << 16);
                         out.fields.push(Field {
                             kind,
                             report_id: g.report_id,
-                            usage_page: g.usage_page,
-                            usage: usages.last().copied().unwrap_or(0),
+                            usage_page: (u >> 16) as u16,
+                            usage: u as u16,
                             bit_offset: *off,
                             bit_size: g.report_size,
                             logical_min: g.logical_min,
                             logical_max: g.logical_max,
                             relative,
                             constant,
+                            application,
                         });
                         *off += g.report_size * g.report_count;
                         usages.clear();
@@ -183,11 +203,12 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                     }
                     for n in 0..g.report_count {
                         let usage = if (n as usize) < usages.len() {
-                            usages[n as usize]
+                            full(usages[n as usize])
                         } else if let Some(m) = usage_min {
-                            m.saturating_add(n as u16)
+                            let m = full(m);
+                            (m & 0xFFFF_0000) | ((m as u16).saturating_add(n as u16) as u32)
                         } else {
-                            usages.last().copied().unwrap_or(0)
+                            usages.last().map(|&u| full(u)).unwrap_or((g.usage_page as u32) << 16)
                         };
                         // Padding bits create no field.
                         //
@@ -202,22 +223,33 @@ pub fn parse(desc: &[u8]) -> ReportMap {
                         out.fields.push(Field {
                             kind,
                             report_id: g.report_id,
-                            usage_page: g.usage_page,
-                            usage,
+                            usage_page: (usage >> 16) as u16,
+                            usage: usage as u16,
                             bit_offset: *off,
                             bit_size: g.report_size,
                             logical_min: g.logical_min,
                             logical_max: g.logical_max,
                             relative,
                             constant,
+                            application,
                         });
                         *off += g.report_size;
                     }
                     usages.clear();
                     usage_min = None;
                 }
-                0xA | 0xC => {
-                    // Collection / End Collection
+                0xA => {
+                    // Collection: its usage is the last one before it
+                    // (`open_collection`); type 1 is Application.
+                    let u = usages.last().map(|&(u, ext)| {
+                        if ext { u } else { ((g.usage_page as u32) << 16) | (u & 0xFFFF) }
+                    }).unwrap_or(0);
+                    collections.push((val == 1, u));
+                    usages.clear();
+                    usage_min = None;
+                }
+                0xC => {
+                    collections.pop();
                     usages.clear();
                     usage_min = None;
                 }
@@ -227,7 +259,10 @@ pub fn parse(desc: &[u8]) -> ReportMap {
             1 => match tag {
                 0x0 => g.usage_page = val as u16,
                 0x1 => g.logical_min = sval,
-                0x2 => g.logical_max = sval,
+                // Unsigned unless the minimum is negative (hid-core.c,
+                // `HID_GLOBAL_ITEM_TAG_LOGICAL_MAXIMUM`): a 16-bit maximum
+                // of 0xFFFF is 65535, not -1.
+                0x2 => g.logical_max = if g.logical_min < 0 { sval } else { val as i32 },
                 0x7 => g.report_size = val,
                 0x8 => { g.report_id = val as u8; out.uses_ids = true; }
                 0x9 => g.report_count = val,
@@ -237,8 +272,8 @@ pub fn parse(desc: &[u8]) -> ReportMap {
             },
             // ── Local ──────────────────────────────────────────────
             2 => match tag {
-                0x0 => usages.push(val as u16),
-                0x1 => usage_min = Some(val as u16),
+                0x0 => usages.push((val, size == 4)),
+                0x1 => usage_min = Some((val, size == 4)),
                 0x2 => {} // Usage Maximum: the range follows from min + n
                 _ => {}
             },
@@ -296,13 +331,58 @@ impl ReportMap {
         })
     }
 
-    /// A report that carries contact points — a real touchpad report, not
-    /// mouse emulation.
+    /// The application collection of an input report.
+    pub fn application_of(&self, report_id: u8) -> u32 {
+        self.fields.iter()
+            .find(|f| f.kind == Kind::Input && f.report_id == report_id && !f.constant)
+            .map(|f| f.application).unwrap_or(0)
+    }
+
+    fn contact_report(&self, id: u8) -> bool {
+        self.find(id, PAGE_DIGITIZER, USAGE_TIP_SWITCH).is_some()
+            && self.find(id, PAGE_GENERIC_DESKTOP, USAGE_X).is_some()
+    }
+
+    /// A touch screen whose fingers point where they are: its application
+    /// is Touch Screen and it has no buttons. With buttons hid-multitouch
+    /// models it as a touchpad (`mt_touch_input_mapping`).
+    fn direct(&self, id: u8) -> bool {
+        self.application_of(id) == APP_TOUCH_SCREEN
+            && !self.fields.iter().any(|f| f.kind == Kind::Input && f.report_id == id
+                && f.usage_page == PAGE_BUTTON && !f.constant)
+    }
+
+    /// A report that carries contact points for a pointer that moves by
+    /// the fingers' motion: a touchpad, not mouse emulation and not a touch
+    /// screen or pen.
     pub fn touchpad_report(&self) -> Option<u8> {
         self.report_ids().into_iter().find(|&id| {
-            self.find(id, PAGE_DIGITIZER, USAGE_TIP_SWITCH).is_some()
-                && self.find(id, PAGE_GENERIC_DESKTOP, USAGE_X).is_some()
+            self.contact_report(id) && !self.direct(id) && self.application_of(id) != APP_PEN
         })
+    }
+
+    /// A touch screen report (`INPUT_MT_DIRECT`).
+    pub fn touchscreen_report(&self) -> Option<u8> {
+        self.report_ids().into_iter().find(|&id| self.contact_report(id) && self.direct(id))
+    }
+
+    /// A pen report: application Pen, with X and Y.
+    pub fn pen_report(&self) -> Option<u8> {
+        self.report_ids().into_iter().find(|&id| {
+            self.application_of(id) == APP_PEN
+                && self.find(id, PAGE_GENERIC_DESKTOP, USAGE_X).is_some()
+                && self.find(id, PAGE_GENERIC_DESKTOP, USAGE_Y).is_some()
+        })
+    }
+
+    /// The value for Input Mode (`inputmode_value`): 3 when the device is a
+    /// touchpad, else 2, the touch screen default of hid-multitouch.
+    pub fn input_mode_value(&self) -> i32 {
+        let pad = self.report_ids().into_iter().any(|id| {
+            self.application_of(id) == APP_TOUCH_PAD
+                || (self.application_of(id) == APP_TOUCH_SCREEN && !self.direct(id))
+        });
+        if pad { 3 } else { 2 }
     }
 
     /// How many contact points this report carries.
@@ -447,6 +527,10 @@ mod tests {
         let d = include_bytes!("../testdata/elan06fa.bin");
         let m = parse(d);
         assert_eq!(m.contact_slots(4), 1, "EIN Platz — das Geraet sendet mehrere Berichte");
+        assert_eq!(m.application_of(4), APP_TOUCH_PAD);
+        assert_eq!(m.touchpad_report(), Some(4));
+        assert_eq!(m.touchscreen_report(), None);
+        assert_eq!(m.input_mode_value(), 3);
 
         let tip = m.find(4, PAGE_DIGITIZER, USAGE_TIP_SWITCH).expect("tip switch");
         assert_eq!((tip.bit_offset, tip.bit_size), (1, 1));
@@ -504,6 +588,59 @@ mod tests {
         assert_eq!(m.report_bytes(Kind::Feature, 5), 2);
     }
 
+    /// A touch screen collection marks its fields, and a 16-bit logical
+    /// maximum above 0x7FFF stays positive when the minimum is not negative.
+    #[test]
+    fn touch_screen_application_and_unsigned_max() {
+        let d = [
+            0x05, 0x0D,       // Usage Page (Digitizer)
+            0x09, 0x04,       // Usage (Touch Screen)
+            0xA1, 0x01,       // Collection (Application)
+            0x85, 0x02,       //   Report ID (2)
+            0x09, 0x22,       //   Usage (Finger)
+            0xA1, 0x02,       //   Collection (Logical)
+            0x09, 0x42,       //     Usage (Tip Switch)
+            0x15, 0x00, 0x25, 0x01, 0x75, 0x01, 0x95, 0x01,
+            0x81, 0x02,       //     Input (Data,Var,Abs)
+            0x95, 0x07, 0x81, 0x03, // padding
+            0x09, 0x51,       //     Usage (Contact ID)
+            0x75, 0x08, 0x95, 0x01, 0x25, 0x0A, 0x81, 0x02,
+            0x05, 0x01,       //     Usage Page (Generic Desktop)
+            0x09, 0x30,       //     Usage (X)
+            0x26, 0x00, 0x90, //     Logical Maximum (36864)
+            0x75, 0x10, 0x95, 0x01, 0x81, 0x02,
+            0x09, 0x31,       //     Usage (Y)
+            0x26, 0xFF, 0xFF, //     Logical Maximum (65535)
+            0x81, 0x02,
+            0xC0,             //   End Collection
+            0xC0,             // End Collection
+        ];
+        let m = parse(&d);
+        assert_eq!(m.application_of(2), APP_TOUCH_SCREEN);
+        assert_eq!(m.touchscreen_report(), Some(2));
+        assert_eq!(m.touchpad_report(), None);
+        assert_eq!(m.input_mode_value(), 2);
+        let x = m.find(2, PAGE_GENERIC_DESKTOP, USAGE_X).unwrap();
+        assert_eq!(x.logical_max, 36864);
+        let y = m.find(2, PAGE_GENERIC_DESKTOP, USAGE_Y).unwrap();
+        assert_eq!(y.logical_max, 65535);
+    }
+
+    /// A 4-byte usage carries its own page.
+    #[test]
+    fn extended_usage_carries_its_page() {
+        let d = [
+            0x05, 0x01, 0x09, 0x02, 0xA1, 0x01,
+            0x0B, 0x30, 0x00, 0x01, 0x00, // Usage (Generic Desktop: X), 4 bytes
+            0x05, 0x09,                   // Usage Page (Button), after it
+            0x15, 0x81, 0x25, 0x7F, 0x75, 0x08, 0x95, 0x01, 0x81, 0x06,
+            0xC0,
+        ];
+        let m = parse(&d);
+        assert!(m.find(0, PAGE_GENERIC_DESKTOP, USAGE_X).is_some());
+        assert_eq!(m.application_of(0), 0x0001_0002);
+    }
+
     /// Writing and reading must agree, also across a byte boundary and with
     /// a sign.
     #[test]
@@ -511,7 +648,7 @@ mod tests {
         let f = Field {
             kind: Kind::Feature, report_id: 1, usage_page: 0, usage: 0,
             bit_offset: 5, bit_size: 12, logical_min: -2048, logical_max: 2047,
-            relative: false, constant: false,
+            relative: false, constant: false, application: 0,
         };
         let mut b = [0u8; 4];
         for v in [0i32, 1, -1, 2047, -2048, 1234] {

@@ -34,6 +34,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use npk_sys::bump::Bump;
+use i2c_hid_core::direct as i_core_direct;
 use npk_sys::cell::Single;
 
 // ── Diagnostic lines: built in, silent in normal operation ───────────
@@ -313,6 +314,9 @@ pub extern "C" fn _start() {
         for l in live.iter_mut() {
             l.track.tick(now / 1000);
             push_buttons(l);
+            if let Some(p) = l.direct.as_mut().and_then(|t| t.tick(now / 1000)) {
+                send_abs(l, p);
+            }
         }
 
         if stat_lines_left > 0 && now >= next_stat_us {
@@ -381,7 +385,8 @@ pub extern "C" fn _start() {
                 let now_ms = now / 1000;
                 let mut wait_ms: u64 = 1000;
                 for l in live.iter() {
-                    if let Some(d) = l.track.next_deadline() {
+                    let direct = l.direct.as_ref().and_then(|t| t.next_deadline());
+                    for d in [l.track.next_deadline(), direct].into_iter().flatten() {
                         wait_ms = wait_ms.min(d.saturating_sub(now_ms).max(1));
                     }
                 }
@@ -540,6 +545,21 @@ enum Mode {
         contacts: alloc::vec::Vec<Contact>,
         count: Option<report::Field>,
     },
+    /// Touch screen (`INPUT_MT_DIRECT`): the pointer goes where the oldest
+    /// finger is, the left button is down while a finger is.
+    Direct {
+        contacts: alloc::vec::Vec<Contact>,
+        count: Option<report::Field>,
+    },
+    /// Pen: in range moves the pointer, tip is the left button, the barrel
+    /// switch the right one.
+    Pen {
+        tip: Option<report::Field>,
+        in_range: Option<report::Field>,
+        barrel: Option<report::Field>,
+        x: report::Field,
+        y: report::Field,
+    },
 }
 
 /// A contact slot in the report: is it touching, which finger, where.
@@ -548,6 +568,8 @@ struct Contact {
     id: Option<report::Field>,
     x: report::Field,
     y: report::Field,
+    /// Confidence 0 is a palm (`MT_QUIRK_CONFIDENCE`): not a contact.
+    confidence: Option<report::Field>,
 }
 
 /// A report and how to read it.
@@ -602,6 +624,10 @@ struct Live {
     //
     // That logic lives in `i2c_hid_core::gesture`, where it has tests.
     track: i2c_hid_core::gesture::Tracker,
+    /// The touch screen's contacts, if the device is one.
+    direct: Option<i2c_hid_core::direct::Tracker>,
+    /// Buttons last sent with an absolute position.
+    abs_buttons: i32,
     /// Reference point for a mouse that reports positions instead of motion.
     have_ref: bool,
     rx: i32,
@@ -769,13 +795,14 @@ fn talk_to_device(
         let n = map.report_bytes(report::Kind::Feature, im.report_id).max(1);
         mode_len = n;
         let mut payload = alloc::vec![0u8; n];
-        report::insert(&mut payload, &im, 3);
+        let value = map.input_mode_value();
+        report::insert(&mut payload, &im, value);
         match hid::set_report(bus, dw, addr, &desc, hid::REPORT_TYPE_FEATURE, im.report_id, &payload) {
             Ok(()) => {
                 logln(&alloc::format!(
-                    "[i2c-hid]   device mode -> 3 (precision touchpad), feature report {} \
+                    "[i2c-hid]   device mode -> {value} ({}), feature report {} \
                      ({n} byte(s): {payload:02x?})",
-                    im.report_id));
+                    if value == 3 { "touchpad" } else { "touch screen" }, im.report_id));
                 switched = Some(im.report_id);
             }
             Err(e) => logln(&alloc::format!(
@@ -791,6 +818,61 @@ fn talk_to_device(
     let mut tap_move = 1i32;
     let mut pin_move = 1i32;
 
+    let mut screen_axes: Option<(i_core_direct::Axis, i_core_direct::Axis)> = None;
+    if let Some(id) = map.touchscreen_report() {
+        let tips = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH);
+        let xs = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X);
+        let ys = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_Y);
+        let ids = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_CONTACT_ID);
+        let conf = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_CONFIDENCE);
+        let n = tips.len().min(xs.len()).min(ys.len());
+        if n > 0 {
+            let contacts: alloc::vec::Vec<_> = (0..n)
+                .map(|i| Contact {
+                    tip: *tips[i],
+                    id: ids.get(i).map(|f| **f),
+                    x: *xs[i],
+                    y: *ys[i],
+                    confidence: conf.get(i).map(|f| **f),
+                })
+                .collect();
+            let ax = i_core_direct::Axis { min: xs[0].logical_min, max: xs[0].logical_max };
+            let ay = i_core_direct::Axis { min: ys[0].logical_min, max: ys[0].logical_max };
+            logln(&alloc::format!(
+                "[i2c-hid]   report {id}: touch screen, {n} contact slot(s), \
+                 x {}..{}, y {}..{}, confidence {}",
+                ax.min, ax.max, ay.min, ay.max, if conf.is_empty() { "no" } else { "yes" }));
+            screen_axes = Some((ax, ay));
+            decoders.push(Decoder {
+                rid: id,
+                mode: Mode::Direct {
+                    contacts,
+                    count: map.find(id, report::PAGE_DIGITIZER, report::USAGE_CONTACT_COUNT).copied(),
+                },
+                btn: alloc::vec::Vec::new(),
+            });
+        }
+    }
+    if let Some(id) = map.pen_report() {
+        let f = |page, usage| map.find(id, page, usage).copied();
+        if let (Some(x), Some(y)) = (f(report::PAGE_GENERIC_DESKTOP, report::USAGE_X),
+                                     f(report::PAGE_GENERIC_DESKTOP, report::USAGE_Y)) {
+            logln(&alloc::format!(
+                "[i2c-hid]   report {id}: pen, x {}..{}, y {}..{}",
+                x.logical_min, x.logical_max, y.logical_min, y.logical_max));
+            decoders.push(Decoder {
+                rid: id,
+                mode: Mode::Pen {
+                    tip: f(report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH),
+                    in_range: f(report::PAGE_DIGITIZER, report::USAGE_IN_RANGE),
+                    barrel: f(report::PAGE_DIGITIZER, report::USAGE_BARREL_SWITCH),
+                    x, y,
+                },
+                btn: alloc::vec::Vec::new(),
+            });
+        }
+    }
+
     if let Some(id) = map.touchpad_report() {
         let tips = map.find_all(report::Kind::Input, id, report::PAGE_DIGITIZER, report::USAGE_TIP_SWITCH);
         let xs = map.find_all(report::Kind::Input, id, report::PAGE_GENERIC_DESKTOP, report::USAGE_X);
@@ -804,6 +886,7 @@ fn talk_to_device(
                     id: ids.get(i).map(|f| **f),
                     x: *xs[i],
                     y: *ys[i],
+                    confidence: None,
                 })
                 .collect();
             // Scroll step from the logical range: about a fortieth of the
@@ -868,8 +951,8 @@ fn talk_to_device(
 
     // Every slot of one touchpad report is a finger the device may send.
     let slots = decoders.iter().find_map(|d| match &d.mode {
-        Mode::Touchpad { contacts, .. } => Some(contacts.len()),
-        Mode::Mouse { .. } => None,
+        Mode::Touchpad { contacts, .. } | Mode::Direct { contacts, .. } => Some(contacts.len()),
+        Mode::Mouse { .. } | Mode::Pen { .. } => None,
     });
     let max_contacts = match slots {
         Some(slots) => {
@@ -888,8 +971,10 @@ fn talk_to_device(
         addr, desc,
         uses_ids: map.uses_ids,
         touch_rid: decoders.iter()
-            .find(|d| matches!(d.mode, Mode::Touchpad { .. }))
+            .find(|d| matches!(d.mode, Mode::Touchpad { .. } | Mode::Direct { .. }))
             .map(|d| d.rid),
+        direct: screen_axes.map(|(ax, ay)| i_core_direct::Tracker::new(ax, ay, max_contacts)),
+        abs_buttons: 0,
         decoders,
         unknown_logged: 0,
         switched,
@@ -1198,7 +1283,49 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     }
     let buttons = l.hw_buttons;
 
+    match mode {
+        Mode::Direct { contacts, count } => {
+            let cc = count.as_ref().map(|c| report::extract(data, c)).unwrap_or(-1);
+            let mut present: alloc::vec::Vec<(i32, i32, i32)> = alloc::vec::Vec::new();
+            for (i, c) in contacts.iter().enumerate() {
+                if report::extract(data, &c.tip) == 0 { continue; }
+                if c.confidence.as_ref().is_some_and(|f| report::extract(data, f) == 0) { continue; }
+                let cid = c.id.as_ref().map(|f| report::extract(data, f)).unwrap_or(i as i32);
+                present.push((cid, report::extract(data, &c.x), report::extract(data, &c.y)));
+            }
+            let now_ms = { let t = npk_sys::now_us(); if t < 0 { 0 } else { t as u64 / 1000 } };
+            let slots = contacts.len();
+            if let Some(p) = l.direct.as_mut().and_then(|t| t.feed(cc, &present, slots, now_ms)) {
+                if l.touch_logged < 3 {
+                    l.touch_logged += 1;
+                    dbgln(&alloc::format!(
+                        "[i2c-hid]   touch: {} contact(s), contact-count {cc}, pointer {:?}",
+                        present.len(), p));
+                }
+                send_abs(l, p);
+            }
+            return Step::Data;
+        }
+        Mode::Pen { tip, in_range, barrel, x, y } => {
+            let get = |f: &Option<report::Field>| f.as_ref().map(|f| report::extract(data, f) != 0);
+            let touching = get(tip).unwrap_or(false);
+            let near = get(in_range).unwrap_or(touching);
+            if near || l.abs_buttons != 0 {
+                let ax = i_core_direct::Axis { min: x.logical_min, max: x.logical_max };
+                let ay = i_core_direct::Axis { min: y.logical_min, max: y.logical_max };
+                let b = (touching as i32) | ((get(barrel).unwrap_or(false) && near) as i32) << 1;
+                let _ = npk_sys::pointer_abs(
+                    ax.scale(report::extract(data, x)) as i32,
+                    ay.scale(report::extract(data, y)) as i32, b);
+                l.abs_buttons = b;
+            }
+            return Step::Data;
+        }
+        _ => {}
+    }
+
     let (dx, dy, scroll, hscroll, tap) = match mode {
+        Mode::Direct { .. } | Mode::Pen { .. } => (0, 0, 0, 0, 0),
         Mode::Mouse { fx, fy, wheel } => {
             let x = report::extract(data, fx);
             let y = report::extract(data, fy);
@@ -1274,6 +1401,13 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
         npk_sys::pointer_inject(dx, dy, l.last_buttons, scroll, hscroll);
     }
     Step::Data
+}
+
+/// A touch screen position: left button down while a finger is.
+fn send_abs(l: &mut Live, p: i_core_direct::Point) {
+    let b = p.down as i32;
+    let _ = npk_sys::pointer_abs(p.x as i32, p.y as i32, b);
+    l.abs_buttons = b;
 }
 
 /// Report the button state if it changed.

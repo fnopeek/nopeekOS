@@ -167,6 +167,7 @@ unsafe extern "C" {
     fn npk_battery_report(packed: i32);
     fn npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
     fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
+    fn npk_pointer_abs(x: i32, y: i32, buttons: i32) -> i32;
     fn npk_audio_poll_mix(ptr: i32, max: i32) -> i32;
     fn npk_audio_device_format(rate: i32, encoding: i32, channels: i32) -> i32;
     fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
@@ -311,6 +312,8 @@ plain! {
     fn battery_report = npk_battery_report(packed: i32);
     fn battery_detail = npk_battery_detail(rate: i32, remaining: i32, full: i32, voltage_mv: i32, unit: i32);
     fn pointer_inject = npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
+    /// The pointer at `x`, `y` on 0..=65535 of the screen (touch screen, pen).
+    fn pointer_abs = npk_pointer_abs(x: i32, y: i32, buttons: i32) -> i32;
 }
 
 /// Calls that read one slice of this module's memory.

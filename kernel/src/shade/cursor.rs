@@ -423,6 +423,23 @@ pub fn update_atomic(dx: i8, dy: i8, buttons: u8) {
     MOUSE_DIRTY.store(true, Ordering::Release);
 }
 
+/// Put the pointer at `(nx, ny)` on 0..=65535 of the screen, for a device
+/// that reports where it points (a touch screen, a pen).
+pub fn set_atomic_abs(nx: u16, ny: u16, buttons: u8) {
+    let sw = SCREEN_W.load(Ordering::Relaxed).max(1);
+    let sh = SCREEN_H.load(Ordering::Relaxed).max(1);
+    let x = (nx as i64 * (sw - 1) as i64 / 65535) as i32;
+    let y = (ny as i64 * (sh - 1) as i64 / 65535) as i32;
+    let old_btn = ATOMIC_BUTTONS.load(Ordering::Relaxed);
+    ACC_X.store(0, Ordering::Relaxed);
+    ACC_Y.store(0, Ordering::Relaxed);
+    ATOMIC_X.store(x, Ordering::Relaxed);
+    ATOMIC_Y.store(y, Ordering::Relaxed);
+    ATOMIC_PREV_BUTTONS.store(old_btn, Ordering::Relaxed);
+    ATOMIC_BUTTONS.store(buttons, Ordering::Release);
+    MOUSE_DIRTY.store(true, Ordering::Release);
+}
+
 /// Read current atomic mouse position
 pub fn atomic_pos() -> (i32, i32) {
     (ATOMIC_X.load(Ordering::Relaxed), ATOMIC_Y.load(Ordering::Relaxed))

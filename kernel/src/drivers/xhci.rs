@@ -285,6 +285,19 @@ fn inject_pointer(evt: MouseEvent, cheap: bool) {
     }
 }
 
+/// Put the pointer at an absolute position (0..=65535 per axis of the
+/// screen) with these buttons. Same ring and lock as `inject_pointer`; the
+/// event itself carries no motion, the position is in the cursor state.
+pub fn inject_pointer_abs(x: u16, y: u16, buttons: u8) {
+    crate::interrupts::without_interrupts(|| {
+        let _g = POINTER_LOCK.lock();
+        MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+        crate::shade::cursor::set_atomic_abs(x, y, buttons);
+        push_mouse_locked(MouseEvent { buttons, dx: 0, dy: 0, scroll: 0, hscroll: 0 });
+    });
+    crate::shade::request_render();
+}
+
 /// Inject a mouse event from another input source (e.g. the PS/2 touchpad on
 /// the i8042 aux port) into the same ring `poll_mouse` drains, so the main
 /// loop's existing `poll_mouse()` delivers it with no extra plumbing. Marks the

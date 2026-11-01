@@ -809,6 +809,10 @@ host_imports! {
     // npk_pointer_inject(dx, dy, buttons, scroll, hscroll) -> 0, or -1 without the right.
     ctx fn npk_pointer_inject(dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32) -> i32;
 
+    // npk_pointer_abs(x, y, buttons) -> 0, or -1 without the right. x, y on
+    // 0..=65535 of the screen: a touch screen or pen.
+    ctx fn npk_pointer_abs(x: i32, y: i32, buttons: i32) -> i32;
+
     // npk_ec_query() -> query number, or -1 when nothing is pending
     ctx fn npk_ec_query() -> i32;
 

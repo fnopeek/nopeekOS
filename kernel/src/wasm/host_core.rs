@@ -2127,6 +2127,18 @@ pub(crate) fn npk_pointer_inject(
     0
 }
 
+/// A pointing device that reports where it points (touch screen, pen):
+/// `x`, `y` on 0..=65535 of the screen, clamped. Requires `Rights::HARDWARE`,
+/// like `npk_pointer_inject`.
+pub(crate) fn npk_pointer_abs(ctx: &mut HostState, x: i32, y: i32, buttons: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    crate::xhci::inject_pointer_abs(
+        x.clamp(0, 65535) as u16, y.clamp(0, 65535) as u16, (buttons & 0x07) as u8);
+    0
+}
+
 /// An address inside one of the module's own MMIO or DMA regions, checked
 /// once on construction. Only `hw_addr` makes one.
 #[derive(Clone, Copy)]

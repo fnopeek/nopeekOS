@@ -19,6 +19,7 @@
 extern crate alloc;
 
 pub mod discover;
+pub mod direct;
 pub mod dw_i2c;
 pub mod hid;
 pub mod gesture;
