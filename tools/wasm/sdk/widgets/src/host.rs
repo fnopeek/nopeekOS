@@ -255,6 +255,18 @@ pub fn canvas_commit(id: u32, px: &[u8], w: u32, h: u32) -> bool {
 /// Free canvas `id`. False if there was none.
 pub fn canvas_drop(id: u32) -> bool { sys::canvas_drop(id as i32) == 0 }
 
+/// Start dragging `paths` from this window, while the left button is held.
+/// The drop arrives as `Event::Drop` in a window of this app. False if
+/// refused.
+pub fn drag_start(paths: &[String]) -> bool {
+    let mut buf = Vec::new();
+    for p in paths {
+        if !buf.is_empty() { buf.push(0); }
+        buf.extend_from_slice(p.as_bytes());
+    }
+    sys::drag_start(&buf) == 0
+}
+
 /// Where canvas `id` was laid out: `(x, y, w, h)` in window space.
 pub fn canvas_rect(id: u32) -> Option<(i32, i32, i32, i32)> {
     let mut out = [0u8; 16];

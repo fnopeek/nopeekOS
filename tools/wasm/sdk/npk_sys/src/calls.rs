@@ -71,6 +71,7 @@ unsafe extern "C" {
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
     fn npk_canvas_drop(canvas_id: i32) -> i32;
+    fn npk_drag_start(ptr: i32, len: i32) -> i32;
     fn npk_pick(mode: i32, start_ptr: i32, start_len: i32,
                 suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
 
@@ -598,6 +599,13 @@ pub fn canvas_rect(canvas_id: i32, out: &mut [u8; 16]) -> i32 {
 pub fn canvas_drop(canvas_id: i32) -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_canvas_drop(canvas_id) }
+}
+
+/// Start dragging `paths` (NUL-separated) from this window. 0, or -1 when
+/// refused (not focused, no button held, a path the caller may not read).
+pub fn drag_start(paths: &[u8]) -> i32 {
+    // SAFETY: FFI; the range is borrowed for the call.
+    unsafe { npk_drag_start(paths.as_ptr() as i32, paths.len() as i32) }
 }
 
 pub fn pick(mode: i32, start: &[u8], suggest: &[u8], tag: i32) -> i32 {

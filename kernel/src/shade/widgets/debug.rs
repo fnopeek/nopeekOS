@@ -233,6 +233,7 @@ fn fmt_mods(mods: &[Modifier]) -> String {
             }
             Modifier::AutoClose(bits) => { let _ = write!(s, "AutoClose({:#x})", bits); }
             Modifier::Wrap => { let _ = write!(s, "Wrap"); }
+            Modifier::DropTarget(a) => { let _ = write!(s, "DropTarget({})", a.0); }
         }
     }
     s.push(']');

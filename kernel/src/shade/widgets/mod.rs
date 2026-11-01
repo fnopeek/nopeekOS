@@ -5,6 +5,7 @@
 
 pub mod abi;
 pub mod canvas;
+pub mod drag;
 pub mod tile;
 pub mod debug;
 pub mod layout;
@@ -338,6 +339,7 @@ pub fn remove_scene(window_id: u32) {
     LAST_HOVER.lock().remove(&window_id);
     LAST_MOTION.lock().remove(&window_id);
     canvas::remove_window(window_id);
+    drag::forget_window(window_id);
 }
 
 // ── Per-window event queues ───────────────────────────────────────────
@@ -787,6 +789,29 @@ pub fn hit_test(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
     let mut out = None;
     find_click_target(&scene.tree, &scene.layout_tree, x, y, false, &mut out);
     out
+}
+
+/// The deepest `Modifier::DropTarget` under screen `(x, y)` in the window,
+/// outside any open popover.
+pub fn drop_target(window_id: u32, x: i32, y: i32) -> Option<abi::ActionId> {
+    let (x, y) = to_local(window_id, x, y);
+    let scenes = SCENES.lock();
+    let scene = scenes.get(&window_id)?;
+    if scene.popovers.iter().any(|p| rect_contains(p.layout.rect, x, y)) { return None; }
+    find_drop_target(&scene.tree, &scene.layout_tree, x, y)
+}
+
+fn find_drop_target(widget: &abi::Widget, layout: &layout::LayoutNode, x: i32, y: i32)
+    -> Option<abi::ActionId>
+{
+    if !rect_contains(layout.rect, x, y) || is_disabled(widget) { return None; }
+    for (cw, cl) in widget_children_ref(widget).iter().zip(layout.children.iter()) {
+        if let Some(id) = find_drop_target(cw, cl, x, y) { return Some(id); }
+    }
+    modifiers_of_ref(widget).iter().find_map(|m| match m {
+        abi::Modifier::DropTarget(id) => Some(*id),
+        _ => None,
+    })
 }
 
 fn is_disabled(w: &abi::Widget) -> bool {
@@ -3317,7 +3342,10 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
             let id = crate::shade::with_compositor(|c| c.create_widget_window(title))
                 .ok_or(-3i32);
             match id {
-                Ok(id) => (id.0, Some(id.0)),
+                Ok(id) => {
+                    drag::note_window(id.0, module_name);
+                    (id.0, Some(id.0))
+                }
                 Err(_) => return -3,
             }
         }

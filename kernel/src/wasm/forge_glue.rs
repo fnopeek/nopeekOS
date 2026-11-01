@@ -597,6 +597,13 @@ host_imports! {
     // at window close. RENDER-gated; -1 if there was none.
     ctx fn npk_canvas_drop(canvas_id: i32) -> i32;
 
+    // npk_drag_start(ptr, len) -> 0 / -1
+    // Start dragging the paths at ptr (NUL-separated). Only from the
+    // focused window while its left button is held, and only paths the
+    // caller may read. The drop arrives as Event::Drop in a window of the
+    // same module. RENDER-gated.
+    mem fn npk_drag_start(ptr: i32, len: i32) -> i32;
+
     // npk_cursor_pos() -> (x << 16) | y, or -1
     //
     // Screen coordinates, the same space `Event::MouseMove` and

@@ -543,6 +543,14 @@ impl MouseState {
     pub fn middle_released(&self) -> bool {
         (self.buttons & 4) == 0 && (self.prev_buttons & 4) != 0
     }
+    /// The side buttons, 4 (back) and 5 (forward). Only HID pointers
+    /// report them; the PS/2 packet carries three buttons.
+    pub fn back_clicked(&self) -> bool {
+        (self.buttons & 8) != 0 && (self.prev_buttons & 8) == 0
+    }
+    pub fn forward_clicked(&self) -> bool {
+        (self.buttons & 16) != 0 && (self.prev_buttons & 16) == 0
+    }
     pub fn left_held(&self) -> bool { (self.buttons & 1) != 0 }
     pub fn right_held(&self) -> bool { (self.buttons & 2) != 0 }
     #[allow(dead_code)]

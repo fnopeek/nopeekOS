@@ -217,6 +217,7 @@ fn _modifier_wire_position(m: &Modifier) -> usize {
         Modifier::Indent { .. }       => 38,
         Modifier::AutoClose(_)        => 39,
         Modifier::Wrap                => 40,
+        Modifier::DropTarget(_)       => 41,
     }
 }
 
@@ -242,6 +243,8 @@ fn _event_wire_position(e: &Event) -> usize {
         Event::InputChangeAt { .. } => 17,
         Event::Caret { .. }         => 18,
         Event::Mods { .. }          => 19,
+        Event::Navigate { .. }      => 20,
+        Event::Drop { .. }          => 21,
     }
 }
 

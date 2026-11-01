@@ -575,6 +575,11 @@ pub enum Modifier {
     /// than the column. Line numbers count the `\n`-separated lines; Up
     /// and Down move by row, Home and End stay on the whole line.
     Wrap,
+    /// Things dragged with `npk_drag_start` may be dropped here. On
+    /// release over this widget (the deepest one carrying it wins) the
+    /// window gets `Event::Drop` with this action. Hover styles apply
+    /// while something is dragged over it, as they do for the pointer.
+    DropTarget(ActionId),
     // Appended only.
 }
 
@@ -887,6 +892,14 @@ pub enum Event {
     /// do Shift+click ranges and Ctrl+click toggles, which `Action` and
     /// `Key` cannot say.
     Mods { shift: bool, ctrl: bool },
+    /// Go back (`forward: false`) or forward in the app's history: Alt+Left
+    /// / Alt+Right, or the side buttons of a mouse (buttons 4 and 5).
+    Navigate { forward: bool },
+    /// Something dragged with `npk_drag_start` was released over a widget
+    /// with `Modifier::DropTarget(target)` in this window. `paths` are the
+    /// dragged items; `copy` is true when Ctrl was held at the release.
+    /// Sent only to a window of the module that started the drag.
+    Drop { target: ActionId, paths: alloc::vec::Vec<alloc::string::String>, copy: bool },
     // Appended only.
 }
 

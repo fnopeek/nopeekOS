@@ -1409,6 +1409,29 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     // on a different row leaves both rows highlighted.
                     // Mouse-move re-establishes hover on the next motion.
                     crate::shade::widgets::suppress_hover(widget_wid);
+                    // Esc while something is dragged drops the drag, not
+                    // whatever the app would do with Esc.
+                    if event.key == crate::input::KeyCode::Escape && crate::shade::widgets::drag::active() {
+                        crate::shade::widgets::drag::cancel();
+                        continue;
+                    }
+                    // Alt+Left / Alt+Right: back and forward, before a text
+                    // field takes the arrow.
+                    let m = event.modifiers;
+                    if m.alt && !(m.ctrl || m.shift || m.super_key) {
+                        let forward = match event.key {
+                            crate::input::KeyCode::Left => Some(false),
+                            crate::input::KeyCode::Right => Some(true),
+                            _ => None,
+                        };
+                        if let Some(forward) = forward {
+                            crate::shade::widgets::push_event(
+                                widget_wid,
+                                crate::shade::widgets::abi::Event::Navigate { forward },
+                            );
+                            continue;
+                        }
+                    }
                     // If a Widget::Input / TextArea is focused, the
                     // compositor owns text editing: printable /
                     // Backspace / Delete / arrows / Home / End / Enter

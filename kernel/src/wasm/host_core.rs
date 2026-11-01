@@ -3167,6 +3167,26 @@ pub(crate) fn npk_canvas_drop(ctx: &mut HostState, canvas_id: i32) -> i32 {
     if crate::shade::widgets::canvas::remove(wid, canvas_id as u32) { 0 } else { -1 }
 }
 
+pub(crate) fn npk_drag_start(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+        return -1;
+    }
+    let wid = ctx.widget_window_id;
+    if wid == 0 || crate::shade::focused_widget_id() != Some(wid) { return -1; }
+    // A drag starts from a press the user is still holding.
+    if crate::shade::cursor::atomic_buttons().0 & 1 == 0 { return -1; }
+    let Some(bytes) = read_bytes(mem, ptr, len) else { return -1 };
+    let Ok(text) = core::str::from_utf8(&bytes) else { return -1 };
+    let mut paths = alloc::vec::Vec::new();
+    for p in text.split('\0').filter(|p| !p.is_empty()) {
+        if !read_allowed(ctx, p, "npk_drag_start") { return -1; }
+        paths.push(String::from(p));
+    }
+    if paths.is_empty() { return -1; }
+    crate::shade::widgets::drag::start(&ctx.module_name, paths);
+    0
+}
+
 pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::CAPTURE).is_err() {

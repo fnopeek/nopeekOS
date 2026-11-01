@@ -2242,6 +2242,9 @@ impl Compositor {
 
         // Regular LMB click: focus window + dispatch widget event
         if self.mouse.left_clicked() {
+            // A drag started as the button came up never saw its release;
+            // a new press ends it.
+            crate::shade::widgets::drag::cancel();
             if let Some(wid) = self.window_at(mx, my) {
                 // The panel must not steal keyboard focus from the tile you
                 // were working in; clicking an icon launches/focuses an
@@ -2350,11 +2353,33 @@ impl Compositor {
             }
         }
 
+        // Side buttons: back and forward to the widget window under the
+        // pointer, like Alt+Left / Alt+Right from the keyboard.
+        if !mod_held && (self.mouse.back_clicked() || self.mouse.forward_clicked()) {
+            let forward = self.mouse.forward_clicked();
+            if let Some(wid) = self.window_at(mx, my) {
+                let is_widget = self.windows.iter()
+                    .any(|w| w.id == wid && w.kind == crate::shade::window::WindowKind::Widget);
+                if is_widget {
+                    crate::shade::widgets::push_event(
+                        wid.0, crate::shade::widgets::abi::Event::Navigate { forward });
+                }
+            }
+        }
+
         // Mouse release: clear active state on every widget window
         // (we don't track which window held the press). Cheap — only
         // does work when the window's `active_path` was actually set.
         if self.mouse.left_released() {
             use crate::shade::widgets::abi::{Event, MouseButton};
+            // A drag ends here, dropped on the widget window under the
+            // pointer (Ctrl = copy) or on nothing.
+            if crate::shade::widgets::drag::active() {
+                let under = self.window_at(mx, my).filter(|wid| self.windows.iter()
+                    .any(|w| w.id == *wid && w.kind == crate::shade::window::WindowKind::Widget));
+                crate::shade::widgets::drag::release(
+                    under.map(|w| w.0), mx, my, crate::keyboard::is_ctrl_held());
+            }
             let widget_ids: alloc::vec::Vec<crate::shade::WindowId> = self.windows.iter()
                 .filter(|w| w.kind == crate::shade::window::WindowKind::Widget)
                 .map(|w| w.id)

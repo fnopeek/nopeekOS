@@ -257,6 +257,7 @@ struct Strings {
     bm_added:       &'static str,
     preview_pane:   &'static str,
     preview_none:   &'static str,
+    dragging:       &'static str,
     // Renaming several items.
     /// `{}` = the number of items.
     br_title:       &'static str,
@@ -354,7 +355,7 @@ const EN: Strings = Strings {
     bm_here: "Bookmark this folder", bm_item: "Add bookmark",
     bm_remove: "Remove bookmark", bm_up: "Move up",
     bm_added: "Bookmarked: {}",
-    preview_pane: "Preview pane", preview_none: "Nothing selected",
+    preview_pane: "Preview pane", preview_none: "Nothing selected", dragging: "Dragging {} · drop on a folder, Ctrl copies, Esc cancels",
     br_title: "Rename {} items", br_find: "Find:", br_replace: "Replace with:",
    
     br_more: "… and {} more",
@@ -470,9 +471,14 @@ const ACT_GRID_CLICK_END:     u32 = 2_000_000;
 // get bands as wide as the item band.
 const ACT_SIDEBAR_CLICK_BASE: u32 = 2_000_000;
 const ACT_SIDEBAR_CLICK_END:  u32 = 3_000_000;
+// Drop targets: sidebar rows, then folder items (one per visible row).
+const ACT_DROP_SIDEBAR_BASE:  u32 = 3_000_000;
+const ACT_DROP_SIDEBAR_END:   u32 = 4_000_000;
 const ACT_TAB_BASE:           u32 = 4_000_000;
 const ACT_TAB_CLOSE_BASE:     u32 = 5_000_000;
 const ACT_TAB_CLOSE_END:      u32 = 6_000_000;
+const ACT_DROP_ITEM_BASE:     u32 = 6_000_000;
+const ACT_DROP_ITEM_END:      u32 = 7_000_000;
 const ACT_BREADCRUMB_BASE:    u32 = 3_000;
 const ACT_TOOLBAR_BACK:       u32 = 4_000;
 const ACT_TOOLBAR_FORWARD:    u32 = 4_001;
@@ -503,6 +509,11 @@ const ACT_ZOOM_IN:            u32 = 6_110;
 const ACT_ZOOM_OUT:           u32 = 6_111;
 const ACT_VIEW_PREVIEW:       u32 = 6_112;
 const ACT_PREVIEW_GRIP:       u32 = 6_113;
+/// The empty part of the file area: a drop into the current folder.
+const ACT_DROP_HERE:          u32 = 6_114;
+/// Physical px the pointer travels with the button held before a press on
+/// an item becomes a drag.
+const DRAG_SLOP: i32 = 6;
 const ACT_GO_HOME:            u32 = 6_200;
 const ACT_GO_FILESYSTEM:      u32 = 6_201;
 const ACT_GO_LOCATION:        u32 = 6_202;
@@ -713,6 +724,10 @@ enum Clash { Replace, Keep, Skip }
 /// A paste in progress; it pauses on a name clash until the user answers.
 struct PasteJob {
     mode:      ClipMode,
+    /// The folder the items go into.
+    dest:      String,
+    /// Started by a drop, not Ctrl+V: the clipboard stays as it is.
+    dropped:   bool,
     /// All source paths, for the clipboard afterwards.
     all:       Vec<String>,
     /// Sources still to go, next one last.
@@ -945,6 +960,14 @@ struct Loft {
     /// Width of the preview pane in logical px.
     preview_w:      u16,
     grip:           Grip,
+    /// A press on an item, its screen position, until the button comes up:
+    /// moved far enough, it becomes a drag of the targets.
+    press:          Option<(i32, i32)>,
+    press_armed:    bool,
+    /// The press landed on one of several marked items: the marks stay for
+    /// a drag and go on a plain click (the release).
+    press_keep:     bool,
+    dragging:       bool,
 }
 
 /// Resizing the preview pane. A press on the grip arrives as its `Action`
@@ -1016,6 +1039,10 @@ impl Loft {
             preview:       None,
             preview_w:     PREVIEW_W,
             grip:          Grip::Idle,
+            press:         None,
+            press_armed:   false,
+            press_keep:    false,
+            dragging:      false,
         };
         lf.load_settings();
         lf.load_clip();
@@ -1320,6 +1347,24 @@ impl Loft {
         shown
     }
 
+    /// The pointer moved with the button held after a press on an item:
+    /// past the slop, hand the targets to the compositor as a drag.
+    fn drag_item(&mut self, x: i32, y: i32) -> bool {
+        let Some((x0, y0)) = self.press else { return false };
+        if self.dragging || (x - x0).abs() + (y - y0).abs() <= DRAG_SLOP { return false; }
+        let paths: Vec<String> = self.targets().into_iter().map(|t| t.full).collect();
+        self.press = None;
+        if paths.is_empty() || !host::drag_start(&paths) { return false; }
+        self.dragging = true;
+        self.press_keep = false;
+        let what = match paths.as_slice() {
+            [one] => basename(one).to_string(),
+            _ => num(paths.len()),
+        };
+        self.say(fill(s().dragging, &[&what]), false);
+        true
+    }
+
     /// Follow the pointer while the grip is dragged. The pane is on the
     /// right, so moving left widens it.
     fn drag_grip(&mut self, x: i32) -> bool {
@@ -1571,10 +1616,12 @@ impl Loft {
             return;
         }
         self.anchor = Some(ui);
+        self.press_armed = true;
         let now = host::ticks_ms();
         let double = matches!(self.last_click,
             Some((i, t)) if i == ui && now.saturating_sub(t) <= DOUBLE_CLICK_MS);
-        self.marks.clear();
+        self.press_keep = !double && self.is_marked(ui) && self.visible_marks() > 1;
+        if !self.press_keep { self.marks.clear(); }
         if double {
             self.last_click = None;
             self.open_cursor();
@@ -1694,7 +1741,49 @@ impl Loft {
         let mut todo = clip.items.clone();
         todo.reverse();
         self.paste = Some(PasteJob {
-            mode: clip.mode, all: clip.items, todo, policy: None, apply_all: false, asked: None,
+            mode: clip.mode, dest: self.current.clone(), dropped: false,
+            all: clip.items, todo, policy: None, apply_all: false, asked: None,
+            steps: Vec::new(), ok: 0, failed: 0, last: None,
+        });
+        self.run_paste(None);
+    }
+
+    /// The folder a drop target stands for.
+    fn drop_dest(&self, id: u32) -> Option<String> {
+        match id {
+            ACT_DROP_HERE => Some(self.current.clone()),
+            ACT_DROP_SIDEBAR_BASE..ACT_DROP_SIDEBAR_END =>
+                self.sidebar.get((id - ACT_DROP_SIDEBAR_BASE) as usize).map(|p| p.path.clone()),
+            ACT_DROP_ITEM_BASE..ACT_DROP_ITEM_END => {
+                let e = self.entry_at((id - ACT_DROP_ITEM_BASE) as usize)?;
+                e.is_dir.then(|| join(&self.current, &e.name))
+            }
+            _ => None,
+        }
+    }
+
+    /// Items dropped on folder `dest`: moved, or copied with Ctrl. A drop
+    /// on the trash moves them there as Delete does.
+    fn drop_into(&mut self, dest: String, paths: Vec<String>, copy: bool) {
+        if self.paste.is_some() || !self.idle_fs() || paths.is_empty() { return; }
+        if dest == self.trash_dir() {
+            if copy { return; }
+            let targets: Vec<Target> = paths.iter().map(|p| Target {
+                name: basename(p).to_string(), full: p.clone(), is_dir: dir_exists(p),
+            }).collect();
+            let (steps, failed) = self.trash_items(&targets);
+            let ok = steps.len();
+            self.record(steps);
+            self.marks.clear();
+            self.refresh();
+            self.report(ok, failed, s().trashed, s().trash_failed);
+            return;
+        }
+        let mut todo = paths.clone();
+        todo.reverse();
+        self.paste = Some(PasteJob {
+            mode: if copy { ClipMode::Copy } else { ClipMode::Cut }, dest, dropped: true,
+            all: paths, todo, policy: None, apply_all: false, asked: None,
             steps: Vec::new(), ok: 0, failed: 0, last: None,
         });
         self.run_paste(None);
@@ -1706,15 +1795,22 @@ impl Loft {
         let Some(mut job) = self.paste.take() else { return };
         while let Some(src) = job.todo.last().cloned() {
             // Moving an item into the folder it is already in changes nothing.
-            if job.mode == ClipMode::Cut && parent_path(&src) == self.current {
+            if job.mode == ClipMode::Cut && parent_path(&src) == job.dest {
                 job.todo.pop();
+                continue;
+            }
+            // Dropped on itself: nothing to do. A folder cannot go below
+            // itself.
+            if job.dest == src || is_below(&job.dest, &src) {
+                job.todo.pop();
+                if job.dest != src { job.failed += 1; }
                 continue;
             }
             if job.asked.as_deref().is_some_and(|a| a != src) { answer = None; }
             job.asked = None;
             let name = basename(&src).to_string();
             let is_dir = dir_exists(&src);
-            let plain = join(&self.current, &name);
+            let plain = join(&job.dest, &name);
             // A copy into its own folder is a duplicate, not a clash.
             let clash = plain != src && path_exists(&plain);
             let choice = if !clash {
@@ -1739,7 +1835,7 @@ impl Loft {
                     None => { job.failed += 1; continue; }
                 }
             }
-            let dest = if choice == Clash::Replace { plain } else { unique_in(&self.current, &name, is_dir) };
+            let dest = if choice == Clash::Replace { plain } else { unique_in(&job.dest, &name, is_dir) };
             let done = match job.mode {
                 ClipMode::Copy => fs_copy(&src, &dest),
                 ClipMode::Cut  => fs_rename(&src, &dest),
@@ -1760,14 +1856,18 @@ impl Loft {
 
     fn finish_paste(&mut self, job: PasteJob) {
         // A copy can be pasted again; a cut keeps only what did not move.
-        let mut items = job.all;
-        if job.mode == ClipMode::Cut { items.retain(|p| path_exists(p)); }
-        self.clipboard = (!items.is_empty()).then_some(Clip { items, mode: job.mode });
-        self.store_clip();
+        if !job.dropped {
+            let mut items = job.all;
+            if job.mode == ClipMode::Cut { items.retain(|p| path_exists(p)); }
+            self.clipboard = (!items.is_empty()).then_some(Clip { items, mode: job.mode });
+            self.store_clip();
+        }
         self.record(job.steps);
         self.marks.clear();
         self.refresh();
-        if let Some(name) = job.last { self.select_name(&name); }
+        if job.dest == self.current {
+            if let Some(name) = job.last { self.select_name(&name); }
+        }
         self.report(job.ok, job.failed, s().pasted, s().paste_failed);
     }
 
@@ -3316,11 +3416,12 @@ fn render_body(lf: &Loft) -> Widget {
     let mut devices_rows: Vec<Widget> = Vec::new();
     for (i, p) in lf.sidebar.iter().enumerate() {
         let selected = lf.sidebar_sel == Some(i);
-        let row = prefab::nav_row(
+        let mut row = prefab::nav_row(
             p.icon, &p.label, selected,
             Some(ActionId(ACT_SIDEBAR_CLICK_BASE + i as u32)),
             None,
         );
+        add_modifier(&mut row, Modifier::DropTarget(ActionId(ACT_DROP_SIDEBAR_BASE + i as u32)));
         match p.section {
             Section::Places => places_rows.push(row),
             Section::Bookmarks => bookmark_rows.push(row),
@@ -3392,7 +3493,11 @@ fn render_body(lf: &Loft) -> Widget {
     let content = Widget::Scroll {
         child:     alloc::boxed::Box::new(content),
         axis:      Axis::Vertical,
-        modifiers: alloc::vec![Modifier::Flex(1), Modifier::OnClick(ActionId(ACT_BACKGROUND))],
+        modifiers: alloc::vec![
+            Modifier::Flex(1),
+            Modifier::OnClick(ActionId(ACT_BACKGROUND)),
+            Modifier::DropTarget(ActionId(ACT_DROP_HERE)),
+        ],
     };
     let content = Widget::Column {
         children: alloc::vec![
@@ -3518,6 +3623,7 @@ fn render_grid(lf: &Loft) -> Widget {
             }
         }
         look.apply(&mut item);
+        if e.is_dir { add_modifier(&mut item, Modifier::DropTarget(ActionId(ACT_DROP_ITEM_BASE + ui_idx as u32))); }
         item
     }).collect();
     prefab::grid(grid_children, lf.grid_cols())
@@ -3567,6 +3673,7 @@ fn render_list(lf: &Loft) -> Widget {
             ActionId(ACT_GRID_CLICK_BASE + ui_idx as u32),
         );
         look.apply(&mut row);
+        if e.is_dir { add_modifier(&mut row, Modifier::DropTarget(ActionId(ACT_DROP_ITEM_BASE + ui_idx as u32))); }
         rows.push(row);
     }
     Widget::Column {
@@ -3879,16 +3986,37 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
             Outcome::Idle
         }
         Event::Action(ActionId(ACT_PREVIEW_GRIP)) => { lf.grip = Grip::Armed; Outcome::Idle }
-        Event::MouseButton { button: MouseButton::Left, down: true, x, .. } => {
+        Event::MouseButton { button: MouseButton::Left, down: true, x, y } => {
             lf.grip = if lf.grip == Grip::Armed { Grip::Drag { x0: x, w0: lf.preview_w } } else { Grip::Idle };
+            lf.press = core::mem::take(&mut lf.press_armed).then_some((x, y));
             Outcome::Idle
         }
-        Event::MouseMove { x, .. } => if lf.drag_grip(x) { Outcome::Rerender } else { Outcome::Idle },
+        Event::MouseMove { x, y } => {
+            if lf.drag_grip(x) || lf.drag_item(x, y) { Outcome::Rerender } else { Outcome::Idle }
+        }
         Event::MouseButton { button: MouseButton::Left, down: false, .. } => {
-            let dragged = matches!(lf.grip, Grip::Drag { w0, .. } if w0 != lf.preview_w);
+            let resized = matches!(lf.grip, Grip::Drag { w0, .. } if w0 != lf.preview_w);
             lf.grip = Grip::Idle;
-            if dragged { lf.save_settings(); }
-            Outcome::Idle
+            if resized { lf.save_settings(); }
+            lf.press = None;
+            let mut out = Outcome::Idle;
+            // A plain click on one of several marked items selects just it.
+            if core::mem::take(&mut lf.press_keep) && !lf.dragging {
+                lf.marks.clear();
+                out = Outcome::Rerender;
+            }
+            if core::mem::take(&mut lf.dragging) {
+                lf.status = None;
+                out = Outcome::Rerender;
+            }
+            out
+        }
+        Event::Navigate { forward: false } => { lf.go_back(); Outcome::Rerender }
+        Event::Navigate { forward: true } => { lf.go_forward(); Outcome::Rerender }
+        Event::Drop { target: ActionId(id), paths, copy } => {
+            let Some(dest) = lf.drop_dest(id) else { return Outcome::Idle };
+            lf.drop_into(dest, paths, copy);
+            Outcome::Rerender
         }
         Event::ContextAction(ActionId(id)) => handle_context(lf, id),
         Event::Action(ActionId(id)) => handle_action(lf, id),
