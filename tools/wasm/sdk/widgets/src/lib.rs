@@ -121,6 +121,9 @@ pub mod caps {
         /// `_overlay_at` / `_modal`, `npk_power`, system volume without
         /// focus. The shell's own modules only.
         pub const SHELL: u8 = 0x02;
+        /// Files on external drives (`ext/`), with READ. See
+        /// docs/spec/EXTERNAL_STORAGE.md.
+        pub const EXTERNAL: u8 = 0x04;
     }
 }
 

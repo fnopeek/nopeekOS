@@ -37,7 +37,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 // create files) and no EXEC.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 2] = [caps::READ | caps::RENDER, caps::ext::SHELL];
+static NPK_CAPS: [u8; 2] = [caps::READ | caps::RENDER, caps::ext::SHELL | caps::ext::EXTERNAL];
 
 use nopeek_widgets::host;
 
@@ -341,7 +341,7 @@ impl Pick {
                 true
             }
             Mode::Save => {
-                if !can_commit_name(&self.name) { return false; }
+                if !can_save_in(&self.dir) || !can_commit_name(&self.name) { return false; }
                 let name = self.full_name();
                 // Warn before clobbering — the requester writes blind, so
                 // this is the only place the user can be asked.
@@ -425,10 +425,20 @@ fn read_home_dir() -> String {
 
 /// Immediate children of `dir`, folders first then files, each group
 /// sorted by name. Wire per line: `name\0size(8)\0is_dir(1)\0mtime(8)`.
+/// Where external drives appear. npkFS reserves the name, so the root
+/// listing never carries it: the dialog adds it while a drive is mounted.
+const EXT: &str = "ext";
+
 fn list_dir(dir: &str) -> Vec<Entry> {
     let Some(listing) = host::fs_list(dir, false) else { return Vec::new() };
 
     let mut out: Vec<Entry> = Vec::new();
+    if dir.is_empty() {
+        let drives = count_children(EXT);
+        if drives > 0 {
+            out.push(Entry { name: String::from(EXT), is_dir: true, size: 0, items: Some(drives) });
+        }
+    }
     for e in nopeek_widgets::fs::list_entries(&listing) {
         if e.name == ".dir" { continue; }
         let full = if dir.is_empty() { e.name.to_string() }
@@ -585,7 +595,7 @@ fn render_toolbar(p: &Pick) -> Widget {
     ];
     // Opening has no use for a new directory, and offering it there
     // invites a stray write on a dialog that is meant to be read-only.
-    if p.mode != Mode::Open {
+    if p.mode != Mode::Open && can_save_in(&p.dir) {
         let mut add = prefab::button(s().new_folder, prefab::ButtonStyle::Ghost,
                                      ActionId(ACT_NEW_FOLDER));
         if let Widget::Button { icon, .. } = &mut add { *icon = IconId::Plus; }
@@ -812,7 +822,7 @@ fn render_footer(p: &Pick) -> Widget {
         Mode::Save => (
             text_field(&p.name, s().name_hint, ACT_NAME_SUBMIT, NODE_NAME, true, p.focus_seq),
             s().save_btn,
-            can_commit_name(&p.name),
+            can_save_in(&p.dir) && can_commit_name(&p.name),
         ),
         Mode::Open => {
             let file = p.selected_entry().filter(|e| !e.is_dir);
@@ -850,7 +860,13 @@ fn render_footer(p: &Pick) -> Widget {
 /// says so before the click.
 fn folder_ok(dir: &str) -> bool {
     let top = dir.split('/').next().unwrap_or("");
-    !dir.is_empty() && !matches!(top, "sys" | ".system" | "priv")
+    !dir.is_empty() && !matches!(top, "sys" | ".system" | "priv" | EXT)
+}
+
+/// External drives are read-only for now (docs/spec/EXTERNAL_STORAGE.md),
+/// so a save there would be confirmed and then fail.
+fn can_save_in(dir: &str) -> bool {
+    dir.split('/').next() != Some(EXT)
 }
 
 /// A name is committable when it's non-empty and names a file, not a path.
@@ -981,7 +997,7 @@ fn handle_action(p: &mut Pick, id: u32) -> Outcome {
         ACT_CONFIRM | ACT_NAME_SUBMIT => finish(p.confirm()),
         ACT_PARENT => { p.go_parent(); Outcome::Rerender }
         ACT_BACK   => { p.go_back();   Outcome::Rerender }
-        ACT_NEW_FOLDER => {
+        ACT_NEW_FOLDER if can_save_in(&p.dir) => {
             p.folder_name.clear();
             p.new_folder = true;
             p.focus_seq += 1;

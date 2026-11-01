@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.45.1"
+version = "0.46.1"
 dependencies = [
  "npk_sys",
  "postcard",
@@ -55,7 +55,7 @@ version = "0.2.0"
 
 [[package]]
 name = "pick"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "nopeek_widgets",
  "postcard",
