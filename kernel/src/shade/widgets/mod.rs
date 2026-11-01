@@ -792,6 +792,24 @@ fn is_disabled(w: &abi::Widget) -> bool {
     modifiers_of_ref(w).iter().any(|m| matches!(m, abi::Modifier::Disabled(_)))
 }
 
+/// The action of the focused Button or Checkbox, for Enter and Space.
+/// Only real controls: rows and cells with `OnClick` keep Enter for the
+/// app, where it means "open" rather than "select". A click focuses only
+/// text widgets, so a control holds focus only after Tab.
+pub fn focused_click(window_id: u32) -> Option<abi::ActionId> {
+    let scenes = SCENES.lock();
+    let s = scenes.get(&window_id)?;
+    if s.focus_path.is_empty() || s.input_edit.is_some() { return None; }
+    let w = widget_at_path(&s.tree, &s.focus_path)?;
+    if is_disabled(w) { return None; }
+    let id = match w {
+        abi::Widget::Button { on_click, .. } => *on_click,
+        abi::Widget::Checkbox { on_toggle, .. } => *on_toggle,
+        _ => return None,
+    };
+    (id.0 != u32::MAX).then_some(id)
+}
+
 fn is_focusable(w: &abi::Widget) -> bool {
     if is_disabled(w) { return false; }
     if matches!(w,

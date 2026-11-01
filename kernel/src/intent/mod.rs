@@ -1447,6 +1447,19 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     if crate::shade::widgets::handle_input_key(widget_wid, event.key, event.modifiers) {
                         continue;
                     }
+                    // Enter or Space on a button reached with Tab presses it.
+                    let m = event.modifiers;
+                    if !(m.ctrl || m.alt || m.super_key)
+                        && matches!(event.key, crate::input::KeyCode::Enter | crate::input::KeyCode::Char(b' '))
+                    {
+                        if let Some(action) = crate::shade::widgets::focused_click(widget_wid) {
+                            crate::shade::widgets::push_event(
+                                widget_wid,
+                                crate::shade::widgets::abi::Event::Action(action),
+                            );
+                            continue;
+                        }
+                    }
                     // Ctrl+A that no text widget claimed is the app's select-all.
                     let ctrl_a = match event.key {
                         crate::input::KeyCode::Char(0x01) => true,

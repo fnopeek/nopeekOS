@@ -100,7 +100,6 @@ struct Strings {
     unsaved_body:  &'static str,
     discard:       &'static str,
     cancel:        &'static str,
-    esc_cancels:   &'static str,
     /// "{} of {}" — position in the quit sequence.
     step_of:       &'static str,
     welcome:       &'static str,
@@ -147,7 +146,6 @@ const EN: Strings = Strings {
     unsaved_title: "Unsaved changes",
     unsaved_body: "{} has unsaved changes.",
     discard: "Discard", cancel: "Cancel",
-    esc_cancels: "Esc cancels",
     step_of: "{} of {}",
     welcome: "Welcome to Spell\n\nStart typing, or open a file via File \u{2192} Open\u{2026} \u{2014} or double-click in loft.\n\nMultiple files open as tabs. Save it with a name and the\nextension decides how it is highlighted.\n",
     menu_edit: "Edit",
@@ -1946,6 +1944,16 @@ fn lang_name(k: Kind) -> &'static str {
 /// While quitting this is one step of a sequence, so it carries a
 /// "(2 of 3)" counter — otherwise a second dialog appearing right after
 /// the first reads like the button didn't take.
+/// Discard throws work away, so it says so in red, but as a quiet
+/// button: Save is the one filled action in the card.
+fn discard_button() -> Widget {
+    let mut b = prefab::button(s().discard, prefab::ButtonStyle::Ghost, ActionId(ACT_CLOSE_DISCARD));
+    if let Widget::Button { modifiers, .. } = &mut b {
+        modifiers.push(Modifier::Tint(Token::Danger));
+    }
+    b
+}
+
 fn render_confirm_dialog(sp: &Spell) -> Widget {
     let idx = sp.confirm_close.unwrap_or(0);
     let title = match sp.docs.get(idx) {
@@ -1978,7 +1986,7 @@ fn render_confirm_dialog(sp: &Spell) -> Widget {
                 },
                 Widget::Row {
                     children: alloc::vec![
-                        prefab::button(s().discard, prefab::ButtonStyle::Destructive, ActionId(ACT_CLOSE_DISCARD)),
+                        discard_button(),
                         Widget::Spacer { flex: 1 },
                         prefab::button(s().cancel, prefab::ButtonStyle::Ghost, ActionId(ACT_CLOSE_CANCEL)),
                         prefab::button(s().save, prefab::ButtonStyle::Primary, ActionId(ACT_CLOSE_SAVE)),
@@ -1992,7 +2000,7 @@ fn render_confirm_dialog(sp: &Spell) -> Widget {
             align:     Align::Stretch,
             modifiers: alloc::vec![],
         },
-        Some(s().esc_cancels),
+        None,
         380,
     );
     Widget::Column {
@@ -2993,6 +3001,8 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
         // editor Esc is the cancel key, and a stray press should never
         // end the session. Closing is Mod+Q, the window's ×, or
         // File → Close.
+        // Enter in the unsaved-changes card saves, as its filled button.
+        Event::Key(KeyCode::Enter) if sp.confirm_close.is_some() => handle_action(sp, ACT_CLOSE_SAVE),
         Event::Key(KeyCode::Escape) => {
             if sp.confirm_close.is_some() { sp.cancel_quit(); Outcome::Rerender }
             else if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }

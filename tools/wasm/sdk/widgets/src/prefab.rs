@@ -609,8 +609,10 @@ pub fn button(label: &str, style: ButtonStyle, on_click: ActionId) -> Widget {
     } else {
         vec![Modifier::Background(active_bg)]
     }));
+    // A ring outside the fill: an Accent border would vanish on the
+    // Accent fill of a Primary button.
     mods.push(Modifier::Focus(vec![
-        Modifier::Border { token: Token::Accent, width: 2, radius: Radius::Md.as_u8() },
+        Modifier::Ring { token: Token::AccentRing, width: 2 },
     ]));
     Widget::Button {
         label:     label.to_string(),

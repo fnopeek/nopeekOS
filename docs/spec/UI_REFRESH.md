@@ -287,7 +287,7 @@ content below it.
 
 | Prefab | Rest | Hover | Active | Focus |
 |---|---|---|---|---|
-| `button` `Primary` | `Accent`, label `OnAccent` | `AccentMuted` | `AccentMuted` | `Border { Accent, 2, 8 }` |
+| `button` `Primary` | `Accent`, label `OnAccent` | `AccentMuted` | `AccentMuted` | `Ring { AccentRing, 2 }` |
 | `button` `Secondary` | `SurfaceElevated` | `SurfaceMuted` | `Border` | same |
 | `button` `Ghost` | `Surface` | `SurfaceMuted` | `Border` | same |
 | `button` `Destructive` | `Danger`, label `OnAccent` | `Danger`, `Opacity(220)` | `Danger`, `Opacity(190)` | same |
