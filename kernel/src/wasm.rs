@@ -1179,6 +1179,7 @@ fn cleanup_instance_state(state: &mut HostState) {
     crate::wasm::host_core::tls_release_owner(state.pid);
     // A file still being written is dropped unpublished: its name keeps the
     // old content, and the chunks already stored go to the next GC.
+    host_core::drop_ext_writers(state);
     state.files.clear();
     crate::audio::release_owner(state.pid);
     crate::audio::display_audio_release(state.pid);

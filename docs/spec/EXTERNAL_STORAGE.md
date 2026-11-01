@@ -11,7 +11,7 @@ none of its structures is parsed in the kernel.
 |---|---|---|
 | usb-storage | `kernel/src/drivers/usb_storage.rs` | Bulk-Only Transport and the SCSI commands of Linux `sd.c`; one disk per LUN |
 | volumes | `kernel/src/storage/ext.rs` | starts `extfs` instances, binds each to a block range, routes `ext/` calls, checks every answer |
-| file system | `tools/wasm/extfs` | partition tables (Linux `efi.c`, `msdos.c`), FAT12/16/32 with long names (Linux `fs/fat`) |
+| file system | `tools/wasm/extfs` | partition tables (Linux `efi.c`, `msdos.c`), FAT12/16/32 with long names, read and write (Linux `fs/fat`) |
 
 ## Bring-up
 
@@ -56,6 +56,23 @@ volume. Operations and their answers:
 | 1 list | per entry: name length u16, is_dir u8, size u64, mtime u64, name |
 | 2 stat | is_dir u8, size u64, mtime u64 |
 | 3 read | the bytes from the offset, at most the length asked |
+| 4 create | an empty file, or the file there cut to nothing |
+| 5 write | append the payload to a file whose size is the offset |
+| 6 mkdir | a folder |
+| 7 delete | a file or an empty folder |
+| 8 rename | to the path in the payload; offset 1 replaces a file there |
+
+A change answers with the volume's free bytes (u64), or with status 1 not
+found, 3 exists, 4 not empty, 5 no space, 2 failed. Create, mkdir, delete
+and rename end with the FAT and FSINFO written, the dirty bit cleared and
+the device's cache flushed; a write keeps the dirty bit set until the
+file's rename at close, so a drive pulled mid-copy is known as such.
+
+A file an app writes in `ext/` goes to `.<name>.npk-part` beside it and
+takes its name at close, so the name keeps its old content until then;
+an abort or the app's end deletes the partial file. Listings leave such
+files out. `npk_fs_copy` does not reach `ext/`: across volumes the
+caller copies the bytes.
 
 The kernel checks each answer before the caller sees it: names are one
 path segment of UTF-8 without control characters, at most 1024 bytes and
@@ -71,4 +88,4 @@ only through a grant from the open dialog. A folder grant never covers
 `ext` itself. The kernel's own intents (`ls`, `cat`) reach `ext/` too.
 
 The top-level name `ext` is reserved in npkFS: nothing can be stored
-under it. Volumes are read-only for now.
+under it. A write-protected drive is mounted read-only.

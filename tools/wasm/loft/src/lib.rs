@@ -192,7 +192,6 @@ struct Strings {
     place_trash:     &'static str,
     sec_places:      &'static str,
     sec_devices:     &'static str,
-    drive_read_only: &'static str,
     copying:         &'static str,
     copy_scanning:   &'static str,
     copy_done:       &'static str,
@@ -330,7 +329,6 @@ const EN: Strings = Strings {
     place_home: "Home", place_documents: "Documents", place_downloads: "Downloads",
     place_music: "Music", place_pictures: "Pictures", place_videos: "Videos", place_projects: "Projects", place_trash: "Trash",
     sec_places: "PLACES", sec_devices: "DEVICES",
-    drive_read_only: "External drives are read-only for now",
     copying: "Copying {} of {} files · {} of {} · {}/s · {} left · Esc stops",
     copy_scanning: "Preparing copy… {} files, {} · Esc stops",
     copy_done: "Copied {} files ({})",
@@ -771,6 +769,8 @@ struct Transfer {
     bytes_done:  u64,
     failed:      usize,
     started_ms:  u64,
+    /// Sources of a move, deleted once everything is copied.
+    moved:       Vec<(String, bool)>,
 }
 
 /// The file being copied: read and write handles, bytes so far.
@@ -1791,11 +1791,8 @@ impl Loft {
     /// A name that exists already asks first (see `Dialog::Clash`).
     fn do_paste(&mut self) {
         if self.paste.is_some() || self.transfer.is_some() { return; }
-        if self.refuse_ext(&self.current.clone()) { return; }
         self.load_clip();
-        let Some(mut clip) = self.clipboard.take() else { return };
-        // A drive is read-only: what is cut there is copied.
-        if clip.items.iter().any(|p| is_ext(p)) { clip.mode = ClipMode::Copy; }
+        let Some(clip) = self.clipboard.take() else { return };
         let mut todo = clip.items.clone();
         todo.reverse();
         self.paste = Some(PasteJob {
@@ -1822,12 +1819,10 @@ impl Loft {
     /// on the trash moves them there as Delete does.
     fn drop_into(&mut self, dest: String, paths: Vec<String>, copy: bool) {
         if self.paste.is_some() || self.transfer.is_some() || !self.idle_fs() || paths.is_empty() { return; }
-        if self.refuse_ext(&dest) { return; }
-        // Off a drive is always a copy, as between volumes elsewhere.
-        let copy = copy || paths.iter().any(|p| is_ext(p));
+        // Between volumes a drop copies, as elsewhere; Ctrl+X moves.
+        let copy = copy || paths.iter().any(|p| volume_of(p) != volume_of(&dest));
         if dest == self.trash_dir() {
             if copy { return; }
-            if paths.iter().any(|p| is_ext(p)) { self.refuse_ext(EXT_ROOT); return; }
             let targets: Vec<Target> = paths.iter().map(|p| Target {
                 name: basename(p).to_string(), full: p.clone(), is_dir: dir_exists(p),
             }).collect();
@@ -1888,7 +1883,10 @@ impl Loft {
             if choice == Clash::Skip { continue; }
             // Replacing a folder that holds the source would trash the source.
             if choice == Clash::Replace && is_below(&src, &plain) { job.failed += 1; continue; }
-            if choice == Clash::Replace {
+            if choice == Clash::Replace && is_ext(&plain) {
+                // A drive has no trash: the file there goes, a folder stays.
+                if dir_exists(&plain) || !fs_delete(&plain) { job.failed += 1; continue; }
+            } else if choice == Clash::Replace {
                 let old = Target { name: name.clone(), full: plain.clone(), is_dir: dir_exists(&plain) };
                 match self.trash_items(core::slice::from_ref(&old)).0.pop() {
                     Some(step) => job.steps.push(step),
@@ -1896,9 +1894,14 @@ impl Loft {
                 }
             }
             let dest = if choice == Clash::Replace { plain } else { unique_in(&job.dest, &name, is_dir) };
-            let done = if is_ext(&src) {
-                // A drive's files are bytes to copy, not store objects.
+            let other_volume = volume_of(&src) != volume_of(&job.dest);
+            let done = if other_volume || (is_ext(&src) && job.mode == ClipMode::Copy) {
+                // A drive's files are bytes to copy, not store objects; a
+                // move between volumes deletes the source once copied.
                 self.queue_transfer(src.clone(), dest.clone(), is_dir);
+                if job.mode == ClipMode::Cut {
+                    if let Some(t) = self.transfer.as_mut() { t.moved.push((src.clone(), is_dir)); }
+                }
                 true
             } else {
                 match job.mode {
@@ -1947,14 +1950,6 @@ impl Loft {
 
     // ── External drives ───────────────────────────────────────────────
 
-    /// External drives are read-only for now: say so instead of failing.
-    fn refuse_ext(&mut self, path: &str) -> bool {
-        if !is_ext(path) { return false; }
-        self.close_menus();
-        self.say(s().drive_read_only.to_string(), true);
-        true
-    }
-
     /// Re-read the mounted drives; true if the list changed. A folder on
     /// a drive that went away is left for home.
     fn poll_drives(&mut self) -> bool {
@@ -1974,6 +1969,7 @@ impl Loft {
         let t = self.transfer.get_or_insert_with(|| Transfer {
             scan: Vec::new(), files: Vec::new(), cur: None, files_total: 0, files_done: 0,
             bytes_total: 0, bytes_done: 0, failed: 0, started_ms: host::ticks_ms(),
+            moved: Vec::new(),
         });
         if is_dir {
             t.scan.push((src, dest));
@@ -2059,6 +2055,13 @@ impl Loft {
         };
         self.refresh();
         self.say(msg, t.failed > 0);
+        // A move deletes its sources only when every byte arrived.
+        if !stopped && t.failed == 0 && !t.moved.is_empty() {
+            let targets = t.moved.into_iter()
+                .map(|(p, is_dir)| Target { name: basename(&p).to_string(), full: p, is_dir })
+                .collect();
+            self.delete_permanently(targets);
+        }
     }
 
     /// The copy's line in the status bar.
@@ -2084,9 +2087,9 @@ impl Loft {
     fn delete_targets(&mut self) {
         let targets = self.targets();
         if targets.is_empty() { return; }
-        if targets.iter().any(|t| is_ext(&t.full)) { self.refuse_ext(EXT_ROOT); return; }
         self.close_menus();
-        if self.in_trash_tree() {
+        // A drive has no trash: deleting there is for good, after asking.
+        if self.in_trash_tree() || targets.iter().any(|t| is_ext(&t.full)) {
             self.open_dialog(Dialog::ConfirmDelete(targets));
         } else {
             self.move_to_trash(targets);
@@ -2306,7 +2309,6 @@ impl Loft {
     /// Open the rename dialog for the cursor item, or the find-and-replace
     /// dialog when several items are marked.
     fn open_rename(&mut self) {
-        if self.refuse_ext(&self.current.clone()) { return; }
         let targets = self.targets();
         if targets.len() > 1 {
             self.close_menus();
@@ -2322,7 +2324,6 @@ impl Loft {
     }
 
     fn open_new_folder(&mut self) {
-        if self.refuse_ext(&self.current.clone()) { return; }
         self.close_menus();
         let dest = unique_in(&self.current, s().folder_default, true);
         let name = basename(&dest).to_string();
@@ -2331,7 +2332,6 @@ impl Loft {
     }
 
     fn open_new_file(&mut self) {
-        if self.refuse_ext(&self.current.clone()) { return; }
         self.close_menus();
         let dest = unique_in(&self.current, s().file_default, false);
         let name = basename(&dest).to_string();
@@ -2487,7 +2487,7 @@ impl Loft {
 
     /// Ctrl+D: a copy of each target next to it, under a free name.
     fn duplicate(&mut self) {
-        if self.refuse_ext(&self.current.clone()) { return; }
+        if self.transfer.is_some() { return; }
         self.close_menus();
         let targets = self.targets();
         if targets.is_empty() || self.in_trash_tree() { return; }
@@ -2496,7 +2496,12 @@ impl Loft {
         let mut last = None;
         for t in &targets {
             let dest = unique_in(&parent_path(&t.full), basename(&t.name), t.is_dir);
-            if fs_copy(&t.full, &dest) {
+            if is_ext(&t.full) {
+                self.queue_transfer(t.full.clone(), dest.clone(), t.is_dir);
+                ok += 1;
+                last = Some(basename(&dest).to_string());
+                steps.push(Step::Create { path: dest, is_dir: t.is_dir });
+            } else if fs_copy(&t.full, &dest) {
                 ok += 1;
                 last = Some(basename(&dest).to_string());
                 steps.push(Step::Create { path: dest, is_dir: t.is_dir });
@@ -4668,6 +4673,12 @@ fn filter_sidebar_to_existing(places: Vec<Place>) -> Vec<Place> {
 
 /// The namespace of external drives (`ext/<label>/`).
 const EXT_ROOT: &str = "ext";
+
+/// The volume a path lies on: a drive's label, `None` for npkFS.
+fn volume_of(path: &str) -> Option<&str> {
+    let p = path.trim_matches('/');
+    p.strip_prefix(EXT_ROOT)?.strip_prefix('/')?.split('/').next()
+}
 
 /// A path on an external drive, or `ext` itself.
 fn is_ext(path: &str) -> bool {

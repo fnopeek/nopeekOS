@@ -2403,6 +2403,30 @@ pub(crate) fn npk_netdev_set_link_state(ctx: &mut HostState, carrier: i32, dorma
     0
 }
 
+/// Every entry below `base` on an external volume, as relative paths,
+/// folders before what they hold. Bounded like one listing.
+fn ext_tree(base: &str, out: &mut alloc::vec::Vec<u8>) -> bool {
+    const MAX_TREE: usize = 1 << 16;
+    let mut todo: alloc::vec::Vec<String> = alloc::vec![String::new()];
+    let mut count = 0usize;
+    while let Some(rel) = todo.pop() {
+        let abs = if rel.is_empty() { String::from(base) } else { alloc::format!("{}/{}", base, rel) };
+        let entries = match crate::ext::list(&abs) {
+            Ok(Some(v)) => v,
+            Ok(None) => continue,
+            Err(_) => return false,
+        };
+        for e in entries {
+            count += 1;
+            if count > MAX_TREE { return false; }
+            let child = if rel.is_empty() { e.name.clone() } else { alloc::format!("{}/{}", rel, e.name) };
+            append_entry(out, &child, e.size, e.is_dir, e.mtime);
+            if e.is_dir { todo.push(child); }
+        }
+    }
+    true
+}
+
 /// May the module of `ctx` reach `name` in `ext/` for `want`? With
 /// EXTERNAL and the global right, or through a grant from the open dialog.
 fn ext_allowed(ctx: &HostState, name: &str, want: capability::Rights) -> bool {
@@ -2688,8 +2712,15 @@ const PRIVATE_QUOTA_DIVISOR: u64 = 32;
 /// `None` refused.
 fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
     if crate::ext::is_ext(name) {
-        kprintln!("[npk] WASM: {} DENIED ({} is read-only)", call, name);
-        return None;
+        if !ext_allowed(ctx, name, capability::Rights::WRITE) {
+            kprintln!("[npk] WASM: {} DENIED (no EXTERNAL for {})", call, name);
+            return None;
+        }
+        if !crate::ext::writable(name) {
+            kprintln!("[npk] WASM: {} DENIED ({} is read-only)", call, name);
+            return None;
+        }
+        return Some(false);
     }
     // Apps may not write the module store or the trust store — see
     // is_trust_critical_path.
@@ -2776,6 +2807,9 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
     };
     let Some(by_private) = write_allowed(ctx, &name, "npk_store") else { return -1 };
     let Some(payload) = glen(data_len).and_then(|n| guest(mem, data_ptr, n)) else { return -1 };
+    if crate::ext::is_ext(&name) {
+        return if ext_store(&name, payload) { 0 } else { -1 };
+    }
 
     if !crate::npkfs::room_for(payload.len()) {
         kprintln!("[npk] WASM: npk_store DENIED ({} B, npkFS is down to the system reserve)",
@@ -2813,6 +2847,14 @@ pub(crate) enum OpenFile {
         name: String,
         size: u64,
     },
+    /// A file being written in `ext/`: the bytes go to `temp` beside it,
+    /// which takes the name at close, so the name keeps its old content
+    /// until then.
+    ExtWrite {
+        name: String,
+        temp: String,
+        written: u64,
+    },
     Read {
         name: String,
         reader: crate::npkfs::fs::RangeReader,
@@ -2830,7 +2872,7 @@ impl OpenFile {
     /// whole Blob), a writer's chunk buffer.
     fn held(&self) -> usize {
         match self {
-            OpenFile::Ext { .. } => 0,
+            OpenFile::Ext { .. } | OpenFile::ExtWrite { .. } => 0,
             OpenFile::Read { reader, .. } => reader.held(),
             OpenFile::Write { .. } => crate::npkfs::STREAMING_CHUNK_SIZE,
         }
@@ -2928,6 +2970,7 @@ pub(crate) fn npk_file_size(ctx: &mut HostState, handle: i32) -> i64 {
     let Some(i) = file_index(ctx, handle) else { return -1 };
     let n = match &ctx.files[i] {
         Some(OpenFile::Ext { size, .. }) => *size,
+        Some(OpenFile::ExtWrite { written, .. }) => *written,
         Some(OpenFile::Read { reader, .. }) => reader.size(),
         Some(OpenFile::Write { writer, .. }) => writer.written(),
         None => return -1,
@@ -2944,6 +2987,13 @@ pub(crate) fn npk_file_create(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32
     if write_allowed(ctx, &name, "npk_file_create").is_none() {
         return -1;
     }
+    if crate::ext::is_ext(&name) {
+        let Some(temp) = ext_temp_name(&name) else { return -1 };
+        let Some(i) = file_slot(ctx) else { return -1 };
+        if crate::ext::create(&temp).is_err() { return -1; }
+        ctx.files[i] = Some(OpenFile::ExtWrite { name, temp, written: 0 });
+        return i as i32;
+    }
     let Some(i) = file_slot(ctx) else { return -1 };
     // The writer allocates its chunk buffer as it opens.
     if file_budget(ctx, i) < crate::npkfs::STREAMING_CHUNK_SIZE {
@@ -2959,6 +3009,16 @@ pub(crate) fn npk_file_write(mem: &mut [u8], ctx: &mut HostState,
                              handle: i32, buf_ptr: i32, len: i32) -> i32 {
     let Some(i) = file_index(ctx, handle) else { return -1 };
     let Some(data) = glen(len).and_then(|n| guest(mem, buf_ptr, n)) else { return -1 };
+    if let Some(OpenFile::ExtWrite { name, temp, written }) = &ctx.files[i] {
+        let (name, temp, mut at) = (name.clone(), temp.clone(), *written);
+        if write_allowed(ctx, &name, "npk_file_write").is_none() { return -1; }
+        for chunk in data.chunks(crate::ext::MAX_IO) {
+            if crate::ext::write(&temp, at, chunk).is_err() { return -1; }
+            at += chunk.len() as u64;
+            if let Some(OpenFile::ExtWrite { written, .. }) = ctx.files[i].as_mut() { *written = at; }
+        }
+        return data.len() as i32;
+    }
     let (name, cached) = match &ctx.files[i] {
         Some(OpenFile::Write { name, committed, .. }) => (name.clone(), *committed),
         _ => return -1,
@@ -3006,6 +3066,15 @@ pub(crate) fn npk_file_close(ctx: &mut HostState, handle: i32) -> i32 {
                 Err(_) => -1,
             }
         }
+        Some(OpenFile::ExtWrite { name, temp, .. }) => {
+            if write_allowed(ctx, &name, "npk_file_close").is_none()
+                || crate::ext::rename(&temp, &name, true).is_err()
+            {
+                let _ = crate::ext::delete(&temp);
+                return -1;
+            }
+            0
+        }
         Some(OpenFile::Read { .. }) | Some(OpenFile::Ext { .. }) => 0,
         None => -1,
     }
@@ -3015,8 +3084,47 @@ pub(crate) fn npk_file_close(ctx: &mut HostState, handle: i32) -> i32 {
 /// writer's file is not written. For a reader the same as close.
 pub(crate) fn npk_file_abort(ctx: &mut HostState, handle: i32) -> i32 {
     let Some(i) = file_index(ctx, handle) else { return -1 };
-    ctx.files[i] = None;
+    if let Some(OpenFile::ExtWrite { temp, .. }) = ctx.files[i].take() {
+        let _ = crate::ext::delete(&temp);
+    }
     0
+}
+
+/// The files a module left open on external drives: their partial copies
+/// go, the names keep what they had.
+pub(crate) fn drop_ext_writers(ctx: &mut HostState) {
+    for f in ctx.files.iter_mut() {
+        if let Some(OpenFile::ExtWrite { temp, .. }) = f.take() {
+            let _ = crate::ext::delete(&temp);
+        }
+    }
+}
+
+/// The partial copy of `name` while it is written: a hidden name beside it.
+fn ext_temp_name(name: &str) -> Option<String> {
+    let p = name.trim_matches('/');
+    let (dir, base) = p.rsplit_once('/')?;
+    if base.is_empty() { return None; }
+    Some(alloc::format!("{}/.{}.npk-part", dir, base))
+}
+
+/// `npk_store` on an external drive: written beside, then renamed over.
+fn ext_store(name: &str, data: &[u8]) -> bool {
+    let Some(temp) = ext_temp_name(name) else { return false };
+    if crate::ext::create(&temp).is_err() { return false; }
+    let mut at = 0u64;
+    for chunk in data.chunks(crate::ext::MAX_IO) {
+        if crate::ext::write(&temp, at, chunk).is_err() {
+            let _ = crate::ext::delete(&temp);
+            return false;
+        }
+        at += chunk.len() as u64;
+    }
+    if crate::ext::rename(&temp, name, true).is_err() {
+        let _ = crate::ext::delete(&temp);
+        return false;
+    }
+    true
 }
 
 pub(crate) fn npk_home_dir(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -3741,15 +3849,19 @@ pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: 
 pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {
     if prefix_len > 0 {
         if let Some(prefix) = read_str(mem, prefix_ptr, prefix_len).filter(|p| crate::ext::is_ext(p)) {
-            if recursive != 0 || !ext_allowed(ctx, &prefix, capability::Rights::READ) { return -1; }
-            let entries = match crate::ext::list(&prefix) {
-                Ok(Some(v)) => v,
-                Ok(None) => alloc::vec::Vec::new(),
-                Err(_) => return -1,
-            };
+            if !ext_allowed(ctx, &prefix, capability::Rights::READ) { return -1; }
             let mut out = alloc::vec::Vec::new();
-            for e in &entries {
-                append_entry(&mut out, &e.name, e.size, e.is_dir, e.mtime);
+            if recursive == 0 {
+                let entries = match crate::ext::list(&prefix) {
+                    Ok(Some(v)) => v,
+                    Ok(None) => alloc::vec::Vec::new(),
+                    Err(_) => return -1,
+                };
+                for e in &entries {
+                    append_entry(&mut out, &e.name, e.size, e.is_dir, e.mtime);
+                }
+            } else if !ext_tree(&prefix, &mut out) {
+                return -1;
             }
             return write_whole(mem, out_ptr, out_cap, &out);
         }
@@ -4904,6 +5016,10 @@ pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
         Some(s) => s,
         None => return -1,
     };
+    if crate::ext::is_ext(&name) {
+        if write_allowed(ctx, &name, "npk_fs_delete").is_none() { return -1; }
+        return if crate::ext::delete(&name).is_ok() { 0 } else { -1 };
+    }
     // Apps may not delete modules or trust anchors — see
     // is_trust_critical_path.
     if is_trust_critical_path(&name) {
@@ -4927,6 +5043,10 @@ pub(crate) fn npk_fs_mkdir(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
         return -1;
     }
     let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
+    if crate::ext::is_ext(&name) {
+        if write_allowed(ctx, &name, "npk_fs_mkdir").is_none() { return -1; }
+        return if crate::ext::mkdir(&name).is_ok() { 0 } else { -1 };
+    }
     if is_trust_critical_path(&name) {
         kprintln!("[npk] WASM: npk_fs_mkdir DENIED ({} is read-only to apps)", name);
         return -1;
@@ -4954,6 +5074,15 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
         Some(s) => s,
         None => return -1,
     };
+    // Within one external volume only; across volumes the bytes move.
+    if crate::ext::is_ext(&old) || crate::ext::is_ext(&new) {
+        if write_allowed(ctx, &old, "npk_fs_rename").is_none()
+            || write_allowed(ctx, &new, "npk_fs_rename").is_none()
+        {
+            return -1;
+        }
+        return if crate::ext::rename(&old, &new, false).is_ok() { 0 } else { -1 };
+    }
     // Neither source nor destination may be module or trust store —
     // renaming in would plant an unverified module or anchor.
     if is_trust_critical_path(&old) || is_trust_critical_path(&new) {
@@ -4987,6 +5116,8 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
         Some(s) => s,
         None => return -1,
     };
+    // An external file is bytes, not a store object: the caller copies it.
+    if crate::ext::is_ext(&old) || crate::ext::is_ext(&new) { return -1; }
     if is_trust_critical_path(&old) || is_trust_critical_path(&new) {
         kprintln!("[npk] WASM: npk_fs_copy DENIED (module/trust store is read-only to apps)");
         return -1;

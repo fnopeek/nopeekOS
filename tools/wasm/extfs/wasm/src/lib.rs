@@ -11,7 +11,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
-use extfs_core::fat::{Fat, Node};
+use extfs_core::fat::{self, Fat, Node};
 use extfs_core::{part, Dev, IoError};
 
 // No rights: the block handle is bound to the instance by the kernel.
@@ -33,9 +33,17 @@ const ROLE_VOLUME: u32 = 2;
 const OP_LIST: u8 = 1;
 const OP_STAT: u8 = 2;
 const OP_READ: u8 = 3;
+const OP_CREATE: u8 = 4;
+const OP_WRITE: u8 = 5;
+const OP_MKDIR: u8 = 6;
+const OP_DELETE: u8 = 7;
+const OP_RENAME: u8 = 8;
 const ST_OK: i32 = 0;
 const ST_NOT_FOUND: i32 = 1;
 const ST_FAILED: i32 = 2;
+const ST_EXISTS: i32 = 3;
+const ST_NOT_EMPTY: i32 = 4;
+const ST_NO_SPACE: i32 = 5;
 const REQ_HDR: usize = 24;
 /// Largest block transfer per host call.
 const MAX_IO: usize = 1 << 20;
@@ -57,6 +65,29 @@ impl Dev for Handle {
             at += n;
         }
         Ok(())
+    }
+    fn write(&mut self, lba: u64, buf: &[u8]) -> Result<(), IoError> {
+        let bs = self.bs as usize;
+        let mut at = 0;
+        while at < buf.len() {
+            let n = (buf.len() - at).min(MAX_IO / bs * bs);
+            if npk_sys::blk_write(lba + (at / bs) as u64, &buf[at..at + n]) != 0 { return Err(IoError); }
+            at += n;
+        }
+        Ok(())
+    }
+    fn flush(&mut self) -> Result<(), IoError> {
+        if npk_sys::blk_flush() == 0 { Ok(()) } else { Err(IoError) }
+    }
+}
+
+fn status_of(e: fat::Error) -> i32 {
+    match e {
+        fat::Error::NotFound => ST_NOT_FOUND,
+        fat::Error::Exists => ST_EXISTS,
+        fat::Error::NotEmpty => ST_NOT_EMPTY,
+        fat::Error::NoSpace => ST_NO_SPACE,
+        _ => ST_FAILED,
     }
 }
 
@@ -98,7 +129,8 @@ fn serve(dev: Handle) {
     let label = alloc::string::String::from(fs.label());
     if npk_sys::ext_mount(label.as_bytes(), fs.total_bytes(), fs.free_bytes()) != 0 { return; }
 
-    let mut req = alloc::vec![0u8; REQ_HDR + 4096];
+    // Header, two paths and a write's payload.
+    let mut req = alloc::vec![0u8; REQ_HDR + 2 * 4096 + MAX_IO];
     let mut out: Vec<u8> = Vec::new();
     // The node of the last path asked for: reads of one file come in many
     // requests.
@@ -119,6 +151,33 @@ fn serve(dev: Handle) {
             npk_sys::ext_reply(seq, ST_FAILED, &[]);
             continue;
         };
+        if matches!(op, OP_CREATE | OP_WRITE | OP_MKDIR | OP_DELETE | OP_RENAME) {
+            last = None;
+            let Some(payload) = r.get(REQ_HDR + plen..REQ_HDR + plen + if op == OP_CREATE || op == OP_MKDIR || op == OP_DELETE { 0 } else { len }) else {
+                npk_sys::ext_reply(seq, ST_FAILED, &[]);
+                continue;
+            };
+            fs.set_now(npk_sys::unix_time().max(0) as u64);
+            let done = match op {
+                OP_CREATE => fs.create(path_str).and_then(|_| fs.sync()),
+                OP_WRITE => fs.append(path_str, off, payload),
+                OP_MKDIR => fs.mkdir(path_str).and_then(|_| fs.sync()),
+                OP_DELETE => fs.remove(path_str).and_then(|_| fs.sync()),
+                _ => match core::str::from_utf8(payload) {
+                    Ok(to) => fs.rename(path_str, to, off == 1).and_then(|_| fs.sync()),
+                    Err(_) => Err(fat::Error::BadName),
+                },
+            };
+            match done {
+                Ok(()) => npk_sys::ext_reply(seq, ST_OK, &fs.free_bytes().to_le_bytes()),
+                Err(e) => {
+                    // A failed change may have marked the volume: settle it.
+                    let _ = fs.sync();
+                    npk_sys::ext_reply(seq, status_of(e), &[])
+                }
+            };
+            continue;
+        }
         let node = match &last {
             Some((p, n)) if p == path => Ok(Some(*n)),
             _ => fs.lookup(path_str),

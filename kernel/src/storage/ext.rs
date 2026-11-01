@@ -34,13 +34,26 @@ pub const ROLE_VOLUME: u32 = 2;
 pub const OP_LIST: u8 = 1;
 pub const OP_STAT: u8 = 2;
 pub const OP_READ: u8 = 3;
+/// An empty file, or an existing one cut to nothing.
+pub const OP_CREATE: u8 = 4;
+/// Append the payload to a file whose size is the offset.
+pub const OP_WRITE: u8 = 5;
+pub const OP_MKDIR: u8 = 6;
+/// A file or an empty folder.
+pub const OP_DELETE: u8 = 7;
+/// Rename to the path in the payload; offset 1 replaces a file there.
+pub const OP_RENAME: u8 = 8;
 
 /// Reply status: done, and no such entry.
 pub const ST_OK: i32 = 0;
 pub const ST_NOT_FOUND: i32 = 1;
+pub const ST_EXISTS: i32 = 3;
+pub const ST_NOT_EMPTY: i32 = 4;
+pub const ST_NO_SPACE: i32 = 5;
 
 /// Request header: seq u32, op u8, 3 bytes zero, offset u64, length u32,
-/// path length u16, 2 bytes zero; the path follows.
+/// path length u16, 2 bytes zero; the path follows, then `length` bytes of
+/// payload for a write or a rename.
 pub const REQ_HDR: usize = 24;
 
 /// Largest block transfer per call and largest `OP_READ`.
@@ -66,6 +79,12 @@ pub enum Error {
     Io,
     /// Not a valid path below `ext/`.
     BadPath,
+    /// The volume or the drive is write-protected.
+    ReadOnly,
+    /// The two paths of a rename lie on different volumes.
+    OtherVolume,
+    /// The file system refused: the reply's status.
+    Refused(i32),
 }
 
 pub struct Entry {
@@ -97,6 +116,7 @@ struct Req {
     path: String,
     off: u64,
     len: u32,
+    data: Vec<u8>,
     waiter: Waker,
 }
 
@@ -130,6 +150,8 @@ enum Answer {
     Stat(Option<Stat>),
     Bytes(Vec<u8>),
     NotFound,
+    /// A change went through; the volume's free bytes are updated.
+    Done,
 }
 
 static INSTS: Mutex<Vec<Inst>> = Mutex::new(Vec::new());
@@ -378,16 +400,18 @@ pub fn next(cap: &CapId, timeout_ms: u64, max: usize) -> Next {
             if let Some(w) = w { i.waker = w; }
             if i.gone || i.failed { return Some(Next::Gone); }
             let r = i.queue.front()?;
-            if REQ_HDR + r.path.len() > max { return Some(Next::Gone); }
+            if REQ_HDR + r.path.len() + r.data.len() > max { return Some(Next::Gone); }
             let r = i.queue.pop_front()?;
-            let mut b = Vec::with_capacity(REQ_HDR + r.path.len());
+            let mut b = Vec::with_capacity(REQ_HDR + r.path.len() + r.data.len());
             b.extend_from_slice(&r.seq.to_le_bytes());
             b.extend_from_slice(&[r.op, 0, 0, 0]);
             b.extend_from_slice(&r.off.to_le_bytes());
-            b.extend_from_slice(&r.len.to_le_bytes());
+            let len = if r.data.is_empty() { r.len } else { r.data.len() as u32 };
+            b.extend_from_slice(&len.to_le_bytes());
             b.extend_from_slice(&(r.path.len() as u16).to_le_bytes());
             b.extend_from_slice(&[0, 0]);
             b.extend_from_slice(r.path.as_bytes());
+            b.extend_from_slice(&r.data);
             i.taken.push(r);
             Some(Next::Req(b))
         });
@@ -411,15 +435,21 @@ pub fn reply(cap: &CapId, seq: u32, status: i32, data: &[u8]) -> bool {
     let Some(i) = g.iter_mut().find(|i| i.cap == *cap) else { return false };
     let Some(k) = i.taken.iter().position(|r| r.seq == seq) else { return false };
     let r = i.taken.remove(k);
+    let changes = matches!(r.op, OP_CREATE | OP_WRITE | OP_MKDIR | OP_DELETE | OP_RENAME);
     let ans = if status == ST_NOT_FOUND {
         Ok(Answer::NotFound)
     } else if status != ST_OK {
-        Err(Error::Io)
+        Err(if changes { Error::Refused(status) } else { Error::Io })
     } else {
         match r.op {
             OP_LIST => parse_entries(data).map(Answer::Entries),
             OP_STAT => parse_stat(data).map(|s| Answer::Stat(Some(s))),
             OP_READ if data.len() <= r.len as usize => Some(Answer::Bytes(Vec::from(data))),
+            _ if changes && data.len() == 8 => {
+                let free = u64::from_le_bytes(data.try_into().unwrap_or([0; 8]));
+                i.free = free.min(i.total);
+                Some(Answer::Done)
+            }
             _ => None,
         }.ok_or(Error::Io)
     };
@@ -508,6 +538,10 @@ pub fn volumes() -> Vec<VolumeInfo> {
 }
 
 fn call(label: &str, op: u8, path: &str, off: u64, len: u32) -> Result<Answer, Error> {
+    call_with(label, op, path, off, len, Vec::new())
+}
+
+fn call_with(label: &str, op: u8, path: &str, off: u64, len: u32, data: Vec<u8>) -> Result<Answer, Error> {
     let seq = NEXT_SEQ.fetch_add(1, Ordering::Relaxed);
     let waiter = fiber::current_waker().unwrap_or(NO_WAKER);
     let cap = {
@@ -515,7 +549,12 @@ fn call(label: &str, op: u8, path: &str, off: u64, len: u32) -> Result<Answer, E
         let i = g.iter_mut()
             .find(|i| i.label.as_deref() == Some(label) && !i.gone && !i.failed)
             .ok_or(Error::Gone)?;
-        i.queue.push_back(Req { seq, op, path: String::from(path), off, len, waiter });
+        if (op == OP_CREATE || op == OP_WRITE || op == OP_MKDIR || op == OP_DELETE || op == OP_RENAME)
+            && i.read_only
+        {
+            return Err(Error::ReadOnly);
+        }
+        i.queue.push_back(Req { seq, op, path: String::from(path), off, len, data, waiter });
         fiber::signal(i.waker, SIG_EXT);
         i.cap
     };
@@ -551,7 +590,11 @@ pub fn list(path: &str) -> Result<Option<Vec<Entry>>, Error> {
     };
     if !volumes().iter().any(|v| v.label == label) { return Ok(None); }
     match call(&label, OP_LIST, &inner, 0, 0)? {
-        Answer::Entries(e) => Ok(Some(e)),
+        // A file still being written is not shown under its partial name.
+        Answer::Entries(mut e) => {
+            e.retain(|x| !(x.name.starts_with('.') && x.name.ends_with(".npk-part")));
+            Ok(Some(e))
+        }
         Answer::NotFound => Ok(None),
         _ => Err(Error::Io),
     }
@@ -598,4 +641,52 @@ pub fn read_all(path: &str, max: usize) -> Result<Option<Vec<u8>>, Error> {
         at += n;
     }
     Ok(Some(out))
+}
+
+// === Changes ===
+
+fn change(path: &str, op: u8, off: u64, data: Vec<u8>) -> Result<(), Error> {
+    let Some((label, inner)) = split(path)? else { return Err(Error::BadPath) };
+    if inner.is_empty() { return Err(Error::BadPath); }
+    match call_with(&label, op, &inner, off, 0, data)? {
+        Answer::Done => Ok(()),
+        Answer::NotFound => Err(Error::Refused(ST_NOT_FOUND)),
+        _ => Err(Error::Io),
+    }
+}
+
+/// True if `path` lies on a mounted volume that can be written.
+pub fn writable(path: &str) -> bool {
+    let Ok(Some((label, _))) = split(path) else { return false };
+    volumes().iter().any(|v| v.label == label && !v.read_only)
+}
+
+/// An empty file at `path`, or the file there cut to nothing.
+pub fn create(path: &str) -> Result<(), Error> {
+    change(path, OP_CREATE, 0, Vec::new())
+}
+
+/// Append `data` (at most `MAX_IO` bytes) to the file at `path`, whose
+/// size is `off`.
+pub fn write(path: &str, off: u64, data: &[u8]) -> Result<(), Error> {
+    if data.len() > MAX_IO { return Err(Error::BadPath); }
+    change(path, OP_WRITE, off, Vec::from(data))
+}
+
+pub fn mkdir(path: &str) -> Result<(), Error> {
+    change(path, OP_MKDIR, 0, Vec::new())
+}
+
+/// A file or an empty folder.
+pub fn delete(path: &str) -> Result<(), Error> {
+    change(path, OP_DELETE, 0, Vec::new())
+}
+
+/// `from` renamed to `to` on the same volume; with `replace` a file at
+/// `to` gives way.
+pub fn rename(from: &str, to: &str, replace: bool) -> Result<(), Error> {
+    let (Some((la, _)), Some((lb, inner_to))) = (split(from)?, split(to)?) else { return Err(Error::BadPath) };
+    if la != lb { return Err(Error::OtherVolume); }
+    if inner_to.is_empty() { return Err(Error::BadPath); }
+    change(from, OP_RENAME, replace as u64, Vec::from(inner_to.as_bytes()))
 }

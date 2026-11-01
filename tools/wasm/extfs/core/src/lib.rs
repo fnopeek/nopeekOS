@@ -23,6 +23,10 @@ pub trait Dev {
     fn blocks(&self) -> u64;
     /// Read `buf.len() / block_size` blocks from `lba`.
     fn read(&mut self, lba: u64, buf: &mut [u8]) -> Result<(), IoError>;
+    /// Write `buf.len() / block_size` blocks at `lba`.
+    fn write(&mut self, _lba: u64, _buf: &[u8]) -> Result<(), IoError> { Err(IoError) }
+    /// Make what was written durable (the device's write cache).
+    fn flush(&mut self) -> Result<(), IoError> { Ok(()) }
 }
 
 /// Read `len` bytes at byte offset `off` of the device, any alignment.
