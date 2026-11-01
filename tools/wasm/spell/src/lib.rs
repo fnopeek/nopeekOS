@@ -89,6 +89,8 @@ struct Strings {
     /// "Actual size ({} px)" — shows where you'd land back.
     zoom_reset:    &'static str,
     wrap_on:       &'static str,
+    palette:       &'static str,
+    palette_ph:    &'static str,
     wrap_off:      &'static str,
     /// Header written above the settings, so the file explains itself
     /// when someone opens it in spell.
@@ -141,6 +143,7 @@ const EN: Strings = Strings {
     zoom_in: "Zoom in", zoom_out: "Zoom out",
     zoom_reset: "Actual size ({} px)",
     wrap_on: "Word wrap: on", wrap_off: "Word wrap: off",
+    palette: "Command palette", palette_ph: "Type a command",
     cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n# trim_trailing: yes removes spaces at line ends on save.\n# final_newline: yes ends the file with a line break on save.\n# word_wrap: yes breaks long lines at the window edge.\n# recent / open: recently used files and the tabs open at exit.\n",
     about: "About Spell",
     untitled: "Untitled",
@@ -290,6 +293,12 @@ const ACT_COMMENT:      u32 = 6_205;
 const ACT_DELETE_LINE:  u32 = 6_206;
 const ACT_DISK_RELOAD:  u32 = 6_407;
 const ACT_DISK_KEEP:    u32 = 6_408;
+const ACT_PALETTE:      u32 = 6_106;
+const ACT_PALETTE_RUN:  u32 = 6_409;
+/// Palette: run the i-th listed command.
+const ACT_PALETTE_BASE: u32 = 7_100;
+/// Rows the palette lists at most.
+const PALETTE_ROWS:     usize = 12;
 /// File menu: reopen recent file i.
 const ACT_RECENT_BASE:  u32 = 7_000;
 const MAX_RECENT:       usize = 8;
@@ -316,6 +325,7 @@ const NODE_MENU_EDIT: u32 = 106;
 const NODE_FIND:      u32 = 200;
 const NODE_REPLACE:   u32 = 201;
 const NODE_GOTO:      u32 = 202;
+const NODE_PALETTE:   u32 = 203;
 /// Each document's editor carries `NODE_EDITOR_BASE + uid`, so a caret or
 /// change event still finds its document after the tab was switched.
 const NODE_EDITOR_BASE: u32 = 10_000;
@@ -509,12 +519,14 @@ struct Spell {
 
 /// The fields that can ask for the keyboard.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Focus { Editor, Query, Replace, Goto }
+enum Focus { Editor, Query, Replace, Goto, Palette }
 
 /// The strip above the editor.
 enum Bar {
     Find(FindBar),
     Goto(String),
+    /// The command palette: what is typed, and the highlighted row.
+    Palette { query: String, sel: usize },
 }
 
 struct FindBar {
@@ -1156,6 +1168,42 @@ impl Spell {
         self.active = ((self.active as isize + dir).rem_euclid(n)) as usize;
     }
 
+    fn open_palette(&mut self) {
+        self.open_menu = None;
+        self.bar = Some(Bar::Palette { query: String::new(), sel: 0 });
+        self.focus_on(Focus::Palette);
+    }
+
+    /// The commands the palette's query matches, in menu order.
+    fn palette_hits(&self) -> Vec<(String, &'static str, u32)> {
+        let q = match &self.bar {
+            Some(Bar::Palette { query, .. }) => query.to_lowercase(),
+            _ => return Vec::new(),
+        };
+        commands(self).into_iter()
+            .filter(|(label, _, _)| {
+                let l = label.to_lowercase();
+                q.split_whitespace().all(|w| l.contains(w))
+            })
+            .take(PALETTE_ROWS)
+            .collect()
+    }
+
+    fn palette_step(&mut self, d: isize) {
+        let n = self.palette_hits().len();
+        if let Some(Bar::Palette { sel, .. }) = &mut self.bar {
+            if n > 0 { *sel = ((*sel as isize + d).rem_euclid(n as isize)) as usize; }
+        }
+    }
+
+    /// Run the `i`-th listed command; the palette closes first, so a
+    /// command that opens a bar of its own gets the keyboard.
+    fn palette_run(&mut self, i: usize) -> Outcome {
+        let Some(&(_, _, act)) = self.palette_hits().get(i) else { return Outcome::Idle };
+        self.close_bar();
+        handle_action(self, act)
+    }
+
     fn open_goto(&mut self) {
         self.bar = Some(Bar::Goto(String::new()));
         self.focus_on(Focus::Goto);
@@ -1478,6 +1526,37 @@ fn render(sp: &Spell) -> Widget {
     }
 }
 
+/// Everything the palette offers: label, shortcut, action. The same
+/// actions as the menus, so a command behaves the same wherever it runs.
+fn commands(sp: &Spell) -> Vec<(String, &'static str, u32)> {
+    let t = s();
+    let mut v: Vec<(String, &'static str, u32)> = alloc::vec![
+        (t.new.to_string(),            "Ctrl+N",       ACT_FILE_NEW),
+        (t.open.to_string(),           "Ctrl+O",       ACT_FILE_OPEN),
+        (t.save.to_string(),           "Ctrl+S",       ACT_FILE_SAVE),
+        (t.save_as.to_string(),        "Ctrl+Shift+S", ACT_FILE_SAVE_AS),
+        (t.close.to_string(),          "Ctrl+W",       ACT_FILE_CLOSE),
+        (t.settings.to_string(),       "",             ACT_FILE_SETTINGS),
+        (t.undo.to_string(),           "Ctrl+Z",       ACT_UNDO),
+        (t.redo.to_string(),           "Ctrl+Y",       ACT_REDO),
+        (t.find.to_string(),           "Ctrl+F",       ACT_FIND),
+        (t.replace.to_string(),        "Ctrl+H",       ACT_REPLACE),
+        (t.goto_line.to_string(),      "Ctrl+G",       ACT_GOTO),
+        (t.toggle_comment.to_string(), "Ctrl+/",       ACT_COMMENT),
+        (t.delete_line.to_string(),    "Ctrl+Shift+K", ACT_DELETE_LINE),
+        ((if sp.wrap { t.wrap_on } else { t.wrap_off }).to_string(), "", ACT_WRAP),
+        (t.zoom_in.to_string(),        "Ctrl++",       ACT_ZOOM_IN),
+        (t.zoom_out.to_string(),       "Ctrl+-",       ACT_ZOOM_OUT),
+        (zoom_reset_label(),           "Ctrl+0",       ACT_ZOOM_RESET),
+    ];
+    if matches!(sp.cur().kind(), Kind::Markdown) {
+        v.push((t.view_source.to_string(), "", ACT_VIEW_EDIT));
+        v.push((t.view_preview.to_string(), "", ACT_VIEW_PREVIEW));
+    }
+    v.push((t.about.to_string(), "", ACT_HELP_ABOUT));
+    v
+}
+
 fn render_menu_bar() -> Widget {
     let labels: Vec<(String, ActionId)> = alloc::vec![
         (s().menu_file.to_string(), ActionId(ACT_MENU_FILE)),
@@ -1539,7 +1618,8 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().zoom_out.to_string(), ActionId(ACT_ZOOM_OUT)),
                 (zoom_reset_label(), ActionId(ACT_ZOOM_RESET)),
                 ((if sp.wrap { s().wrap_on } else { s().wrap_off }).to_string(), ActionId(ACT_WRAP)),
-            ], &["", "", "Ctrl++", "Ctrl+-", "Ctrl+0", ""],
+                (s().palette.to_string(), ActionId(ACT_PALETTE)),
+            ], &["", "", "Ctrl++", "Ctrl+-", "Ctrl+0", "", "Ctrl+Shift+P"],
                Some(match sp.cur().mode { Mode::Edit => 0, Mode::Preview => 1 })),
         ),
         OpenMenu::Help => (
@@ -1813,6 +1893,35 @@ fn bar_row(children: Vec<Widget>) -> Widget {
     }
 }
 
+/// One palette entry: the label, its shortcut on the right; the
+/// highlighted one is what Enter runs.
+fn palette_row(label: String, key: &str, on: bool, i: usize) -> Widget {
+    let mut mods = alloc::vec![
+        Modifier::Padding(Padding::Xs.as_u16()),
+        Modifier::Rounded(Radius::Sm.as_u8()),
+        Modifier::OnClick(ActionId(ACT_PALETTE_BASE + i as u32)),
+        Modifier::Hover(alloc::vec![
+            Modifier::Background(Token::SurfaceHover),
+            Modifier::Rounded(Radius::Sm.as_u8()),
+        ]),
+    ];
+    if on { mods.push(Modifier::Background(Token::AccentMuted)); }
+    Widget::Row {
+        children: alloc::vec![
+            Widget::Text { content: label, style: TextStyle::Body, modifiers: alloc::vec![] },
+            Widget::Spacer { flex: 1 },
+            Widget::Text {
+                content:   key.to_string(),
+                style:     TextStyle::Caption,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint)],
+            },
+        ],
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: mods,
+    }
+}
+
 /// Find / replace / go-to strip above the editor.
 fn render_bar(sp: &Spell) -> Option<Widget> {
     let rows = match sp.bar.as_ref()? {
@@ -1844,6 +1953,17 @@ fn render_bar(sp: &Spell) -> Option<Widget> {
                     bar_button(s().replace_one, ACT_REPLACE_ONE, false),
                     bar_button(s().replace_all, ACT_REPLACE_ALL, false),
                 ]));
+            }
+            rows
+        }
+        Bar::Palette { query, sel } => {
+            let mut rows = alloc::vec![bar_row(alloc::vec![
+                bar_input(sp, query, s().palette_ph, NODE_PALETTE, Focus::Palette, ACT_PALETTE_RUN, 360),
+                Widget::Spacer { flex: 1 },
+                bar_icon(IconId::X, ACT_FIND_CLOSE),
+            ])];
+            for (i, (label, key, _)) in sp.palette_hits().into_iter().enumerate() {
+                rows.push(palette_row(label, key, i == *sel, i));
             }
             rows
         }
@@ -3018,6 +3138,9 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
         // File → Close.
         // Enter in the unsaved-changes card saves, as its filled button.
         Event::Key(KeyCode::Enter) if sp.confirm_close.is_some() => handle_action(sp, ACT_CLOSE_SAVE),
+        Event::Key(KeyCode::Up) if matches!(sp.bar, Some(Bar::Palette { .. })) => { sp.palette_step(-1); Outcome::Rerender }
+        Event::Key(KeyCode::Down) if matches!(sp.bar, Some(Bar::Palette { .. })) => { sp.palette_step(1); Outcome::Rerender }
+        Event::Key(KeyCode::F(1)) => { sp.open_palette(); Outcome::Rerender }
         Event::Key(KeyCode::Escape) => {
             if sp.confirm_close.is_some() { sp.cancel_quit(); Outcome::Rerender }
             else if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
@@ -3050,6 +3173,13 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
                     *r = payload.to_string();
                 }
                 Outcome::Idle
+            }
+            NODE_PALETTE => {
+                if let Some(Bar::Palette { query, sel }) = &mut sp.bar {
+                    *query = payload.to_string();
+                    *sel = 0;
+                }
+                Outcome::Rerender
             }
             NODE_GOTO => {
                 if let Some(Bar::Goto(t)) = &mut sp.bar { *t = payload.to_string(); }
@@ -3124,6 +3254,7 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             // `/` on US layouts, `#` where it sits on its own key (German).
             b'/' | b'#' => { sp.toggle_comment(); Outcome::Rerender }
             b'k' if shift => { sp.delete_lines(); Outcome::Rerender }
+            b'p' if shift => { sp.open_palette(); Outcome::Rerender }
             _ => Outcome::Idle,
         },
         // Ctrl+wheel. One px per notch: small enough to land on the size
@@ -3245,6 +3376,11 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_ZOOM_OUT => { sp.open_menu = None; sp.zoom(Some(-1)); Outcome::Rerender }
         ACT_ZOOM_RESET => { sp.open_menu = None; sp.zoom(None);   Outcome::Rerender }
         ACT_WRAP => { sp.open_menu = None; sp.wrap = !sp.wrap; Outcome::Rerender }
+        ACT_PALETTE => { sp.open_palette(); Outcome::Rerender }
+        ACT_PALETTE_RUN => {
+            let sel = match &sp.bar { Some(Bar::Palette { sel, .. }) => *sel, _ => 0 };
+            sp.palette_run(sel)
+        }
         ACT_HELP_ABOUT => {
             log("[spell] Spell 0.1 — nopeekOS text editor");
             sp.open_menu = None;
@@ -3260,6 +3396,9 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
                 let i = (id - ACT_TAB_BASE) as usize;
                 if i < sp.docs.len() { sp.active = i; }
                 return Outcome::Rerender;
+            }
+            if id >= ACT_PALETTE_BASE && id < ACT_PALETTE_BASE + PALETTE_ROWS as u32 {
+                return sp.palette_run((id - ACT_PALETTE_BASE) as usize);
             }
             if id >= ACT_RECENT_BASE && id < ACT_RECENT_BASE + MAX_RECENT as u32 {
                 sp.open_menu = None;
