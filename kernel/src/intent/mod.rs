@@ -2153,6 +2153,14 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
+        "drives" => {
+            let sub = args.trim();
+            let writes = sub.starts_with("eject") || sub.starts_with("write") || sub.ends_with(" write");
+            let need = if writes { Rights::WRITE } else { Rights::READ };
+            if require_cap(vault, &session, need, "drives") {
+                fs::intent_drives(sub);
+            }
+        }
         "disk" | "blk" => {
             let sub = args.trim();
             if sub.is_empty() || sub == "info" {

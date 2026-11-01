@@ -1,7 +1,8 @@
 //! xHCI USB Host Controller Driver
 //!
 //! Hubs after Linux hub.c, HID devices after usbhid (keyboards, mice,
-//! receivers that are both) and one USB network device. Every device
+//! receivers that are both), the pipes of mass storage devices
+//! (`usb_storage`) and one USB network device. Every device
 //! enumeration meets stays addressed with its descriptors until it is
 //! unplugged (`devices`).
 
@@ -455,6 +456,8 @@ struct XhciState {
     /// and its event ring dequeue pointer; a second state on the same ring
     /// would steal events.
     nic: Option<NicRings>,
+    /// Mass storage interfaces (`usb_storage`).
+    msc: Vec<MscPipe>,
 }
 
 /// One state per controller. Devices of different kinds (keyboard, mouse,
@@ -698,7 +701,7 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
         evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table,
         input_ctx, data_buf,
         devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
-        last_fail: "", failed: Vec::new(), nic: None,
+        last_fail: "", failed: Vec::new(), nic: None, msc: Vec::new(),
     };
 
     // Power on all ports
@@ -1995,6 +1998,12 @@ fn usb_new_device(state: &mut XhciState, slot: u8) {
         hub_probe(state, slot, &device, &cfg);
         return;
     }
+    if parse_hid_interfaces(&cfg).is_empty() {
+        if let Some(m) = parse_msc_interface(&cfg) {
+            msc_probe(state, slot, &cfg, m);
+            return;
+        }
+    }
     hid_probe(state, slot, &cfg);
 }
 
@@ -2077,12 +2086,24 @@ fn usb_disconnect(state: &mut XhciState, slot: u8) {
         kprintln!("[npk] xhci: the network device is gone");
         state.nic = None;
     }
+    let mut gone_msc = Vec::new();
+    for m in state.msc.iter().filter(|m| m.slot == slot) {
+        gone_msc.push((m.id, m.buf));
+        pages.push(m.in_ring);
+        pages.push(m.out_ring);
+    }
+    state.msc.retain(|m| m.slot != slot);
     let dev = state.devs.remove(d);
     if let Some(h) = dev.hub {
         pages.push(h.ring);
         pages.push(h.buf);
     }
     usb_release_slot(state, slot);
+    // The slot is disabled: the controller no longer touches the buffer.
+    for (id, buf) in gone_msc {
+        crate::memory::deallocate_contiguous(buf.phys(), MSC_BUF_PAGES);
+        crate::usb_storage::detached(id);
+    }
     state.free_pages.extend(pages);
     state.free_pages.push(dev.dctx);
     state.free_pages.push(dev.ep0);
@@ -2149,6 +2170,7 @@ static HOTPLUG_RUNNING: AtomicBool = AtomicBool::new(false);
 /// core must not wait with it. Events of other devices keep flowing: the
 /// waits drain the event ring themselves.
 pub fn hotplug() {
+    crate::usb_storage::kick();
     if !HOTPLUG.load(Ordering::Acquire) { return; }
     if HOTPLUG_RUNNING.swap(true, Ordering::AcqRel) { return; }
     crate::smp::scheduler::spawn("usb hotplug", hotplug_task, 0);
@@ -2664,6 +2686,413 @@ fn reset_port(state: &XhciState, port: u32) -> bool {
         core::hint::spin_loop();
     }
     false
+}
+
+// === Mass storage pipes — Linux drivers/usb/storage (usb.c probe,
+// transport.c bulk transfers) on xHCI bulk rings ===
+//
+// One pipe per Bulk-Only interface: a bulk IN and a bulk OUT ring and a
+// data buffer. `usb_storage` drives the protocol; this part only moves
+// bytes and recovers halted endpoints. A transfer is posted under the
+// controller lock and waited for without it, so keyboards and the network
+// keep flowing while a stick works.
+
+const USB_CLASS_MASS_STORAGE: u8 = 8;
+/// `USB_PR_BULK`: Bulk-Only Transport.
+const USB_PR_BULK: u8 = 0x50;
+
+const TRB_ISP: u32 = 1 << 2;
+const TRB_CHAIN: u32 = 1 << 4;
+const TRB_RESET_EP: u32 = 14 << 10;
+const TRB_STOP_RING: u32 = 15 << 10;
+const TRB_SET_DEQ: u32 = 16 << 10;
+const CC_STALL: u32 = 6;
+
+/// The data buffer: the largest transfer, 64 KiB aligned so no TRB crosses
+/// a 64 KiB boundary (xHCI 4.11.7.1).
+pub(crate) const MSC_MAX_XFER: usize = 1 << 20;
+const MSC_BUF_PAGES: usize = MSC_MAX_XFER / 4096;
+const MSC_TRB_BYTES: usize = 64 * 1024;
+/// Completions kept until the waiter takes them; older ones are stale.
+const MSC_MAX_EVENTS: usize = 64;
+
+static MSC_NEXT_ID: AtomicUsize = AtomicUsize::new(1);
+
+struct MscEvt {
+    addr: u64,
+    cc: u32,
+    residual: u32,
+}
+
+struct MscPipe {
+    id: u32,
+    slot: u8,
+    ifnum: u8,
+    subclass: u8,
+    in_ep: u8,
+    out_ep: u8,
+    in_dci: u8,
+    out_dci: u8,
+    in_ring: DmaRegion,
+    in_cycle: u32,
+    in_enq: usize,
+    out_ring: DmaRegion,
+    out_cycle: u32,
+    out_enq: usize,
+    buf: DmaRegion,
+    events: Vec<MscEvt>,
+    max_pkt: u16,
+    burst: u8,
+}
+
+/// A Bulk-Only interface as the configuration descriptor describes it.
+#[derive(Clone, Copy)]
+struct MscIntfDesc {
+    ifnum: u8,
+    subclass: u8,
+    ep_in: u8,
+    ep_out: u8,
+    max_pkt: u16,
+    /// bMaxBurst of the SuperSpeed endpoint companions.
+    burst: u8,
+}
+
+/// The first Bulk-Only mass storage interface of alternate setting 0 with
+/// a bulk IN and a bulk OUT endpoint (`usb_stor_probe1`, `get_pipes`).
+fn parse_msc_interface(cfg: &[u8]) -> Option<MscIntfDesc> {
+    let mut cur: Option<MscIntfDesc> = None;
+    let mut take = false;
+    let mut last_bulk = false;
+    let mut pos = 0usize;
+    let done = |c: &Option<MscIntfDesc>| c.is_some_and(|c| c.ep_in != 0 && c.ep_out != 0);
+    while pos + 2 <= cfg.len() {
+        let len = cfg[pos] as usize;
+        if len < 2 || pos + len > cfg.len() { break; }
+        let d = &cfg[pos..pos + len];
+        match d[1] {
+            4 if len >= 9 => {
+                if take && done(&cur) { return cur; }
+                take = d[3] == 0 && d[5] == USB_CLASS_MASS_STORAGE && d[7] == USB_PR_BULK;
+                cur = take.then_some(MscIntfDesc {
+                    ifnum: d[2], subclass: d[6], ep_in: 0, ep_out: 0, max_pkt: 0, burst: 0,
+                });
+                last_bulk = false;
+            }
+            5 if len >= 7 && take => {
+                last_bulk = false;
+                if let Some(c) = cur.as_mut() {
+                    if d[3] & 0x03 == 2 {
+                        let mp = u16::from_le_bytes([d[4], d[5]]) & 0x7FF;
+                        if d[2] & 0x80 != 0 {
+                            if c.ep_in == 0 { c.ep_in = d[2] & 0x0F; last_bulk = true; }
+                        } else if c.ep_out == 0 {
+                            c.ep_out = d[2] & 0x0F;
+                            last_bulk = true;
+                        }
+                        if last_bulk { c.max_pkt = c.max_pkt.max(mp); }
+                    }
+                }
+            }
+            0x30 if len >= 3 && take && last_bulk => {
+                if let Some(c) = cur.as_mut() { c.burst = c.burst.max(d[2].min(15)); }
+            }
+            _ => {}
+        }
+        pos += len;
+    }
+    if take && done(&cur) { cur } else { None }
+}
+
+/// The endpoint context of a bulk endpoint (`xhci_endpoint_init` for bulk:
+/// interval 0, max burst from the companion, CErr 3), its dequeue pointer at
+/// `deq` with cycle state `cycle`.
+fn msc_ep_ctx(state: &XhciState, dci: u8, ep_type: u32, deq: u64, cycle: u32, max_pkt: u16, burst: u8) {
+    let input = state.input_ctx;
+    let ep = state.ctx_size * (dci as usize + 1);
+    input.w32(ep, 0);
+    input.w32(ep + 4, (3 << 1) | (ep_type << 3) | ((burst as u32) << 8) | ((max_pkt as u32) << 16));
+    input.w32(ep + 8, (deq as u32) | cycle);
+    input.w32(ep + 12, (deq >> 32) as u32);
+    input.w32(ep + 16, 0);
+}
+
+/// Configure both bulk endpoints of a mass storage interface.
+fn cmd_configure_msc(state: &mut XhciState, slot: u8, m: &MscIntfDesc, in_ring: u64, out_ring: u64,
+    max_pkt: u16) -> bool
+{
+    let Some(d) = dev_idx(state, slot) else { return false };
+    let in_dci = m.ep_in * 2 + 1;
+    let out_dci = m.ep_out * 2;
+    state.input_ctx.fill(0u32, 0, 4096);
+    state.input_ctx.w32(4u32, 1 | (1u32 << in_dci) | (1u32 << out_dci));
+    input_slot_copy(state, d, in_dci.max(out_dci));
+    msc_ep_ctx(state, in_dci, EP_TYPE_BULK_IN, in_ring, 1, max_pkt, m.burst);
+    msc_ep_ctx(state, out_dci, EP_TYPE_BULK_OUT, out_ring, 1, max_pkt, m.burst);
+    post_command(state, state.input_ctx.phys(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
+    matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS)
+}
+
+/// Reset the controller's side of one bulk endpoint, data toggle or
+/// sequence number included: stop it, then drop and add it again with its
+/// dequeue pointer at the enqueue pointer (`xhci_endpoint_reset`).
+fn msc_reinit_ep(state: &mut XhciState, i: usize, dir_in: bool) -> bool {
+    let m = &state.msc[i];
+    let slot = m.slot;
+    let (dci, ep_type, ring, cycle, enq) = if dir_in {
+        (m.in_dci, EP_TYPE_BULK_IN, m.in_ring, m.in_cycle, m.in_enq)
+    } else {
+        (m.out_dci, EP_TYPE_BULK_OUT, m.out_ring, m.out_cycle, m.out_enq)
+    };
+    let (max_pkt, burst) = (m.max_pkt, m.burst);
+    let Some(d) = dev_idx(state, slot) else { return false };
+    // A halted endpoint refuses Stop Endpoint; that is fine here.
+    post_command(state, 0, 0, TRB_STOP_RING | ((slot as u32) << 24) | ((dci as u32) << 16));
+    let _ = wait_command_completion(state);
+    state.input_ctx.fill(0u32, 0, 4096);
+    state.input_ctx.w32(0u32, 1u32 << dci);
+    state.input_ctx.w32(4u32, 1 | (1u32 << dci));
+    input_slot_copy(state, d, dci);
+    msc_ep_ctx(state, dci, ep_type, ring.phys() + (enq * 16) as u64, cycle, max_pkt, burst);
+    post_command(state, state.input_ctx.phys(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
+    let ok = matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS);
+    state.msc[i].events.clear();
+    ok
+}
+
+/// Set up the pipe of a Bulk-Only interface and hand it to `usb_storage`.
+fn msc_probe(state: &mut XhciState, slot: u8, cfg: &[u8], m: MscIntfDesc) {
+    let Some(d) = dev_idx(state, slot) else { return };
+    let speed = state.devs[d].speed;
+    let path = state.devs[d].seen.port.clone();
+    let config_val = cfg.get(5).copied().unwrap_or(1);
+    // The size the descriptor gives, else the one the speed fixes.
+    let max_pkt = match (m.max_pkt, speed) {
+        (0, s) if s >= SPEED_SUPER => 1024,
+        (0, SPEED_HIGH) => 512,
+        (0, _) => 64,
+        (p, _) => p,
+    };
+    let (Some(in_ring), Some(out_ring)) = (take_ring(state, "msc in"), take_ring(state, "msc out")) else {
+        kprintln!("[npk] xhci: port {} mass storage: DMA alloc failed", path);
+        return;
+    };
+    let Some(phys) = crate::memory::allocate_contiguous_aligned(MSC_BUF_PAGES, MSC_TRB_BYTES / 4096) else {
+        state.free_pages.push(in_ring);
+        state.free_pages.push(out_ring);
+        kprintln!("[npk] xhci: port {} mass storage: no buffer", path);
+        return;
+    };
+    // SAFETY: freshly allocated contiguous frames, identity-mapped RAM as
+    // every DMA region; owned by this pipe until `usb_disconnect` frees it.
+    let buf = unsafe { DmaRegion::from_raw(phys, (MSC_BUF_PAGES * 4096) as u64) };
+    if !cmd_configure_msc(state, slot, &m, in_ring.phys(), out_ring.phys(), max_pkt) {
+        kprintln!("[npk] xhci: port {} mass storage: configure endpoints failed", path);
+        crate::memory::deallocate_contiguous(phys, MSC_BUF_PAGES);
+        state.free_pages.push(in_ring);
+        state.free_pages.push(out_ring);
+        return;
+    }
+    if !usb_set_config(state, slot, config_val) {
+        kprintln!("[npk] xhci: port {} mass storage: set configuration failed", path);
+        crate::memory::deallocate_contiguous(phys, MSC_BUF_PAGES);
+        state.free_pages.push(in_ring);
+        state.free_pages.push(out_ring);
+        return;
+    }
+    let id = MSC_NEXT_ID.fetch_add(1, Ordering::Relaxed) as u32;
+    state.msc.push(MscPipe {
+        id, slot, ifnum: m.ifnum, subclass: m.subclass, in_ep: m.ep_in, out_ep: m.ep_out,
+        in_dci: m.ep_in * 2 + 1, out_dci: m.ep_out * 2,
+        in_ring, in_cycle: 1, in_enq: 0, out_ring, out_cycle: 1, out_enq: 0,
+        buf, events: Vec::new(), max_pkt, burst: m.burst,
+    });
+    let seen = &state.devs[d].seen;
+    let name = format!("{} {}", seen.manufacturer, seen.product);
+    kprintln!("[npk] xhci: port {} mass storage (subclass {:02x}, {} speed, bulk in {} out {}, burst {})",
+        path, m.subclass, speed_name(speed), m.ep_in, m.ep_out, m.burst);
+    crate::usb_storage::attached(id, crate::usb_storage::PipeInfo {
+        port: path, name: String::from(name.trim()), subclass: m.subclass,
+        super_speed: speed >= SPEED_SUPER,
+    });
+}
+
+/// The controller is about to be reset: every pipe on it ends. Returns the
+/// data buffers, to be freed once the reset stopped the controller.
+fn msc_forget(state: &mut XhciState) -> Vec<DmaRegion> {
+    let mut bufs = Vec::new();
+    for m in state.msc.drain(..) {
+        crate::usb_storage::detached(m.id);
+        bufs.push(m.buf);
+    }
+    bufs
+}
+
+/// Why a mass storage transfer failed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum MscError {
+    /// The device is gone.
+    Gone,
+    /// The endpoint stalled; it is cleared again.
+    Stall,
+    /// No completion in time; the transfer was aborted.
+    Timeout,
+    /// Any other completion code.
+    Failed(u32),
+}
+
+fn with_msc<R>(id: u32, f: impl FnOnce(&mut XhciState, usize) -> R) -> Result<R, MscError> {
+    let mut g = CTRLS.lock();
+    for s in g.iter_mut() {
+        if let Some(i) = s.msc.iter().position(|m| m.id == id) {
+            return Ok(f(s, i));
+        }
+    }
+    Err(MscError::Gone)
+}
+
+/// Post one TD of `len` bytes from the pipe's buffer on its IN or OUT ring:
+/// chained TRBs of at most 64 KiB, interrupt on a short packet and at the
+/// end. Returns the TD's first and last TRB address.
+fn msc_post(state: &mut XhciState, i: usize, dir_in: bool, len: usize) -> (u64, u64) {
+    let m = &mut state.msc[i];
+    let (ring, cycle, enq) = if dir_in {
+        (m.in_ring, &mut m.in_cycle, &mut m.in_enq)
+    } else {
+        (m.out_ring, &mut m.out_cycle, &mut m.out_enq)
+    };
+    let trbs = len.div_ceil(MSC_TRB_BYTES).max(1);
+    // A TD stays in one pass of the ring, as for control transfers.
+    if *enq + trbs > NUM_TR_TRBS - 1 {
+        for k in *enq..NUM_TR_TRBS - 1 {
+            write_trb(ring, k, 0, 0, TRB_TR_NOOP | *cycle);
+        }
+        write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | *cycle | (1 << 1));
+        *cycle ^= 1;
+        *enq = 0;
+    }
+    let first = *enq;
+    // Every TRB but the first gets its cycle bit right away; the first one
+    // last, so the controller never starts on half a TD.
+    for k in (0..trbs).rev() {
+        let off = k * MSC_TRB_BYTES;
+        let n = (len - off.min(len)).min(MSC_TRB_BYTES);
+        // TD Size (xHCI 4.11.2.4) left 0: these rings are not using it for
+        // anything the controller needs; the last TRB carries IOC.
+        let flags = if k + 1 == trbs { TRB_IOC } else { TRB_CHAIN };
+        let c = if k == 0 { *cycle ^ 1 } else { *cycle };
+        write_trb(ring, first + k, m.buf.phys() + off as u64, n as u32, TRB_NORMAL | TRB_ISP | flags | c);
+    }
+    fence(Ordering::SeqCst);
+    let (p, st, ctl) = read_trb(ring, first);
+    write_trb(ring, first, p, st, ctl ^ TRB_CYCLE);
+    *enq = first + trbs;
+    if *enq >= NUM_TR_TRBS - 1 {
+        write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | *cycle | (1 << 1));
+        *cycle ^= 1;
+        *enq = 0;
+    }
+    let base = ring.phys();
+    let (slot, dci) = (m.slot as u32, if dir_in { m.in_dci } else { m.out_dci } as u32);
+    m.events.clear();
+    ring_doorbell(state, slot, dci);
+    (base + (first * 16) as u64, base + ((first + trbs - 1) * 16) as u64)
+}
+
+/// Stop the endpoint if `stop`, then move its dequeue pointer to the
+/// enqueue pointer, past whatever the TD left (`xhci_handle_halted_endpoint`,
+/// `xhci_move_dequeue_past_td`).
+fn msc_skip_td(state: &mut XhciState, i: usize, dir_in: bool, stop: bool) {
+    let m = &state.msc[i];
+    let (slot, dci) = (m.slot as u32, if dir_in { m.in_dci } else { m.out_dci } as u32);
+    let (ring, cycle, enq) = if dir_in { (m.in_ring, m.in_cycle, m.in_enq) } else { (m.out_ring, m.out_cycle, m.out_enq) };
+    let sel = (slot << 24) | (dci << 16);
+    if stop {
+        post_command(state, 0, 0, TRB_STOP_RING | sel);
+    } else {
+        post_command(state, 0, 0, TRB_RESET_EP | sel);
+    }
+    let _ = wait_command_completion(state);
+    post_command(state, ring.phys() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
+    let _ = wait_command_completion(state);
+    state.msc[i].events.clear();
+}
+
+/// One bulk transfer of `len` bytes through the pipe's buffer: OUT sends
+/// what `msc_buf_write` put there, IN fills it. Returns the bytes moved.
+/// `timeout_ms` bounds the wait; on its end the TD is aborted.
+pub(crate) fn msc_transfer(id: u32, dir_in: bool, len: usize, timeout_ms: u64) -> Result<usize, MscError> {
+    let len = len.min(MSC_MAX_XFER);
+    let (first, last) = with_msc(id, |s, i| msc_post(s, i, dir_in, len))?;
+    let deadline = crate::interrupts::ticks() + timeout_ms.div_ceil(10).max(1);
+    loop {
+        let r = with_msc(id, |s, i| {
+            drain(s);
+            let m = &mut s.msc[i];
+            let hit = m.events.iter().position(|e| e.addr >= first && e.addr <= last)?;
+            let e = m.events.remove(hit);
+            m.events.clear();
+            let k = ((e.addr - first) / 16) as usize;
+            let this = (len - (k * MSC_TRB_BYTES).min(len)).min(MSC_TRB_BYTES);
+            let done = k * MSC_TRB_BYTES + this.saturating_sub(e.residual as usize);
+            Some(match e.cc {
+                CC_SUCCESS | CC_SHORT_PACKET => Ok(done.min(len)),
+                CC_STALL => {
+                    msc_skip_td(s, i, dir_in, false);
+                    Err(MscError::Stall)
+                }
+                cc => {
+                    msc_skip_td(s, i, dir_in, false);
+                    Err(MscError::Failed(cc))
+                }
+            })
+        })?;
+        if let Some(r) = r { return r; }
+        if crate::interrupts::ticks() >= deadline {
+            let _ = with_msc(id, |s, i| msc_skip_td(s, i, dir_in, true));
+            return Err(MscError::Timeout);
+        }
+        crate::smp::fiber::spin_or_yield();
+    }
+}
+
+/// Copy `data` into the pipe's buffer at `off`.
+pub(crate) fn msc_buf_write(id: u32, off: usize, data: &[u8]) -> Result<(), MscError> {
+    if off.checked_add(data.len()).is_none_or(|e| e > MSC_MAX_XFER) { return Err(MscError::Failed(0)); }
+    with_msc(id, |s, i| s.msc[i].buf.copy_in(off, data))
+}
+
+/// Copy from the pipe's buffer at `off` into `out`.
+pub(crate) fn msc_buf_read(id: u32, off: usize, out: &mut [u8]) -> Result<(), MscError> {
+    if off.checked_add(out.len()).is_none_or(|e| e > MSC_MAX_XFER) { return Err(MscError::Failed(0)); }
+    with_msc(id, |s, i| s.msc[i].buf.copy_out(off, out))
+}
+
+/// A class request to the interface on EP0; IN data lands in `buf`.
+pub(crate) fn msc_class_request(id: u32, req_type: u8, request: u8, value: u16, buf: &mut [u8]) -> bool {
+    with_msc(id, |s, i| {
+        let (slot, ifnum) = (s.msc[i].slot, s.msc[i].ifnum as u16);
+        let dir_in = req_type & 0x80 != 0;
+        let len = buf.len().min(64) as u16;
+        if !dir_in && len > 0 { s.data_buf.copy_in(0u32, &buf[..len as usize]); }
+        let ok = usb_control_transfer(s, slot, req_type, request, value, ifnum, len, dir_in);
+        if ok && dir_in && len > 0 { s.data_buf.copy_out(0u32, &mut buf[..len as usize]); }
+        ok
+    }).unwrap_or(false)
+}
+
+/// CLEAR_FEATURE(ENDPOINT_HALT) on the bulk IN or OUT endpoint, then the
+/// controller's side of it reset to match (`usb_clear_halt`).
+pub(crate) fn msc_clear_halt(id: u32, dir_in: bool) -> bool {
+    with_msc(id, |s, i| {
+        let (slot, ep) = (s.msc[i].slot, if dir_in { s.msc[i].in_ep | 0x80 } else { s.msc[i].out_ep });
+        let ok = usb_control_transfer(s, slot, 0x02, USB_CLEAR_FEATURE, 0, ep as u16, 0, false);
+        msc_reinit_ep(s, i, dir_in) && ok
+    }).unwrap_or(false)
+}
+
+/// The interface subclass (command set) of the pipe.
+pub(crate) fn msc_subclass(id: u32) -> Option<u8> {
+    with_msc(id, |s, i| s.msc[i].subclass).ok()
 }
 
 // === Command Ring operations ===
@@ -3420,9 +3849,13 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
         kprintln!("[npk] xhci: NIC not found gently on {:02x}:{:02x}.{} — falling back to a \
                    controller RESET (everything addressed there loses its slot)",
             a.bus, a.device, a.function);
+        let mut msc_bufs = Vec::new();
         {
             let mut g = CTRLS.lock();
-            for s in g.iter_mut().filter(|s| s.pci_addr == a) { hid_forget(s); }
+            for s in g.iter_mut().filter(|s| s.pci_addr == a) {
+                hid_forget(s);
+                msc_bufs.extend(msc_forget(s));
+            }
             g.retain(|s| s.pci_addr != a);
         }
         let id = pci::read32(a, 0x00);
@@ -3433,7 +3866,10 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
             bar0: pci::read32(a, 0x10),
             irq_line: pci::read8(a, 0x3C),
         };
+        // Freed only after a successful bring-up, which reset the
+        // controller; a failed one may have left it running, so they stay.
         let Some(mut x) = bring_up_controller(pci_dev) else { continue };
+        for b in msc_bufs { crate::memory::deallocate_contiguous(b.phys(), MSC_BUF_PAGES); }
         enumerate_root_ports(&mut x);
         let found = nic_probe(&mut x, vid, pid, ep_in, ep_out);
         store_ctrl(x);
@@ -3767,6 +4203,16 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
             }
             return true;
         }
+    }
+
+    // Mass storage: the waiter in `msc_transfer` picks its completion up.
+    if let Some(m) = state.msc.iter_mut()
+        .find(|m| in_ring(a, m.in_ring.phys()) || in_ring(a, m.out_ring.phys()))
+    {
+        if m.events.len() < MSC_MAX_EVENTS {
+            m.events.push(MscEvt { addr: a, cc, residual: e.residual });
+        }
+        return true;
     }
 
     // HID interfaces: an IN completion is a report, an OUT completion the

@@ -1869,6 +1869,11 @@ pub fn intent_help_topic(topic: &str) {
             help_row("disk", "Disk info");
             help_row("disk read <sector>", "Raw sector hex dump");
             help_row("disk write <s> <txt>", "Write text to a sector");
+            help_row("drives", "External drives (USB sticks and disks)");
+            help_row("drives read <n> [b]", "Hex dump of a drive's block");
+            help_row("drives write <n> <b> <txt>", "Write text to a drive's block");
+            help_row("drives bench <n> [write]", "Sequential speed; write puts the data back");
+            help_row("drives eject <n>", "Flush and stop a drive for removal");
             help_row("fbinfo", "Framebuffer geometry");
             help_row("beep", "Speaker test");
             help_row("test-audio", "Audio output test");

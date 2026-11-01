@@ -670,6 +670,108 @@ pub fn intent_disk_write(args: &str) {
     }
 }
 
+/// External disks (USB mass storage): list, dump a block, measure, eject.
+pub fn intent_drives(args: &str) {
+    use crate::drivers::usb_storage as us;
+    let mut it = args.split_whitespace();
+    let cmd = it.next().unwrap_or("");
+    let id: Option<u32> = it.next().and_then(|s| s.parse().ok());
+    let lba: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let find = |id: Option<u32>| id.and_then(|id| us::disks().into_iter().find(|d| d.id == id));
+    match cmd {
+        "" | "list" => {
+            let disks = us::disks();
+            if disks.is_empty() {
+                kprintln!("  no external drives");
+                return;
+            }
+            for d in disks {
+                kprintln!("  {}  {:<28} port {:<6} {:>8} MB  {} B blocks{}{}",
+                    d.id, d.name, d.port,
+                    d.blocks.saturating_mul(d.block_size as u64) / 1_000_000, d.block_size,
+                    if d.removable { "  removable" } else { "" },
+                    if d.read_only { "  read-only" } else { "" });
+            }
+        }
+        "read" => {
+            let Some(d) = find(id) else { kprintln!("  usage: drives read <n> [block]"); return };
+            let mut buf = alloc::vec![0u8; d.block_size as usize];
+            match us::read(d.id, lba, &mut buf) {
+                Ok(()) => {
+                    kprintln!("  drive {} block {}:", d.id, lba);
+                    for chunk in buf.chunks(512).take(1) {
+                        let mut b = [0u8; 512];
+                        b.copy_from_slice(chunk);
+                        hex_dump(&b);
+                    }
+                }
+                Err(e) => kprintln!("  read failed: {:?}", e),
+            }
+        }
+        "write" => {
+            // `drives write <n> <block> <text>`: the text at the start of
+            // the block, the rest of it kept.
+            let text = args.splitn(4, ' ').nth(3).unwrap_or("");
+            let Some(d) = find(id).filter(|_| !text.is_empty()) else {
+                kprintln!("  usage: drives write <n> <block> <text>");
+                return;
+            };
+            let mut buf = alloc::vec![0u8; d.block_size as usize];
+            let n = text.len().min(buf.len());
+            let r = us::read(d.id, lba, &mut buf).and_then(|()| {
+                buf[..n].copy_from_slice(&text.as_bytes()[..n]);
+                us::write(d.id, lba, &buf)
+            }).and_then(|()| us::flush(d.id));
+            match r {
+                Ok(()) => kprintln!("  wrote {} bytes to drive {} block {}", n, d.id, lba),
+                Err(e) => kprintln!("  write failed: {:?}", e),
+            }
+        }
+        "bench" => {
+            let Some(d) = find(id) else { kprintln!("  usage: drives bench <n> [write]"); return };
+            // `write` puts back what it just read, chunk by chunk: the
+            // drive's content does not change.
+            let rewrite = args.split_whitespace().nth(2) == Some("write");
+            if rewrite && d.read_only { kprintln!("  drive {} is read-only", d.id); return; }
+            let chunk = 1usize << 20;
+            let total = (64u64 << 20).min(d.blocks * d.block_size as u64) as usize / chunk * chunk;
+            if total == 0 { kprintln!("  drive too small"); return; }
+            let mut buf = alloc::vec![0u8; chunk];
+            let per = (chunk / d.block_size as usize) as u64;
+            let t0 = crate::interrupts::rdtsc();
+            let mut at = 0u64;
+            for _ in 0..total / chunk {
+                if let Err(e) = us::read(d.id, at, &mut buf) {
+                    kprintln!("  read failed at block {}: {:?}", at, e);
+                    return;
+                }
+                if rewrite {
+                    if let Err(e) = us::write(d.id, at, &buf) {
+                        kprintln!("  write failed at block {}: {:?}", at, e);
+                        return;
+                    }
+                }
+                at += per;
+            }
+            if rewrite {
+                if let Err(e) = us::flush(d.id) { kprintln!("  flush failed: {:?}", e); return; }
+            }
+            let us_ = (crate::interrupts::rdtsc() - t0) / (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+            kprintln!("  {} {} MiB in {} ms: {} MB/s", if rewrite { "read+wrote" } else { "read" },
+                total >> 20, us_ / 1000,
+                (total as u64).saturating_mul(1_000_000) / us_.max(1) / 1_000_000);
+        }
+        "eject" => {
+            let Some(d) = find(id) else { kprintln!("  usage: drives eject <n>"); return };
+            match us::eject(d.id) {
+                Ok(()) => kprintln!("  drive {} can be removed", d.id),
+                Err(e) => kprintln!("  eject failed: {:?}", e),
+            }
+        }
+        _ => kprintln!("  usage: drives [list | read <n> [block] | write <n> <block> <text> | bench <n> [write] | eject <n>]"),
+    }
+}
+
 fn hex_dump(buf: &[u8; 512]) {
     let mut prev = [0xFFu8; 16]; // impossible first value
     let mut collapsed = false;
