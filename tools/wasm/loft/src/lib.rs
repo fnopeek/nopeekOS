@@ -39,7 +39,7 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
 // could not mutate the FS.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER | caps::CANVAS];
+static NPK_CAPS: [u8; 2] = [caps::READ | caps::WRITE | caps::EXEC | caps::RENDER | caps::CANVAS, caps::ext::EXTERNAL];
 
 use nopeek_widgets::host;
 
@@ -192,6 +192,12 @@ struct Strings {
     place_trash:     &'static str,
     sec_places:      &'static str,
     sec_devices:     &'static str,
+    drive_read_only: &'static str,
+    copying:         &'static str,
+    copy_scanning:   &'static str,
+    copy_done:       &'static str,
+    copy_failed:     &'static str,
+    copy_stopped:    &'static str,
     // View menu.
     sort_name:      &'static str,
     sort_size:      &'static str,
@@ -324,6 +330,12 @@ const EN: Strings = Strings {
     place_home: "Home", place_documents: "Documents", place_downloads: "Downloads",
     place_music: "Music", place_pictures: "Pictures", place_videos: "Videos", place_projects: "Projects", place_trash: "Trash",
     sec_places: "PLACES", sec_devices: "DEVICES",
+    drive_read_only: "External drives are read-only for now",
+    copying: "Copying {} of {} files · {} of {} · {}/s · {} left · Esc stops",
+    copy_scanning: "Preparing copy… {} files, {} · Esc stops",
+    copy_done: "Copied {} files ({})",
+    copy_failed: "Copied {} files, {} failed",
+    copy_stopped: "Stopped after {} files",
     sort_name: "Sort by name", sort_size: "Sort by size", sort_files: "Sort by file count",
     sort_type: "Sort by type", sort_modified: "Sort by date",
     sort_asc: "Ascending", sort_desc: "Descending",
@@ -743,6 +755,36 @@ struct PasteJob {
     last:      Option<String>,
 }
 
+/// A byte copy out of an external drive, where `fs_copy` cannot alias:
+/// folders are scanned first so the totals are known, then the files are
+/// streamed a slice per tick. Each file appears whole when its writer
+/// closes; a stop leaves the files done so far.
+struct Transfer {
+    /// Folders still to scan: source, destination.
+    scan:        Vec<(String, String)>,
+    /// Files to copy: source, destination, size. Next one last.
+    files:       Vec<(String, String, u64)>,
+    cur:         Option<Stream>,
+    files_total: usize,
+    files_done:  usize,
+    bytes_total: u64,
+    bytes_done:  u64,
+    failed:      usize,
+    started_ms:  u64,
+}
+
+/// The file being copied: read and write handles, bytes so far.
+struct Stream {
+    src:  i32,
+    dst:  i32,
+    off:  u64,
+    size: u64,
+}
+
+/// One slice of a copy, and the longest a tick spends on it.
+const COPY_CHUNK: usize = 1 << 20;
+const COPY_SLICE_MS: u64 = 40;
+
 /// A thumbnail of one picture, kept as a canvas in the kernel.
 struct Thumb {
     /// Canvas id, or `None` when the file could not be decoded.
@@ -934,6 +976,9 @@ struct Loft {
     undo:           Vec<Vec<Step>>,
     paste:          Option<PasteJob>,
     deleting:       Option<DeleteJob>,
+    transfer:       Option<Transfer>,
+    /// The mounted external drives, as `ext` lists them.
+    drives:         Vec<String>,
     /// Saved state of every tab; the entry at `active` is stale while the
     /// tab is shown.
     tabs:           Vec<Tab>,
@@ -1028,6 +1073,8 @@ impl Loft {
             undo:          Vec::new(),
             paste:         None,
             deleting:      None,
+            transfer:      None,
+            drives:        Vec::new(),
             tabs:          Vec::new(),
             active:        0,
             bookmarks:     Vec::new(),
@@ -1743,9 +1790,12 @@ impl Loft {
     /// Ctrl+V: copy or move the clipboard items into the current folder.
     /// A name that exists already asks first (see `Dialog::Clash`).
     fn do_paste(&mut self) {
-        if self.paste.is_some() { return; }
+        if self.paste.is_some() || self.transfer.is_some() { return; }
+        if self.refuse_ext(&self.current.clone()) { return; }
         self.load_clip();
-        let Some(clip) = self.clipboard.take() else { return };
+        let Some(mut clip) = self.clipboard.take() else { return };
+        // A drive is read-only: what is cut there is copied.
+        if clip.items.iter().any(|p| is_ext(p)) { clip.mode = ClipMode::Copy; }
         let mut todo = clip.items.clone();
         todo.reverse();
         self.paste = Some(PasteJob {
@@ -1771,9 +1821,13 @@ impl Loft {
     /// Items dropped on folder `dest`: moved, or copied with Ctrl. A drop
     /// on the trash moves them there as Delete does.
     fn drop_into(&mut self, dest: String, paths: Vec<String>, copy: bool) {
-        if self.paste.is_some() || !self.idle_fs() || paths.is_empty() { return; }
+        if self.paste.is_some() || self.transfer.is_some() || !self.idle_fs() || paths.is_empty() { return; }
+        if self.refuse_ext(&dest) { return; }
+        // Off a drive is always a copy, as between volumes elsewhere.
+        let copy = copy || paths.iter().any(|p| is_ext(p));
         if dest == self.trash_dir() {
             if copy { return; }
+            if paths.iter().any(|p| is_ext(p)) { self.refuse_ext(EXT_ROOT); return; }
             let targets: Vec<Target> = paths.iter().map(|p| Target {
                 name: basename(p).to_string(), full: p.clone(), is_dir: dir_exists(p),
             }).collect();
@@ -1842,9 +1896,15 @@ impl Loft {
                 }
             }
             let dest = if choice == Clash::Replace { plain } else { unique_in(&job.dest, &name, is_dir) };
-            let done = match job.mode {
-                ClipMode::Copy => fs_copy(&src, &dest),
-                ClipMode::Cut  => fs_rename(&src, &dest),
+            let done = if is_ext(&src) {
+                // A drive's files are bytes to copy, not store objects.
+                self.queue_transfer(src.clone(), dest.clone(), is_dir);
+                true
+            } else {
+                match job.mode {
+                    ClipMode::Copy => fs_copy(&src, &dest),
+                    ClipMode::Cut  => fs_rename(&src, &dest),
+                }
             };
             if done {
                 job.ok += 1;
@@ -1885,11 +1945,146 @@ impl Loft {
         }
     }
 
+    // ── External drives ───────────────────────────────────────────────
+
+    /// External drives are read-only for now: say so instead of failing.
+    fn refuse_ext(&mut self, path: &str) -> bool {
+        if !is_ext(path) { return false; }
+        self.close_menus();
+        self.say(s().drive_read_only.to_string(), true);
+        true
+    }
+
+    /// Re-read the mounted drives; true if the list changed. A folder on
+    /// a drive that went away is left for home.
+    fn poll_drives(&mut self) -> bool {
+        let now: Vec<String> = list_dir_internal(EXT_ROOT, false).into_iter()
+            .filter(|e| e.is_dir).map(|e| e.name).collect();
+        if now == self.drives { return false; }
+        self.drives = now;
+        if is_ext(&self.current) && !path_exists(&self.current) {
+            self.navigate(self.home.clone());
+        }
+        self.rebuild_sidebar();
+        true
+    }
+
+    /// Queue `src`, on a drive, to be copied to `dest`.
+    fn queue_transfer(&mut self, src: String, dest: String, is_dir: bool) {
+        let t = self.transfer.get_or_insert_with(|| Transfer {
+            scan: Vec::new(), files: Vec::new(), cur: None, files_total: 0, files_done: 0,
+            bytes_total: 0, bytes_done: 0, failed: 0, started_ms: host::ticks_ms(),
+        });
+        if is_dir {
+            t.scan.push((src, dest));
+        } else {
+            let size = host::fs_stat(&src).map_or(0, |(n, _, _)| n);
+            t.files.insert(0, (src, dest, size));
+            t.files_total += 1;
+            t.bytes_total += size;
+        }
+    }
+
+    /// Scan folders, then stream files, for at most `COPY_SLICE_MS`. True
+    /// if anything changed.
+    fn pump_transfer(&mut self) -> bool {
+        let Some(t) = self.transfer.as_mut() else { return false };
+        let until = host::ticks_ms() + COPY_SLICE_MS;
+        let mut buf = alloc::vec![0u8; COPY_CHUNK];
+        while host::ticks_ms() < until {
+            if let Some((src, dest)) = t.scan.pop() {
+                if !fs_mkdir(&dest) && !dir_exists(&dest) { t.failed += 1; continue; }
+                for e in list_dir_internal(&src, false) {
+                    let (from, to) = (join(&src, &e.name), join(&dest, &e.name));
+                    if e.is_dir {
+                        t.scan.push((from, to));
+                    } else {
+                        t.files.insert(0, (from, to, e.size));
+                        t.files_total += 1;
+                        t.bytes_total += e.size;
+                    }
+                }
+                continue;
+            }
+            if t.cur.is_none() {
+                let Some((src, dest, size)) = t.files.pop() else { break };
+                let (r, w) = (npk_sys::file_open(src.as_bytes()), npk_sys::file_create(dest.as_bytes()));
+                if r < 0 || w < 0 {
+                    if r >= 0 { npk_sys::file_close(r); }
+                    if w >= 0 { npk_sys::file_abort(w); }
+                    t.failed += 1;
+                    t.bytes_total = t.bytes_total.saturating_sub(size);
+                    continue;
+                }
+                t.cur = Some(Stream { src: r, dst: w, off: 0, size });
+            }
+            let Some(c) = t.cur.as_mut() else { break };
+            let n = npk_sys::file_read(c.src, c.off, &mut buf);
+            let ok = n >= 0 && (n == 0 || npk_sys::file_write(c.dst, &buf[..n as usize]) == n);
+            if ok && n > 0 {
+                c.off += n as u64;
+                t.bytes_done += n as u64;
+                if c.off < c.size { continue; }
+            }
+            // The file is through, or broke: publish or drop it.
+            let c = t.cur.take().unwrap_or(Stream { src: -1, dst: -1, off: 0, size: 0 });
+            npk_sys::file_close(c.src);
+            let whole = ok && c.off == c.size;
+            if whole && npk_sys::file_close(c.dst) == 0 {
+                t.files_done += 1;
+            } else {
+                if !whole { npk_sys::file_abort(c.dst); }
+                t.failed += 1;
+                t.bytes_total = t.bytes_total.saturating_sub(c.size - c.off.min(c.size));
+            }
+        }
+        if t.scan.is_empty() && t.files.is_empty() && t.cur.is_none() {
+            self.finish_transfer(false);
+        }
+        true
+    }
+
+    fn finish_transfer(&mut self, stopped: bool) {
+        let Some(mut t) = self.transfer.take() else { return };
+        if let Some(c) = t.cur.take() {
+            npk_sys::file_close(c.src);
+            npk_sys::file_abort(c.dst);
+        }
+        let msg = if stopped {
+            fill(s().copy_stopped, &[&num(t.files_done)])
+        } else if t.failed > 0 {
+            fill(s().copy_failed, &[&num(t.files_done), &num(t.failed)])
+        } else {
+            fill(s().copy_done, &[&num(t.files_done), &format_size(t.bytes_done)])
+        };
+        self.refresh();
+        self.say(msg, t.failed > 0);
+    }
+
+    /// The copy's line in the status bar.
+    fn transfer_text(&self) -> Option<String> {
+        let t = self.transfer.as_ref()?;
+        if !t.scan.is_empty() {
+            return Some(fill(s().copy_scanning, &[&num(t.files_total), &format_size(t.bytes_total)]));
+        }
+        let ms = host::ticks_ms().saturating_sub(t.started_ms).max(1);
+        let rate = t.bytes_done.saturating_mul(1000) / ms;
+        let left = t.bytes_total.saturating_sub(t.bytes_done);
+        let secs = if rate == 0 { 0 } else { left / rate };
+        let eta = alloc::format!("{}:{:02}", secs / 60, secs % 60);
+        Some(fill(s().copying, &[
+            &num((t.files_done + 1).min(t.files_total)), &num(t.files_total),
+            &format_size(t.bytes_done), &format_size(t.bytes_total),
+            &format_size(rate), &eta,
+        ]))
+    }
+
     /// Delete key / "Move to trash": to the trash, or with a confirmation
     /// for good when the items are in the trash already.
     fn delete_targets(&mut self) {
         let targets = self.targets();
         if targets.is_empty() { return; }
+        if targets.iter().any(|t| is_ext(&t.full)) { self.refuse_ext(EXT_ROOT); return; }
         self.close_menus();
         if self.in_trash_tree() {
             self.open_dialog(Dialog::ConfirmDelete(targets));
@@ -2111,6 +2306,7 @@ impl Loft {
     /// Open the rename dialog for the cursor item, or the find-and-replace
     /// dialog when several items are marked.
     fn open_rename(&mut self) {
+        if self.refuse_ext(&self.current.clone()) { return; }
         let targets = self.targets();
         if targets.len() > 1 {
             self.close_menus();
@@ -2126,6 +2322,7 @@ impl Loft {
     }
 
     fn open_new_folder(&mut self) {
+        if self.refuse_ext(&self.current.clone()) { return; }
         self.close_menus();
         let dest = unique_in(&self.current, s().folder_default, true);
         let name = basename(&dest).to_string();
@@ -2134,6 +2331,7 @@ impl Loft {
     }
 
     fn open_new_file(&mut self) {
+        if self.refuse_ext(&self.current.clone()) { return; }
         self.close_menus();
         let dest = unique_in(&self.current, s().file_default, false);
         let name = basename(&dest).to_string();
@@ -2289,6 +2487,7 @@ impl Loft {
 
     /// Ctrl+D: a copy of each target next to it, under a free name.
     fn duplicate(&mut self) {
+        if self.refuse_ext(&self.current.clone()) { return; }
         self.close_menus();
         let targets = self.targets();
         if targets.is_empty() || self.in_trash_tree() { return; }
@@ -2543,6 +2742,13 @@ impl Loft {
             .map(|p| Place { label: p.label.clone(), icon: p.icon, path: p.path.clone(), section: p.section })
             .collect();
         places.retain(|p| p.section == Section::Places);
+        let drives: Vec<Place> = self.drives.iter().map(|d| Place {
+            label: d.clone(), icon: IconId::HardDrives, path: join(EXT_ROOT, d), section: Section::Devices,
+        }).collect();
+        let mut devices = devices;
+        // After Filesystem, before the trash.
+        let at = devices.len().min(1);
+        for (k, d) in drives.into_iter().enumerate() { devices.insert(at + k, d); }
         for b in &self.bookmarks {
             let label = if b.is_empty() { "/".to_string() } else { basename(b).to_string() };
             places.push(Place { label, icon: IconId::Folder, path: b.clone(), section: Section::Bookmarks });
@@ -2942,6 +3148,7 @@ fn add_modifier(w: &mut Widget, m: Modifier) {
 /// Count line, or the selection and its size, or a transient message.
 fn render_status_bar(lf: &Loft) -> Widget {
     let (text, tint) = match (&lf.deleting, &lf.status) {
+        _ if lf.transfer.is_some() => (lf.transfer_text().unwrap_or_default(), Token::OnSurface),
         (Some(job), _) => (fill(s().deleting, &[&num(job.todo.len())]), Token::OnSurface),
         (None, Some(st)) => (st.text.clone(), if st.error { Token::Danger } else { Token::OnSurface }),
         (None, None) => (selection_summary(lf), Token::OnSurfaceMuted),
@@ -3667,7 +3874,8 @@ fn render_list(lf: &Loft) -> Widget {
     // Folder size/count is only computed for the browse listing; in
     // search mode (recursive source) folders show "—" rather than a
     // misleading zero.
-    let browsing = lf.query.is_empty();
+    // A drive's folders are not summed: "—" as in a search.
+    let browsing = lf.query.is_empty() && !is_ext(&lf.current);
     let mut rows: Vec<Widget> = Vec::with_capacity(lf.filtered.len() + 2);
     rows.push(list_header_row(lf));
     rows.push(Widget::Divider);
@@ -4033,7 +4241,9 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
 /// The cancel ladder: menus, then marks and select mode, then the search,
 /// then the window.
 fn escape(lf: &mut Loft) -> Outcome {
-    if lf.deleting.is_some() {
+    if lf.transfer.is_some() {
+        lf.finish_transfer(true);
+    } else if lf.deleting.is_some() {
         lf.stop_delete();
     } else if lf.ctx.is_some() || lf.open_menu.is_some() {
         lf.close_menus();
@@ -4456,6 +4666,15 @@ fn filter_sidebar_to_existing(places: Vec<Place>) -> Vec<Place> {
     }).collect()
 }
 
+/// The namespace of external drives (`ext/<label>/`).
+const EXT_ROOT: &str = "ext";
+
+/// A path on an external drive, or `ext` itself.
+fn is_ext(path: &str) -> bool {
+    let p = path.trim_matches('/');
+    p == EXT_ROOT || p.strip_prefix(EXT_ROOT).is_some_and(|r| r.starts_with('/'))
+}
+
 fn dir_exists(path: &str) -> bool {
     host::fs_stat(path).is_some_and(|(_, is_dir, _)| is_dir)
 }
@@ -4749,6 +4968,7 @@ pub extern "C" fn _start() {
     // No `npk_window_set_overlay` — loft is a regular tiled app, the
     // first commit creates its window via shade::create_widget_window.
     let mut loft = Loft::new();
+    loft.poll_drives();
     let mut event_buf = [0u8; EVENT_BUF_SIZE];
     let mut idle_ticks: u32 = 0;
 
@@ -4774,9 +4994,10 @@ pub extern "C" fn _start() {
                 // Skipped while searching (folder stats aren't shown then).
                 let mut dirty = loft.expire_status();
                 if loft.pump_delete(DELETE_BUDGET) { dirty = true; }
+                if loft.pump_transfer() { dirty = true; }
                 if loft.pump_thumbs() { dirty = true; }
                 if loft.pump_preview() { dirty = true; }
-                if loft.query.is_empty() && !loft.stats_queue.is_empty()
+                if loft.query.is_empty() && !is_ext(&loft.current) && !loft.stats_queue.is_empty()
                     && loft.pump_stats(STATS_PUMP_BUDGET)
                 {
                     dirty = true;
@@ -4786,6 +5007,7 @@ pub extern "C" fn _start() {
                 idle_ticks += 1;
                 if idle_ticks >= AUTO_REFRESH_TICKS {
                     idle_ticks = 0;
+                    if loft.poll_drives() { commit_tree(&mut loft); }
                     // Auto-refresh the browse view when the folder changed
                     // on disk (new screenshot, download, …). Skip while a
                     // search, menu or dialog is up so we don't disturb the user.

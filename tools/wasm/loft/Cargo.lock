@@ -46,7 +46,7 @@ dependencies = [
 
 [[package]]
 name = "loft"
-version = "0.20.1"
+version = "0.21.0"
 dependencies = [
  "nopeek_widgets",
  "npk_sys",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.45.1"
+version = "0.46.1"
 dependencies = [
  "miniz_oxide",
  "npk_sys",
