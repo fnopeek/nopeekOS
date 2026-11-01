@@ -3017,6 +3017,11 @@ fn td_remainder(hci_version: u16, queued: usize, trb_len: usize, total: usize, m
 /// enqueue pointer, past whatever the TD left (`xhci_handle_halted_endpoint`,
 /// `xhci_move_dequeue_past_td`).
 fn msc_skip_td(state: &mut XhciState, i: usize, dir_in: bool, stop: bool) {
+    msc_skip_td_then(state, i, dir_in, stop, |_| {});
+}
+
+/// `msc_skip_td`, with `after_stop` run between the stop and the move.
+fn msc_skip_td_then(state: &mut XhciState, i: usize, dir_in: bool, stop: bool, after_stop: impl FnOnce(&XhciState)) {
     let m = &state.msc[i];
     let (slot, dci) = (m.slot as u32, if dir_in { m.in_dci } else { m.out_dci } as u32);
     let (ring, cycle, enq) = if dir_in { (m.in_ring, m.in_cycle, m.in_enq) } else { (m.out_ring, m.out_cycle, m.out_enq) };
@@ -3027,6 +3032,7 @@ fn msc_skip_td(state: &mut XhciState, i: usize, dir_in: bool, stop: bool) {
         post_command(state, 0, 0, TRB_RESET_EP | sel);
     }
     let _ = wait_command_completion(state);
+    after_stop(state);
     post_command(state, ring.phys() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
     let _ = wait_command_completion(state);
     state.msc[i].events.clear();
@@ -3064,8 +3070,8 @@ pub(crate) fn msc_transfer(id: u32, dir_in: bool, len: usize, timeout_ms: u64) -
         if let Some(r) = r { return r; }
         if crate::interrupts::ticks() >= deadline {
             let _ = with_msc(id, |s, i| {
-                msc_timeout_report(s, i, dir_in, len, first, last);
-                msc_skip_td(s, i, dir_in, true);
+                msc_timeout_report(s, i, dir_in, len, first, last, false);
+                msc_skip_td_then(s, i, dir_in, true, |s| msc_timeout_report(s, i, dir_in, len, first, last, true));
             });
             return Err(MscError::Timeout);
         }
@@ -3076,7 +3082,7 @@ pub(crate) fn msc_transfer(id: u32, dir_in: bool, len: usize, timeout_ms: u64) -
 /// What the controller says about a TD that got no completion: the
 /// endpoint's state and dequeue pointer, so a log tells a device that did
 /// not answer from a completion that went missing.
-fn msc_timeout_report(state: &XhciState, i: usize, dir_in: bool, len: usize, first: u64, last: u64) {
+fn msc_timeout_report(state: &XhciState, i: usize, dir_in: bool, len: usize, first: u64, last: u64, stopped: bool) {
     let m = &state.msc[i];
     let dci = if dir_in { m.in_dci } else { m.out_dci } as usize;
     let Some(d) = dev_idx(state, m.slot) else { return };
@@ -3084,9 +3090,17 @@ fn msc_timeout_report(state: &XhciState, i: usize, dir_in: bool, len: usize, fir
     let dctx = state.devs[d].dctx;
     let ep_state = dctx.r32(ep as u32) & 7;
     let deq = (dctx.r32(ep as u32 + 8) as u64 | (dctx.r32(ep as u32 + 12) as u64) << 32) & !0xF;
+    if stopped {
+        // Only a stopped endpoint's dequeue pointer is current (xHCI 4.6.9).
+        kprintln!("[npk] xhci: msc {} stopped: ep state {} deq {:#x}", m.id, ep_state, deq);
+        return;
+    }
     let sts = state.oper.r32(OP_USBSTS);
-    kprintln!("[npk] xhci: msc {} {} {} B timed out: ep state {} deq {:#x} td {:#x}..{:#x} usbsts {:#x} held {}",
-        m.id, if dir_in { "in" } else { "out" }, len, ep_state, deq, first, last, sts, m.events.len());
+    kprintln!("[npk] xhci: msc {} {} {} B timed out: ep state {} td {:#x}..{:#x} usbsts {:#x} held {}",
+        m.id, if dir_in { "in" } else { "out" }, len, ep_state, first, last, sts, m.events.len());
+    for e in &m.events {
+        kprintln!("[npk] xhci: msc {} held event {:#x} cc {} residual {}", m.id, e.addr, e.cc, e.residual);
+    }
 }
 
 /// Copy `data` into the pipe's buffer at `off`.
