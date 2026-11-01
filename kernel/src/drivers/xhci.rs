@@ -3063,11 +3063,30 @@ pub(crate) fn msc_transfer(id: u32, dir_in: bool, len: usize, timeout_ms: u64) -
         })?;
         if let Some(r) = r { return r; }
         if crate::interrupts::ticks() >= deadline {
-            let _ = with_msc(id, |s, i| msc_skip_td(s, i, dir_in, true));
+            let _ = with_msc(id, |s, i| {
+                msc_timeout_report(s, i, dir_in, len, first, last);
+                msc_skip_td(s, i, dir_in, true);
+            });
             return Err(MscError::Timeout);
         }
         crate::smp::fiber::spin_or_yield();
     }
+}
+
+/// What the controller says about a TD that got no completion: the
+/// endpoint's state and dequeue pointer, so a log tells a device that did
+/// not answer from a completion that went missing.
+fn msc_timeout_report(state: &XhciState, i: usize, dir_in: bool, len: usize, first: u64, last: u64) {
+    let m = &state.msc[i];
+    let dci = if dir_in { m.in_dci } else { m.out_dci } as usize;
+    let Some(d) = dev_idx(state, m.slot) else { return };
+    let ep = state.ctx_size * dci;
+    let dctx = state.devs[d].dctx;
+    let ep_state = dctx.r32(ep as u32) & 7;
+    let deq = (dctx.r32(ep as u32 + 8) as u64 | (dctx.r32(ep as u32 + 12) as u64) << 32) & !0xF;
+    let sts = state.oper.r32(OP_USBSTS);
+    kprintln!("[npk] xhci: msc {} {} {} B timed out: ep state {} deq {:#x} td {:#x}..{:#x} usbsts {:#x} held {}",
+        m.id, if dir_in { "in" } else { "out" }, len, ep_state, deq, first, last, sts, m.events.len());
 }
 
 /// Copy `data` into the pipe's buffer at `off`.

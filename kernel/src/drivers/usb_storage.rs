@@ -256,10 +256,12 @@ fn moved(r: Result<usize, MscError>) -> Result<Result<usize, MscError>, Broken> 
 /// `usb_stor_invoke_transport`: CBW, data, CSW; a failed command fetches
 /// its sense data. Returns the bytes moved.
 fn command(c: &Claim, lun: u8, cdb: &[u8], mut data: Data<'_>) -> Result<usize, Error> {
+    let len = data.len();
     match transport(c, lun, cdb, &mut data) {
         Ok(Ok(n)) => Ok(n),
         Ok(Err(())) => Err(request_sense(c, lun)),
         Err(b) => {
+            kprintln!("[npk] usb-storage: pipe {} command {:02x} {:02x?} of {} B broke", c.pipe, cdb[0], &cdb[1..], len);
             reset_recovery(c, &b);
             Err(if xhci::msc_subclass(c.pipe).is_none() { Error::Gone } else { Error::Io })
         }
