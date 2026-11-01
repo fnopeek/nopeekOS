@@ -736,6 +736,45 @@ struct Thumb {
     stamp:  (u64, u64),
 }
 
+/// A picture being shrunk off the idle loop, a slice of the file per tick.
+struct PngJob {
+    path:  String,
+    stamp: (u64, u64),
+    file:  host::File,
+    off:   u64,
+    dec:   nopeek_widgets::png::Shrink,
+}
+
+/// Source pixels a picture job works through per idle tick, and the file
+/// piece it reads at a time.
+const PNG_TICK_PIXELS: usize = 1 << 20;
+const PNG_PIECE: usize = 64 * 1024;
+
+impl PngJob {
+    fn open(path: String, stamp: (u64, u64), max: u32) -> Option<PngJob> {
+        let file = host::File::open(&path)?;
+        Some(PngJob { path, stamp, file, off: 0, dec: nopeek_widgets::png::Shrink::new(max) })
+    }
+
+    /// One tick of work: `None` while pending, then the picture, or
+    /// `Some(None)` if the file is no PNG loft reads.
+    fn step(&mut self, buf: &mut [u8]) -> Option<Option<nopeek_widgets::png::Image>> {
+        let mut budget = PNG_TICK_PIXELS;
+        loop {
+            if self.dec.done() { return Some(self.dec.take()); }
+            if budget == 0 { return None; }
+            let n = match self.file.read_at(self.off, buf) {
+                Some(n) if n > 0 => n,
+                _ => return Some(None),
+            };
+            let before = budget;
+            let Ok(used) = self.dec.feed(&buf[..n], &mut budget) else { return Some(None) };
+            self.off += used as u64;
+            if used == 0 && budget == before && !self.dec.done() { return Some(None); }
+        }
+    }
+}
+
 /// What the preview pane shows for one item.
 struct Preview {
     path:  String,
@@ -894,6 +933,10 @@ struct Loft {
     thumbs:         BTreeMap<String, Thumb>,
     /// Pictures still to decode, next one last.
     thumb_queue:    Vec<(String, (u64, u64))>,
+    /// The thumbnail being made, and the preview pane's picture.
+    thumb_job:      Option<PngJob>,
+    preview_job:    Option<PngJob>,
+    png_buf:        Vec<u8>,
     /// Canvas ids given back, for the next thumbnail.
     free_canvas:    Vec<u32>,
     next_canvas:    u32,
@@ -964,6 +1007,9 @@ impl Loft {
             pending_open:  Vec::new(),
             thumbs:        BTreeMap::new(),
             thumb_queue:   Vec::new(),
+            thumb_job:     None,
+            preview_job:   None,
+            png_buf:       alloc::vec![0; PNG_PIECE],
             free_canvas:   Vec::new(),
             next_canvas:   1,
             preview_on:    false,
@@ -1192,19 +1238,31 @@ impl Loft {
                 self.free_canvas.push(id);
             }
         }
+        if self.thumb_job.as_ref().is_some_and(|j| want.get(&j.path) != Some(&j.stamp)) {
+            self.thumb_job = None;
+        }
+        let busy = self.thumb_job.as_ref().map(|j| j.path.clone());
         self.thumb_queue = want.into_iter()
-            .filter(|(p, _)| !self.thumbs.contains_key(p))
+            .filter(|(p, _)| !self.thumbs.contains_key(p) && busy.as_ref() != Some(p))
             .collect();
         // The queue pops from the end: decode in display order.
         self.thumb_queue.reverse();
     }
 
-    /// Decode one queued picture. True if a thumbnail appeared.
+    /// Work on the queued pictures for one tick. True if a thumbnail
+    /// appeared.
     fn pump_thumbs(&mut self) -> bool {
-        let Some((path, stamp)) = self.thumb_queue.pop() else { return false };
-        let img = host::fetch(&path)
-            .and_then(|bytes| nopeek_widgets::png::decode(&bytes))
-            .map(|img| nopeek_widgets::png::fit(img, THUMB_PX));
+        if self.thumb_job.is_none() {
+            while let Some((path, stamp)) = self.thumb_queue.pop() {
+                match PngJob::open(path.clone(), stamp, THUMB_PX) {
+                    Some(job) => { self.thumb_job = Some(job); break; }
+                    None => { self.thumbs.insert(path, Thumb { canvas: None, stamp }); }
+                }
+            }
+        }
+        let Some(job) = &mut self.thumb_job else { return false };
+        let Some(img) = job.step(&mut self.png_buf) else { return false };
+        let Some(job) = self.thumb_job.take() else { return false };
         let canvas = img.and_then(|img| {
             let id = self.free_canvas.pop().unwrap_or_else(|| {
                 self.next_canvas += 1;
@@ -1218,7 +1276,7 @@ impl Loft {
             }
         });
         let shown = canvas.is_some();
-        self.thumbs.insert(path, Thumb { canvas, stamp });
+        self.thumbs.insert(job.path, Thumb { canvas, stamp: job.stamp });
         shown
     }
 
@@ -1236,23 +1294,30 @@ impl Loft {
             (None, None) => true,
             _ => false,
         };
-        if same { return false; }
+        if same { return self.pump_preview_picture(); }
         if self.preview.take().is_some_and(|p| p.image) { host::canvas_drop(PREVIEW_CANVAS); }
+        self.preview_job = None;
         let Some((path, stamp, is_dir)) = want else { return true };
-        let mut image = false;
         let mut text = None;
         if !is_dir {
             if extension(&path).as_deref() == Some("png") {
-                image = host::fetch(&path)
-                    .and_then(|b| nopeek_widgets::png::decode(&b))
-                    .map(|img| nopeek_widgets::png::fit(img, PREVIEW_PX))
-                    .is_some_and(|img| host::canvas_commit(PREVIEW_CANVAS, &img.bgra, img.width, img.height));
+                self.preview_job = PngJob::open(path.clone(), stamp, PREVIEW_PX);
             } else {
                 text = text_head(&path);
             }
         }
-        self.preview = Some(Preview { path, stamp, image, text });
+        self.preview = Some(Preview { path, stamp, image: false, text });
         true
+    }
+
+    /// One tick on the preview pane's picture. True when it is ready.
+    fn pump_preview_picture(&mut self) -> bool {
+        let Some(job) = &mut self.preview_job else { return false };
+        let Some(img) = job.step(&mut self.png_buf) else { return false };
+        self.preview_job = None;
+        let shown = img.is_some_and(|img| host::canvas_commit(PREVIEW_CANVAS, &img.bgra, img.width, img.height));
+        if let Some(p) = &mut self.preview { p.image = shown; }
+        shown
     }
 
     /// Follow the pointer while the grip is dragged. The pane is on the

@@ -5,12 +5,21 @@
 //!
 //! Width and height come from the file, so they are checked before any
 //! buffer is sized: on wasm32 their product would wrap.
+//!
+//! [`Shrink`] reads a file in pieces and averages it down to a small size
+//! as the rows arrive, so a thumbnail of an 8K picture needs neither the
+//! whole file nor the whole picture in memory, and the work can be spread
+//! over many short steps.
 
 use alloc::vec;
 use alloc::vec::Vec;
 
+use alloc::boxed::Box;
+
 use miniz_oxide::inflate::TINFLStatus;
 use miniz_oxide::inflate::core::{DecompressorOxide, decompress, inflate_flags};
+use miniz_oxide::inflate::stream::{InflateState, inflate};
+use miniz_oxide::{DataFormat, MZError, MZFlush};
 
 /// Largest image decoded: per side, and in pixels (an 8K frame).
 pub const MAX_SIDE: u32 = 16384;
@@ -102,13 +111,8 @@ where
 /// pixel the average of the source pixels it covers. A picture that fits
 /// already is returned as is.
 pub fn fit(img: Image, max: u32) -> Image {
-    let max = max.max(1);
-    if img.width <= max && img.height <= max { return img; }
-    let (w, h) = if img.width >= img.height {
-        (max, ((img.height as u64 * max as u64) / img.width as u64).max(1) as u32)
-    } else {
-        (((img.width as u64 * max as u64) / img.height as u64).max(1) as u32, max)
-    };
+    if img.width <= max.max(1) && img.height <= max.max(1) { return img; }
+    let (w, h) = fit_size(img.width, img.height, max);
     let mut out = vec![0u8; w as usize * h as usize * 4];
     let (sw, sh) = (img.width as usize, img.height as usize);
     for ty in 0..h as usize {
@@ -130,6 +134,241 @@ pub fn fit(img: Image, max: u32) -> Image {
         }
     }
     Image { bgra: out, width: w, height: h }
+}
+
+/// The size `width` × `height` takes to fit in `max` × `max`, aspect kept.
+fn fit_size(width: u32, height: u32, max: u32) -> (u32, u32) {
+    let max = max.max(1);
+    if width <= max && height <= max { return (width, height); }
+    if width >= height {
+        (max, ((height as u64 * max as u64) / width as u64).max(1) as u32)
+    } else {
+        (((width as u64 * max as u64) / height as u64).max(1) as u32, max)
+    }
+}
+
+/// Decodes a PNG handed over in pieces into a picture that fits in
+/// `max` × `max`, each target pixel the average of the source pixels it
+/// covers (as [`fit`]). Holds two scanlines and the result, never the
+/// whole picture. Each [`feed`](Shrink::feed) does at most a given number
+/// of source pixels of work, so a caller can spread one big picture over
+/// many steps.
+pub struct Shrink {
+    max:   u32,
+    stage: Stage,
+    ihdr:  Vec<u8>,
+    rows:  Option<Rows>,
+}
+
+enum Stage {
+    /// Signature bytes seen so far.
+    Signature(usize),
+    /// Chunk length and type, bytes seen so far.
+    Head([u8; 8], usize),
+    Body { kind: [u8; 4], left: u32 },
+    Crc(u32),
+}
+
+/// A picture in the making: inflate state, the scanline being filled, the
+/// one above (the filters refer to it), and the running sums of the
+/// target row.
+struct Rows {
+    inflate:  Box<InflateState>,
+    width:    usize,
+    height:   usize,
+    channels: usize,
+    raw:      Vec<u8>,
+    fill:     usize,
+    prev:     Vec<u8>,
+    cur:      Vec<u8>,
+    /// Source rows done.
+    y:        usize,
+    /// Target size, and the first source column of each target column
+    /// (`tw + 1` entries).
+    tw:       usize,
+    th:       usize,
+    xs:       Vec<usize>,
+    acc:      Vec<u64>,
+    /// Target row being summed, its source row count so far, and the
+    /// source row it ends before.
+    ty:       usize,
+    summed:   u64,
+    y_end:    usize,
+    out:      Vec<u8>,
+}
+
+impl Shrink {
+    pub fn new(max: u32) -> Shrink {
+        Shrink { max, stage: Stage::Signature(0), ihdr: Vec::new(), rows: None }
+    }
+
+    /// True once the picture is complete.
+    pub fn done(&self) -> bool {
+        self.rows.as_ref().is_some_and(|r| r.y == r.height)
+    }
+
+    /// The finished picture, once [`done`](Shrink::done).
+    pub fn take(&mut self) -> Option<Image> {
+        if !self.done() { return None; }
+        let r = self.rows.take()?;
+        Some(Image { bgra: r.out, width: r.tw as u32, height: r.th as u32 })
+    }
+
+    /// Take bytes of the file that follow what was fed before. Returns how
+    /// many were used: fewer than given when `budget` (source pixels, each
+    /// finished row takes its width off) ran out or the picture is done,
+    /// and the rest is to be fed again. `Err` if the file is not a PNG
+    /// this module reads, or ends before the picture does.
+    pub fn feed(&mut self, data: &[u8], budget: &mut usize) -> Result<usize, ()> {
+        let mut pos = 0;
+        // Output inflate still holds from the last piece comes first.
+        if let Some(rows) = &mut self.rows { rows.push(&[], budget)?; }
+        while !self.done() && *budget > 0 {
+            match &mut self.stage {
+                Stage::Signature(n) => {
+                    if pos == data.len() { break; }
+                    if data[pos] != SIGNATURE[*n] { return Err(()); }
+                    pos += 1;
+                    *n += 1;
+                    if *n == SIGNATURE.len() { self.stage = Stage::Head([0; 8], 0); }
+                }
+                Stage::Head(buf, n) => {
+                    let take = (8 - *n).min(data.len() - pos);
+                    buf[*n..*n + take].copy_from_slice(&data[pos..pos + take]);
+                    *n += take;
+                    pos += take;
+                    if *n < 8 { break; }
+                    let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    let kind = [buf[4], buf[5], buf[6], buf[7]];
+                    match &kind {
+                        // Everything was fed and the rows are still short.
+                        b"IEND" => return Err(()),
+                        b"IHDR" if len != 13 || self.rows.is_some() => return Err(()),
+                        b"IDAT" if self.rows.is_none() => return Err(()),
+                        _ => {}
+                    }
+                    self.stage = Stage::Body { kind, left: len };
+                }
+                Stage::Body { kind, left } => {
+                    let (kind, left) = (*kind, *left);
+                    let take = (left as usize).min(data.len() - pos);
+                    let piece = &data[pos..pos + take];
+                    let used = match &kind {
+                        b"IDAT" => match &mut self.rows {
+                            Some(rows) => rows.push(piece, budget)?,
+                            None => return Err(()),
+                        },
+                        b"IHDR" => { self.ihdr.extend_from_slice(piece); take }
+                        _ => take,
+                    };
+                    pos += used;
+                    let left = left - used as u32;
+                    self.stage = Stage::Body { kind, left };
+                    if left == 0 {
+                        if &kind == b"IHDR" {
+                            let h = ihdr(&self.ihdr).ok_or(())?;
+                            self.rows = Some(Rows::new(h, self.max));
+                        }
+                        self.stage = Stage::Crc(4);
+                    } else if used < take || pos == data.len() {
+                        break;
+                    }
+                }
+                Stage::Crc(left) => {
+                    let take = (*left as usize).min(data.len() - pos);
+                    pos += take;
+                    *left -= take as u32;
+                    if *left > 0 { break; }
+                    self.stage = Stage::Head([0; 8], 0);
+                }
+            }
+        }
+        Ok(pos)
+    }
+}
+
+impl Rows {
+    fn new(h: Header, max: u32) -> Rows {
+        let (tw, th) = fit_size(h.width, h.height, max);
+        let (width, height, tw, th) = (h.width as usize, h.height as usize, tw as usize, th as usize);
+        let stride = width * h.channels;
+        let xs = (0..=tw).map(|tx| tx * width / tw).collect();
+        Rows {
+            inflate: InflateState::new_boxed(DataFormat::Zlib),
+            width, height, channels: h.channels,
+            raw: vec![0; 1 + stride],
+            fill: 0,
+            prev: vec![0; stride],
+            cur: vec![0; stride],
+            y: 0,
+            tw, th, xs,
+            acc: vec![0; tw * 4],
+            ty: 0,
+            summed: 0,
+            y_end: (height / th).max(1),
+            out: vec![0; tw * th * 4],
+        }
+    }
+
+    /// Inflate `input` into scanlines until it is used up, `budget` runs
+    /// out or the picture is complete. Returns the bytes used.
+    fn push(&mut self, input: &[u8], budget: &mut usize) -> Result<usize, ()> {
+        let mut used = 0;
+        while self.y < self.height && *budget > 0 {
+            let r = inflate(&mut self.inflate, &input[used..], &mut self.raw[self.fill..], MZFlush::None);
+            used += r.bytes_consumed;
+            self.fill += r.bytes_written;
+            match r.status {
+                Ok(_) | Err(MZError::Buf) => {}
+                Err(_) => return Err(()),
+            }
+            if self.fill == self.raw.len() {
+                self.row();
+                self.fill = 0;
+                *budget = budget.saturating_sub(self.width);
+            } else if r.bytes_consumed == 0 && r.bytes_written == 0 {
+                break;
+            }
+        }
+        Ok(used)
+    }
+
+    /// Un-filter the scanline in `raw` and add it to the target row.
+    fn row(&mut self) {
+        let above = if self.y == 0 { None } else { Some(&self.prev[..]) };
+        if self.channels == 3 {
+            unfilter_row::<3>(self.raw[0], &mut self.cur, &self.raw[1..], above);
+        } else {
+            unfilter_row::<4>(self.raw[0], &mut self.cur, &self.raw[1..], above);
+        }
+        let c = self.channels;
+        for tx in 0..self.tw {
+            let mut sum = [0u64; 4];
+            for px in self.cur[self.xs[tx] * c..self.xs[tx + 1] * c].chunks_exact(c) {
+                sum[0] += px[2] as u64;
+                sum[1] += px[1] as u64;
+                sum[2] += px[0] as u64;
+                sum[3] += if c == 4 { px[3] as u64 } else { 255 };
+            }
+            for k in 0..4 { self.acc[tx * 4 + k] += sum[k]; }
+        }
+        self.summed += 1;
+        self.y += 1;
+        core::mem::swap(&mut self.prev, &mut self.cur);
+        if self.y == self.y_end || self.y == self.height {
+            let row = &mut self.out[self.ty * self.tw * 4..(self.ty + 1) * self.tw * 4];
+            for tx in 0..self.tw {
+                let n = self.summed * (self.xs[tx + 1] - self.xs[tx]).max(1) as u64;
+                for k in 0..4 {
+                    row[tx * 4 + k] = (self.acc[tx * 4 + k] / n) as u8;
+                    self.acc[tx * 4 + k] = 0;
+                }
+            }
+            self.summed = 0;
+            self.ty = (self.ty + 1).min(self.th - 1);
+            self.y_end = ((self.ty + 1) * self.height / self.th).max(self.y + 1);
+        }
+    }
 }
 
 struct Header {
@@ -158,7 +397,13 @@ fn chunks(data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
 fn header(data: &[u8]) -> Option<Header> {
     if data.len() < SIGNATURE.len() || &data[..SIGNATURE.len()] != SIGNATURE { return None; }
     let (kind, d) = chunks(data).next()?;
-    if kind != b"IHDR" || d.len() < 13 { return None; }
+    if kind != b"IHDR" { return None; }
+    ihdr(d)
+}
+
+/// The IHDR payload, if this module reads such a picture.
+fn ihdr(d: &[u8]) -> Option<Header> {
+    if d.len() < 13 { return None; }
     let width = u32::from_be_bytes([d[0], d[1], d[2], d[3]]);
     let height = u32::from_be_bytes([d[4], d[5], d[6], d[7]]);
     let (bit_depth, color_type) = (d[8], d[9]);
@@ -370,6 +615,43 @@ mod tests {
         assert!(decode(&huge).is_none());
         let full = encode(8, 8, &pattern(8, 8), &[4]);
         assert!(decode(&full[..full.len() - 30]).is_none());
+    }
+
+    /// Feed `data` in pieces of `piece` bytes with `budget` pixels a step.
+    fn shrink(data: &[u8], max: u32, piece: usize, budget: usize) -> Option<Image> {
+        let mut s = Shrink::new(max);
+        let mut pos = 0;
+        for _ in 0..1_000_000 {
+            if s.done() { return s.take(); }
+            let end = (pos + piece).min(data.len());
+            let mut b = budget;
+            let used = s.feed(&data[pos..end], &mut b).ok()?;
+            pos += used;
+            if used == 0 && b == budget && !s.done() { return None; }
+        }
+        None
+    }
+
+    #[test]
+    fn shrink_matches_decode_then_fit() {
+        let (w, h) = (300, 170);
+        let png = encode(w, h, &pattern(w, h), &[0, 1, 2, 3, 4]);
+        let want = fit(decode(&png).unwrap(), 64);
+        for (piece, budget) in [(7, 50), (1, 1), (4096, 1_000_000), (100, 301)] {
+            let got = shrink(&png, 64, piece, budget).expect("decodes");
+            assert_eq!((got.width, got.height), (want.width, want.height));
+            assert_eq!(got.bgra, want.bgra, "piece {piece} budget {budget}");
+        }
+        // Smaller than the box: the picture itself.
+        let same = shrink(&png, 1000, 512, 10_000).unwrap();
+        assert_eq!(same.bgra, decode(&png).unwrap().bgra);
+    }
+
+    #[test]
+    fn shrink_rejects_bad_input() {
+        assert!(shrink(b"not a png at all", 64, 4, 100).is_none());
+        let full = encode(40, 40, &pattern(40, 40), &[4]);
+        assert!(shrink(&full[..full.len() - 30], 16, 64, 1000).is_none());
     }
 
     #[test]
