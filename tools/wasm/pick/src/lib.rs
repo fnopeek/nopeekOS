@@ -860,13 +860,13 @@ fn render_footer(p: &Pick) -> Widget {
 /// says so before the click.
 fn folder_ok(dir: &str) -> bool {
     let top = dir.split('/').next().unwrap_or("");
-    !dir.is_empty() && !matches!(top, "sys" | ".system" | "priv" | EXT)
+    !dir.is_empty() && dir != EXT && !matches!(top, "sys" | ".system" | "priv")
 }
 
-/// External drives are read-only for now (docs/spec/EXTERNAL_STORAGE.md),
-/// so a save there would be confirmed and then fail.
+/// `ext` itself only lists the drives; a file or folder goes on one of
+/// them (docs/spec/EXTERNAL_STORAGE.md).
 fn can_save_in(dir: &str) -> bool {
-    dir.split('/').next() != Some(EXT)
+    dir != EXT
 }
 
 /// A name is committable when it's non-empty and names a file, not a path.

@@ -138,6 +138,8 @@ struct Strings {
     disk_changed:  &'static str,
     reload:        &'static str,
     keep_mine:     &'static str,
+    save_failed:   &'static str,
+    ok:            &'static str,
 }
 
 const EN: Strings = Strings {
@@ -177,6 +179,8 @@ const EN: Strings = Strings {
     disk_changed: "This file changed on disk.",
     reload: "Reload",
     keep_mine: "Keep mine",
+    save_failed: "Couldn't save to",
+    ok: "OK",
 };
 
 
@@ -300,6 +304,7 @@ const ACT_COMMENT:      u32 = 6_205;
 const ACT_DELETE_LINE:  u32 = 6_206;
 const ACT_DISK_RELOAD:  u32 = 6_407;
 const ACT_DISK_KEEP:    u32 = 6_408;
+const ACT_SAVE_FAILED_OK: u32 = 6_410;
 const ACT_PALETTE:      u32 = 6_106;
 const ACT_TREE_TOGGLE:  u32 = 6_107;
 const ACT_TREE_REFRESH: u32 = 6_108;
@@ -398,6 +403,9 @@ struct Doc {
     /// The file on disk is no longer what was loaded or saved, and the
     /// tab has edits of its own: the user decides.
     disk_changed: bool,
+    /// The place just picked in the save dialog refused the write (a
+    /// write-protected drive): shown until the next save works.
+    save_failed: Option<String>,
 }
 
 impl Doc {
@@ -415,6 +423,7 @@ impl Doc {
             spans_stale: true,
             indent: (4, false),
             disk_changed: false,
+            save_failed: None,
         }
     }
 
@@ -921,6 +930,7 @@ impl Spell {
         }
         self.note_recent(path);
         let d = self.cur_mut();
+        d.save_failed = None;
         d.saved = text_hash(&d.text);
         d.dirty = false;
         d.disk_changed = false;
@@ -989,7 +999,9 @@ impl Spell {
         // The user just picked this place: no question about what is there.
         self.docs[doc].disk_changed = false;
         if let Some(disk) = host::fetch(path) { self.docs[doc].saved = text_hash_bytes(&disk); }
-        let _ = self.write_to(path);
+        if !self.write_to(path) && !self.docs[doc].disk_changed {
+            self.docs[doc].save_failed = Some(path.to_string());
+        }
         self.active = prev.min(self.docs.len().saturating_sub(1));
     }
 }
@@ -1622,6 +1634,12 @@ fn render(sp: &Spell) -> Widget {
     if editing && sp.cur().disk_changed {
         children.push(render_disk_strip());
         children.push(Widget::Divider);
+    }
+    if editing {
+        if let Some(path) = &sp.cur().save_failed {
+            children.push(render_save_failed_strip(path));
+            children.push(Widget::Divider);
+        }
     }
     if editing {
         if let Some(bar) = render_bar(sp) {
@@ -2294,6 +2312,24 @@ fn render_disk_strip() -> Widget {
             Widget::Spacer { flex: 1 },
             bar_button(s().reload, ACT_DISK_RELOAD, true),
             bar_button(s().keep_mine, ACT_DISK_KEEP, false),
+        ],
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![
+            Modifier::PaddingXY { x: Padding::Sm.as_u16(), y: Padding::Xs.as_u16() },
+            Modifier::Background(Token::SurfaceElevated),
+        ],
+    }
+}
+
+/// The last save went nowhere: say where, so a second dialog is not a riddle.
+fn render_save_failed_strip(path: &str) -> Widget {
+    Widget::Row {
+        children: alloc::vec![
+            Widget::Icon { id: IconId::FileText, size: 16, modifiers: alloc::vec![Modifier::Tint(Token::Warning)] },
+            Widget::Text { content: alloc::format!("{} {}", s().save_failed, path), style: TextStyle::Body, modifiers: alloc::vec![] },
+            Widget::Spacer { flex: 1 },
+            bar_button(s().ok, ACT_SAVE_FAILED_OK, false),
         ],
         spacing:   Spacing::Sm.as_u16(),
         align:     Align::Center,
@@ -3595,6 +3631,7 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_DELETE_LINE => { sp.open_menu = None; sp.delete_lines(); Outcome::Rerender }
         ACT_DISK_RELOAD => { sp.disk_reload(); Outcome::Rerender }
         ACT_DISK_KEEP   => { sp.disk_keep(); Outcome::Rerender }
+        ACT_SAVE_FAILED_OK => { sp.cur_mut().save_failed = None; Outcome::Rerender }
         ACT_MENU_DISMISS => {
             if sp.open_menu.is_some() { sp.open_menu = None; Outcome::Rerender }
             else { Outcome::Idle }

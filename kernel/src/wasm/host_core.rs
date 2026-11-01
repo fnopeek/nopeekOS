@@ -5001,6 +5001,10 @@ pub(crate) fn npk_pick_mkdir(mem: &mut [u8], ctx: &mut HostState, path_ptr: i32,
         kprintln!("[npk] npk_pick_mkdir DENIED (sys is off limits)");
         return -1;
     }
+    if crate::ext::is_ext(clean) {
+        if !crate::ext::writable(clean) { return -1; }
+        return if crate::ext::mkdir(clean).is_ok() { 0 } else { -1 };
+    }
     match crate::npkfs::fs::mkdir(clean) {
         Ok(()) => 0,
         Err(_) => -1,
