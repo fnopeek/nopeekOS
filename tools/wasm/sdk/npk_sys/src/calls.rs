@@ -774,3 +774,78 @@ pub fn gpudev_job_data(seq: i32, offset: i32, out: &mut [u8]) -> i32 {
     // borrowed for the call.
     unsafe { npk_gpudev_job_data(seq, offset, out.as_mut_ptr() as i32, out.len() as i32) }
 }
+
+// External volumes: the block handle and request channel of an `extfs`
+// instance. Every other module gets -1.
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn npk_blk_info(out_ptr: i32) -> i32;
+    fn npk_blk_read(lba: i64, len: i32, buf_ptr: i32) -> i32;
+    fn npk_blk_write(lba: i64, len: i32, buf_ptr: i32) -> i32;
+    fn npk_blk_flush() -> i32;
+    fn npk_ext_parts(ptr: i32, len: i32) -> i32;
+    fn npk_ext_mount(label_ptr: i32, label_len: i32, total: i64, free: i64) -> i32;
+    fn npk_ext_next(buf_ptr: i32, buf_max: i32, timeout_ms: i32) -> i32;
+    fn npk_ext_reply(seq: i32, status: i32, ptr: i32, len: i32) -> i32;
+}
+
+/// The block handle: role (1 probe, 2 volume), block size, block count,
+/// read-only. `None` without a handle.
+pub fn blk_info() -> Option<(u32, u32, u64, bool)> {
+    let mut b = [0u8; 20];
+    // SAFETY: FFI; the kernel writes 20 bytes into `b`, borrowed for the call.
+    if unsafe { npk_blk_info(b.as_mut_ptr() as i32) } != 20 { return None; }
+    let u32_at = |o: usize| u32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]);
+    let mut blocks = [0u8; 8];
+    blocks.copy_from_slice(&b[8..16]);
+    Some((u32_at(0), u32_at(4), u64::from_le_bytes(blocks), u32_at(16) != 0))
+}
+
+/// Read whole blocks at `lba` into `buf` (at most 1 MiB): 0, -1 range,
+/// -2 gone, -3 I/O.
+pub fn blk_read(lba: u64, buf: &mut [u8]) -> i32 {
+    let Ok(lba) = i64::try_from(lba) else { return -1 };
+    // SAFETY: FFI; the kernel writes at most `buf.len()` bytes into `buf`,
+    // borrowed for the call.
+    unsafe { npk_blk_read(lba, buf.len() as i32, buf.as_mut_ptr() as i32) }
+}
+
+/// Write whole blocks at `lba`: the codes of `blk_read`, -4 read-only.
+pub fn blk_write(lba: u64, buf: &[u8]) -> i32 {
+    let Ok(lba) = i64::try_from(lba) else { return -1 };
+    // SAFETY: FFI; `buf` is borrowed for the call.
+    unsafe { npk_blk_write(lba, buf.len() as i32, buf.as_ptr() as i32) }
+}
+
+/// Flush the device's write cache.
+pub fn blk_flush() -> i32 {
+    // SAFETY: FFI without arguments.
+    unsafe { npk_blk_flush() }
+}
+
+/// A probe's partitions, 16 bytes each (start u64, count u64): how many
+/// volumes started, or -1.
+pub fn ext_parts(parts: &[u8]) -> i32 {
+    // SAFETY: FFI; `parts` is borrowed for the call.
+    unsafe { npk_ext_parts(parts.as_ptr() as i32, parts.len() as i32) }
+}
+
+/// The volume is mounted: its label, size and free bytes.
+pub fn ext_mount(label: &[u8], total: u64, free: u64) -> i32 {
+    // SAFETY: FFI; `label` is borrowed for the call.
+    unsafe { npk_ext_mount(label.as_ptr() as i32, label.len() as i32, total as i64, free as i64) }
+}
+
+/// The next request into `buf`: its length, 0 when none came within
+/// `timeout_ms`, -2 when the volume is gone.
+pub fn ext_next(buf: &mut [u8], timeout_ms: i32) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `buf.len()` bytes into `buf`,
+    // borrowed for the call.
+    unsafe { npk_ext_next(buf.as_mut_ptr() as i32, buf.len() as i32, timeout_ms) }
+}
+
+/// The answer to request `seq`.
+pub fn ext_reply(seq: u32, status: i32, data: &[u8]) -> i32 {
+    // SAFETY: FFI; `data` is borrowed for the call.
+    unsafe { npk_ext_reply(seq as i32, status, data.as_ptr() as i32, data.len() as i32) }
+}

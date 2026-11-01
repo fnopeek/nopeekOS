@@ -1,0 +1,19 @@
+[package]
+name = "extfs"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "File systems of external drives: one sandboxed instance per partition."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+extfs_core = { path = "../core" }
+npk_sys = { path = "../../sdk/npk_sys", features = ["alloc"] }
+nopeek_widgets = { path = "../../sdk/widgets", features = ["heap"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+panic = "abort"

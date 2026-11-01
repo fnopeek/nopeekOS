@@ -11,6 +11,8 @@ exclude = [
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
     "tools/wasm/sdk/npk_sys",
+    "tools/wasm/extfs/core",
+    "tools/wasm/extfs/wasm",
     "tools/wasm/dock",
     "tools/wasm/bar",
     "tools/wasm/deck",

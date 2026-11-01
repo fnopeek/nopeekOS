@@ -164,6 +164,8 @@ pub const SIG_STATE: u32 = 1 << 5;
 pub const SIG_GPU: u32 = 1 << 6;
 /// A `gpu::gpudev` job this fiber waits for completed.
 pub const SIG_GPU_DONE: u32 = 1 << 7;
+/// An `ext` request was queued for a volume instance, or answered.
+pub const SIG_EXT: u32 = 1 << 8;
 
 pub type Waker = u32;
 pub const NO_WAKER: Waker = u32::MAX;

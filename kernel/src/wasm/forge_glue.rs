@@ -1343,4 +1343,35 @@ host_imports! {
     // is UP only when carrier && !dormant, so an authorization phase does
     // not look like a lost link.
     ctx fn npk_netdev_set_link_state(carrier: i32, dormant: i32) -> i32;
+
+    // External volumes (`storage::ext`). Only an `extfs` instance the kernel
+    // started has a block handle; for every other module these return -1.
+    //
+    // npk_blk_info(out_ptr) -> 20 or -1: role u32 (1 probe, 2 volume),
+    // block size u32, block count u64, read-only u32. The handle covers
+    // blocks 0..count of the disk (probe) or of one partition (volume).
+    mem fn npk_blk_info(out_ptr: i32) -> i32;
+    // npk_blk_read(lba, len, buf_ptr) / npk_blk_write(lba, len, buf_ptr)
+    // -> 0, -1 range or not a handle, -2 gone, -3 I/O, -4 read-only.
+    // `len` is a whole number of blocks, at most 1 MiB.
+    mem fn npk_blk_read(lba: i64, len: i32, buf_ptr: i32) -> i32;
+    mem fn npk_blk_write(lba: i64, len: i32, buf_ptr: i32) -> i32;
+    // npk_blk_flush() -> 0 or the codes above.
+    ctx fn npk_blk_flush() -> i32;
+    // npk_ext_parts(ptr, len) -> partitions started or -1: a probe's
+    // partitions, 16 bytes each (start u64, count u64), once.
+    mem fn npk_ext_parts(ptr: i32, len: i32) -> i32;
+    // npk_ext_mount(label_ptr, label_len, total, free) -> 0 or -1: a volume
+    // instance mounted its file system; sizes in bytes.
+    mem fn npk_ext_mount(label_ptr: i32, label_len: i32, total: i64, free: i64) -> i32;
+    // npk_ext_next(buf_ptr, buf_max, timeout_ms) -> request length, 0 when
+    // none came in time, -2 when the volume is gone (the instance ends).
+    // Header (24 bytes): seq u32, op u8, 3 zero, offset u64, length u32,
+    // path length u16, 2 zero; the path inside the volume follows.
+    mem fn npk_ext_next(buf_ptr: i32, buf_max: i32, timeout_ms: i32) -> i32;
+    // npk_ext_reply(seq, status, ptr, len) -> 0 or -1. Status 0 done,
+    // 1 not found, else failed. LIST: per entry name length u16, is_dir u8,
+    // size u64, mtime u64, name. STAT: is_dir u8, size u64, mtime u64.
+    // READ: the bytes, at most the length asked.
+    mem fn npk_ext_reply(seq: i32, status: i32, ptr: i32, len: i32) -> i32;
 }

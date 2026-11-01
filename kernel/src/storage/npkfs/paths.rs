@@ -69,7 +69,8 @@ pub struct WalkOk {
 // ── Path parsing ──────────────────────────────────────────────────────
 
 /// Split a slash-separated path into validated segments. Empty input
-/// (or just slashes) returns an empty Vec, which means "the root".
+/// (or just slashes) returns an empty Vec, which means "the root". The
+/// top-level name `ext` is reserved.
 pub fn parse_path(path: &str) -> Result<Vec<&str>, PathError> {
     let trimmed = path.trim_matches('/');
     if trimmed.is_empty() { return Ok(Vec::new()); }
@@ -82,6 +83,8 @@ pub fn parse_path(path: &str) -> Result<Vec<&str>, PathError> {
         if s.len() > MAX_NAME_LEN { return Err(PathError::InvalidPath); }
         out.push(s);
     }
+    // `ext/` holds external volumes (`storage::ext`), never store objects.
+    if out[0] == crate::ext::ROOT { return Err(PathError::InvalidPath); }
     Ok(out)
 }
 

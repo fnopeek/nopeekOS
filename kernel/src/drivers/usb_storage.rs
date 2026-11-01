@@ -137,11 +137,16 @@ pub fn attached(pipe: u32, info: PipeInfo) {
 /// From the xHCI driver, under its lock: the interface is gone.
 pub fn detached(pipe: u32) {
     PIPES.lock().retain(|p| p.id != pipe);
-    let mut d = DISKS.lock();
-    for disk in d.iter().filter(|d| d.pipe == pipe) {
-        kprintln!("[npk] usb-storage: disk {} ({}) gone", disk.info.id, disk.info.name);
+    let mut gone = Vec::new();
+    {
+        let mut d = DISKS.lock();
+        for disk in d.iter().filter(|d| d.pipe == pipe) {
+            kprintln!("[npk] usb-storage: disk {} ({}) gone", disk.info.id, disk.info.name);
+            gone.push(disk.info.id);
+        }
+        d.retain(|d| d.pipe != pipe);
     }
-    d.retain(|d| d.pipe != pipe);
+    for id in gone { crate::ext::disk_gone(id); }
 }
 
 /// From the idle step: scan new pipes on a worker.
@@ -386,7 +391,9 @@ fn scan_pipe(pipe: u32) {
                     if info.removable { ", removable" } else { "" },
                     if info.read_only { ", read-only" } else { "" });
                 if PIPES.lock().iter().any(|p| p.id == pipe) {
+                    let id = info.id;
                     DISKS.lock().push(Disk { info, pipe, lun, max_blocks });
+                    crate::ext::disk_added(id);
                 }
             }
             Ok(None) => {}
@@ -591,6 +598,7 @@ pub fn flush(id: u32) -> Result<(), Error> {
 /// Flush, allow removal, stop the unit and unload the medium; the disk is
 /// then gone from the list (`sd_shutdown`, `scsi_eject`).
 pub fn eject(id: u32) -> Result<(), Error> {
+    crate::ext::disk_gone(id);
     flush(id)?;
     let (pipe, lun, ..) = disk(id)?;
     {

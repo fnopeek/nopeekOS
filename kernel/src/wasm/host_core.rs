@@ -585,7 +585,7 @@ pub(crate) fn npk_battery_detail(ctx: &mut HostState, rate: i32, remaining: i32,
 /// identity of the inline execution paths, not an owner (same rule as
 /// `fetch::submit`).
 pub(crate) fn npk_audio_open(ctx: &mut HostState) -> i32 {
-    if ctx.pid == 0 { return -1; }
+    if ctx.pid == 0 || crate::ext::is_instance(&ctx.cap_id) { return -1; }
     crate::audio::open_for(ctx.pid)
 }
 
@@ -2403,11 +2403,24 @@ pub(crate) fn npk_netdev_set_link_state(ctx: &mut HostState, carrier: i32, dorma
     0
 }
 
+/// May the module of `ctx` reach `name` in `ext/` for `want`? With
+/// EXTERNAL and the global right, or through a grant from the open dialog.
+fn ext_allowed(ctx: &HostState, name: &str, want: capability::Rights) -> bool {
+    (capability::check_global(&ctx.cap_id, capability::Rights::EXTERNAL).is_ok()
+        && capability::check_global(&ctx.cap_id, want).is_ok())
+        || capability::check_path_grant(&ctx.cap_id, name.trim_matches('/'), want)
+}
+
 /// May the module of `ctx` read file `name`? The rule of `npk_fetch` and
 /// `npk_file_*`: another module's private area is closed, even with global
 /// READ; the module's own area is open even without READ
 /// (`wasm::is_own_private`).
 fn read_allowed(ctx: &HostState, name: &str, call: &str) -> bool {
+    if crate::ext::is_ext(name) {
+        let ok = ext_allowed(ctx, name, capability::Rights::READ);
+        if !ok { kprintln!("[npk] WASM: {} DENIED (no EXTERNAL for {})", call, name); }
+        return ok;
+    }
     if !crate::wasm::private_area_allows(name, &ctx.module_name) {
         kprintln!("[npk] WASM: {} DENIED ({} gehoert einem anderen Modul)", call, name);
         return false;
@@ -2429,6 +2442,24 @@ pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
     };
     if !read_allowed(ctx, &name, "npk_fetch") {
         return -1;
+    }
+    if crate::ext::is_ext(&name) {
+        let Some(max) = glen(buf_max) else { return -1 };
+        let st = match crate::ext::stat(&name) {
+            Ok(Some(st)) if !st.is_dir => st,
+            _ => return -1,
+        };
+        let Ok(len) = usize::try_from(st.size) else { return -1 };
+        if len > max { return too_small(len); }
+        let Some(dst) = guest_mut(mem, buf_ptr, len) else { return -1 };
+        let mut at = 0;
+        while at < len {
+            match crate::ext::read(&name, at as u64, &mut dst[at..]) {
+                Ok(n) if n > 0 => at += n,
+                _ => return -1,
+            }
+        }
+        return len as i32;
     }
 
     // Size first, then straight into the guest: a file the buffer cannot
@@ -2656,6 +2687,10 @@ const PRIVATE_QUOTA_DIVISOR: u64 = 32;
 /// file, `Some(true)` only through its private area (the quota applies),
 /// `None` refused.
 fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
+    if crate::ext::is_ext(name) {
+        kprintln!("[npk] WASM: {} DENIED ({} is read-only)", call, name);
+        return None;
+    }
     // Apps may not write the module store or the trust store — see
     // is_trust_critical_path.
     // Checked before the grant path so a per-file grant can never
@@ -2686,7 +2721,7 @@ fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
     let own_config = alloc::format!("sys/config/{}", ctx.module_name);
     let has_write = capability::check_global(&cap_id, capability::Rights::WRITE).is_ok()
         || capability::check_path_grant(&cap_id, name, capability::Rights::WRITE)
-        || name == own_config;
+        || (name == own_config && ctx.module_name != crate::ext::MODULE);
     if has_write {
         return Some(false);
     }
@@ -2773,6 +2808,11 @@ pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name
 
 /// One open file of a module.
 pub(crate) enum OpenFile {
+    /// A file in `ext/`: read by path and offset from its volume.
+    Ext {
+        name: String,
+        size: u64,
+    },
     Read {
         name: String,
         reader: crate::npkfs::fs::RangeReader,
@@ -2790,6 +2830,7 @@ impl OpenFile {
     /// whole Blob), a writer's chunk buffer.
     fn held(&self) -> usize {
         match self {
+            OpenFile::Ext { .. } => 0,
             OpenFile::Read { reader, .. } => reader.held(),
             OpenFile::Write { .. } => crate::npkfs::STREAMING_CHUNK_SIZE,
         }
@@ -2836,6 +2877,15 @@ pub(crate) fn npk_file_open(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
     if !read_allowed(ctx, &name, "npk_file_open") {
         return -1;
     }
+    if crate::ext::is_ext(&name) {
+        let size = match crate::ext::stat(&name) {
+            Ok(Some(st)) if !st.is_dir => st.size,
+            _ => return -1,
+        };
+        let Some(i) = file_slot(ctx) else { return -1 };
+        ctx.files[i] = Some(OpenFile::Ext { name, size });
+        return i as i32;
+    }
     let Some(i) = file_slot(ctx) else { return -1 };
     let Ok(reader) = crate::npkfs::open_range(&name, file_budget(ctx, i)) else { return -1 };
     ctx.files[i] = Some(OpenFile::Read { name, reader });
@@ -2852,10 +2902,18 @@ pub(crate) fn npk_file_read(mem: &mut [u8], ctx: &mut HostState,
     let Ok(offset) = u64::try_from(offset) else { return -1 };
     let Some(dst) = glen(buf_max).and_then(|n| guest_mut(mem, buf_ptr, n)) else { return -1 };
     let allowed = match &ctx.files[i] {
-        Some(OpenFile::Read { name, .. }) => read_allowed(ctx, name, "npk_file_read"),
+        Some(OpenFile::Read { name, .. }) | Some(OpenFile::Ext { name, .. }) => read_allowed(ctx, name, "npk_file_read"),
         _ => false,
     };
     if !allowed { return -1; }
+    if let Some(OpenFile::Ext { name, size }) = &ctx.files[i] {
+        if offset >= *size { return 0; }
+        let n = dst.len().min(crate::ext::MAX_IO).min((*size - offset) as usize);
+        return match crate::ext::read(name, offset, &mut dst[..n]) {
+            Ok(n) => n as i32,
+            Err(_) => -1,
+        };
+    }
     let budget = file_budget(ctx, i);
     let Some(OpenFile::Read { reader, .. }) = ctx.files[i].as_mut() else { return -1 };
     match reader.read_at(offset, dst, budget) {
@@ -2869,6 +2927,7 @@ pub(crate) fn npk_file_read(mem: &mut [u8], ctx: &mut HostState,
 pub(crate) fn npk_file_size(ctx: &mut HostState, handle: i32) -> i64 {
     let Some(i) = file_index(ctx, handle) else { return -1 };
     let n = match &ctx.files[i] {
+        Some(OpenFile::Ext { size, .. }) => *size,
         Some(OpenFile::Read { reader, .. }) => reader.size(),
         Some(OpenFile::Write { writer, .. }) => writer.written(),
         None => return -1,
@@ -2947,7 +3006,7 @@ pub(crate) fn npk_file_close(ctx: &mut HostState, handle: i32) -> i32 {
                 Err(_) => -1,
             }
         }
-        Some(OpenFile::Read { .. }) => 0,
+        Some(OpenFile::Read { .. }) | Some(OpenFile::Ext { .. }) => 0,
         None => -1,
     }
 }
@@ -3680,6 +3739,21 @@ pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: 
 }
 
 pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {
+    if prefix_len > 0 {
+        if let Some(prefix) = read_str(mem, prefix_ptr, prefix_len).filter(|p| crate::ext::is_ext(p)) {
+            if recursive != 0 || !ext_allowed(ctx, &prefix, capability::Rights::READ) { return -1; }
+            let entries = match crate::ext::list(&prefix) {
+                Ok(Some(v)) => v,
+                Ok(None) => alloc::vec::Vec::new(),
+                Err(_) => return -1,
+            };
+            let mut out = alloc::vec::Vec::new();
+            for e in &entries {
+                append_entry(&mut out, &e.name, e.size, e.is_dir, e.mtime);
+            }
+            return write_whole(mem, out_ptr, out_cap, &out);
+        }
+    }
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
         return -1;
@@ -3801,6 +3875,19 @@ pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, na
         None => return -1,
     };
 
+    if crate::ext::is_ext(&name) {
+        if !ext_allowed(ctx, &name, capability::Rights::READ) { return -1; }
+        let st = match crate::ext::stat(&name) {
+            Ok(Some(st)) => st,
+            Ok(None) => return 0,
+            Err(_) => return -1,
+        };
+        let mut buf = [0u8; 17];
+        buf[0..8].copy_from_slice(&st.size.to_le_bytes());
+        buf[8] = st.is_dir as u8;
+        buf[9..17].copy_from_slice(&st.mtime.to_le_bytes());
+        return write_bytes(mem, out_ptr, &buf);
+    }
     if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
         return -1;   // silently: another module's private area does not exist
     }
@@ -4499,9 +4586,11 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
 fn passable_rights(cap: &capability::CapId, path: &str) -> capability::Rights {
     use capability::Rights;
     let mut r = Rights::empty();
+    let ext = crate::ext::is_ext(path);
     for want in [Rights::READ, Rights::WRITE] {
-        if capability::check_global(cap, want).is_ok()
-            || capability::check_path_grant(cap, path, want)
+        let global = capability::check_global(cap, want).is_ok()
+            && (!ext || capability::check_global(cap, Rights::EXTERNAL).is_ok());
+        if global || capability::check_path_grant(cap, path, want)
         {
             r |= want;
         }
@@ -4623,6 +4712,8 @@ pub(crate) fn npk_launch_at(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, a
 pub(crate) fn npk_status_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32,
     icon: i32, value: i32, flags: i32, text_ptr: i32, text_len: i32, opens_ptr: i32, opens_len: i32) -> i32
 {
+    // A file system instance reads crafted input; it gets no say on screen.
+    if crate::ext::is_instance(&ctx.cap_id) { return -1; }
     let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
     if key.is_empty() || key.len() > crate::status::MAX_KEY { return -1; }
     let text = if text_len > 0 { read_str(mem, text_ptr, text_len) } else { Some(String::new()) };
@@ -5295,4 +5386,95 @@ pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submi
         return -1;
     }
     crate::gpu::gpudev::ring(dev, client as u32, ring as u32, submitted as u64, completed as u64)
+}
+
+// === External volumes: the block handle and the request channel of an
+// `extfs` instance (`storage::ext`) ===
+
+fn blk_code(e: crate::ext::BlkError) -> i32 {
+    match e {
+        crate::ext::BlkError::Range => -1,
+        crate::ext::BlkError::Gone => -2,
+        crate::ext::BlkError::Io => -3,
+        crate::ext::BlkError::ReadOnly => -4,
+    }
+}
+
+pub(crate) fn npk_blk_info(mem: &mut [u8], ctx: &mut HostState, out_ptr: i32) -> i32 {
+    let Some((role, bs, blocks, ro)) = crate::ext::blk_info(&ctx.cap_id) else { return -1 };
+    let mut b = [0u8; 20];
+    b[0..4].copy_from_slice(&role.to_le_bytes());
+    b[4..8].copy_from_slice(&bs.to_le_bytes());
+    b[8..16].copy_from_slice(&blocks.to_le_bytes());
+    b[16..20].copy_from_slice(&(ro as u32).to_le_bytes());
+    write_bytes(mem, out_ptr, &b)
+}
+
+pub(crate) fn npk_blk_read(mem: &mut [u8], ctx: &mut HostState, lba: i64, len: i32, buf_ptr: i32) -> i32 {
+    let (Ok(lba), Some(n)) = (u64::try_from(lba), glen(len)) else { return -1 };
+    if n > crate::ext::MAX_IO { return -1; }
+    let Some(buf) = guest_mut(mem, buf_ptr, n) else { return -1 };
+    match crate::ext::blk_read(&ctx.cap_id, lba, buf) {
+        Ok(()) => 0,
+        Err(e) => blk_code(e),
+    }
+}
+
+pub(crate) fn npk_blk_write(mem: &mut [u8], ctx: &mut HostState, lba: i64, len: i32, buf_ptr: i32) -> i32 {
+    let (Ok(lba), Some(n)) = (u64::try_from(lba), glen(len)) else { return -1 };
+    if n > crate::ext::MAX_IO { return -1; }
+    let Some(buf) = guest(mem, buf_ptr, n) else { return -1 };
+    match crate::ext::blk_write(&ctx.cap_id, lba, buf) {
+        Ok(()) => 0,
+        Err(e) => blk_code(e),
+    }
+}
+
+pub(crate) fn npk_blk_flush(ctx: &mut HostState) -> i32 {
+    match crate::ext::blk_flush(&ctx.cap_id) {
+        Ok(()) => 0,
+        Err(e) => blk_code(e),
+    }
+}
+
+pub(crate) fn npk_ext_parts(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
+    let Some(n) = glen(len) else { return -1 };
+    if n % 16 != 0 || n > 16 * 16 { return -1; }
+    let Some(b) = guest(mem, ptr, n) else { return -1 };
+    let parts: alloc::vec::Vec<(u64, u64)> = b.chunks_exact(16).map(|c| (
+        u64::from_le_bytes(c[0..8].try_into().unwrap_or([0; 8])),
+        u64::from_le_bytes(c[8..16].try_into().unwrap_or([0; 8])),
+    )).collect();
+    match crate::ext::report_parts(&ctx.cap_id, &parts) {
+        Some(k) => k as i32,
+        None => -1,
+    }
+}
+
+pub(crate) fn npk_ext_mount(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32, label_len: i32, total: i64, free: i64) -> i32 {
+    let label = if label_len == 0 { String::new() } else {
+        match read_str(mem, label_ptr, label_len) { Some(s) => s, None => return -1 }
+    };
+    let (Ok(total), Ok(free)) = (u64::try_from(total), u64::try_from(free)) else { return -1 };
+    match crate::ext::mount(&ctx.cap_id, &label, total, free) {
+        Some(_) => 0,
+        None => -1,
+    }
+}
+
+pub(crate) fn npk_ext_next(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32, timeout_ms: i32) -> i32 {
+    let (Some(max), Ok(t)) = (glen(buf_max), u64::try_from(timeout_ms)) else { return -1 };
+    if !crate::ext::is_instance(&ctx.cap_id) { return -1; }
+    if guest(mem, buf_ptr, max).is_none() { return -1; }
+    match crate::ext::next(&ctx.cap_id, t.min(10_000), max) {
+        crate::ext::Next::Req(b) => write_bytes(mem, buf_ptr, &b),
+        crate::ext::Next::Idle => 0,
+        crate::ext::Next::Gone => -2,
+    }
+}
+
+pub(crate) fn npk_ext_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, status: i32, ptr: i32, len: i32) -> i32 {
+    let Some(n) = glen(len) else { return -1 };
+    let Some(b) = guest(mem, ptr, n) else { return -1 };
+    if crate::ext::reply(&ctx.cap_id, seq as u32, status, b) { 0 } else { -1 }
 }

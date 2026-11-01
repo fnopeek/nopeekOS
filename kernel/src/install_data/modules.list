@@ -23,3 +23,5 @@ volume
 # drivers every x86 machine needs
 acpi
 audio_hda
+# file systems of external drives (USB sticks)
+extfs

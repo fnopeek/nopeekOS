@@ -32,7 +32,7 @@ mod crypto;
 pub use crypto::{tls, update_key};
 
 mod storage;
-pub use storage::{npkfs, fat32, gpt};
+pub use storage::{npkfs, fat32, gpt, ext};
 
 mod gui;
 pub use gui::theme;
@@ -433,6 +433,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     shell::start_listener();
 
     kprintln!("[npk] System ready.");
+    ext::store_ready();
 
     // Start shade compositor (GUI_MODE already set after login)
     if framebuffer::is_available() {

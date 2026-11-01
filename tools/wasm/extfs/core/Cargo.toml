@@ -1,0 +1,14 @@
+[package]
+name = "extfs_core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+# no_std + alloc: builds for wasm32 and for host tests against images
+# made by the Linux tools.
+[lib]
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true

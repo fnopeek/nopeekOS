@@ -16,6 +16,7 @@ bug in one of them; the change that moves the code updates the spec too.
 | [`UI_REFRESH.md`](spec/UI_REFRESH.md) | Design tokens: colours, spacing, type |
 | [`PANEL.md`](spec/PANEL.md) | Panels at the screen edge (`deck`), popups |
 | [`WIFI_CLASS_ABI.md`](spec/WIFI_CLASS_ABI.md) | Contract between `link`, `wifid` and the vendor WiFi drivers |
+| [`EXTERNAL_STORAGE.md`](spec/EXTERNAL_STORAGE.md) | USB drives in `ext/`: block handle, `extfs` instances, the request channel |
 | [`BROWSER.md`](spec/BROWSER.md) | `beak`, the native browser |
 | [`CONFORMANCE.md`](spec/CONFORMANCE.md) | `beak` against the official test suites |
 

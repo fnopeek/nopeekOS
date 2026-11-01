@@ -1182,6 +1182,7 @@ fn cleanup_instance_state(state: &mut HostState) {
     state.files.clear();
     crate::audio::release_owner(state.pid);
     crate::audio::display_audio_release(state.pid);
+    crate::ext::instance_ended(&state.cap_id);
     if let Some(hw) = state.hw.take() {
         release_hw(hw);
     }
@@ -1294,7 +1295,7 @@ pub(crate) fn private_area_allows(name: &str, module: &str) -> bool {
 /// The name is the authorisation, and the kernel assigns it: a module cannot
 /// leave `priv/<itself>` or enter another's, whatever its `.npk.caps` says.
 pub(crate) fn is_own_private(name: &str, module: &str) -> bool {
-    !module.is_empty() && private_area_owner(name) == Some(module)
+    !module.is_empty() && module != crate::ext::MODULE && private_area_owner(name) == Some(module)
 }
 
 /// True if `name` targets the module store (`sys/wasm/…`), the trust

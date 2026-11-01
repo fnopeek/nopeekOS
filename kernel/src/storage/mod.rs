@@ -7,3 +7,5 @@ pub mod npkfs;
 pub mod fat32;
 #[allow(dead_code)]
 pub mod gpt;
+/// External volumes: the `ext/` namespace.
+pub mod ext;

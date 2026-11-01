@@ -54,7 +54,10 @@ bitflags! {
         /// can put itself in front of the user and read what is typed, so
         /// only the shell's own modules declare it.
         const SHELL     = 0b1_0000_0000_0000;
-        const ALL       = 0b1_1111_1111_1111;
+        /// The `ext/` namespace: files on external drives. A module without
+        /// it reaches such a file only through the open dialog.
+        const EXTERNAL  = 0b10_0000_0000_0000;
+        const ALL       = 0b11_1111_1111_1111;
     }
 }
 
@@ -282,8 +285,8 @@ pub fn release_module_cap(cap: &CapId) {
 //     folder mode, that folder and everything below it; a folder grant
 //     matches at path boundaries only and never a path with an empty,
 //     `.` or `..` segment
-//   - no folder grant on the root, `sys`, `.system` or `priv` (`grant_tree`
-//     refuses)
+//   - no folder grant on the root, `sys`, `.system`, `priv` or `ext`
+//     (`grant_tree` refuses)
 //   - bound to the capability of the instance that asked, so it dies
 //     with the app
 //   - never covers `sys/wasm/` — that check runs before this one and a
@@ -319,6 +322,7 @@ pub fn grant_tree(cap: CapId, dir: &str, rights: Rights) -> bool {
     if !canonical(dir) { return false; }
     let top = dir.split('/').next().unwrap_or("");
     if top == "sys" || top == ".system" || top == crate::wasm::PRIVATE_ROOT { return false; }
+    if dir == crate::ext::ROOT { return false; }
     push_grant(cap, dir, rights, true);
     true
 }
@@ -396,11 +400,13 @@ fn rights_from_caps_byte(b: u8) -> Rights {
 // section grants nothing from byte 2.
 const CAP2_BIT_NET: u8 = 0x01; // npk_http_request (beak's outbound fetch)
 const CAP2_BIT_SHELL: u8 = 0x02; // system UI roles (panel, launcher, picker)
+const CAP2_BIT_EXTERNAL: u8 = 0x04; // files on external drives (`ext/`)
 
 fn rights_from_caps_byte2(b: u8) -> Rights {
     let mut r = Rights::empty();
     if b & CAP2_BIT_NET != 0 { r |= Rights::NET; }
     if b & CAP2_BIT_SHELL != 0 { r |= Rights::SHELL; }
+    if b & CAP2_BIT_EXTERNAL != 0 { r |= Rights::EXTERNAL; }
     r
 }
 

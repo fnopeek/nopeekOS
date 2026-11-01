@@ -8,6 +8,13 @@ use super::resolve_path;
 /// Name is resolved relative to cwd.
 pub(super) fn fetch_object(name: &str) -> Option<alloc::vec::Vec<u8>> {
     let path = resolve_path(name);
+    if crate::ext::is_ext(&path) {
+        return match crate::ext::read_all(&path, 64 << 20) {
+            Ok(Some(d)) => Some(d),
+            Ok(None) => { kprintln!("[npk] '{}': not found", name); None }
+            Err(e) => { kprintln!("[npk] '{}': {:?}", name, e); None }
+        };
+    }
     match crate::npkfs::fetch(&path) {
         Ok((data, _)) => Some(data),
         Err(e) => { kprintln!("[npk] '{}': {}", name, e); None }
@@ -324,6 +331,10 @@ pub fn intent_list(args: &str) {
         super::get_cwd()
     };
 
+    if crate::ext::is_ext(&resolved) {
+        list_ext(&resolved);
+        return;
+    }
     use crate::npkfs::object::EntryKind;
     let entries = match crate::npkfs::fs::list(&resolved) {
         Ok(Some(v)) => v,
@@ -366,6 +377,34 @@ pub fn intent_list(args: &str) {
     if let Some((_, free, count, _)) = crate::npkfs::stats() {
         kprintln!();
         kprintln!("  {} objects, {} free blocks", count, free);
+    }
+    kprintln!();
+}
+
+/// A folder of an external volume, or the volumes themselves for `ext`.
+fn list_ext(path: &str) {
+    let entries = match crate::ext::list(path) {
+        Ok(Some(v)) => v,
+        Ok(None) => { kprintln!("[npk] '{}': not found", path); return; }
+        Err(e) => { kprintln!("[npk] '{}': {:?}", path, e); return; }
+    };
+    kprintln!();
+    if entries.is_empty() { kprintln!("  (empty)"); }
+    for e in entries.iter().filter(|e| e.is_dir) {
+        kprintln!("  {}/", e.name);
+    }
+    for e in entries.iter().filter(|e| !e.is_dir) {
+        if e.size >= 1024 {
+            kprintln!("  {:<24} {:>6} KB", e.name, e.size / 1024);
+        } else {
+            kprintln!("  {:<24} {:>6} B", e.name, e.size);
+        }
+    }
+    if path.trim_matches('/') == crate::ext::ROOT {
+        for v in crate::ext::volumes() {
+            kprintln!("  {}: {} MB, {} MB free{}", v.label, v.total / 1_000_000, v.free / 1_000_000,
+                if v.read_only { ", read-only" } else { "" });
+        }
     }
     kprintln!();
 }
