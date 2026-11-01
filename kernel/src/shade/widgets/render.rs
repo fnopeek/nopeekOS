@@ -517,6 +517,25 @@ where M: IntoIterator<Item = &'a Modifier> + Copy
     (x, (right - x).max(0) as u32)
 }
 
+/// Whether a `TextArea` wraps its lines (`Modifier::Wrap`).
+pub(super) fn textarea_wraps<'a>(mods: impl IntoIterator<Item = &'a Modifier>) -> bool {
+    mods.into_iter().any(|m| matches!(m, Modifier::Wrap))
+}
+
+/// The visual rows of a `TextArea` laid out in `rect`: one per line, or
+/// broken at the text column with `Modifier::Wrap`. Layout, render,
+/// caret-follow, hit test and the arrow keys all take their rows from
+/// here.
+pub(super) fn textarea_rows<'a, M>(value: &str, rect: Rect, mods: M)
+    -> alloc::vec::Vec<super::wrap::Row>
+where M: IntoIterator<Item = &'a Modifier> + Copy
+{
+    let wrap = textarea_wraps(mods).then(|| {
+        textarea_text_column(rect, mods, value.split('\n').count()).1
+    });
+    super::wrap::rows(value, wrap, super::layout::font_size_of(super::abi::TextStyle::Mono, mods))
+}
+
 /// Width of the widest line in a `TextArea`, in px. Shared by the layout
 /// (which turns it into the scrollable range) and the renderer (which sizes
 /// the scrollbar thumb from it).
@@ -873,17 +892,18 @@ fn paint_node_eff(
             // Everything drawn in text coordinates below goes through
             // `text_x`, so the caret and the selection blocks can never
             // drift apart from the glyphs they belong to.
-            let text_x = col_x - scroll_x as i32;
+            let wraps = textarea_wraps(eff);
+            let rows = textarea_rows(live, rect, eff);
+            let text_x = col_x - if wraps { 0 } else { scroll_x as i32 };
             let top_y  = inner_y + text_inset();
             let visible = (rect.h / line_h).max(1) as usize;
 
-            // Caret line/column (byte prefix within the caret's line).
-            let (caret_line, caret_prefix) = match edit_state {
+            // Caret row and the part of that row in front of it.
+            let (caret_row, caret_prefix) = match edit_state {
                 Some(e) => {
                     let cur = e.cursor.min(live.len());
-                    let cline = live[..cur].matches('\n').count();
-                    let lstart = live[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
-                    (Some(cline), &live[lstart..cur])
+                    let r = super::wrap::row_of(&rows, cur);
+                    (Some(r), &live[rows[r].start..cur])
                 }
                 None => (None, ""),
             };
@@ -893,8 +913,8 @@ fn paint_node_eff(
             // happens on caret moves (handle_input_key adjusts scroll_y), so
             // the render must not re-pull to the caret every frame — that
             // would defeat manual wheel/drag scrolling.
-            let total_lines = total_lines_all;
-            let max_scroll = total_lines.saturating_sub(visible);
+            let total_rows = rows.len();
+            let max_scroll = total_rows.saturating_sub(visible);
             let scroll = ((scroll_y / line_h) as usize).min(max_scroll);
 
             // Line-number gutter: a right-aligned column of numbers and a
@@ -908,11 +928,13 @@ fn paint_node_eff(
                           Rect { x: rule_x, y: rect.y, w: hair, h: rect.h },
                           Fill::Solid(Token::Border));
                 for row in 0..visible {
-                    let li = scroll + row;
-                    if li >= total_lines { break; }
+                    let ri = scroll + row;
+                    if ri >= total_rows { break; }
+                    // A wrapped line is numbered once, on its first row.
+                    if !rows[ri].first { continue; }
                     let mut num = alloc::string::String::new();
                     let _ = core::fmt::Write::write_fmt(
-                        &mut num, format_args!("{}", li + 1));
+                        &mut num, format_args!("{}", rows[ri].line + 1));
                     let w = ceil_u32_local(crate::gui::text::measure_px(&num, style, px)) as i32;
                     let y = top_y + (row as u32 * line_h) as i32;
                     rast.text_px(target, &num, style, px, Token::OnSurfaceFaint,
@@ -946,28 +968,28 @@ fn paint_node_eff(
             // block under the text on each line it covers.
             let selection = edit_state.and_then(|e| e.selection());
 
-            // Paint the visible window of lines, colouring each line by
-            // the spans covering its bytes (uncovered → default colour).
-            let mut line_byte = 0usize;
-            for (li, line) in live.split('\n').enumerate() {
-                let line_start = line_byte;
-                line_byte += line.len() + 1; // include the '\n'
-                if li < scroll { continue; }
-                let row = li - scroll;
-                if row >= visible { break; }
+            // Paint the visible window of rows, colouring each row by the
+            // spans covering its bytes (uncovered → default colour).
+            for (ri, r) in rows.iter().enumerate().skip(scroll).take(visible) {
+                let line = &live[r.start..r.end];
+                let line_start = r.start;
+                let row = ri - scroll;
                 let y = top_y + (row as u32 * line_h) as i32;
+                // A row that a wrap continues ends on the next row's start,
+                // not on a '\n'.
+                let cont = super::wrap::continues(&rows, ri);
                 // Selection highlight under the text (before glyphs so they
                 // stay on top). A selection crossing this line's end (the
                 // '\n') or an empty selected line gets a small trailing block.
                 if let Some((sel_s, sel_e)) = selection {
                     let line_lo = line_start;
-                    let line_hi = line_start + line.len();
-                    if sel_e > line_lo && sel_s <= line_hi {
+                    let line_hi = r.end;
+                    if sel_e > line_lo && (sel_s < line_hi || (!cont && sel_s <= line_hi)) {
                         let a = sel_s.max(line_lo) - line_lo;
                         let b = sel_e.min(line_hi) - line_lo;
                         let ax = ceil_u32_local(crate::gui::text::measure_px(&line[..a], style, px));
                         let mut w = ceil_u32_local(crate::gui::text::measure_px(&line[a..b], style, px));
-                        if sel_e > line_hi { w += scale::len(6); } // newline included
+                        if sel_e > line_hi && !cont { w += scale::len(6); } // newline included
                         if w < scale::len(2) { w = scale::len(6); } // empty line / zero-width
                         rast.rect(target, Rect { x: text_x + ax as i32, y, w, h: line_h },
                                   Fill::Solid(Token::AccentMuted));
@@ -997,7 +1019,7 @@ fn paint_node_eff(
             }
 
             // Caret (only when focused / editor present).
-            if let Some(cl) = caret_line {
+            if let Some(cl) = caret_row {
                 if cl >= scroll && cl - scroll < visible {
                     let advance = ceil_u32_local(crate::gui::text::measure_px(caret_prefix, style, px));
                     let y = top_y + ((cl - scroll) as u32 * line_h) as i32;
@@ -1016,13 +1038,13 @@ fn paint_node_eff(
             // Overlay scrollbar — only when the document overflows. Mirrors
             // paint_scrollbar (Widget::Scroll) so the editor and file views
             // look identical; thumb position tracks the line window.
-            if total_lines > visible && rect.h > 0 {
-                let content_h = (total_lines as u32) * line_h;
+            if total_rows > visible && rect.h > 0 {
+                let content_h = (total_rows as u32) * line_h;
                 let track_h = rect.h as u64;
                 let thumb_h = ((track_h * track_h) / content_h.max(1) as u64)
                     .max(scale::len(24) as u64).min(track_h) as u32;
                 let travel = track_h - thumb_h as u64;
-                let max_off = (total_lines - visible) as u64;
+                let max_off = (total_rows - visible) as u64;
                 let thumb_y = rect.y + if max_off == 0 { 0 } else { (scroll as u64 * travel / max_off) as i32 };
                 let thumb_x = rect.x + rect.w as i32 - textarea_bar_w();
                 rast.rect_rounded(target,
@@ -1031,10 +1053,10 @@ fn paint_node_eff(
             }
 
             // …and its sideways twin, along the bottom of the text column.
-            // Lines are never wrapped, so a single long line is enough to
-            // make it appear. Same content width the layout derived
-            // `max_scroll_x` from, so bar and offset can't disagree.
-            let content_w = textarea_content_w(live, eff);
+            // Unwrapped, a single long line is enough to make it appear.
+            // Same content width the layout derived `max_scroll_x` from, so
+            // bar and offset can't disagree.
+            let content_w = if wraps { 0 } else { textarea_content_w(live, eff) };
             if content_w > col_w && col_w > 0 {
                 let track_w = col_w as u64;
                 let thumb_w = ((track_w * track_w) / content_w.max(1) as u64)

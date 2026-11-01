@@ -279,6 +279,18 @@ pub fn measure_px(s: &str, style: TextStyle, size_px: u16) -> f32 {
     }).unwrap_or(0.0)
 }
 
+/// Run `f` with the advance of a single character at `size_px`, under one
+/// font lock: for callers that measure character by character (soft wrap).
+/// Kerning is left out, which for the mono face it is used with is zero.
+pub fn with_advance<R>(style: TextStyle, size_px: u16, f: impl FnOnce(&dyn Fn(char) -> f32) -> R)
+    -> Option<R>
+{
+    with_font_for(style, |font| {
+        let size = size_px as f32;
+        f(&|ch| font.metrics(ch, size).advance_width)
+    })
+}
+
 /// Line height (ascent − descent + line_gap) in logical pixels.
 pub fn line_height(style: TextStyle) -> f32 {
     line_height_px(style, style_desc(style).size_px)

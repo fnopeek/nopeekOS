@@ -13,6 +13,7 @@ pub mod render;
 pub mod raster;
 pub mod animation;
 pub mod scale;
+pub mod wrap;
 
 mod check_abi;
 
@@ -1825,26 +1826,42 @@ fn clamp_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
-/// Move the caret up one visual line, preserving the byte-column within
-/// the line as closely as the shorter target line allows.
-fn cursor_up(s: &str, cursor: usize) -> usize {
-    let ls = line_start(s, cursor);
-    if ls == 0 { return 0; } // already on the first line
-    let col = cursor - ls;
-    let prev_ls = line_start(s, ls - 1);
-    let prev_len = (ls - 1) - prev_ls;
-    clamp_boundary(s, prev_ls + col.min(prev_len))
+/// Move the caret `delta` rows up (negative) or down, keeping its x as
+/// closely as the target row allows. Past the first row it goes to the
+/// start of the document, past the last to the end.
+fn move_rows(value: &str, rows: &[wrap::Row], cursor: usize, delta: isize, px: u16) -> usize {
+    if rows.is_empty() { return cursor; }
+    let r = wrap::row_of(rows, cursor);
+    let last = rows.len() - 1;
+    let t = r as isize + delta;
+    if t < 0 { return 0; }
+    if t as usize > last { return value.len(); }
+    let t = t as usize;
+    let style = abi::TextStyle::Mono;
+    let x = ceil_u32(crate::gui::text::measure_px(&value[rows[r].start..cursor], style, px));
+    let row = rows[t];
+    let mut pos = row.start + byte_at_x_px(&value[row.start..row.end], style, px, x);
+    // The end of a row a wrap continues is drawn at the start of the next
+    // one; stop a character short so the caret stays on the row it was
+    // sent to.
+    if wrap::continues(rows, t) && pos == row.end && pos > row.start {
+        pos = clamp_boundary(value, pos - 1);
+    }
+    pos
 }
 
-/// Move the caret down one visual line, preserving byte-column.
-fn cursor_down(s: &str, cursor: usize) -> usize {
-    let le = line_end(s, cursor);
-    if le == s.len() { return s.len(); } // already on the last line
-    let ls = line_start(s, cursor);
-    let col = cursor - ls;
-    let next_ls = le + 1;
-    let next_len = line_end(s, next_ls) - next_ls;
-    clamp_boundary(s, next_ls + col.min(next_len))
+/// The TextArea at `path` over `value`: its rows, font px and how many
+/// rows its viewport shows.
+fn textarea_geometry(s: &WidgetScene, path: &[u32], value: &str)
+    -> Option<(Vec<wrap::Row>, u16, usize)>
+{
+    let w = widget_at_path(&s.tree, path)?;
+    let node = layout_node_at_path(&s.layout_tree, path)?;
+    let mods = modifiers_of_ref(w);
+    let px = layout::font_size_of(abi::TextStyle::Mono, mods);
+    let line_h = ceil_u32(crate::gui::text::line_height_px(abi::TextStyle::Mono, px)).max(1);
+    let visible = (node.rect.h / line_h).max(1) as usize;
+    Some((render::textarea_rows(value, node.rect, mods), px, visible))
 }
 
 /// How a TextArea indents (`Modifier::Indent`).
@@ -2149,26 +2166,31 @@ fn caret_follow_scroll_in(s: &mut WidgetScene) {
 fn follow_caret_at(s: &mut WidgetScene, path: &[u32], e: &InputEditState) {
     // Resolve the editor's metrics in one immutable pass — a zoomed
     // editor scrolls in its own line height, not the default one.
-    let (px, column) = match widget_at_path(&s.tree, path) {
+    let (px, column, wraps) = match widget_at_path(&s.tree, path) {
         Some(w) => {
             let mods = modifiers_of_ref(w);
             let total_lines = e.value.split('\n').count();
             let column = layout_node_at_path(&s.layout_tree, path)
                 .map(|n| render::textarea_text_column(n.rect, mods, total_lines));
-            (layout::font_size_of(abi::TextStyle::Mono, mods), column)
+            (layout::font_size_of(abi::TextStyle::Mono, mods), column, render::textarea_wraps(mods))
         }
-        None => (layout::style_px(abi::TextStyle::Mono), None),
+        None => (layout::style_px(abi::TextStyle::Mono), None, false),
     };
     let line_h = (crate::gui::text::line_height_px(abi::TextStyle::Mono, px) as u32).max(1);
 
-    // Caret line + how far into that line it sits, in px.
+    // Caret row + how far into that row it sits, in px.
     let (caret_line, caret_x) = {
         let cur = e.cursor.min(e.value.len());
-        let line = e.value[..cur].matches('\n').count();
-        let lstart = e.value[..cur].rfind('\n').map(|i| i + 1).unwrap_or(0);
+        let (row, rstart) = match textarea_geometry(s, path, &e.value) {
+            Some((rows, _, _)) => {
+                let r = wrap::row_of(&rows, cur);
+                (r, rows[r].start)
+            }
+            None => (e.value[..cur].matches('\n').count(), line_start(&e.value, cur)),
+        };
         let adv = ceil_u32(crate::gui::text::measure_px(
-            &e.value[lstart..cur], abi::TextStyle::Mono, px));
-        (line, adv)
+            &e.value[rstart..cur], abi::TextStyle::Mono, px));
+        (row, adv)
     };
 
     if s.scroll_viewport.h > 0 {
@@ -2183,6 +2205,8 @@ fn follow_caret_at(s: &mut WidgetScene, path: &[u32], e: &InputEditState) {
         s.scroll_y = ((sl as u32) * line_h).min(max_sy);
     }
 
+    // A wrapped editor has nothing to the side to scroll to.
+    if wraps { s.scroll_x = 0; return; }
     if let Some((_, col_w)) = column {
         // A column narrower than the margin can't hold the caret anywhere —
         // leave the view where it is rather than fight over sub-pixels.
@@ -2401,16 +2425,6 @@ fn byte_at_x_px(s: &str, style: abi::TextStyle, px: u16, target_x: u32) -> usize
     best
 }
 
-/// (byte start, slice) of the `n`th '\n'-delimited line in `s`.
-fn nth_line(s: &str, n: usize) -> (usize, &str) {
-    let mut start = 0usize;
-    for (i, line) in s.split('\n').enumerate() {
-        if i == n { return (start, line); }
-        start += line.len() + 1;
-    }
-    (s.len(), "")
-}
-
 /// Byte offset in the focused text widget's value under screen pixel (x,y).
 /// Mirrors the render geometry (Input: Heading, single line; TextArea: Mono,
 /// scrolled lines). `require_inside` rejects points outside the widget rect
@@ -2449,19 +2463,26 @@ fn offset_at(scene: &WidgetScene, x: i32, y: i32, require_inside: bool) -> Optio
             let line_h = ceil_u32(crate::gui::text::line_height_px(style, px)).max(1);
             let top_y = rect.y + pad + render::text_inset();
             let visible = (rect.h / line_h).max(1) as usize;
+            let mods = modifiers_of_ref(widget);
             let total_lines = value.split('\n').count();
-            // Same text column the renderer used, shifted by the same
-            // sideways offset — otherwise a click on a scrolled line lands
-            // on the character that would be there at offset zero.
-            let (col_x, _) = render::textarea_text_column(
-                rect, modifiers_of_ref(widget), total_lines);
-            let text_x = col_x - scene.scroll_x as i32;
-            let max_scroll = total_lines.saturating_sub(visible);
+            // Same text column and rows the renderer used, shifted by the
+            // same sideways offset — otherwise a click on a scrolled line
+            // lands on the character that would be there at offset zero.
+            let (col_x, _) = render::textarea_text_column(rect, mods, total_lines);
+            let text_x = col_x - if render::textarea_wraps(mods) { 0 } else { scene.scroll_x as i32 };
+            let rows = render::textarea_rows(value, rect, mods);
+            let max_scroll = rows.len().saturating_sub(visible);
             let scroll = ((scene.scroll_y / line_h) as usize).min(max_scroll);
             let row = ((y - top_y).max(0) as u32 / line_h) as usize;
-            let target_line = (scroll + row).min(total_lines.saturating_sub(1));
-            let (line_start, line_str) = nth_line(value, target_line);
-            Some(line_start + byte_at_x_px(line_str, style, px, (x - text_x).max(0) as u32))
+            let ri = (scroll + row).min(rows.len().saturating_sub(1));
+            let r = rows[ri];
+            let mut at = r.start + byte_at_x_px(&value[r.start..r.end], style, px,
+                                                (x - text_x).max(0) as u32);
+            // A click past the end of a continued row stays on that row.
+            if wrap::continues(&rows, ri) && at == r.end && at > r.start {
+                at = clamp_boundary(value, at - 1);
+            }
+            Some(at)
         }
         _ => None,
     }
@@ -2999,6 +3020,19 @@ pub fn handle_input_key(
                 (IndentRule::of(mods), if is_textarea { pairs } else { 0 })
             })
             .unwrap_or_default();
+        // One viewport of lines for PageUp/PageDown when the editor's own
+        // rows are not at hand: the window height at Mono metrics.
+        let line_h = (crate::gui::text::line_height_px(
+            abi::TextStyle::Mono, layout::style_px(abi::TextStyle::Mono)) as u32).max(1);
+        let mut page = ((win_h / line_h).saturating_sub(1)).max(1) as usize;
+        // Up / Down / PageUp / PageDown move by the rows on screen.
+        let geo = if is_textarea && matches!(op, Op::Up | Op::Down | Op::PageUp | Op::PageDown) {
+            scene.input_edit.as_ref()
+                .and_then(|e| textarea_geometry(scene, &scene.focus_path, &e.value))
+        } else {
+            None
+        };
+        if let Some((_, _, visible)) = &geo { page = visible.saturating_sub(1).max(1); }
         let edit = match scene.input_edit.as_mut() {
             Some(e) => e,
             None    => return false,
@@ -3006,12 +3040,6 @@ pub fn handle_input_key(
         // Defensive: clamp cursor in case a malformed prev state slipped
         // through (a wild or mid-codepoint index would panic insert/remove).
         edit.cursor = clamp_boundary(&edit.value, edit.cursor);
-        // One viewport of lines for PageUp/PageDown, derived from the
-        // window height at Mono metrics (a close-enough approximation —
-        // the TextArea's own rect isn't threaded here).
-        let line_h = (crate::gui::text::line_height_px(
-            abi::TextStyle::Mono, layout::style_px(abi::TextStyle::Mono)) as u32).max(1);
-        let page = ((win_h / line_h).saturating_sub(1)).max(1) as usize;
         let mut changed = false;
 
         // Selection-aware editing. Movement ops update or clear the anchor
@@ -3180,10 +3208,15 @@ pub fn handle_input_key(
             Op::DupLines(up)  => changed |= dup_lines(edit, up),
             Op::DocStart => edit.cursor = 0,
             Op::DocEnd   => edit.cursor = edit.value.len(),
-            Op::Up    => edit.cursor = cursor_up(&edit.value, edit.cursor),
-            Op::Down  => edit.cursor = cursor_down(&edit.value, edit.cursor),
-            Op::PageUp   => for _ in 0..page { edit.cursor = cursor_up(&edit.value, edit.cursor); },
-            Op::PageDown => for _ in 0..page { edit.cursor = cursor_down(&edit.value, edit.cursor); },
+            Op::Up | Op::Down | Op::PageUp | Op::PageDown => if let Some((rows, px, _)) = &geo {
+                let delta = match op {
+                    Op::Up => -1,
+                    Op::Down => 1,
+                    Op::PageUp => -(page as isize),
+                    _ => page as isize,
+                };
+                edit.cursor = move_rows(&edit.value, rows, edit.cursor, delta, *px);
+            },
             Op::Submit => {}
         }
         if changed { edit.note_sent(); }

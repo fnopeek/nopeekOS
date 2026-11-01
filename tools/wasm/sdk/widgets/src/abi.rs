@@ -487,6 +487,12 @@ pub enum Modifier {
     /// Backspace between an empty pair removes both, and an opener typed
     /// over a selection wraps it. Bits: 1 `( [ {`, 2 `"`, 4 `'`, 8 `` ` ``.
     AutoClose(u8),
+    /// Break the lines of a `Widget::TextArea` at the width of its text
+    /// column instead of scrolling sideways. A line breaks after its last
+    /// space or tab that still fits, mid-word only when one word is wider
+    /// than the column. Line numbers count the `\n`-separated lines; Up
+    /// and Down move by row, Home and End stay on the whole line.
+    Wrap,
     // Appended only.
 }
 

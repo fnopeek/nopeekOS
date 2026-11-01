@@ -88,6 +88,8 @@ struct Strings {
     zoom_out:      &'static str,
     /// "Actual size ({} px)" — shows where you'd land back.
     zoom_reset:    &'static str,
+    wrap_on:       &'static str,
+    wrap_off:      &'static str,
     /// Header written above the settings, so the file explains itself
     /// when someone opens it in spell.
     cfg_header:    &'static str,
@@ -138,7 +140,8 @@ const EN: Strings = Strings {
     settings: "Settings",
     zoom_in: "Zoom in", zoom_out: "Zoom out",
     zoom_reset: "Actual size ({} px)",
-    cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n# trim_trailing: yes removes spaces at line ends on save.\n# final_newline: yes ends the file with a line break on save.\n# recent / open: recently used files and the tabs open at exit.\n",
+    wrap_on: "Word wrap: on", wrap_off: "Word wrap: off",
+    cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n# trim_trailing: yes removes spaces at line ends on save.\n# final_newline: yes ends the file with a line break on save.\n# word_wrap: yes breaks long lines at the window edge.\n# recent / open: recently used files and the tabs open at exit.\n",
     about: "About Spell",
     untitled: "Untitled",
     untitled_file: "untitled",
@@ -267,6 +270,7 @@ const ACT_FILE_SETTINGS: u32 = 6_010;
 const ACT_ZOOM_IN:    u32 = 6_102;
 const ACT_ZOOM_OUT:   u32 = 6_103;
 const ACT_ZOOM_RESET: u32 = 6_104;
+const ACT_WRAP:       u32 = 6_105;
 const ACT_HELP_ABOUT: u32 = 6_300;
 const ACT_MENU_EDIT:  u32 = 5_006;
 const ACT_UNDO:       u32 = 6_200;
@@ -472,6 +476,8 @@ struct Spell {
     /// Save options from the settings file.
     trim:          bool,
     final_nl:      bool,
+    /// Long lines break at the editor's edge (`word_wrap`).
+    wrap:          bool,
     /// Recently opened or saved files, newest first.
     recent:        Vec<String>,
     /// What the settings file holds. A wheel spin fires a dozen zoom
@@ -532,6 +538,7 @@ impl Spell {
             font_px:       cfg.font,
             trim:          cfg.trim,
             final_nl:      cfg.final_nl,
+            wrap:          cfg.wrap,
             recent:        cfg.recent.clone(),
             quit_total:    0,
             quit_done:     0,
@@ -736,6 +743,7 @@ impl Spell {
             font:     self.font_px,
             trim:     self.trim,
             final_nl: self.final_nl,
+            wrap:     self.wrap,
             recent:   self.recent.clone(),
             open:     self.docs.iter().filter_map(|d| d.path.clone()).collect(),
         }
@@ -811,6 +819,7 @@ impl Spell {
             self.font_px = c.font;
             self.trim = c.trim;
             self.final_nl = c.final_nl;
+            self.wrap = c.wrap;
             self.recent = c.recent.clone();
             self.cfg_saved = c;
         }
@@ -1358,6 +1367,7 @@ struct Config {
     font:     u16,
     trim:     bool,
     final_nl: bool,
+    wrap:     bool,
     recent:   Vec<String>,
     open:     Vec<String>,
 }
@@ -1365,7 +1375,7 @@ struct Config {
 /// Read the settings. Anything missing or unparseable falls back to the
 /// default — a broken config should never keep the editor shut.
 fn read_config() -> Config {
-    let mut c = Config { font: MONO_SIZE_PX, trim: false, final_nl: false,
+    let mut c = Config { font: MONO_SIZE_PX, trim: false, final_nl: false, wrap: false,
                          recent: Vec::new(), open: Vec::new() };
     let Some(buf) = host::fetch(CONFIG_PATH) else { return c };
     let Ok(text) = core::str::from_utf8(&buf) else { return c };
@@ -1381,6 +1391,7 @@ fn read_config() -> Config {
             },
             "trim_trailing" => c.trim = yes,
             "final_newline" => c.final_nl = yes,
+            "word_wrap" => c.wrap = yes,
             "recent" if !val.is_empty() && c.recent.len() < MAX_RECENT => c.recent.push(val.to_string()),
             "open" if !val.is_empty() => c.open.push(val.to_string()),
             _ => {}
@@ -1399,6 +1410,8 @@ fn write_config(c: &Config) {
     out.push_str(if c.trim { "yes" } else { "no" });
     out.push_str("\nfinal_newline: ");
     out.push_str(if c.final_nl { "yes" } else { "no" });
+    out.push_str("\nword_wrap: ");
+    out.push_str(if c.wrap { "yes" } else { "no" });
     out.push('\n');
     for p in &c.recent { out.push_str("recent: "); out.push_str(p); out.push('\n'); }
     for p in &c.open { out.push_str("open: "); out.push_str(p); out.push('\n'); }
@@ -1525,7 +1538,8 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().zoom_in.to_string(), ActionId(ACT_ZOOM_IN)),
                 (s().zoom_out.to_string(), ActionId(ACT_ZOOM_OUT)),
                 (zoom_reset_label(), ActionId(ACT_ZOOM_RESET)),
-            ], &["", "", "Ctrl++", "Ctrl+-", "Ctrl+0"],
+                ((if sp.wrap { s().wrap_on } else { s().wrap_off }).to_string(), ActionId(ACT_WRAP)),
+            ], &["", "", "Ctrl++", "Ctrl+-", "Ctrl+0", ""],
                Some(match sp.cur().mode { Mode::Edit => 0, Mode::Preview => 1 })),
         ),
         OpenMenu::Help => (
@@ -1707,6 +1721,7 @@ fn render_body(sp: &Spell) -> Widget {
         },
         Modifier::AutoClose(pair_bits(doc.kind())),
     ];
+    if sp.wrap { modifiers.push(Modifier::Wrap); }
     if let Some((n, seq, a, c)) = sp.select {
         if n == node {
             modifiers.push(Modifier::Select { seq, anchor: a, cursor: c });
@@ -3229,6 +3244,7 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_ZOOM_IN  => { sp.open_menu = None; sp.zoom(Some(1));  Outcome::Rerender }
         ACT_ZOOM_OUT => { sp.open_menu = None; sp.zoom(Some(-1)); Outcome::Rerender }
         ACT_ZOOM_RESET => { sp.open_menu = None; sp.zoom(None);   Outcome::Rerender }
+        ACT_WRAP => { sp.open_menu = None; sp.wrap = !sp.wrap; Outcome::Rerender }
         ACT_HELP_ABOUT => {
             log("[spell] Spell 0.1 — nopeekOS text editor");
             sp.open_menu = None;

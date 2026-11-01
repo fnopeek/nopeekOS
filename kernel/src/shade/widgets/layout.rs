@@ -605,14 +605,15 @@ fn place(w: &Widget, inner: Rect, ctx: &mut ScrollCtx) -> LayoutNode {
             let line_h = ceil_u32(crate::gui::text::line_height_px(TextStyle::Mono, px)).max(1);
             let visible = (inner.h / line_h).max(1) as usize;
             let total = value.split('\n').count();
-            let max_off = (total.saturating_sub(visible)) as u32 * line_h;
+            let rows = super::render::textarea_rows(value, inner, modifiers).len();
+            let max_off = (rows.saturating_sub(visible)) as u32 * line_h;
             if max_off > ctx.max { ctx.max = max_off; ctx.max_rect = inner; }
             // Sideways: how far the widest line overruns the text column.
-            // Lines are never wrapped, so a long one simply runs past the
-            // right edge — that overrun is the scrollable range.
+            // A wrapped editor never overruns it.
             let (col_x, col_w) = super::render::textarea_text_column(inner, modifiers, total);
-            let max_x = super::render::textarea_content_w(value, modifiers)
-                .saturating_sub(col_w);
+            let max_x = if super::render::textarea_wraps(modifiers) { 0 } else {
+                super::render::textarea_content_w(value, modifiers).saturating_sub(col_w)
+            };
             if max_x > ctx.max_x {
                 ctx.max_x = max_x;
                 ctx.max_x_rect = Rect { x: col_x, y: inner.y, w: col_w, h: inner.h };
