@@ -218,6 +218,7 @@ icon_ids! {
     SquareSplitHorizontal = 64,
     SquareSplitVertical   = 65,
     DotsThree             = 66,
+    Eject                 = 67,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

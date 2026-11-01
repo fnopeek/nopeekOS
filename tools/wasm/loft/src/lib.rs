@@ -498,6 +498,9 @@ const ACT_TAB_CLOSE_BASE:     u32 = 5_000_000;
 const ACT_TAB_CLOSE_END:      u32 = 6_000_000;
 const ACT_DROP_ITEM_BASE:     u32 = 6_000_000;
 const ACT_DROP_ITEM_END:      u32 = 7_000_000;
+/// The eject button of sidebar row `n`.
+const ACT_EJECT_BASE:         u32 = 7_000_000;
+const ACT_EJECT_END:          u32 = 8_000_000;
 const ACT_BREADCRUMB_BASE:    u32 = 3_000;
 const ACT_TOOLBAR_BACK:       u32 = 4_000;
 const ACT_TOOLBAR_FORWARD:    u32 = 4_001;
@@ -3731,6 +3734,12 @@ fn render_body(lf: &Loft) -> Widget {
             None,
         );
         add_modifier(&mut row, Modifier::DropTarget(ActionId(ACT_DROP_SIDEBAR_BASE + i as u32)));
+        if volume_of(&p.path).is_some() {
+            if let Widget::Row { children, .. } = &mut row {
+                children.push(prefab::icon_button(IconId::Eject, 16,
+                    Some(ActionId(ACT_EJECT_BASE + i as u32)), None));
+            }
+        }
         match p.section {
             Section::Places => places_rows.push(row),
             Section::Bookmarks => bookmark_rows.push(row),
@@ -4574,6 +4583,11 @@ fn handle_action(lf: &mut Loft, id: u32) -> Outcome {
             let target = take_first_segments(&lf.current, n);
             if target == lf.current { return Outcome::Idle; }
             lf.navigate(target);
+            Outcome::Rerender
+        }
+        ACT_EJECT_BASE..ACT_EJECT_END => {
+            let path = lf.sidebar.get((id - ACT_EJECT_BASE) as usize).map(|p| p.path.clone());
+            if let Some(path) = path { lf.eject(&path); }
             Outcome::Rerender
         }
         ACT_SIDEBAR_CLICK_BASE..ACT_SIDEBAR_CLICK_END => {
