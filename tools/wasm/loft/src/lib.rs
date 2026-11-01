@@ -781,6 +781,8 @@ struct Transfer {
     started_ms:  u64,
     /// Sources of a move, deleted once everything is copied.
     moved:       Vec<(String, bool)>,
+    /// When the progress line was last drawn.
+    shown_ms:    u64,
 }
 
 /// A mounted external volume, as `npk_ext_volumes` reports it.
@@ -820,6 +822,7 @@ struct Stream {
 /// One slice of a copy, and the longest a tick spends on it.
 const COPY_CHUNK: usize = 1 << 20;
 const COPY_SLICE_MS: u64 = 40;
+const COPY_SHOW_MS: u64 = 250;
 
 /// A thumbnail of one picture, kept as a canvas in the kernel.
 struct Thumb {
@@ -2040,7 +2043,7 @@ impl Loft {
         let t = self.transfer.get_or_insert_with(|| Transfer {
             scan: Vec::new(), files: Vec::new(), cur: None, files_total: 0, files_done: 0,
             bytes_total: 0, bytes_done: 0, failed: 0, started_ms: host::ticks_ms(),
-            moved: Vec::new(),
+            moved: Vec::new(), shown_ms: 0,
         });
         if is_dir {
             t.scan.push((src, dest));
@@ -2107,7 +2110,12 @@ impl Loft {
         }
         if t.scan.is_empty() && t.files.is_empty() && t.cur.is_none() {
             self.finish_transfer(false);
+            return true;
         }
+        // The progress line a few times a second, not after every slice.
+        let now = host::ticks_ms();
+        if now.saturating_sub(t.shown_ms) < COPY_SHOW_MS { return false; }
+        t.shown_ms = now;
         true
     }
 
@@ -5082,7 +5090,8 @@ pub extern "C" fn _start() {
                 }
             }
             PollResult::Empty => {
-                host::sleep_ms(16);
+                // A copy keeps the drive busy: no pause between its slices.
+                if loft.transfer.is_none() { host::sleep_ms(16); }
 
                 // Progressively fill folder sizes/counts a few per tick.
                 // Skipped while searching (folder stats aren't shown then).
