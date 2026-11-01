@@ -142,8 +142,8 @@ impl Modifiers {
         Modifiers {
             shift: crate::keyboard::is_shift_held(),
             ctrl: crate::keyboard::is_ctrl_held(),
-            alt: false, // no separate Alt tracking yet (AltGr covers Right Alt)
-            alt_gr: crate::keyboard::is_alt_held(), // is_alt_held actually tracks AltGr
+            alt: crate::keyboard::is_alt_held(),
+            alt_gr: crate::keyboard::is_alt_gr_held(),
             super_key: crate::keyboard::is_super_held(),
         }
     }

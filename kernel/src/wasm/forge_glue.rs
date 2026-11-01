@@ -950,7 +950,7 @@ host_imports! {
     // -1 if the app doesn't own a widget window.
     ctx fn npk_close_widget() -> i32;
 
-    // npk_get_fb_size() -> (width << 16) | height
+    // npk_get_fb_size() -> (width << 32) | height, physical px
     ctx fn npk_get_fb_size() -> i64;
 
     // npk_set_wallpaper(ptr, len, width, height) -> 0 or -1

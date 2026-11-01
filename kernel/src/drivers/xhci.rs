@@ -344,7 +344,7 @@ pub fn poll_keyboard() -> Option<u8> {
     None
 }
 
-/// Final byte of the `ESC [ x` sequence for a HID navigation key.
+/// Final byte of the `ESC [ x` sequence for a HID navigation or function key.
 fn nav_seq_final(key: u8) -> Option<u8> {
     Some(match key {
         0x4F => b'C', // Right
@@ -355,6 +355,7 @@ fn nav_seq_final(key: u8) -> Option<u8> {
         0x4D => b'F', // End
         0x4B => b'5', // PgUp
         0x4E => b'6', // PgDn
+        k @ 0x3A..=0x45 => crate::keyboard::FKEY_FINAL + (k - 0x3A), // F1..F12
         _ => return None,
     })
 }
@@ -2403,6 +2404,7 @@ fn hid_stop(h: &mut HidIntf) {
         crate::keyboard::set_super(false);
         crate::keyboard::set_shift(false);
         crate::keyboard::set_ctrl(false);
+        crate::keyboard::set_alt(false);
     }
     if h.pointer && h.input.buttons != 0 {
         inject_pointer(MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0, hscroll: 0 }, true);
@@ -3829,6 +3831,7 @@ pub fn poll_events() {
 fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
     let shift = (modifiers & 0x22) != 0;  // L/R Shift
     let ctrl = (modifiers & 0x11) != 0;   // L/R Ctrl
+    let alt = (modifiers & 0x04) != 0;    // Left Alt
     let alt_gr = (modifiers & 0x40) != 0; // Right Alt (AltGr)
     let super_held = (modifiers & 0x88) != 0; // L/R GUI (Super)
 
@@ -3836,6 +3839,7 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
     crate::keyboard::set_super(super_held);
     crate::keyboard::set_shift(shift);
     crate::keyboard::set_ctrl(ctrl);
+    crate::keyboard::set_alt(alt);
 
     // Use cached layout (IRQ-safe, no allocation)
     let is_de = crate::keyboard::is_de_layout();

@@ -67,6 +67,7 @@ fn push_seq(seq: &[u8]) {
 // Modifier state (shared across all keyboard drivers)
 static SHIFT: AtomicBool = AtomicBool::new(false);
 static CTRL: AtomicBool = AtomicBool::new(false);
+static ALT: AtomicBool = AtomicBool::new(false);
 static ALT_GR: AtomicBool = AtomicBool::new(false);
 static SUPER: AtomicBool = AtomicBool::new(false);
 static CAPS_LOCK: AtomicBool = AtomicBool::new(false);
@@ -83,11 +84,15 @@ pub fn set_shift(held: bool) { SHIFT.store(held, Ordering::Release); }
 /// Set Ctrl key state. Called by any keyboard driver.
 pub fn set_ctrl(held: bool) { CTRL.store(held, Ordering::Release); }
 
+/// Set left Alt state. Called by any keyboard driver. AltGr is separate.
+pub fn set_alt(held: bool) { ALT.store(held, Ordering::Release); }
+
 /// Query modifier state (used by shade::input).
 pub fn is_super_held() -> bool { SUPER.load(Ordering::Acquire) }
 pub fn is_ctrl_held() -> bool { CTRL.load(Ordering::Acquire) }
 pub fn is_shift_held() -> bool { SHIFT.load(Ordering::Acquire) }
-pub fn is_alt_held() -> bool { ALT_GR.load(Ordering::Acquire) }
+pub fn is_alt_held() -> bool { ALT.load(Ordering::Acquire) }
+pub fn is_alt_gr_held() -> bool { ALT_GR.load(Ordering::Acquire) }
 
 // Special key codes (escape sequences sent as ESC [ X)
 const KEY_UP: u8 = 0x80;
@@ -100,6 +105,11 @@ const KEY_PGUP: u8 = 0x86;
 const KEY_PGDN: u8 = 0x87;
 const KEY_DEL: u8 = 0x88;
 const KEY_INSERT: u8 = 0x89;
+
+/// Final byte of `ESC [ x` for F1; F2..F12 follow in order. A private
+/// range: no ANSI sequence ends in a lowercase letter after `ESC [`.
+pub(crate) const FKEY_FINAL: u8 = b'a';
+const FKEY_FINAL_LAST: u8 = FKEY_FINAL + 11;
 
 /// Initialize PS/2 keyboard controller.
 /// Safe on systems without PS/2 (returns silently).
@@ -534,7 +544,7 @@ pub fn poll_ps2_irq() {
 }
 
 /// Read next key as a typed KeyEvent. Converts ANSI escape sequences
-/// (ESC [ A/B/C/D/H/F/2/3/5/6) to KeyCode variants. Captures current
+/// (ESC [ A/B/C/D/H/F/2/3/5/6, a..l for F1..F12) to KeyCode variants. Captures current
 /// modifier state (Shift, Ctrl, Alt, AltGr, Super) in the event.
 pub fn read_event() -> Option<crate::input::KeyEvent> {
     use crate::input::{KeyEvent, KeyCode, Modifiers};
@@ -558,6 +568,7 @@ pub fn read_event() -> Option<crate::input::KeyEvent> {
                             b'6' => KeyCode::PageDown,
                             b'3' => KeyCode::Delete,
                             b'2' => KeyCode::Insert,
+                            c @ FKEY_FINAL..=FKEY_FINAL_LAST => KeyCode::F(c - FKEY_FINAL + 1),
                             _ => return Some(KeyEvent::special(KeyCode::Escape, mods)),
                         };
                         return Some(KeyEvent::special(key, mods));
@@ -786,6 +797,7 @@ fn decode_scancode_char(scancode: u8) -> Option<char> {
     match code {
         0x2A | 0x36 => { SHIFT.store(!released, Ordering::Relaxed); return None; }
         0x1D => { CTRL.store(!released, Ordering::Relaxed); return None; }
+        0x38 => { ALT.store(!released, Ordering::Relaxed); return None; }   // Left Alt
         0x3A => {
             if !released {
                 let prev = CAPS_LOCK.load(Ordering::Relaxed);
@@ -797,6 +809,18 @@ fn decode_scancode_char(scancode: u8) -> Option<char> {
     }
 
     if released { return None; }
+
+    // F1..F10 are 0x3B..0x44, F11/F12 0x57/0x58 (Linux atkbd keymap). On a
+    // notebook these come with Fn, or without it when the Fn lock is on.
+    let fkey = match code {
+        0x3B..=0x44 => Some(code - 0x3B),
+        0x57 | 0x58 => Some(code - 0x57 + 10),
+        _ => None,
+    };
+    if let Some(i) = fkey {
+        push_seq(&[0x1B, b'[', FKEY_FINAL + i]);
+        return None;
+    }
 
     let shift = SHIFT.load(Ordering::Relaxed);
     let ctrl = CTRL.load(Ordering::Relaxed);

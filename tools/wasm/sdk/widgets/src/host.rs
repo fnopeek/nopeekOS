@@ -231,6 +231,16 @@ pub fn screen_size() -> (u32, u32) {
     (v >> 16, v & 0xFFFF)
 }
 
+/// Physical px per logical px, times 1000. Pointer positions in
+/// `Event::MouseMove` / `Event::MouseButton` are physical; widget sizes
+/// are logical. 1000 when the screen size is not known.
+pub fn pixel_scale_milli() -> u32 {
+    let (lw, _) = screen_size();
+    let pw = (sys::fb_size() as u64 >> 32) as u32;
+    if lw == 0 || pw == 0 { return 1000; }
+    (pw as u64 * 1000 / lw as u64) as u32
+}
+
 /// Master volume in percent, or `None`.
 pub fn audio_volume() -> Option<u32> { u32::try_from(sys::audio_get_volume()).ok() }
 

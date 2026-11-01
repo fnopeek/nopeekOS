@@ -434,13 +434,17 @@ const TRASH_DIR: &str = ".trash";
 const TRASH_INDEX: &str = ".index";
 /// Longest side of a thumbnail, the largest grid icon.
 const THUMB_PX: u32 = 128;
-/// The preview pane: its canvas (thumbnails count from 1), picture size,
-/// width, and how much of a text file it reads and shows.
+/// The preview pane: its canvas (thumbnails count from 1), the decoded
+/// picture size (the canvas scales it to the pane), its default and
+/// narrowest width, and how much of a text file it reads and shows.
 const PREVIEW_CANVAS: u32 = 0;
-const PREVIEW_PX: u32 = 256;
+const PREVIEW_PX: u32 = 768;
 const PREVIEW_W: u16 = 280;
-const PREVIEW_BYTES: usize = 4096;
-const PREVIEW_LINES: usize = 40;
+const PREVIEW_W_MIN: u16 = 160;
+const PREVIEW_BYTES: usize = 64 * 1024;
+const PREVIEW_LINES: usize = 1000;
+/// Width of the bar between file area and preview pane that resizes it.
+const GRIP_W: u16 = 5;
 
 /// Upper bound on list-and-delete passes for one directory tree; each pass
 /// removes at least what one `npk_fs_list` buffer holds.
@@ -497,6 +501,7 @@ const ACT_VIEW_HIDDEN:        u32 = 6_109;
 const ACT_ZOOM_IN:            u32 = 6_110;
 const ACT_ZOOM_OUT:           u32 = 6_111;
 const ACT_VIEW_PREVIEW:       u32 = 6_112;
+const ACT_PREVIEW_GRIP:       u32 = 6_113;
 const ACT_GO_HOME:            u32 = 6_200;
 const ACT_GO_FILESYSTEM:      u32 = 6_201;
 const ACT_GO_LOCATION:        u32 = 6_202;
@@ -893,6 +898,19 @@ struct Loft {
     next_canvas:    u32,
     preview_on:     bool,
     preview:        Option<Preview>,
+    /// Width of the preview pane in logical px.
+    preview_w:      u16,
+    grip:           Grip,
+}
+
+/// Resizing the preview pane. A press on the grip arrives as its `Action`
+/// first, then as the raw button with the position the drag starts from.
+#[derive(Clone, Copy, PartialEq)]
+enum Grip {
+    Idle,
+    Armed,
+    /// Pointer x (physical px) and pane width at the press.
+    Drag { x0: i32, w0: u16 },
 }
 
 impl Loft {
@@ -949,6 +967,8 @@ impl Loft {
             next_canvas:   1,
             preview_on:    false,
             preview:       None,
+            preview_w:     PREVIEW_W,
+            grip:          Grip::Idle,
         };
         lf.load_settings();
         lf.rebuild_sidebar();
@@ -1230,6 +1250,20 @@ impl Loft {
             }
         }
         self.preview = Some(Preview { path, stamp, image, text });
+        true
+    }
+
+    /// Follow the pointer while the grip is dragged. The pane is on the
+    /// right, so moving left widens it.
+    fn drag_grip(&mut self, x: i32) -> bool {
+        let Grip::Drag { x0, w0 } = self.grip else { return false };
+        let scale = host::pixel_scale_milli().max(1) as i32;
+        let dx = (x0 - x) * 1000 / scale;
+        let (screen_w, _) = host::screen_size();
+        let max = (screen_w * 2 / 3).clamp(PREVIEW_W_MIN as u32, u16::MAX as u32) as i32;
+        let w = (w0 as i32 + dx).clamp(PREVIEW_W_MIN as i32, max) as u16;
+        if w == self.preview_w { return false; }
+        self.preview_w = w;
         true
     }
 
@@ -2395,6 +2429,7 @@ impl Loft {
                 "zoom" => if let Ok(z) = v.parse::<usize>() { self.zoom = z.min(ZOOM_STEPS.len() - 1) },
                 "bookmark" => if !v.is_empty() { self.bookmarks.push(v.to_string()) },
                 "preview" => self.preview_on = v == "on",
+                "preview_width" => if let Ok(w) = v.parse::<u16>() { self.preview_w = w.max(PREVIEW_W_MIN) },
                 _ => {}
             }
         }
@@ -2410,6 +2445,9 @@ impl Loft {
         out.push_str(if self.sort_asc { "order: asc\n" } else { "order: desc\n" });
         out.push_str(if self.show_hidden { "hidden: show\n" } else { "hidden: hide\n" });
         out.push_str(if self.preview_on { "preview: on\n" } else { "preview: off\n" });
+        out.push_str("preview_width: ");
+        push_usize(&mut out, self.preview_w as usize);
+        out.push('\n');
         out.push_str("zoom: ");
         push_usize(&mut out, self.zoom);
         out.push('\n');
@@ -3228,7 +3266,21 @@ fn render_body(lf: &Loft) -> Widget {
     };
 
     let mut columns = alloc::vec![sidebar, content];
-    if lf.preview_on { columns.push(render_preview(lf)); }
+    if lf.preview_on {
+        columns.push(Widget::Column {
+            children:  Vec::new(),
+            spacing:   0,
+            align:     Align::Stretch,
+            modifiers: alloc::vec![
+                Modifier::MinWidth(GRIP_W),
+                Modifier::MaxWidth(GRIP_W),
+                Modifier::Background(Token::Border),
+                Modifier::Hover(alloc::vec![Modifier::Background(Token::Accent)]),
+                Modifier::OnClick(ActionId(ACT_PREVIEW_GRIP)),
+            ],
+        });
+        columns.push(render_preview(lf));
+    }
     Widget::Row {
         children: columns,
         spacing: 0,
@@ -3242,17 +3294,20 @@ fn render_body(lf: &Loft) -> Widget {
     }
 }
 
-/// The preview pane: the picture or the first lines of text, then the
-/// item's facts. Filled off the idle loop (`pump_preview`).
+/// The preview pane: the picture or the start of a text file, then the
+/// item's facts. Text scrolls both ways in the space the facts leave.
+/// Filled off the idle loop (`pump_preview`).
 fn render_preview(lf: &Loft) -> Widget {
     let text = |t: String, style| Widget::Text { content: t, style, modifiers: alloc::vec![] };
+    let pad = Padding::Md.as_u16();
+    let inner = lf.preview_w.saturating_sub(pad * 2);
     let mut rows: Vec<Widget> = Vec::new();
     match (lf.cursor.and_then(|c| lf.entry_at(c)), &lf.preview) {
         (Some(e), Some(p)) if p.path == join(&lf.current, &e.name) => {
             rows.push(text(basename(&e.name).to_string(), TextStyle::Heading));
             if p.image {
                 rows.push(Widget::Canvas {
-                    id: CanvasId(PREVIEW_CANVAS), width: PREVIEW_PX as u16, height: PREVIEW_PX as u16,
+                    id: CanvasId(PREVIEW_CANVAS), width: inner, height: inner,
                     modifiers: alloc::vec![],
                 });
             }
@@ -3260,12 +3315,16 @@ fn render_preview(lf: &Loft) -> Widget {
                 let body: Vec<Widget> = lines.iter()
                     .map(|l| Widget::Text { content: l.clone(), style: TextStyle::Mono, modifiers: alloc::vec![] })
                     .collect();
-                rows.push(Widget::Column {
-                    children:  body,
-                    spacing:   0,
-                    align:     Align::Start,
+                rows.push(Widget::Scroll {
+                    child: alloc::boxed::Box::new(Widget::Column {
+                        children:  body,
+                        spacing:   0,
+                        align:     Align::Start,
+                        modifiers: alloc::vec![Modifier::Padding(Padding::Sm.as_u16())],
+                    }),
+                    axis:      Axis::Both,
                     modifiers: alloc::vec![
-                        Modifier::Padding(Padding::Sm.as_u16()),
+                        Modifier::Flex(1),
                         Modifier::Background(Token::Page),
                         Modifier::Rounded(Radius::Sm.as_u8()),
                     ],
@@ -3279,17 +3338,14 @@ fn render_preview(lf: &Loft) -> Widget {
         }
         _ => rows.push(text(s().preview_none.to_string(), TextStyle::Muted)),
     }
-    Widget::Scroll {
-        child: alloc::boxed::Box::new(Widget::Column {
-            children:  rows,
-            spacing:   Spacing::Sm.as_u16(),
-            align:     Align::Stretch,
-            modifiers: alloc::vec![Modifier::Padding(Padding::Md.as_u16())],
-        }),
-        axis:      Axis::Vertical,
+    Widget::Column {
+        children:  rows,
+        spacing:   Spacing::Sm.as_u16(),
+        align:     Align::Stretch,
         modifiers: alloc::vec![
-            Modifier::MinWidth(PREVIEW_W),
-            Modifier::MaxWidth(PREVIEW_W),
+            Modifier::Padding(pad),
+            Modifier::MinWidth(lf.preview_w),
+            Modifier::MaxWidth(lf.preview_w),
             Modifier::Background(Token::SurfaceMuted),
         ],
     }
@@ -3677,6 +3733,18 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         }
         Event::InputChangeAt { node: NODE_LOCATION, value } => {
             if lf.location.is_some() { lf.location = Some(value); }
+            Outcome::Idle
+        }
+        Event::Action(ActionId(ACT_PREVIEW_GRIP)) => { lf.grip = Grip::Armed; Outcome::Idle }
+        Event::MouseButton { button: MouseButton::Left, down: true, x, .. } => {
+            lf.grip = if lf.grip == Grip::Armed { Grip::Drag { x0: x, w0: lf.preview_w } } else { Grip::Idle };
+            Outcome::Idle
+        }
+        Event::MouseMove { x, .. } => if lf.drag_grip(x) { Outcome::Rerender } else { Outcome::Idle },
+        Event::MouseButton { button: MouseButton::Left, down: false, .. } => {
+            let dragged = matches!(lf.grip, Grip::Drag { w0, .. } if w0 != lf.preview_w);
+            lf.grip = Grip::Idle;
+            if dragged { lf.save_settings(); }
             Outcome::Idle
         }
         Event::ContextAction(ActionId(id)) => handle_context(lf, id),

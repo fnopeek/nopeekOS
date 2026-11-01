@@ -64,6 +64,7 @@ unsafe extern "C" {
     fn npk_window_set_overlay(w: i32, h: i32) -> i32;
     fn npk_window_titles(buf_ptr: i32, buf_max: i32) -> i32;
     fn npk_screen_size() -> i32;
+    fn npk_get_fb_size() -> i64;
     fn npk_audio_get_volume() -> i32;
     fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_audio_format(slot: i32, rate: i32, encoding: i32, channels: i32) -> i32;
@@ -221,6 +222,8 @@ plain! {
     fn window_set_overlay = npk_window_set_overlay(w: i32, h: i32) -> i32;
     /// `w << 16 | h`.
     fn screen_size = npk_screen_size() -> i32;
+    /// Physical framebuffer size, `w << 32 | h`.
+    fn fb_size = npk_get_fb_size() -> i64;
     fn audio_get_volume = npk_audio_get_volume() -> i32;
     fn audio_set_volume = npk_audio_set_volume(pct: i32) -> i32;
     /// The format of one's own stream `slot`: `encoding` 0 = S16LE,
