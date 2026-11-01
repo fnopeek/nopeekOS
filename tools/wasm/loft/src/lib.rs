@@ -454,6 +454,10 @@ const DELETE_BUDGET: usize = 48;
 /// loft's own settings, and the extension → app table it shares.
 const CONFIG_PATH: &str = "sys/config/loft";
 const ASSOC_PATH: &str = "sys/config/associations";
+/// The file clipboard, shared by every loft window. In loft's private
+/// area, which no other module can write, so no app can plant paths
+/// for a paste to copy or move.
+const CLIP_PATH: &str = "priv/loft/clip";
 /// Grid zoom steps as (columns, icon size in px), smallest icons first.
 const ZOOM_STEPS: [(usize, u16); 5] = [(8, 32), (6, 48), (4, 64), (3, 96), (2, 128)];
 const ZOOM_DEFAULT: usize = 2;
@@ -970,6 +974,7 @@ impl Loft {
             grip:          Grip::Idle,
         };
         lf.load_settings();
+        lf.load_clip();
         lf.rebuild_sidebar();
         if let Some(arg) = host::launch_arg().filter(|a| !a.trim().is_empty()) {
             lf.current = arg.trim().trim_matches('/').to_string();
@@ -1580,12 +1585,39 @@ impl Loft {
     /// True if a paste is possible (clipboard holds something).
     fn can_paste(&self) -> bool { self.clipboard.is_some() }
 
+    /// Write the clipboard where other loft windows read it: the mode,
+    /// then the paths, NUL-separated (a name may hold a newline).
+    fn store_clip(&self) {
+        let Some(clip) = &self.clipboard else { fs_delete(CLIP_PATH); return };
+        let mut out = String::from(if clip.mode == ClipMode::Copy { "copy" } else { "cut" });
+        for p in &clip.items {
+            out.push('\0');
+            out.push_str(p);
+        }
+        host::store(CLIP_PATH, out.as_bytes());
+    }
+
+    /// Take the clipboard another loft window may have set.
+    fn load_clip(&mut self) {
+        let Some(buf) = host::fetch(CLIP_PATH) else { self.clipboard = None; return };
+        let text = String::from_utf8_lossy(&buf);
+        let mut parts = text.split('\0');
+        let mode = match parts.next() {
+            Some("copy") => ClipMode::Copy,
+            Some("cut") => ClipMode::Cut,
+            _ => { self.clipboard = None; return }
+        };
+        let items: Vec<String> = parts.filter(|p| !p.is_empty()).map(String::from).collect();
+        self.clipboard = (!items.is_empty()).then_some(Clip { items, mode });
+    }
+
     /// Ctrl+C / Ctrl+X — remember the targets for a paste.
     fn arm_clipboard(&mut self, mode: ClipMode) {
         let items: Vec<String> = self.targets().into_iter().map(|t| t.full).collect();
         if items.is_empty() { return; }
         let n = num(items.len());
         self.clipboard = Some(Clip { items, mode });
+        self.store_clip();
         let t = if mode == ClipMode::Copy { s().copied } else { s().cut_done };
         self.say(fill(t, &[&n]), false);
     }
@@ -1594,6 +1626,7 @@ impl Loft {
     /// A name that exists already asks first (see `Dialog::Clash`).
     fn do_paste(&mut self) {
         if self.paste.is_some() { return; }
+        self.load_clip();
         let Some(clip) = self.clipboard.take() else { return };
         let mut todo = clip.items.clone();
         todo.reverse();
@@ -1666,7 +1699,8 @@ impl Loft {
         // A copy can be pasted again; a cut keeps only what did not move.
         let mut items = job.all;
         if job.mode == ClipMode::Cut { items.retain(|p| path_exists(p)); }
-        if !items.is_empty() { self.clipboard = Some(Clip { items, mode: job.mode }); }
+        self.clipboard = (!items.is_empty()).then_some(Clip { items, mode: job.mode });
+        self.store_clip();
         self.record(job.steps);
         self.marks.clear();
         self.refresh();
@@ -3624,6 +3658,10 @@ fn handle(lf: &mut Loft, ev: Event) -> Outcome {
         return Outcome::Idle;
     }
     let mods = core::mem::take(&mut lf.mods);
+    if let Event::Focus(true) = ev {
+        if lf.paste.is_none() { lf.load_clip(); }
+        return Outcome::Rerender;
+    }
     if lf.dialog.is_some() {
         // An open waits for the dialog; it would change the folder under it.
         if let Event::Open(arg) = ev {
