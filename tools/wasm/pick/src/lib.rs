@@ -230,7 +230,12 @@ impl Pick {
         let start = parts.next().unwrap_or("").trim();
         let suggest = parts.next().unwrap_or("").trim();
 
-        let dir = if start.is_empty() { read_home_dir() } else { start.to_string() };
+        // The start dir is the requester's hint: one that is gone, or
+        // that folder mode could not grant, opens at home instead, so
+        // Enter never lands on a folder the user did not navigate to.
+        let usable = !start.is_empty() && dir_exists(start)
+            && (mode != Mode::Folder || folder_ok(start));
+        let dir = if usable { start.to_string() } else { read_home_dir() };
 
         let mut p = Pick {
             mode,
@@ -463,6 +468,10 @@ fn clamp_str(s: &str, max: usize) -> &str {
     let mut end = max;
     while end > 0 && !s.is_char_boundary(end) { end -= 1; }
     &s[..end]
+}
+
+fn dir_exists(dir: &str) -> bool {
+    matches!(host::fs_stat(dir), Some((_, true, _)))
 }
 
 fn path_exists(path: &str) -> bool {

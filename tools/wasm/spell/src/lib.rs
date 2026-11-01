@@ -111,6 +111,7 @@ struct Strings {
     open_folder:   &'static str,
     close_folder:  &'static str,
     toggle_tree:   &'static str,
+    reopen_folder: &'static str,
     tree_more:     &'static str,
     menu_edit:     &'static str,
     undo:          &'static str,
@@ -149,7 +150,7 @@ const EN: Strings = Strings {
     zoom_reset: "Actual size ({} px)",
     wrap_on: "Word wrap: on", wrap_off: "Word wrap: off",
     palette: "Command palette", palette_ph: "Type a command",
-    cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n# trim_trailing: yes removes spaces at line ends on save.\n# final_newline: yes ends the file with a line break on save.\n# word_wrap: yes breaks long lines at the window edge.\n# recent / open: recently used files and the tabs open at exit.\n",
+    cfg_header: "# spell settings — one key per line, # is a comment.\n# font: editor size in px (6-64), Ctrl+0 restores 13.\n# trim_trailing: yes removes spaces at line ends on save.\n# final_newline: yes ends the file with a line break on save.\n# word_wrap: yes breaks long lines at the window edge.\n# recent / open: recently used files and the tabs open at exit.\n# folder: the folder last opened; reopening it asks the dialog again.\n",
     about: "About Spell",
     untitled: "Untitled",
     untitled_file: "untitled",
@@ -158,7 +159,7 @@ const EN: Strings = Strings {
     unsaved_body: "{} has unsaved changes.",
     discard: "Discard", cancel: "Cancel",
     step_of: "{} of {}",
-    open_folder: "Open folder\u{2026}", close_folder: "Close folder", toggle_tree: "Show folder", tree_more: "\u{2026} more (fold a folder in)",
+    open_folder: "Open folder\u{2026}", close_folder: "Close folder", toggle_tree: "Show folder", reopen_folder: "Reopen folder", tree_more: "\u{2026} more (fold a folder in)",
     welcome: "Welcome to Spell\n\nStart typing, or open a file via File \u{2192} Open\u{2026} \u{2014} or double-click in loft.\n\nMultiple files open as tabs. Save it with a name and the\nextension decides how it is highlighted.\n",
     menu_edit: "Edit",
     undo: "Undo", redo: "Redo",
@@ -304,6 +305,7 @@ const ACT_TREE_TOGGLE:  u32 = 6_107;
 const ACT_TREE_REFRESH: u32 = 6_108;
 const ACT_OPEN_FOLDER:  u32 = 6_011;
 const ACT_CLOSE_FOLDER: u32 = 6_012;
+const ACT_REOPEN_FOLDER: u32 = 6_013;
 /// Folder tree: the i-th row shown.
 const ACT_TREE_BASE:    u32 = 20_000;
 /// Rows the tree shows at most; past that a "more" line ends it. The
@@ -581,6 +583,9 @@ struct Spell {
     recent:        Vec<String>,
     /// The folder opened with File → Open folder, shown as a tree.
     tree:          Option<Tree>,
+    /// The folder last opened, kept across runs. Only a hint for where
+    /// the dialog starts: access comes from picking it there again.
+    folder:        Option<String>,
     /// The folder pane is shown (Ctrl+B).
     show_tree:     bool,
     /// What the settings file holds. A wheel spin fires a dozen zoom
@@ -646,7 +651,8 @@ impl Spell {
             wrap:          cfg.wrap,
             recent:        cfg.recent.clone(),
             tree:          None,
-            show_tree:     false,
+            folder:        cfg.folder.clone(),
+            show_tree:     cfg.folder.is_some(),
             quit_total:    0,
             quit_done:     0,
             next_uid:      0,
@@ -852,6 +858,7 @@ impl Spell {
             final_nl: self.final_nl,
             wrap:     self.wrap,
             recent:   self.recent.clone(),
+            folder:   self.folder.clone(),
             open:     self.docs.iter().filter_map(|d| d.path.clone()).collect(),
         }
     }
@@ -1274,6 +1281,12 @@ impl Spell {
         pick(PICK_FOLDER, &start, "", TAG_FOLDER);
     }
 
+    /// Ask the dialog again, starting in the remembered folder.
+    fn reopen_folder(&mut self) {
+        self.open_menu = None;
+        if let Some(f) = self.folder.clone() { pick(PICK_FOLDER, &f, "", TAG_FOLDER); }
+    }
+
     /// A row of the tree was clicked: fold a folder, open a file.
     fn tree_click(&mut self, i: usize) {
         let Some(t) = &mut self.tree else { return };
@@ -1530,6 +1543,7 @@ struct Config {
     final_nl: bool,
     wrap:     bool,
     recent:   Vec<String>,
+    folder:   Option<String>,
     open:     Vec<String>,
 }
 
@@ -1537,7 +1551,7 @@ struct Config {
 /// default — a broken config should never keep the editor shut.
 fn read_config() -> Config {
     let mut c = Config { font: MONO_SIZE_PX, trim: false, final_nl: false, wrap: false,
-                         recent: Vec::new(), open: Vec::new() };
+                         recent: Vec::new(), folder: None, open: Vec::new() };
     let Some(buf) = host::fetch(CONFIG_PATH) else { return c };
     let Ok(text) = core::str::from_utf8(&buf) else { return c };
     for line in text.lines() {
@@ -1555,6 +1569,7 @@ fn read_config() -> Config {
             "word_wrap" => c.wrap = yes,
             "recent" if !val.is_empty() && c.recent.len() < MAX_RECENT => c.recent.push(val.to_string()),
             "open" if !val.is_empty() => c.open.push(val.to_string()),
+            "folder" if !val.is_empty() => c.folder = Some(val.to_string()),
             _ => {}
         }
     }
@@ -1576,6 +1591,7 @@ fn write_config(c: &Config) {
     out.push('\n');
     for p in &c.recent { out.push_str("recent: "); out.push_str(p); out.push('\n'); }
     for p in &c.open { out.push_str("open: "); out.push_str(p); out.push('\n'); }
+    if let Some(f) = &c.folder { out.push_str("folder: "); out.push_str(f); out.push('\n'); }
     if !host::store(CONFIG_PATH, out.as_bytes()) { log("[spell] config: store failed"); }
 }
 
@@ -1628,6 +1644,12 @@ fn render(sp: &Spell) -> Widget {
     let below_menu = match (&sp.tree, sp.show_tree) {
         (Some(t), true) => Widget::Row {
             children:  alloc::vec![render_tree(sp, t), main],
+            spacing:   0,
+            align:     Align::Stretch,
+            modifiers: alloc::vec![Modifier::Flex(1)],
+        },
+        (None, true) if sp.folder.is_some() => Widget::Row {
+            children:  alloc::vec![render_reopen(sp.folder.as_deref().unwrap_or("")), main],
             spacing:   0,
             align:     Align::Stretch,
             modifiers: alloc::vec![Modifier::Flex(1)],
@@ -1740,6 +1762,49 @@ fn render_tree(sp: &Spell, t: &Tree) -> Widget {
     }
 }
 
+/// The folder pane before the remembered folder is opened again: its
+/// name and full path, and a button that asks the dialog for it.
+fn render_reopen(folder: &str) -> Widget {
+    let header = Widget::Row {
+        children: alloc::vec![
+            Widget::Text {
+                content:   basename(folder).to_string(),
+                style:     TextStyle::Mono,
+                modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceFaint), Modifier::Flex(1)],
+            },
+            prefab::icon_button(IconId::X, 16, Some(ActionId(ACT_CLOSE_FOLDER)), None),
+        ],
+        spacing:   Spacing::Xxs.as_u16(),
+        align:     Align::Center,
+        modifiers: alloc::vec![Modifier::PaddingXY { x: 8, y: 4 }],
+    };
+    Widget::Column {
+        children: alloc::vec![
+            header,
+            Widget::Column {
+                children: alloc::vec![
+                    Widget::Text {
+                        content:   folder.to_string(),
+                        style:     TextStyle::Caption,
+                        modifiers: alloc::vec![Modifier::Tint(Token::OnSurfaceMuted)],
+                    },
+                    prefab::button(s().reopen_folder, prefab::ButtonStyle::Primary, ActionId(ACT_REOPEN_FOLDER)),
+                ],
+                spacing:   Spacing::Sm.as_u16(),
+                align:     Align::Start,
+                modifiers: alloc::vec![Modifier::PaddingXY { x: 8, y: 8 }],
+            },
+        ],
+        spacing:   0,
+        align:     Align::Stretch,
+        modifiers: alloc::vec![
+            Modifier::MinWidth(TREE_W),
+            Modifier::MaxWidth(TREE_W),
+            Modifier::Background(Token::SurfaceMuted),
+        ],
+    }
+}
+
 /// Everything the palette offers: label, shortcut, action. The same
 /// actions as the menus, so a command behaves the same wherever it runs.
 fn commands(sp: &Spell) -> Vec<(String, &'static str, u32)> {
@@ -1768,7 +1833,10 @@ fn commands(sp: &Spell) -> Vec<(String, &'static str, u32)> {
         v.push((t.view_source.to_string(), "", ACT_VIEW_EDIT));
         v.push((t.view_preview.to_string(), "", ACT_VIEW_PREVIEW));
     }
-    if sp.tree.is_some() {
+    if sp.tree.is_none() && sp.folder.is_some() {
+        v.push((t.reopen_folder.to_string(), "", ACT_REOPEN_FOLDER));
+    }
+    if sp.tree.is_some() || sp.folder.is_some() {
         v.push((t.toggle_tree.to_string(), "Ctrl+B", ACT_TREE_TOGGLE));
         v.push((t.close_folder.to_string(), "", ACT_CLOSE_FOLDER));
     }
@@ -1806,7 +1874,11 @@ fn render_dropdown(sp: &Spell, kind: OpenMenu) -> (u32, Widget) {
                 (s().open_folder.to_string(), ActionId(ACT_OPEN_FOLDER)),
             ];
             let mut keys: Vec<&str> = alloc::vec!["Ctrl+N", "Ctrl+O", "Ctrl+S", "Ctrl+Shift+S", "Ctrl+W", ""];
-            if sp.tree.is_some() {
+            if sp.tree.is_none() && sp.folder.is_some() {
+                items.push((s().reopen_folder.to_string(), ActionId(ACT_REOPEN_FOLDER)));
+                keys.push("");
+            }
+            if sp.tree.is_some() || sp.folder.is_some() {
                 items.push((s().close_folder.to_string(), ActionId(ACT_CLOSE_FOLDER)));
                 keys.push("");
             }
@@ -3436,6 +3508,7 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             if payload.is_empty() { return Outcome::Idle; }
             if tag == TAG_FOLDER {
                 sp.tree = Some(Tree::new(payload));
+                sp.folder = Some(payload.to_string());
                 sp.show_tree = true;
             } else if tag == TAG_OPEN {
                 sp.open_path(payload);
@@ -3483,7 +3556,7 @@ fn handle(sp: &mut Spell, ev: Event, payload: &str) -> Outcome {
             b'/' | b'#' => { sp.toggle_comment(); Outcome::Rerender }
             b'k' if shift => { sp.delete_lines(); Outcome::Rerender }
             b'p' if shift => { sp.open_palette(); Outcome::Rerender }
-            b'b' if sp.tree.is_some() => { sp.show_tree = !sp.show_tree; Outcome::Rerender }
+            b'b' if sp.tree.is_some() || sp.folder.is_some() => { sp.show_tree = !sp.show_tree; Outcome::Rerender }
             _ => Outcome::Idle,
         },
         // Ctrl+wheel. One px per notch: small enough to land on the size
@@ -3607,7 +3680,8 @@ fn handle_action(sp: &mut Spell, id: u32) -> Outcome {
         ACT_WRAP => { sp.open_menu = None; sp.wrap = !sp.wrap; Outcome::Rerender }
         ACT_PALETTE => { sp.open_palette(); Outcome::Rerender }
         ACT_OPEN_FOLDER => { sp.ask_folder(); Outcome::Rerender }
-        ACT_CLOSE_FOLDER => { sp.open_menu = None; sp.tree = None; sp.show_tree = false; Outcome::Rerender }
+        ACT_CLOSE_FOLDER => { sp.open_menu = None; sp.tree = None; sp.folder = None; sp.show_tree = false; Outcome::Rerender }
+        ACT_REOPEN_FOLDER => { sp.reopen_folder(); Outcome::Rerender }
         ACT_TREE_TOGGLE => { sp.show_tree = !sp.show_tree; Outcome::Rerender }
         ACT_TREE_REFRESH => { if let Some(t) = &mut sp.tree { t.refresh(); } Outcome::Rerender }
         ACT_PALETTE_RUN => {
