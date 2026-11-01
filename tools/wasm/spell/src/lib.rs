@@ -1674,23 +1674,23 @@ fn render_body(sp: &Spell) -> Widget {
             ],
         };
     }
-    // Find hits go first: the first span covering a byte wins.
-    let mut spans: Vec<Span> = Vec::new();
+    // Overlays in priority order: find hits, then the bracket next to
+    // the caret and its partner.
+    let mut over: Vec<Span> = Vec::new();
     if let Some(Bar::Find(f)) = &sp.bar {
         for (i, (a, b)) in sp.hits().into_iter().enumerate() {
             let token = if i == f.cur { Token::Accent } else { Token::Warning };
-            spans.push(Span { start: a as u32, len: (b - a) as u32, token });
+            over.push(Span { start: a as u32, len: (b - a) as u32, token });
         }
     }
-    // The bracket next to the caret and its partner.
     let (ca, cc) = doc.history.caret();
     if ca == cc {
         if let Some((x, y)) = bracket_pair(&doc.text, cc as usize) {
-            spans.push(Span { start: x as u32, len: 1, token: Token::Accent });
-            spans.push(Span { start: y as u32, len: 1, token: Token::Accent });
+            over.push(Span { start: x as u32, len: 1, token: Token::Accent });
+            over.push(Span { start: y as u32, len: 1, token: Token::Accent });
         }
     }
-    spans.extend_from_slice(&doc.spans);
+    let spans = overlay_spans(&doc.spans, over);
     let node = doc.node();
     let mut modifiers = alloc::vec![
         Modifier::Flex(1),
@@ -2122,6 +2122,49 @@ fn code_block(lines: &[String]) -> Widget {
 // in `OnSurface`, which is most of a file. They come out sorted by
 // `start` (the scan only ever moves forward), which the compositor's
 // renderer relies on.
+
+/// `base` (sorted, non-overlapping) with `over` laid on top, as the
+/// TextArea contract wants it: sorted by `start`, non-overlapping. An
+/// overlay hides what is under it; among overlays the earlier one wins.
+fn overlay_spans(base: &[Span], over: Vec<Span>) -> Vec<Span> {
+    let mut top: Vec<Span> = Vec::with_capacity(over.len());
+    for o in over {
+        if o.len == 0 { continue; }
+        let (a, b) = (o.start, o.start + o.len);
+        if top.iter().all(|t| b <= t.start || t.start + t.len <= a) {
+            top.push(o);
+        }
+    }
+    if top.is_empty() { return base.to_vec(); }
+    top.sort_unstable_by_key(|t| t.start);
+    let mut out = Vec::with_capacity(base.len() + 2 * top.len());
+    let mut ti = 0;
+    for s in base {
+        let mut a = s.start;
+        let b = s.start + s.len;
+        while ti < top.len() && top[ti].start < b {
+            let t = top[ti];
+            let te = t.start + t.len;
+            if t.start > a {
+                out.push(Span { start: a, len: t.start - a, token: s.token });
+            }
+            if te <= b || te <= a {
+                out.push(t);
+                ti += 1;
+                a = a.max(te);
+            } else {
+                // Runs past this span: emit it once the base catches up.
+                a = b;
+                break;
+            }
+        }
+        if a < b && (ti >= top.len() || top[ti].start >= b) {
+            out.push(Span { start: a, len: b - a, token: s.token });
+        }
+    }
+    out.extend_from_slice(&top[ti..]);
+    out
+}
 
 fn push_span(out: &mut Vec<Span>, start: usize, len: usize, token: Token) {
     if len == 0 { return; }
