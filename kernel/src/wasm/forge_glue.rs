@@ -1407,4 +1407,18 @@ host_imports! {
     mem fn npk_usb_stream_read(handle: i32, sid: i32, buf_ptr: i32, buf_max: i32) -> i32;
     ctx fn npk_usb_stream_close(handle: i32, sid: i32) -> i32;
     ctx fn npk_usb_release(handle: i32) -> i32;
+
+    // The device register (docs/spec/DEVICES.md). Kinds: 0 audio out, 1
+    // audio in, 2 camera.
+    // npk_device_register(kind, rank, id, id_len, name, name_len) -> handle
+    // or -1 (audio drivers, HARDWARE); npk_device_remove(handle) and
+    // npk_device_active(handle) -> 1 / 0 for the entering module.
+    mem fn npk_device_register(kind: i32, rank: i32, id_ptr: i32, id_len: i32, name_ptr: i32, name_len: i32) -> i32;
+    ctx fn npk_device_remove(handle: i32) -> i32;
+    ctx fn npk_device_active(handle: i32) -> i32;
+    // npk_device_list(kind, buf, max) -> bytes of records `handle u32,
+    // flags u8 (1 active), id_len u8, name_len u8, 0, id, name`, or
+    // -(needed + 2); npk_device_select(handle) -> 0 (SHELL).
+    mem fn npk_device_list(kind: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    ctx fn npk_device_select(handle: i32) -> i32;
 }

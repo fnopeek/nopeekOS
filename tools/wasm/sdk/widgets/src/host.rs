@@ -11,6 +11,7 @@ use alloc::vec::Vec;
 use npk_sys as sys;
 
 pub use npk_sys::{fill, read_all, read_all_from, Fill};
+pub use npk_sys::{DEVICE_AUDIO_IN, DEVICE_AUDIO_OUT, DEVICE_CAMERA};
 
 /// Bytes as text; `None` if they are not UTF-8.
 fn text(bytes: Vec<u8>) -> Option<String> {
@@ -246,6 +247,42 @@ pub fn audio_volume() -> Option<u32> { u32::try_from(sys::audio_get_volume()).ok
 
 /// Set the master volume in percent. False if refused.
 pub fn audio_set_volume(pct: u32) -> bool { sys::audio_set_volume(pct.min(100) as i32) >= 0 }
+
+/// One entry of the device register (`docs/spec/DEVICES.md`).
+pub struct Device {
+    pub handle: i32,
+    pub active: bool,
+    pub id: String,
+    pub name: String,
+}
+
+/// The devices of `kind` (`npk_sys::DEVICE_*`), in the order entered;
+/// empty when refused.
+pub fn devices(kind: i32) -> Vec<Device> {
+    let mut buf = alloc::vec![0u8; 1024];
+    let mut n = sys::device_list(kind, &mut buf);
+    if n < -1 {
+        buf = alloc::vec![0u8; (-n - 2) as usize];
+        n = sys::device_list(kind, &mut buf);
+    }
+    let mut out = Vec::new();
+    let Ok(n) = usize::try_from(n) else { return out };
+    let mut at = 0;
+    while at + 8 <= n {
+        let handle = i32::from_le_bytes([buf[at], buf[at + 1], buf[at + 2], buf[at + 3]]);
+        let (flags, il, nl) = (buf[at + 4], buf[at + 5] as usize, buf[at + 6] as usize);
+        let body = at + 8;
+        if body + il + nl > n { break; }
+        let id = String::from_utf8_lossy(&buf[body..body + il]).into_owned();
+        let name = String::from_utf8_lossy(&buf[body + il..body + il + nl]).into_owned();
+        out.push(Device { handle, active: flags & 1 != 0, id, name });
+        at = body + il + nl;
+    }
+    out
+}
+
+/// Make `handle` the active device of its kind. False if refused.
+pub fn device_select(handle: i32) -> bool { sys::device_select(handle) == 0 }
 
 /// Upload BGRA pixels for canvas `id`. False if refused.
 pub fn canvas_commit(id: u32, px: &[u8], w: u32, h: u32) -> bool {

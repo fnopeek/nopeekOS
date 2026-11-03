@@ -13,7 +13,8 @@ in `kernel/src/wasm/host_core.rs`, SDK wrappers `npk_sys::usb_*`.
 | video (0x0E) | `CAMERA` | second byte, bit `0x08` |
 | audio (0x01) | `MIC` | second byte, bit `0x10` |
 
-Other classes have no module path. No default grants either right.
+Other classes have no module path. No default grants either right. A
+video claim takes the active camera of the device register (`DEVICES.md`).
 
 While any stream on a video interface is open, the kernel shows the status
 item `kernel/camera` (state Attention). It is built from the kernel's own

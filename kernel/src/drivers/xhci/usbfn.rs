@@ -398,15 +398,36 @@ fn configure_device(state: &mut XhciState, slot: u8) -> Result<(), FnError> {
     Ok(())
 }
 
+/// A new device without a kernel driver: a camera goes into the device
+/// register (`devices`), by controller, port path and VID:PID.
+pub(super) fn attached(s: &mut XhciState, slot: u8) {
+    if kernel_owned(s, slot) || s.cams.iter().any(|c| c.0 == slot) { return; }
+    let Some(d) = dev_idx(s, slot) else { return };
+    let seen = &s.devs[d].seen;
+    if interfaces(&seen.cfg, Some(CLASS_VIDEO)).is_empty() || seen.device.len() < 18 { return; }
+    let vid = u16::from_le_bytes([seen.device[8], seen.device[9]]);
+    let pid = u16::from_le_bytes([seen.device[10], seen.device[11]]);
+    let a = s.pci_addr;
+    let id = alloc::format!("usb-{:02x}:{:02x}.{}-{}-{:04x}:{:04x}", a.bus, a.device, a.function, seen.port, vid, pid);
+    let name = if seen.product.is_empty() { alloc::string::String::from("USB camera") } else { seen.product.clone() };
+    let name: alloc::string::String = name.chars().take(crate::devices::NAME_MAX).collect();
+    if let Some(h) = crate::devices::register(crate::devices::Kind::Camera, crate::devices::RANK_USB, &id, &name,
+                                              crate::devices::Owner::Kernel) {
+        s.cams.push((slot, h));
+    }
+}
+
 /// Claim every interface of class `class` on the first device that has
-/// one and no driver. Returns the claim and the device and configuration
-/// descriptors.
+/// one and no driver; for video, on the active camera only. Returns the
+/// claim and the device and configuration descriptors.
 pub fn claim(class: u8, owner: u32) -> Result<(u32, Vec<u8>), FnError> {
+    let active_cam = if class == CLASS_VIDEO { crate::devices::active(crate::devices::Kind::Camera) } else { None };
     let mut g = CTRLS.lock();
     for s in g.iter_mut() {
         let slots: Vec<u8> = s.devs.iter().map(|d| d.slot).collect();
         for slot in slots {
             if kernel_owned(s, slot) { continue; }
+            if class == CLASS_VIDEO && !s.cams.iter().any(|c| c.0 == slot && Some(c.1) == active_cam) { continue; }
             let Some(d) = dev_idx(s, slot) else { continue };
             let cfg = s.devs[d].seen.cfg.clone();
             let ifaces = interfaces(&cfg, Some(class));
@@ -843,6 +864,10 @@ pub fn release_owner(owner: u32) {
 /// Device `slot` is gone: its claims, streams and rings. The slot is still
 /// enabled, so buffers are freed only by the caller after Disable Slot.
 pub(super) fn detached(s: &mut XhciState, slot: u8) -> (Vec<DmaRegion>, Vec<(u64, usize)>) {
+    if let Some(i) = s.cams.iter().position(|c| c.0 == slot) {
+        let (_, h) = s.cams.remove(i);
+        crate::devices::remove(h, crate::devices::Owner::Kernel);
+    }
     let mut pages = Vec::new();
     let mut bufs = Vec::new();
     for f in s.fns.iter_mut().filter(|f| f.slot == slot) {
@@ -862,6 +887,9 @@ pub(super) fn detached(s: &mut XhciState, slot: u8) -> (Vec<DmaRegion>, Vec<(u64
 
 /// Everything of the controller, before a reset.
 pub(super) fn forget(s: &mut XhciState) -> Vec<(u64, usize)> {
+    for (_, h) in s.cams.drain(..) {
+        crate::devices::remove(h, crate::devices::Owner::Kernel);
+    }
     let slots: Vec<u8> = s.fn_devs.iter().map(|d| d.slot).collect();
     let mut bufs = Vec::new();
     for slot in slots {

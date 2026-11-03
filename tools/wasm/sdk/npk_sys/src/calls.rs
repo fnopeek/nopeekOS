@@ -934,3 +934,52 @@ pub fn usb_release(handle: i32) -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_usb_release(handle) }
 }
+
+// ── Device register (docs/spec/DEVICES.md) ───────────────────────────
+
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn npk_device_register(kind: i32, rank: i32, id_ptr: i32, id_len: i32, name_ptr: i32, name_len: i32) -> i32;
+    fn npk_device_remove(handle: i32) -> i32;
+    fn npk_device_active(handle: i32) -> i32;
+    fn npk_device_list(kind: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_device_select(handle: i32) -> i32;
+}
+
+pub const DEVICE_AUDIO_OUT: i32 = 0;
+pub const DEVICE_AUDIO_IN: i32 = 1;
+pub const DEVICE_CAMERA: i32 = 2;
+
+/// Ranks for the default rule: the highest present wins.
+pub const RANK_DISPLAY: i32 = 0;
+pub const RANK_BUILTIN: i32 = 1;
+pub const RANK_USB: i32 = 2;
+pub const RANK_JACK: i32 = 3;
+
+/// An audio driver enters one of its devices: the handle, or -1.
+pub fn device_register(kind: i32, rank: i32, id: &str, name: &str) -> i32 {
+    // SAFETY: FFI; both strings are borrowed for the call.
+    unsafe { npk_device_register(kind, rank, id.as_ptr() as i32, id.len() as i32, name.as_ptr() as i32, name.len() as i32) }
+}
+
+pub fn device_remove(handle: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_device_remove(handle) }
+}
+
+/// Whether the caller's entry `handle` is the active one of its kind.
+pub fn device_active(handle: i32) -> bool {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_device_active(handle) == 1 }
+}
+
+/// The records of `kind` into `buf`: bytes, or -(needed + 2), or -1.
+pub fn device_list(kind: i32, buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `buf.len()` bytes into `buf`.
+    unsafe { npk_device_list(kind, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+pub fn device_select(handle: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_device_select(handle) }
+}

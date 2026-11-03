@@ -488,6 +488,8 @@ struct XhciState {
     /// for them.
     fns: Vec<usbfn::UsbFn>,
     fn_devs: Vec<usbfn::FnDev>,
+    /// Cameras in the device register: slot and handle.
+    cams: Vec<(u8, u32)>,
 }
 
 /// One state per controller. Devices of different kinds (keyboard, mouse,
@@ -736,7 +738,7 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
         input_ctx, data_buf,
         devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
         last_fail: ("", 0), failed: Vec::new(), nic: None, msc: Vec::new(),
-        fns: Vec::new(), fn_devs: Vec::new(),
+        fns: Vec::new(), fn_devs: Vec::new(), cams: Vec::new(),
     };
 
     // Power on all ports
@@ -2157,6 +2159,7 @@ fn usb_new_device(state: &mut XhciState, slot: u8) {
         }
     }
     hid_probe(state, slot, &cfg);
+    usbfn::attached(state, slot);
 }
 
 /// Set up every HID interface of device `slot` (`usbhid_probe` for each).

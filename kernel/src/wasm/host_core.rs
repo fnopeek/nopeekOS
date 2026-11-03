@@ -605,7 +605,7 @@ pub(crate) fn npk_audio_device_format(ctx: &mut HostState, rate: i32, encoding: 
         return -1;
     }
     let Some(fmt) = audio_format(rate, encoding, channels) else { return -1 };
-    if crate::audio::set_device_format(fmt) { 0 } else { -1 }
+    if crate::audio::set_device_format(ctx.pid, fmt) { 0 } else { -1 }
 }
 
 fn audio_format(rate: i32, encoding: i32, channels: i32) -> Option<crate::audio::Format> {
@@ -3745,7 +3745,7 @@ pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], ctx: &mut HostState, ptr: i32, 
     }
     if ptr < 0 || max < 0 { return -1; }
     let Some(out) = guest_mut(mem, ptr, max as usize) else { return -1 };
-    crate::audio::poll_mix(out) as i32
+    crate::audio::poll_mix(ctx.pid, out) as i32
 }
 
 /// The PCI class (config 0x0B) of the device this driver owns, if it owns
@@ -5799,4 +5799,63 @@ pub(crate) fn npk_usb_stream_close(ctx: &mut HostState, handle: i32, sid: i32) -
 pub(crate) fn npk_usb_release(ctx: &mut HostState, handle: i32) -> i32 {
     crate::xhci::usbfn::release(handle as u32, ctx.pid);
     0
+}
+
+/// `npk_device_register`: an audio driver enters one of its devices.
+/// Cameras are entered by the kernel only.
+pub(crate) fn npk_device_register(mem: &mut [u8], ctx: &mut HostState, kind: i32, rank: i32, id_ptr: i32,
+                                  id_len: i32, name_ptr: i32, name_len: i32) -> i32 {
+    use crate::devices::{self, Kind, Owner};
+    let Some(kind) = Kind::from_abi(kind).filter(|k| *k != Kind::Camera) else { return -1 };
+    if ctx.pid == 0 || capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+        return -1;
+    }
+    let Ok(rank) = u8::try_from(rank) else { return -1 };
+    let (Some(id), Some(name)) = (read_str(mem, id_ptr, id_len), read_str(mem, name_ptr, name_len)) else { return -1 };
+    match devices::register(kind, rank, &id, &name, Owner::Module(ctx.pid)) {
+        Some(h) => h as i32,
+        None => -1,
+    }
+}
+
+pub(crate) fn npk_device_remove(ctx: &mut HostState, handle: i32) -> i32 {
+    if crate::devices::remove(handle as u32, crate::devices::Owner::Module(ctx.pid)) { 0 } else { -1 }
+}
+
+/// Whether the caller's own entry `handle` is the active one of its kind.
+pub(crate) fn npk_device_active(ctx: &mut HostState, handle: i32) -> i32 {
+    let mine = crate::devices::get(handle as u32).is_some_and(|e| e.owner == crate::devices::Owner::Module(ctx.pid));
+    if !mine { return -1; }
+    match crate::devices::is_active(handle as u32) {
+        Some(a) => a as i32,
+        None => -1,
+    }
+}
+
+/// `npk_device_list(kind, buf, max)`: the shell's device lists.
+pub(crate) fn npk_device_list(mem: &mut [u8], ctx: &mut HostState, kind: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::SHELL).is_err() {
+        return -1;
+    }
+    let Some(kind) = crate::devices::Kind::from_abi(kind) else { return -1 };
+    let (entries, active) = crate::devices::list(kind);
+    let mut out = alloc::vec::Vec::new();
+    for e in &entries {
+        out.extend_from_slice(&e.handle.to_le_bytes());
+        out.push((active == Some(e.handle)) as u8);
+        out.push(e.id.len() as u8);
+        out.push(e.name.len() as u8);
+        out.push(0);
+        out.extend_from_slice(e.id.as_bytes());
+        out.extend_from_slice(e.name.as_bytes());
+    }
+    write_whole(mem, buf_ptr, buf_max, &out)
+}
+
+/// `npk_device_select(handle)`: the user picks the active one of its kind.
+pub(crate) fn npk_device_select(ctx: &mut HostState, handle: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::SHELL).is_err() {
+        return -1;
+    }
+    if crate::devices::select(handle as u32) { 0 } else { -1 }
 }

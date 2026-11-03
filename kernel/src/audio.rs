@@ -208,12 +208,12 @@ fn encode(enc: Encoding, v: i32, out: &mut [u8]) {
 struct Mixer {
     /// Streams by index; a closed slot is reused, so indices stay put.
     slots: alloc::vec::Vec<Slot>,
-    /// What `poll_mix` produces.
-    device: Format,
+    /// What `poll_mix` produces for each driver that set a format.
+    devices: alloc::vec::Vec<(u32, Format)>,
 }
 
 static MIXER: Mutex<Mixer> =
-    Mutex::new(Mixer { slots: alloc::vec::Vec::new(), device: DEFAULT_FORMAT });
+    Mutex::new(Mixer { slots: alloc::vec::Vec::new(), devices: alloc::vec::Vec::new() });
 
 /// A free slot, reused or new. `None` when `owner` already holds its share.
 fn free_slot(slots: &mut alloc::vec::Vec<Slot>, owner: Option<u32>) -> Option<usize> {
@@ -282,14 +282,29 @@ pub fn set_format_for(slot: usize, pid: u32, fmt: Format) -> bool {
     }
 }
 
-/// The audio driver says what it plays: `poll_mix` produces this from now
-/// on. False for a format the mixer cannot produce.
-pub fn set_device_format(fmt: Format) -> bool {
+/// The audio driver `pid` says what it plays: `poll_mix` produces this
+/// for it from now on. False for a format the mixer cannot produce.
+pub fn set_device_format(pid: u32, fmt: Format) -> bool {
     if !fmt.valid(DEVICE_CHANNELS_MAX) {
         return false;
     }
-    MIXER.lock().device = fmt;
+    let mut m = MIXER.lock();
+    match m.devices.iter_mut().find(|d| d.0 == pid) {
+        Some(d) => d.1 = fmt,
+        None => m.devices.push((pid, fmt)),
+    }
     true
+}
+
+/// Whether driver `pid` plays the mix: one of its outputs is the active
+/// one, or it entered none and no output is active at all.
+fn serves(pid: u32) -> bool {
+    use crate::devices::{self, Kind, Owner};
+    let (outs, active) = devices::list(Kind::AudioOut);
+    match active {
+        Some(a) => outs.iter().any(|e| e.handle == a && e.owner == Owner::Module(pid)),
+        None => true,
+    }
 }
 
 /// `close` for a module: only its own slot. Returns false otherwise.
@@ -314,9 +329,11 @@ pub fn buffered_for(slot: usize, pid: u32) -> Option<usize> {
     m.slots.get(slot).filter(|s| owned(s, pid)).map(|s| s.len)
 }
 
-/// Close every slot module `pid` still holds (it has ended).
+/// Close every slot module `pid` still holds (it has ended), and forget
+/// its device format.
 pub fn release_owner(pid: u32) {
     let mut m = MIXER.lock();
+    m.devices.retain(|d| d.0 != pid);
     for s in m.slots.iter_mut().filter(|s| s.active && s.owner == Some(pid)) {
         s.stop();
     }
@@ -383,12 +400,19 @@ pub fn play_oneshot(data: &[u8]) -> bool {
 /// mapping mono to both front channels, then scale by master volume and
 /// clamp. Always fills `out` fully (silence where slots are empty), so the
 /// driver always has a complete buffer. Returns the number of bytes written
-/// (a whole number of frames).
-pub fn poll_mix(out: &mut [u8]) -> usize {
+/// (a whole number of frames). A driver whose output is not the active one
+/// gets silence and takes nothing from the streams.
+pub fn poll_mix(pid: u32, out: &mut [u8]) -> usize {
     let vol = VOLUME.load(Ordering::Relaxed) as i64;
+    let serving = serves(pid);
     let mut m = MIXER.lock();
-    let dev = m.device;
+    let dev = m.devices.iter().find(|d| d.0 == pid).map_or(DEFAULT_FORMAT, |d| d.1);
     let fb = dev.frame_bytes();
+    if !serving {
+        let n = out.len() - out.len() % fb;
+        out[..n].fill(0);
+        return n;
+    }
     let sb = dev.encoding.bytes();
     let chans = dev.channels as usize;
     let frames = out.len() / fb;

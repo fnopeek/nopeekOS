@@ -450,7 +450,7 @@ pub extern "C" fn _start() {
             }
         }
     }
-    let Some(Hda { mmio, iss, fmt, mut out, .. }) = chosen else {
+    let Some(Hda { mmio, iss, fmt, mut out, analog }) = chosen else {
         log("[audio_hda] no usable HDA controller — exit\n");
         return;
     };
@@ -460,6 +460,28 @@ pub extern "C" fn _start() {
     if npk_sys::audio_device_format(fmt.rate as i32, encoding, fmt.channels as i32) != 0 {
         log("[audio_hda] the mixer does not take the device format, exit\n");
         return;
+    }
+    // The output in the device register: it plays while it is the active
+    // one; otherwise the mixer hands it silence.
+    let ids = pci_read_config(0);
+    let mut idb = *b"hda-vvvv:dddd-analog ";
+    for (i, sh) in [12u32, 8, 4, 0].iter().enumerate() {
+        idb[4 + i] = b"0123456789abcdef"[((ids >> sh) & 0xF) as usize];
+        idb[9 + i] = b"0123456789abcdef"[((ids >> (16 + sh)) & 0xF) as usize];
+    }
+    let id = if analog {
+        core::str::from_utf8(&idb[..20]).unwrap_or("hda")
+    } else {
+        idb[14..21].copy_from_slice(b"digital");
+        core::str::from_utf8(&idb[..21]).unwrap_or("hda")
+    };
+    let (rank, name) = if analog {
+        (npk_sys::RANK_BUILTIN, "Speakers and headphones")
+    } else {
+        (npk_sys::RANK_DISPLAY, "HDMI / DisplayPort")
+    };
+    if npk_sys::device_register(npk_sys::DEVICE_AUDIO_OUT, rank, &id, name) < 0 {
+        log("[audio_hda] not in the device register\n");
     }
     let fb_bytes = fmt.frame_bytes();
     let half_bytes = HALF_FRAMES * fb_bytes;
