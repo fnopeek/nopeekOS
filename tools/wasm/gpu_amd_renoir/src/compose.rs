@@ -667,20 +667,20 @@ pub struct jpeg_bufs {
 /// pixels a row. `out_bos` go into the buffer list. Its fence.
 #[allow(clippy::too_many_arguments)]
 pub fn jpeg_submit(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
-                   pitch_px: u32, tag: u32, out_bos: &[usize]) -> Result<Fence, i32> {
-    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch_px >> 4, 0, 0, crate::jpeg_dec::COND_RD_TIMER, tag, out_bos)
+                   pitch_px: u32, out_bos: &[usize]) -> Result<Fence, i32> {
+    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch_px >> 4, 0, 0, out_bos)
 }
 
 /// `jpeg_submit` with the pitch registers as given.
 #[allow(clippy::too_many_arguments)]
 fn jpeg_submit_regs(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
                     pitch: u32, uv_pitch: u32, out_bos: &[usize]) -> Result<Fence, i32> {
-    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch, uv_pitch, 0, crate::jpeg_dec::COND_RD_TIMER, 0, out_bos)
+    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch, uv_pitch, 0, out_bos)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn jpeg_submit_variant(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
-                       pitch: u32, uv_pitch: u32, variant: u32, timer: u32, tag: u32, out_bos: &[usize]) -> Result<Fence, i32> {
+                       pitch: u32, uv_pitch: u32, variant: u32, out_bos: &[usize]) -> Result<Fence, i32> {
     let need = (bitstream.len() as u64).next_multiple_of(PAGE);
     if j.bits.as_ref().is_some_and(|g| g.bytes < need) {
         let g = j.bits.take().unwrap();
@@ -696,9 +696,9 @@ fn jpeg_submit_variant(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_
     if !write(adev, bits, 0, bitstream) {
         return Err(-ENOMEM);
     }
-    let words = crate::jpeg_dec::build_ib_variant(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch,
-                                                      variant & 3, timer);
-    let _ = tag;
+    let mut words = crate::jpeg_dec::build_ib_variant(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch,
+                                                          variant & 3);
+    amdgpu_pad_ib(&mut words);
     if words.len() as u64 * 4 > ib.bytes || !write_words(adev, ib, 0, &words) {
         return Err(-E2BIG);
     }
@@ -725,19 +725,14 @@ pub fn jpeg_done(adev: &mut amdgpu_device, f: &Fence) -> Option<i32> {
     Some(f.error().min(0))
 }
 
-/// `jpeg_done`, and the decode ended by the conditions the IB's own waits
-/// test (Mesa `vcn_jpeg_build_decode_cmd`): the bitstream read to `dwords`
-/// (UVD_JPEG_RB_RPTR) and the output idle (UVD_JPEG_OUTBUF_WPTR bit 0).
-/// The fence alone comes before that: the IB's waits run out and the ring
-/// moves on while the engine still decodes, without the IB's last write
-/// (UVD_JPEG_CNTL 4). The IB clears both registers before its start. A
-/// fence with an error needs no more.
-pub fn jpeg_finished(adev: &mut amdgpu_device, f: &Fence, dwords: u32) -> Option<i32> {
-    let e = jpeg_done(adev, f)?;
-    if e < 0 { return Some(e); }
-    let rptr = crate::jpeg_v2_0::jpeg_rreg_mm(adev, 0x83);
-    let outbuf = crate::jpeg_v2_0::jpeg_rreg_mm(adev, 0x9d);
-    (rptr == dwords && outbuf & 1 != 0).then_some(0)
+/// Mesa `amdgpu_pad_ib` for `AMD_IP_VCN_JPEG`: NOP packets up to a
+/// multiple of 16 dwords (`ib_pad_dw_mask`). The JRBC reads an IB in
+/// 16-dword blocks and leaves a partial last block out.
+fn amdgpu_pad_ib(words: &mut Vec<u32>) {
+    while words.len() & 0xf != 0 {
+        words.push(crate::regs::CP_PACKETJ_NOP);
+        words.push(0);
+    }
 }
 
 /// What the JPEG self-test writes into its buffers before the decode, to
@@ -840,30 +835,6 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                 match gem_new(adev, &c.fpriv, &mut c.mm, None, room, AMDGPU_GEM_DOMAIN_GTT) {
                     Err(_) => say("no 720p output buffer"),
                     Ok(big) => {
-                        // Whether the IB's waits run out on a timer: the fence's and
-                        // the end's time for a few UVD_JRBC_IB_COND_RD_TIMER values.
-                        for timer in [crate::jpeg_dec::COND_RD_TIMER, 0x0140_ffff, 0xffff_0200, 0xffff_ffff, 0] {
-                            let _ = write(adev, &big, 0, &alloc::vec![ST_OUT; room as usize]);
-                            let tag = (bigbits.len() / 4) as u32;
-                            let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, 0, timer, tag,
-                                                            &[big.bo]) else { say("timer submit failed"); break };
-                            let t0 = crate::linux::now_us();
-                            let (mut t_fence, mut t_done) = (None, None);
-                            while crate::linux::now_us() - t0 < 300_000 && t_done.is_none() {
-                                crate::workqueue::run_pending(adev);
-                                crate::amdgpu_irq::amdgpu_ih_process(adev, false);
-                                crate::workqueue::run_pending(adev);
-                                if t_fence.is_none() && jpeg_done(adev, &f).is_some() { t_fence = Some(crate::linux::now_us() - t0); }
-                                if jpeg_finished(adev, &f, tag).is_some() { t_done = Some(crate::linux::now_us() - t0); }
-                            }
-                            let r = crate::jpeg_v2_0::jpeg_rreg_mm;
-                            let mut l = Line::new();
-                            l.s("jpeg timer ").hex(timer).s(": fence ");
-                            match t_fence { Some(t) => { l.dec(t).s(" us"); } None => { l.s("none"); } }
-                            l.s(", end ");
-                            match t_done { Some(t) => { l.dec(t).s(" us"); } None => { l.s("none"); } }
-                            l.s(", cntl ").hex(r(adev, 0x80)).say();
-                        }
                         let mut good = 0u32;
                         let mut first_err = None;
                         for k in 0..30u32 {
@@ -871,8 +842,8 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let mut bos = alloc::vec![big.bo];
                             if let Some(a) = alias.as_ref() { bos.push(a.bo); }
                             let variant = 0;
-                            let tag = (bigbits.len() / 4) as u32;
-                            let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, variant, crate::jpeg_dec::COND_RD_TIMER, tag, &bos) else { say("720p submit failed"); break };
+                            let dwords = (bigbits.len() / 4) as u32;
+                            let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, variant, &bos) else { say("720p submit failed"); break };
                             let t0 = crate::linux::now_us();
                             let mut d = None;
                             if k == 0 {
@@ -917,7 +888,7 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                                 crate::workqueue::run_pending(adev);
                                 crate::amdgpu_irq::amdgpu_ih_process(adev, false);
                                 crate::workqueue::run_pending(adev);
-                                if let Some(e) = jpeg_finished(adev, &f, tag) { d = Some((e, crate::linux::now_us() - t0)); break; }
+                                if let Some(e) = jpeg_done(adev, &f) { d = Some((e, crate::linux::now_us() - t0)); break; }
                                 crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
                             }
                             if d.is_none() {
@@ -927,7 +898,7 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                                     .s(" cntl ").hex(r(adev, 0x80)).s(" outbuf_wptr ").hex(r(adev, 0x9d)).s(" rb_rptr ").hex(r(adev, 0x83))
                                     .s(" rb_wptr ").hex(r(adev, 0x82)).s(" rb_size ").hex(r(adev, 0x84))
                                     .s(" int_stat ").hex(r(adev, 0x8b)).s(" jrbc_status ").hex(crate::jpeg_v2_0::jrbc_status(adev))
-                                    .s(", expected rptr ").hex(tag).say();
+                                    .s(", expected rptr ").hex(dwords).say();
                             }
                             let mut buf = alloc::vec![0u8; room as usize];
                             crate::amdgpu_gart::kptr_read(adev, big.k, 0, &mut buf);
@@ -936,9 +907,9 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let ok = matches!(d, Some((0, _))) && inside as u64 > frame * 9 / 10 && behind == 0;
                             if k < 9 {
                                 let mut l = Line::new();
-                                l.s("jpeg test 720p tagged #").dec(k as u64).s(": ");
+                                l.s("jpeg test 720p #").dec(k as u64).s(": ");
                                 match d { Some((e, us)) => { l.s(if e == 0 { "done in " } else { "error in " }).dec(us).s(" us"); } None => { l.s("no fence"); } }
-                                l.s(", ").dec(inside as u64).s(" of ").dec(frame).s(" B written when the tag was there").say();
+                                l.s(", ").dec(inside as u64).s(" of ").dec(frame).s(" B written at the fence").say();
                             }
                             if ok { good += 1; } else if first_err.is_none() {
                                 first_err = Some(k);
