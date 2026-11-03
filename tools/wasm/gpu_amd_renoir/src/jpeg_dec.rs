@@ -50,6 +50,12 @@ fn pktj(reg: u32, cond: u32, ty: u32) -> u32 {
 /// `vcn_jpeg_build_decode_cmd` for `RDECODE_JPEG_VER_2`, one packed plane
 /// (pitch in pixels, `dt_top_offset[0]` 0), linear.
 pub fn build_ib(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch_px: u32) -> Vec<u32> {
+    build_ib_regs(bitstream_va, bitstream_size, out_va, pitch_px >> 4, 0)
+}
+
+/// `build_ib` with the two pitch registers as given (the self-test tries
+/// which the engine takes for packed output).
+pub fn build_ib_regs(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch: u32, uv_pitch: u32) -> Vec<u32> {
     let mut c = Vec::with_capacity(128);
     let mut set = |reg: u32, cond: u32, ty: u32, val: u32| {
         c.push(pktj(reg, cond, ty));
@@ -73,8 +79,8 @@ pub fn build_ib(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch_px: u
     set(UVD_JPEG_RB_BASE, COND0, TYPE0, 0);
     set(UVD_JPEG_RB_SIZE, COND0, TYPE0, 0xffff_fff0);
     set(UVD_JPEG_RB_WPTR, COND0, TYPE0, bitstream_size >> 2);
-    set(UVD_JPEG_PITCH, COND0, TYPE0, pitch_px >> 4);
-    set(UVD_JPEG_UV_PITCH, COND0, TYPE0, 0);
+    set(UVD_JPEG_PITCH, COND0, TYPE0, pitch);
+    set(UVD_JPEG_UV_PITCH, COND0, TYPE0, uv_pitch);
     set(JPEG_DEC_ADDR_MODE, COND0, TYPE0, dt_addr_mode | (dt_addr_mode << 2));
     set(JPEG_DEC_Y_GFX10_TILING_SURFACE, COND0, TYPE0, tiling);
     set(JPEG_DEC_UV_GFX10_TILING_SURFACE, COND0, TYPE0, tiling);

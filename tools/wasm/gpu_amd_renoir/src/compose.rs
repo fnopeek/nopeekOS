@@ -667,6 +667,13 @@ pub struct jpeg_bufs {
 /// pixels a row. `out_bos` go into the buffer list. Its fence.
 pub fn jpeg_submit(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
                    pitch_px: u32, out_bos: &[usize]) -> Result<Fence, i32> {
+    jpeg_submit_regs(adev, c, j, bitstream, out_va, pitch_px >> 4, 0, out_bos)
+}
+
+/// `jpeg_submit` with the pitch registers as given.
+#[allow(clippy::too_many_arguments)]
+fn jpeg_submit_regs(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
+                    pitch: u32, uv_pitch: u32, out_bos: &[usize]) -> Result<Fence, i32> {
     let need = (bitstream.len() as u64).next_multiple_of(PAGE);
     if j.bits.as_ref().is_some_and(|g| g.bytes < need) {
         let g = j.bits.take().unwrap();
@@ -682,7 +689,7 @@ pub fn jpeg_submit(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs
     if !write(adev, bits, 0, bitstream) {
         return Err(-ENOMEM);
     }
-    let words = crate::jpeg_dec::build_ib(bits.va, bitstream.len() as u32, out_va, pitch_px);
+    let words = crate::jpeg_dec::build_ib_regs(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch);
     if words.len() as u64 * 4 > ib.bytes || !write_words(adev, ib, 0, &words) {
         return Err(-E2BIG);
     }
@@ -749,45 +756,54 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
     l.say();
     let mut bos = alloc::vec![out.bo];
     if let Some(a) = alias.as_ref() { bos.push(a.bo); }
-    let f = match jpeg_submit(adev, c, j, &bits, out.va, hdr.width, &bos) {
-        Ok(f) => f,
-        Err(e) => { Line::new().s("jpeg test: submit failed (").dec((-e) as u64).s(")").say(); return }
-    };
-    let t0 = crate::linux::now_us();
-    let mut done = None;
-    // As the service loop: the scheduler hands the job to the ring from
-    // its work queue, the interrupt signals the fence.
-    while crate::linux::now_us() - t0 < 500_000 {
-        crate::workqueue::run_pending(adev);
-        crate::amdgpu_irq::amdgpu_ih_process(adev, false);
-        crate::workqueue::run_pending(adev);
-        if let Some(e) = jpeg_done(adev, &f) { done = Some(e); break; }
-        crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
-    }
-    let after = fence_word(adev);
-    let mut buf = alloc::vec![0u8; OUT as usize];
-    crate::amdgpu_gart::kptr_read(adev, out.k, 0, &mut buf);
-    let changed = buf.iter().filter(|&&b| b != ST_OUT).count();
-    // Where the written bytes are: the runs, to read the row stride off.
-    let mut runs: Vec<(usize, usize)> = Vec::new();
-    for (i, &b) in buf.iter().enumerate() {
-        if b == ST_OUT { continue; }
-        match runs.last_mut() {
-            Some(r) if r.1 == i => r.1 = i + 1,
-            _ => runs.push((i, i + 1)),
+    let p16 = hdr.width >> 4;
+    let variants: [(&str, u32, u32); 4] = [
+        ("A pitch px/16, uv 0", p16, 0),
+        ("B pitch px/16, uv px/16", p16, p16),
+        ("C pitch bytes/16, uv bytes/16", p16 * 2, p16 * 2),
+        ("D pitch 0, uv px/16", 0, p16),
+    ];
+    let mut all_done = true;
+    for (name, pitch, uv) in variants {
+        let _ = write(adev, &out, 0, &[ST_OUT; OUT as usize]);
+        let f = match jpeg_submit_regs(adev, c, j, &bits, out.va, pitch, uv, &bos) {
+            Ok(f) => f,
+            Err(e) => { Line::new().s("jpeg test: submit failed (").dec((-e) as u64).s(")").say(); return }
+        };
+        let t0 = crate::linux::now_us();
+        let mut done = None;
+        // As the service loop: the scheduler hands the job to the ring from
+        // its work queue, the interrupt signals the fence.
+        while crate::linux::now_us() - t0 < 500_000 {
+            crate::workqueue::run_pending(adev);
+            crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+            crate::workqueue::run_pending(adev);
+            if let Some(e) = jpeg_done(adev, &f) { done = Some(e); break; }
+            crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
         }
+        let mut buf = alloc::vec![0u8; OUT as usize];
+        crate::amdgpu_gart::kptr_read(adev, out.k, 0, &mut buf);
+        let changed = buf.iter().filter(|&&b| b != ST_OUT).count();
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        for (i, &b) in buf.iter().enumerate() {
+            if b == ST_OUT { continue; }
+            match runs.last_mut() {
+                Some(r) if r.1 == i => r.1 = i + 1,
+                _ => runs.push((i, i + 1)),
+            }
+        }
+        let mut l = Line::new();
+        l.s("jpeg test ").s(name).s(": ").s(match done { Some(0) => "done", Some(_) => "error", None => "no fence" })
+            .s(", ").dec(changed as u64).s(" B written, runs");
+        for (a, b) in runs.iter().take(20) { l.s(" ").dec(*a as u64).s("+").dec((b - a) as u64); }
+        if runs.len() > 20 { l.s(" ... (").dec(runs.len() as u64).s(")"); }
+        l.s(", first");
+        for b in &buf[..8] { l.s(" ").hexw(*b as u32, 2); }
+        l.say();
+        if done.is_none() { all_done = false; break; }
     }
-    let mut l = Line::new();
-    l.s("jpeg test: written runs (offset+len):");
-    for (a, b) in runs.iter().take(24) { l.s(" ").dec(*a as u64).s("+").dec((b - a) as u64); }
-    if runs.len() > 24 { l.s(" ... (").dec(runs.len() as u64).s(" runs)"); }
-    l.say();
-    let mut l = Line::new();
-    l.s("jpeg test: ").s(match done { Some(0) => "fence signaled", Some(_) => "fence signaled with an error", None => "no fence after 500 ms" })
-        .s(" after ").dec(crate::linux::now_us() - t0).s(" us; output changed ").dec(changed as u64)
-        .s(" of ").dec((hdr.width * hdr.height * 2) as u64).s(" B, first bytes");
-    for b in &buf[..16] { l.s(" ").hexw(*b as u32, 2); }
-    l.say();
+    let done = if all_done { Some(0) } else { None };
+    let after = fence_word(adev);
     if let Some(a) = alias.as_ref() {
         let mut abuf = alloc::vec![0u8; PAGE as usize];
         crate::amdgpu_gart::kptr_read(adev, a.k, 0, &mut abuf);
