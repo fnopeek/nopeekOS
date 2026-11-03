@@ -668,7 +668,7 @@ pub struct jpeg_bufs {
 #[allow(clippy::too_many_arguments)]
 pub fn jpeg_submit(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
                    pitch_px: u32, tag: u32, out_bos: &[usize]) -> Result<Fence, i32> {
-    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch_px >> 4, 0, 4, tag, out_bos)
+    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch_px >> 4, 0, 0, tag, out_bos)
 }
 
 /// `jpeg_submit` with the pitch registers as given.
@@ -696,12 +696,9 @@ fn jpeg_submit_variant(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_
     if !write(adev, bits, 0, bitstream) {
         return Err(-ENOMEM);
     }
-    let mut words = crate::jpeg_dec::build_ib_variant(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch,
+    let words = crate::jpeg_dec::build_ib_variant(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch,
                                                       variant & 3);
-    // Variant bit 2: the end tag (`jpeg_dec::end_tag`).
-    if variant & 4 != 0 {
-        crate::jpeg_dec::end_tag(&mut words, tag);
-    }
+    let _ = tag;
     if words.len() as u64 * 4 > ib.bytes || !write_words(adev, ib, 0, &words) {
         return Err(-E2BIG);
     }
@@ -728,12 +725,18 @@ pub fn jpeg_done(adev: &mut amdgpu_device, f: &Fence) -> Option<i32> {
     Some(f.error().min(0))
 }
 
-/// `jpeg_done`, and the IB ran to its end: its tag is in the register
-/// (`jpeg_dec::end_tag`). A fence with an error needs no tag.
-pub fn jpeg_finished(adev: &mut amdgpu_device, f: &Fence, tag: u32) -> Option<i32> {
+/// `jpeg_done`, and the IB ran to its end: the engine stopped
+/// (UVD_JPEG_CNTL 4, the stream's last write) with its bitstream read to
+/// `dwords` (UVD_JPEG_RB_RPTR, which the stream sets to 0 as it starts).
+/// The ring's fence alone comes before the decode ends: it waits for
+/// UVD_JRBC_STATUS.IB_JOB_DONE, which stays set from the job before. A
+/// fence with an error needs no more.
+pub fn jpeg_finished(adev: &mut amdgpu_device, f: &Fence, dwords: u32) -> Option<i32> {
     let e = jpeg_done(adev, f)?;
     if e < 0 { return Some(e); }
-    (crate::jpeg_v2_0::jpeg_rreg_mm(adev, crate::jpeg_dec::JPEG_TAG_REG) == tag).then_some(0)
+    let cntl = crate::jpeg_v2_0::jpeg_rreg_mm(adev, 0x80);
+    let rptr = crate::jpeg_v2_0::jpeg_rreg_mm(adev, 0x83);
+    (cntl == 0x4 && rptr == dwords).then_some(0)
 }
 
 /// What the JPEG self-test writes into its buffers before the decode, to
@@ -842,8 +845,8 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let _ = write(adev, &big, 0, &alloc::vec![ST_OUT; room as usize]);
                             let mut bos = alloc::vec![big.bo];
                             if let Some(a) = alias.as_ref() { bos.push(a.bo); }
-                            let variant = 4;
-                            let tag = crate::jpeg_dec::tag_for(1000 + k);
+                            let variant = 0;
+                            let tag = (bigbits.len() / 4) as u32;
                             let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, variant, tag, &bos) else { say("720p submit failed"); break };
                             let t0 = crate::linux::now_us();
                             let mut d = None;

@@ -844,12 +844,13 @@ fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, 
         let (va, pitch_px) = (dst.va, dst.pitch / 2);
         let bos: Vec<usize> = dst.pieces.iter().flatten().map(|p| p.0).chain(dst.linear.map(|g| g.bo)).collect();
         let c = svc.composer.as_mut().ok_or(-EINVAL)?;
-        compose::jpeg_submit(adev, c, &mut svc.jpeg_bufs, &bits, va, pitch_px, crate::jpeg_dec::tag_for(seq), &bos)
+        compose::jpeg_submit(adev, c, &mut svc.jpeg_bufs, &bits, va, pitch_px, 0, &bos)
     })();
+    let bits_len = bits.len();
     svc.jpeg_bits = bits;
     match r {
         Ok(f) => {
-            svc.jpeg = Some((seq, f, crate::linux::now_us(), crate::jpeg_dec::tag_for(seq)));
+            svc.jpeg = Some((seq, f, crate::linux::now_us(), (bits_len / 4) as u32));
             JOB_OPEN
         }
         Err(e) => e,

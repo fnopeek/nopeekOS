@@ -50,32 +50,8 @@ fn pktj(reg: u32, cond: u32, ty: u32) -> u32 {
 
 /// `vcn_jpeg_build_decode_cmd` for `RDECODE_JPEG_VER_2`, one packed plane
 /// (pitch in pixels, `dt_top_offset[0]` 0), linear.
-pub fn build_ib(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch_px: u32, tag: u32) -> Vec<u32> {
-    let mut c = build_ib_regs(bitstream_va, bitstream_size, out_va, pitch_px >> 4, 0);
-    end_tag(&mut c, tag);
-    c
-}
-
-/// The job's tag in UVD_JRBC_IB_REF_DATA, as the stream's last command.
-///
-/// The ring waits for UVD_JRBC_STATUS.IB_JOB_DONE after starting the IB
-/// (`jpeg_v2_0_dec_ring_emit_ib`), but nothing clears that bit between
-/// jobs: from the second job on the ring writes the fence a few
-/// microseconds after the IB started, while its waits for the bitstream
-/// and the output still run. Only an IB that ran to its end has written
-/// the tag; `JPEG_TAG_REG` is where the module reads it.
-pub fn end_tag(c: &mut Vec<u32>, tag: u32) {
-    c.push(pktj(UVD_JRBC_IB_REF_DATA, COND0, TYPE0));
-    c.push(tag);
-}
-
-/// MMIO offset of UVD_JRBC_IB_REF_DATA (vcn_2_0_0_offset.h).
-pub const JPEG_TAG_REG: u32 = 0x10f;
-
-/// A tag for job `seq` that none of the stream's own reference values
-/// (`bitstream_size >> 2`, 0xffffffff, 0, 1 << 16) can be.
-pub fn tag_for(seq: u32) -> u32 {
-    0x8000_0000 | (seq & 0x3fff_ffff) | 0x4000_0000
+pub fn build_ib(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch_px: u32) -> Vec<u32> {
+    build_ib_regs(bitstream_va, bitstream_size, out_va, pitch_px >> 4, 0)
 }
 
 /// `build_ib` with the two pitch registers as given (the self-test tries
