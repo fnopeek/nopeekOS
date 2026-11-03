@@ -1,5 +1,5 @@
 [microvm:firefox-sqfs]
-size=623247360
-sha384=f29baf933cb05eed127f8cd9633ce537a9880cb560a8992b6e8f943db4f376eff16b7d7f7bdf0800ad7b75834975d05e
-url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-159.0-arch20261029-3/microvm-firefox.sqfs
+size=623251456
+sha384=c36424d8d2309ccd19f137092ca77e06b4eff31999089f293f17ba83894fb7f5fa7a3976eb1cae0c0c533745bbb92d94
+url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-159.0-arch20261029-4/microvm-firefox.sqfs
 
