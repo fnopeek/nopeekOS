@@ -76,7 +76,7 @@ ASSET_NAME="microvm-${BUNDLE_NAME}"
 SNAPSHOT_TAG="arch${ARCH_SNAPSHOT//\//}"
 # A second build on the same client and snapshot (packages or PID-1
 # changed) carries a revision: firefox-159.0-arch20261029-2.
-BUNDLE_REV="-3"
+BUNDLE_REV="-4"
 
 OUT_DIR="$REPO_ROOT/release/apps/${BUNDLE_NAME}"
 
@@ -180,6 +180,13 @@ arch_run "$WORK/root" "
     # gles2); the init runs it instead of PID-1's npkwm when the host offers
     # native contexts.
     install -D -m 0755 \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2 \$R/usr/libexec/npk/npkwm-gles2
+    # The guest's portal backend (microvm/linux/portal): Access, without
+    # which xdg-desktop-portal offers no Camera portal.
+    install -D -m 0755 \$REPO_ROOT/microvm/linux/portal/portal-npk \$R/usr/libexec/npk/portal-npk
+    install -D -m 0644 \$REPO_ROOT/microvm/linux/portal/npk.portal \$R/usr/share/xdg-desktop-portal/portals/npk.portal
+    install -D -m 0644 \$REPO_ROOT/microvm/linux/portal/portals.conf \$R/usr/share/xdg-desktop-portal/portals.conf
+    install -D -m 0644 \$REPO_ROOT/microvm/linux/portal/org.freedesktop.impl.portal.desktop.npk.service \
+        \$R/usr/share/dbus-1/services/org.freedesktop.impl.portal.desktop.npk.service
     # The guest's camera on PipeWire (microvm/linux/npkcam/build.sh).
     install -D -m 0755 \$REPO_ROOT/microvm/linux/npkcam/npk-camera \$R/usr/libexec/npk/npk-camera
     for lib in \$(readelf -d \$REPO_ROOT/microvm/linux/npkcam/npk-camera | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
