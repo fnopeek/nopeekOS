@@ -1,6 +1,6 @@
 [package]
 name = "nopeek_widgets"
-version = "0.47.0"
+version = "0.48.0"
 edition = "2024"
 description = "nopeekOS widget SDK — declarative GUI types for WASM apps."
 license = "AGPL-3.0-or-later"
@@ -17,6 +17,8 @@ crate-type = ["rlib"]
 heap = ["dep:talc", "dep:spin"]
 # The PNG decoder (`png` module); pulls in `miniz_oxide`.
 png = ["dep:miniz_oxide"]
+# The baseline JPEG decoder (`jpeg` module): MJPEG camera frames.
+jpeg = []
 
 [dependencies]
 npk_sys = { path = "../npk_sys", features = ["alloc"] }

@@ -1,6 +1,6 @@
 [package]
 name = "cam"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Camera viewer — nopeekOS."
@@ -9,7 +9,7 @@ description = "Camera viewer — nopeekOS."
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap", "jpeg"] }
 npk_sys = { path = "../sdk/npk_sys" }
 
 [dependencies.postcard]

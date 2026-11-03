@@ -318,7 +318,9 @@ fn configure(state: &mut XhciState, slot: u8, drop: &[u8], add: &[(EpInfo, u64)]
     for &dci in drop { drop_flags |= 1 << dci; }
     let mut add_flags = 1u32;
     for (ep, _) in add { add_flags |= 1 << ep.dci(); }
-    state.input_ctx.w32(0u32, drop_flags & !add_flags);
+    // An endpoint in both is dropped and added again: that is how the
+    // controller resets it (`xhci_endpoint_reset`).
+    state.input_ctx.w32(0u32, drop_flags);
     state.input_ctx.w32(4u32, add_flags);
     input_slot_copy(state, d, last.max(1));
     // Context Entries: the last endpoint left, not the largest ever.
@@ -464,8 +466,38 @@ pub fn control(id: u32, owner: u32, bm: u8, req: u8, value: u16, index: u16, out
         }
         let mut v = alloc::vec![0u8; if dir_in { w_length as usize } else { 0 }];
         if dir_in { s.data_buf.copy_out(0u32, &mut v); }
+        // `usb_clear_halt`: the device starts the endpoint at DATA0, so
+        // the host's side is reset too (`usb_reset_endpoint`).
+        if bm == 0x02 && req == USB_REQ_CLEAR_FEATURE && value == USB_ENDPOINT_HALT {
+            reset_endpoint(s, i, index as u8)?;
+        }
         Ok(v)
     })
+}
+
+const USB_REQ_CLEAR_FEATURE: u8 = 0x01;
+const USB_ENDPOINT_HALT: u16 = 0;
+
+/// `xhci_endpoint_reset`: a stream on the endpoint ends, the endpoint is
+/// stopped, dropped and added again on a fresh ring.
+fn reset_endpoint(s: &mut XhciState, i: usize, ep_addr: u8) -> Result<(), FnError> {
+    let slot = s.fns[i].slot;
+    let fd = s.fn_devs.iter().position(|d| d.slot == slot).ok_or(FnError::Gone)?;
+    let e = s.fn_devs[fd].eps.iter().position(|e| e.ep.addr == ep_addr).ok_or(FnError::BadArgument)?;
+    let dci = s.fn_devs[fd].eps[e].ep.dci();
+    if matches!(s.fn_devs[fd].eps[e].ep.xfer(), 0 | 1) { return Ok(()); }
+    let open: Vec<u32> = s.fns[i].streams.iter().filter(|st| st.dci == dci).map(|st| st.id).collect();
+    for sid in open { stream_close_locked(s, i, sid); }
+    post_command(s, 0, 0, TRB_STOP_RING | ((slot as u32) << 24) | ((dci as u32) << 16));
+    let _ = wait_command_completion(s);
+    let ring = s.fn_devs[fd].eps[e].ring;
+    ring.zero();
+    write_trb(ring, FN_RING_TRBS - 1, ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    let ep = s.fn_devs[fd].eps[e].ep;
+    s.fn_devs[fd].eps[e].enq = 0;
+    s.fn_devs[fd].eps[e].cycle = 1;
+    let last = last_dci(&s.fn_devs[fd].eps);
+    configure(s, slot, &[dci], &[(ep, ring.phys())], last)
 }
 
 /// `usb_set_interface`: bandwidth for the new alternate setting first

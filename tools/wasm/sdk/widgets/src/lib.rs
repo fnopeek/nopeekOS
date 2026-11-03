@@ -56,6 +56,8 @@ pub mod history;
 pub mod i18n;
 #[cfg(feature = "png")]
 pub mod png;
+#[cfg(feature = "jpeg")]
+pub mod jpeg;
 pub mod prefab;
 pub mod style;
 pub mod wire;

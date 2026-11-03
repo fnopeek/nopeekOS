@@ -35,7 +35,10 @@ that class, -3 denied, -4 the device refused, -5 bandwidth, -6 memory,
   8-byte SETUP packet. Allowed: recipient interface with the index of a
   claimed interface (not SET_INTERFACE), recipient endpoint with an
   endpoint of a claimed interface, and GET_DESCRIPTOR to the device.
-  Everything else is denied.
+  Everything else is denied. CLEAR_FEATURE(ENDPOINT_HALT) on a bulk or
+  interrupt endpoint also resets the host's side of it (`usb_clear_halt`):
+  a stream open there ends, the endpoint starts again on a fresh ring.
+  A bulk camera with one setting is stopped this way (uvcvideo).
 - `npk_usb_set_alt(handle, ifnum, alt)`: bandwidth first, then
   SET_INTERFACE (Linux `usb_set_interface`). -5 means the controller has no
   room for this setting; pick a smaller one. Streams on the interface end.
