@@ -859,9 +859,16 @@ fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, 
 const JPEG_WATCHDOG_US: u64 = 200_000;
 const ETIMEDOUT: i32 = 110;
 
-/// The JPEG decode ring passed its ring and IB tests.
+/// The JPEG decode ring passed its ring and IB tests, and
+/// `gpu_amd_renoir.jpeg` is `on`. Off by default: on the IdeaPad a decode
+/// hit a Huffman error and the ring's fence read back garbage, with later
+/// buffer adds and copies failing, so decodes are not offered until that
+/// is understood.
 fn jpeg_ready(adev: &amdgpu_device) -> bool {
-    adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready)
+    let mut buf = [0u8; 8];
+    let n = npk_sys::config_get(b"gpu_amd_renoir.jpeg", &mut buf);
+    let on = n > 0 && &buf[..n as usize] == b"on";
+    on && adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready)
 }
 
 /// Complete the JPEG job once its fence signaled. True when it was.
