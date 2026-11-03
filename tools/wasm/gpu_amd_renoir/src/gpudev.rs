@@ -835,7 +835,10 @@ fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, 
         }
         let dst = svc.bo(target).ok_or(-EINVAL)?;
         // Packed YUYV: w / 2 words a row, the whole frame inside the buffer.
-        if dst.pitch < w * 2 || (dst.pitch as u64) * h as u64 > dst.size || dst.pitch % 32 != 0 {
+        // The engine takes the row stride in 256-byte steps (UVD_JPEG_PITCH
+        // in 16 pixels, rounded down): a pitch between them would give rows
+        // that overlap.
+        if dst.pitch < w * 2 || (dst.pitch as u64) * h as u64 > dst.size || dst.pitch % 256 != 0 {
             return Err(-EINVAL);
         }
         let (va, pitch_px) = (dst.va, dst.pitch / 2);

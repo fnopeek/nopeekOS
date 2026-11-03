@@ -802,6 +802,74 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
         l.say();
         if done.is_none() { all_done = false; break; }
     }
+    // The camera's case without the camera: a 1280x720 4:2:2 frame without
+    // DHT (ffmpeg's MJPEG, tables cut out), 30 times, the bitstream
+    // written anew each time, into a buffer with room behind the frame.
+    if all_done {
+        const BIG: &[u8] = include_bytes!("jpeg_selftest_720.jpg");
+        let mut bigbits = Vec::new();
+        match crate::jpeg_dec::normalize(BIG, &mut bigbits) {
+            Err(_) => say("720p picture refused by normalize"),
+            Ok(h2) => {
+                let frame = (h2.width * h2.height * 2) as u64;
+                let room = frame.next_multiple_of(PAGE) + 16 * PAGE;
+                match gem_new(adev, &c.fpriv, &mut c.mm, None, room, AMDGPU_GEM_DOMAIN_GTT) {
+                    Err(_) => say("no 720p output buffer"),
+                    Ok(big) => {
+                        let mut good = 0u32;
+                        let mut first_err = None;
+                        for k in 0..30u32 {
+                            let _ = write(adev, &big, 0, &alloc::vec![ST_OUT; room as usize]);
+                            let mut bos = alloc::vec![big.bo];
+                            if let Some(a) = alias.as_ref() { bos.push(a.bo); }
+                            let Ok(f) = jpeg_submit(adev, c, j, &bigbits, big.va, h2.width, &bos) else { say("720p submit failed"); break };
+                            let t0 = crate::linux::now_us();
+                            let mut d = None;
+                            while crate::linux::now_us() - t0 < 300_000 {
+                                crate::workqueue::run_pending(adev);
+                                crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+                                crate::workqueue::run_pending(adev);
+                                if let Some(e) = jpeg_done(adev, &f) { d = Some((e, crate::linux::now_us() - t0)); break; }
+                                crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
+                            }
+                            let mut buf = alloc::vec![0u8; room as usize];
+                            crate::amdgpu_gart::kptr_read(adev, big.k, 0, &mut buf);
+                            let inside = buf[..frame as usize].iter().filter(|&&b| b != ST_OUT).count();
+                            let behind = buf[frame as usize..].iter().filter(|&&b| b != ST_OUT).count();
+                            let ok = matches!(d, Some((0, _))) && inside as u64 > frame * 9 / 10 && behind == 0;
+                            if ok { good += 1; } else if first_err.is_none() {
+                                first_err = Some(k);
+                                let mut l = Line::new();
+                                l.s("jpeg test 720p: decode ").dec(k as u64).s(": ").s(match d {
+                                    Some((0, _)) => "done", Some(_) => "error", None => "no fence" })
+                                    .s(", ").dec(inside as u64).s(" of ").dec(frame).s(" B written inside, ")
+                                    .dec(behind as u64).s(" behind the frame");
+                                l.say();
+                                crate::jpeg_v2_0::amdgpu_jpeg_dump_ip_state(adev);
+                                crate::jpeg_v2_0::amdgpu_jpeg_print_ip_state(adev);
+                            }
+                            if k == 0 {
+                                let mut l = Line::new();
+                                l.s("jpeg test 720p: first decode ");
+                                match d {
+                                    Some((0, us)) => { l.s("ok in ").dec(us).s(" us"); }
+                                    _ => { l.s("failed"); }
+                                }
+                                l.s(", first");
+                                for b in &buf[..8] { l.s(" ").hexw(*b as u32, 2); }
+                                l.s(", row 360");
+                                for b in &buf[(2560 * 360) as usize..(2560 * 360 + 8) as usize] { l.s(" ").hexw(*b as u32, 2); }
+                                l.say();
+                            }
+                            if d.is_none() { break; }
+                        }
+                        Line::new().s("jpeg test 720p: ").dec(good as u64).s(" of 30 decodes clean").say();
+                        gem_free(adev, &c.fpriv, &mut c.mm, big);
+                    }
+                }
+            }
+        }
+    }
     let done = if all_done { Some(0) } else { None };
     let after = fence_word(adev);
     if let Some(a) = alias.as_ref() {
