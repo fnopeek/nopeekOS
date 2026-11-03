@@ -1127,6 +1127,36 @@ impl Spec {
         }
     }
 
+    /// Every pin's default configuration and capabilities, and every
+    /// input converter with its connections (`snd_hda_parse_pin_defcfg`
+    /// reads the same): where a microphone is wired.
+    pub fn log_inputs(&self) {
+        let c = &self.codec;
+        for nid in c.nodes() {
+            let t = c.wtype(nid);
+            if t == AC_WID_PIN {
+                let cfg = c.pincfg(nid);
+                if (cfg >> 30) & 0x3 == AC_JACK_PORT_NONE {
+                    continue;
+                }
+                loghex("[audio_hda]  pin 0x", nid);
+                loghex(" defcfg 0x", cfg);
+                loghex(" pincaps 0x", c.pin_caps(nid));
+                log("\n");
+            } else if t == AC_WID_AUD_IN {
+                let mut conn = [0u8; NIDS];
+                let n = c.connections(nid, &mut conn);
+                loghex("[audio_hda]  adc 0x", nid);
+                loghex(" wcaps 0x", c.wcaps(nid));
+                log(" from");
+                for &x in &conn[..n] {
+                    loghex(" 0x", x as u32);
+                }
+                log("\n");
+            }
+        }
+    }
+
     /// The parsed outputs, one line each.
     pub fn log_outputs(&self) {
         let kinds: [(&str, usize, &[u8; HDA_MAX_OUTS], &[usize; HDA_MAX_OUTS]); 4] = [

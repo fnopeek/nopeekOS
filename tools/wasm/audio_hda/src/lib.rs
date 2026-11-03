@@ -124,6 +124,7 @@ fn probe_codec(mmio: i32, cad: u32) -> Option<Output> {
     }
     let spec = codec::Spec::parse(c);
     spec.log_outputs();
+    spec.log_inputs();
     Some(Output::Generic(spec))
 }
 
