@@ -876,6 +876,7 @@ pub fn needs_tick() -> bool {
         || terminal::is_dirty()
         || terminal::any_term_dirty()
         || widgets::close_pending()
+        || widgets::canvas::poll_decodes()
         || with_compositor_local(|c| c.needs_tick()).unwrap_or(false)
 }
 

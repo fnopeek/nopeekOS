@@ -109,6 +109,9 @@ mod app {
         decode_ms: u64,
         decoded: u64,
         jpeg_errors: u64,
+        /// MJPEG goes to the GPU until it says it cannot.
+        gpu_jpeg: bool,
+        gpu_busy: u64,
     }
 
     /// Claim the first camera. Err is the line the window shows.
@@ -129,7 +132,7 @@ mod app {
         log(&alloc::format!("[cam] {:04x}:{:04x} UVC {:x}.{:02x}, VC if {}, VS if {}, ep {:#04x}, {} formats, {}",
             vid, pid, cam.uvc_version >> 8, cam.uvc_version & 0xFF, cam.vc_if, cam.vs_if, cam.ep,
             cam.formats.len(), if cam.is_bulk() { "bulk" } else { "isochronous" }));
-        Ok(Cam { handle: h, cam, vid, pid, mode: Mode::P720, stream: None, jpeg: jpeg::Decoder::new(), decode_ms: 0, decoded: 0, jpeg_errors: 0 })
+        Ok(Cam { handle: h, cam, vid, pid, mode: Mode::P720, stream: None, jpeg: jpeg::Decoder::new(), decode_ms: 0, decoded: 0, jpeg_errors: 0, gpu_jpeg: true, gpu_busy: 0 })
     }
 
     /// The format and frame for `mode`: its preferred kind at that size,
@@ -154,7 +157,8 @@ mod app {
                 npk_sys::usb_stream_close(self.handle, st.sid);
                 let ms = (host::ticks_ms() - st.started).max(1);
                 let fps = st.dec.stats.frames * 1000 / ms;
-                log(&alloc::format!("[cam] stopped {}: {}", st.desc, stats_line(&st.dec.stats, fps, self.avg_ms())));
+                log(&alloc::format!("[cam] stopped {}: {}{}", st.desc, stats_line(&st.dec.stats, fps, self.avg_ms()),
+                    if st.kind == uvc::Kind::Mjpeg && self.gpu_jpeg { "  GPU decode" } else { "" }));
             }
             // `uvc_video_stop_streaming`: setting 0, or for a bulk camera
             // with one setting CLEAR_FEATURE(ENDPOINT_HALT) on its
@@ -466,6 +470,16 @@ mod app {
                 if let Some(f) = done.iter().rev().find(|f| !f.error) {
                     let (w, h) = (st.width, st.height);
                     match st.kind {
+                        uvc::Kind::Mjpeg if c.gpu_jpeg => {
+                            match host::canvas_jpeg(CANVAS_ID, &f.data, w as u32, h as u32) {
+                                host::JpegFrame::Queued => c.decoded += 1,
+                                host::JpegFrame::Busy => c.gpu_busy += 1,
+                                host::JpegFrame::Unsupported => {
+                                    c.gpu_jpeg = false;
+                                    log("[cam] no GPU JPEG decode, decoding on the CPU");
+                                }
+                            }
+                        }
                         uvc::Kind::Mjpeg => {
                             let t0 = host::ticks_ms();
                             // The smallest scale that still fills the
@@ -519,6 +533,10 @@ mod app {
                     frames_at_tick = st.dec.stats.frames;
                     let mut line = stats_line(&st.dec.stats, fps, c.avg_ms());
                     if c.jpeg_errors > 0 { line.push_str(&alloc::format!("  jpeg errors {}", c.jpeg_errors)); }
+                    if st.kind == uvc::Kind::Mjpeg {
+                        line.push_str(if c.gpu_jpeg { "  GPU decode" } else { "  CPU decode" });
+                        if c.gpu_busy > 0 { line.push_str(&alloc::format!(" (dropped {})", c.gpu_busy)); }
+                    }
                     let desc = st.desc.clone();
                     commit(Some(&c), &desc, &line);
                 }

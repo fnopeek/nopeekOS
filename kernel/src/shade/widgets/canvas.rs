@@ -223,10 +223,70 @@ fn note_frame(window_id: u32, canvas_id: u32) {
     if !d.contains(&(window_id, canvas_id)) { d.push((window_id, canvas_id)); }
 }
 
+/// JPEG frames the GPU module decodes into a frame layer: (window,
+/// canvas, job). The layer is damaged when the job is done.
+static DECODING: Mutex<Vec<(u32, u32, u32)>> = Mutex::new(Vec::new());
+
+/// Hand an MJPEG frame of `w` x `h` (baseline 4:2:2) to the GPU module,
+/// which decodes it into the canvas's YUYV frame layer. 0 when queued,
+/// -2 while the canvas's last frame is still being decoded (the frame is
+/// dropped), -1 when there is no GPU decode or the frame is refused.
+pub fn commit_jpeg(window_id: u32, canvas_id: u32, w: u32, h: u32, jpeg: &[u8]) -> i32 {
+    use crate::shade::scene::Yuv;
+    if !crate::gpu::gpudev::jpeg_supported() { return -1; }
+    if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM || w % 16 != 0 || h % 8 != 0 { return -1; }
+    if DECODING.lock().iter().any(|&(wi, c, _)| wi == window_id && c == canvas_id) { return -2; }
+    let bw = w / 2;
+    let phys = {
+        let map = CANVASES.lock();
+        let reuse = map.get(&(window_id, canvas_id)).and_then(|b| match &b.px {
+            Pixels::Frame(buf, Yuv::Full) if b.w == w && b.h == h => Some(buf.phys()),
+            _ => None,
+        });
+        match reuse {
+            Some(p) => p,
+            None => {
+                drop(map);
+                let buf = crate::shade::buffers::PixelBuffer::new(bw, h);
+                if buf.is_empty() { return -1; }
+                let p = buf.phys();
+                if !insert_within_caps(window_id, canvas_id, Bitmap { w, h, px: Pixels::Frame(buf, Yuv::Full) }) {
+                    return -1;
+                }
+                p
+            }
+        }
+    };
+    // Registered as the scene will name it (`gpu_scene::source_bo`).
+    let Some(id) = crate::gpu::gpudev::bo_for(phys, bw as u64 * h as u64 * 4, bw, h, bw * 4) else { return -1 };
+    let Some(seq) = crate::gpu::gpudev::submit_jpeg(id, w, h, jpeg.to_vec()) else { return -1 };
+    DECODING.lock().push((window_id, canvas_id, seq));
+    0
+}
+
+/// Whether a decode is still running; one that finished asks for a render
+/// so its frame shows at once.
+pub fn poll_decodes() -> bool {
+    let list = DECODING.lock();
+    if list.is_empty() { return false; }
+    if list.iter().any(|&(_, _, seq)| crate::gpu::gpudev::job_finished(seq)) {
+        crate::shade::request_render();
+    }
+    true
+}
+
 /// The rects of the frames committed since the last call, on the screen
 /// (canvas rects are relative to their window's content origin).
 pub fn take_frame_damage() -> Vec<(i32, i32, u32, u32)> {
-    let list = core::mem::take(&mut *FRAME_DAMAGE.lock());
+    let mut list = core::mem::take(&mut *FRAME_DAMAGE.lock());
+    // Decodes that finished: their layer shows the new frame.
+    DECODING.lock().retain(|&(w, c, seq)| match crate::gpu::gpudev::job_status(seq) {
+        None => true,
+        Some(status) => {
+            if status == 0 && !list.contains(&(w, c)) { list.push((w, c)); }
+            false
+        }
+    });
     list.iter().filter_map(|&(w, c)| {
         let (x, y, rw, rh) = RECTS.lock().get(&(w, c)).copied()?;
         let (ox, oy) = super::origin_of(w)?;

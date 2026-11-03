@@ -3269,11 +3269,23 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
 /// not rasterized again, only the canvas rect is composed, and the GPU
 /// scales the frame. Format 0 = BGRA32, 1 = packed YUYV BT.601 limited
 /// (a camera's YUY2), 2 = packed YUYV full range; YUYV has an even width.
+/// 3 = an MJPEG frame (baseline 4:2:2, `len` bytes) the GPU module decodes
+/// into a YUYV layer: -1 without GPU decode, -2 while the last is still
+/// being decoded (dropped).
 pub(crate) fn npk_canvas_frame(mem: &mut [u8], ctx: &mut HostState, canvas_id: i32, ptr: i32, len: i32,
                                width: i32, height: i32, format: i32) -> i32 {
     if capability::check_global(&ctx.cap_id, capability::Rights::CANVAS).is_err() { return -1; }
     let wid = ctx.widget_window_id;
     use crate::shade::scene::Yuv;
+    if format == 3 {
+        if wid == 0 || width <= 0 || height <= 0 || len <= 0 { return -1; }
+        let n = len as usize;
+        if n > crate::shade::widgets::canvas::window_budget() { return -1; }
+        let Some(src) = guest(mem, ptr, n) else { return -1 };
+        let r = crate::shade::widgets::canvas::commit_jpeg(wid, canvas_id as u32, width as u32, height as u32, src);
+        if r == 0 { crate::shade::request_render(); }
+        return r;
+    }
     let yuv = match format { 0 => Yuv::None, 1 => Yuv::Limited, 2 => Yuv::Full, _ => return -1 };
     if wid == 0 || width <= 0 || height <= 0 { return -1; }
     let bpp = if yuv == Yuv::None { 4 } else { 2 };

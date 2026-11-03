@@ -652,3 +652,59 @@ impl plan::sink for gpu_sink<'_> {
         Ok(())
     }
 }
+
+/// The buffers a JPEG decode reads: the bitstream and the command stream,
+/// kept from frame to frame and grown when a frame needs more.
+#[derive(Default)]
+pub struct jpeg_bufs {
+    bits: Option<gem>,
+    ib: Option<gem>,
+}
+
+/// One JPEG decode on the JPEG ring (`amdgpu_cs_ioctl`, the IB checked by
+/// `amdgpu_jpeg_dec_parse_cs` as a guest's is): `bitstream` from
+/// `jpeg_dec::normalize` into the YUYV buffer at `out_va`, `pitch_px`
+/// pixels a row. `out_bos` go into the buffer list. Its fence.
+pub fn jpeg_submit(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
+                   pitch_px: u32, out_bos: &[usize]) -> Result<Fence, i32> {
+    let need = (bitstream.len() as u64).next_multiple_of(PAGE);
+    if j.bits.as_ref().is_some_and(|g| g.bytes < need) {
+        let g = j.bits.take().unwrap();
+        gem_free(adev, &c.fpriv, &mut c.mm, g);
+    }
+    if j.bits.is_none() {
+        j.bits = Some(gem_new(adev, &c.fpriv, &mut c.mm, None, need.next_power_of_two(), AMDGPU_GEM_DOMAIN_GTT)?);
+    }
+    if j.ib.is_none() {
+        j.ib = Some(gem_new(adev, &c.fpriv, &mut c.mm, None, PAGE, AMDGPU_GEM_DOMAIN_GTT)?);
+    }
+    let (bits, ib) = (j.bits.as_ref().unwrap(), j.ib.as_ref().unwrap());
+    if !write(adev, bits, 0, bitstream) {
+        return Err(-ENOMEM);
+    }
+    let words = crate::jpeg_dec::build_ib(bits.va, bitstream.len() as u32, out_va, pitch_px);
+    if words.len() as u64 * 4 > ib.bytes || !write_words(adev, ib, 0, &words) {
+        return Err(-E2BIG);
+    }
+    let chunk = cs::drm_amdgpu_cs_chunk_ib {
+        flags: 0,
+        va_start: ib.va,
+        ib_bytes: words.len() as u32 * 4,
+        ip_type: AMDGPU_HW_IP_VCN_JPEG,
+        ip_instance: 0,
+        ring: 0,
+    };
+    let mut list = alloc::vec![bits.bo, ib.bo];
+    list.extend_from_slice(out_bos);
+    let ctx = c.ctx;
+    let (_, fence) = cs::amdgpu_cs_ioctl(adev, &mut c.fpriv, ctx, &[chunk], &list)?;
+    Ok(fence)
+}
+
+/// Whether a JPEG decode's fence signaled, and with what.
+pub fn jpeg_done(adev: &mut amdgpu_device, f: &Fence) -> Option<i32> {
+    if !dma_fence::dma_fence_is_signaled(adev, f) {
+        return None;
+    }
+    Some(f.error().min(0))
+}

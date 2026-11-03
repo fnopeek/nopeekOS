@@ -265,11 +265,33 @@ pub mod frame {
     pub const YUYV: i32 = 1;
     /// Packed YUYV, full range (JFIF).
     pub const YUYV_FULL: i32 = 2;
+    /// An MJPEG frame (baseline 4:2:2) the GPU decodes into the layer.
+    pub const MJPEG: i32 = 3;
 }
 
 /// `canvas_frame` in format `fmt` (`frame::*`); the GPU converts.
 pub fn canvas_frame_as(id: u32, px: &[u8], w: u32, h: u32, fmt: i32) -> bool {
     sys::canvas_frame(id as i32, px, w as i32, h as i32, fmt) >= 0
+}
+
+/// What `canvas_jpeg` did with a frame.
+pub enum JpegFrame {
+    /// The GPU decodes it into the layer.
+    Queued,
+    /// The last frame is still being decoded; this one was dropped.
+    Busy,
+    /// No GPU decode here (or the frame is not baseline 4:2:2): decode it
+    /// yourself.
+    Unsupported,
+}
+
+/// An MJPEG frame of `w` x `h` for canvas `id`, decoded on the GPU.
+pub fn canvas_jpeg(id: u32, jpeg: &[u8], w: u32, h: u32) -> JpegFrame {
+    match sys::canvas_frame(id as i32, jpeg, w as i32, h as i32, frame::MJPEG) {
+        0 => JpegFrame::Queued,
+        -2 => JpegFrame::Busy,
+        _ => JpegFrame::Unsupported,
+    }
 }
 
 /// Free canvas `id`. False if there was none.

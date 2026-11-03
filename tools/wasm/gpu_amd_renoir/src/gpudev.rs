@@ -47,6 +47,9 @@ const OP_CURSOR_MOVE: u32 = 12;
 /// `a0` level in hundredths of a percent of the backlight's range, `a1` 1 =
 /// set it, 0 = only read. The status is the level then.
 const OP_BACKLIGHT: u32 = 13;
+/// `a0` target buffer (packed YUYV, `a2` x `a3` pixels), `a1` length; the
+/// payload is a baseline 4:2:2 JPEG, decoded on the JPEG block.
+const OP_JPEG: u32 = 14;
 /// The top of `OP_BACKLIGHT`'s scale.
 const BACKLIGHT_SCALE: u32 = 10_000;
 const MAX_CURSOR: u32 = 256;
@@ -59,10 +62,15 @@ const CAP_NATIVE: i32 = 4;
 const CAP_CURSOR: i32 = 8;
 const CAP_PRESENT: i32 = 16;
 const CAP_BACKLIGHT: i32 = 32;
+/// It decodes JPEG frames into scene buffers (`OP_JPEG`).
+const CAP_JPEG: i32 = 64;
+/// Largest JPEG frame taken.
+const MAX_JPEG: u32 = 16 << 20;
 const JOB_BYTES: usize = 32;
 const BO_INFO_BYTES: usize = 40;
 const NUM_BOS: usize = 3;
 const MAX_DYN: usize = 256;
+const EBUSY: i32 = 16;
 const EINVAL: i32 = 22;
 const ENOSPC: i32 = 28;
 const ENOMEM: i32 = 12;
@@ -404,6 +412,11 @@ struct service {
     named: core::cell::RefCell<Vec<u32>>,
     /// With DC driving the panel: the buffers it shows.
     present: Option<present>,
+    /// The JPEG decode on the JPEG ring, its job still open (seq, fence),
+    /// its buffers, and the bitstream being built.
+    jpeg: Option<(u32, crate::dma_fence::Fence)>,
+    jpeg_bufs: compose::jpeg_bufs,
+    jpeg_bits: Vec<u8>,
 }
 
 /// A buffer the display shows: its MC address and pitch, and what of the
@@ -782,6 +795,69 @@ fn run_scene(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32,
     }
 }
 
+/// `OP_JPEG`: the frame from the payload normalised (`jpeg_dec`) and
+/// decoded on the JPEG ring into the target, its job left open until
+/// `poll_jpeg` sees it done. One at a time: while one runs, the next is
+/// refused (the kernel drops that frame), so a stuck decode never holds
+/// the scenes behind it.
+fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, len: u32, w: u32, h: u32) -> i32 {
+    if svc.jpeg.is_some() && !poll_jpeg(adev, svc) {
+        return -EBUSY;
+    }
+    if len == 0 || len > MAX_JPEG {
+        return -EINVAL;
+    }
+    let mut src = alloc::vec![0u8; len as usize];
+    let mut at = 0usize;
+    while at < src.len() {
+        let n = npk_sys::gpudev_job_data(seq as i32, at as i32, &mut src[at..]);
+        if n <= 0 {
+            return -EINVAL;
+        }
+        at += n as usize;
+    }
+    let mut bits = core::mem::take(&mut svc.jpeg_bits);
+    let hdr = crate::jpeg_dec::normalize(&src, &mut bits);
+    let r = (|| -> Result<crate::dma_fence::Fence, i32> {
+        let hdr = hdr?;
+        if hdr.width != w || hdr.height != h {
+            return Err(-EINVAL);
+        }
+        let dst = svc.bo(target).ok_or(-EINVAL)?;
+        // Packed YUYV: w / 2 words a row, the whole frame inside the buffer.
+        if dst.pitch < w * 2 || (dst.pitch as u64) * h as u64 > dst.size || dst.pitch % 32 != 0 {
+            return Err(-EINVAL);
+        }
+        let (va, pitch_px) = (dst.va, dst.pitch / 2);
+        let bos: Vec<usize> = dst.pieces.iter().flatten().map(|p| p.0).chain(dst.linear.map(|g| g.bo)).collect();
+        let c = svc.composer.as_mut().ok_or(-EINVAL)?;
+        compose::jpeg_submit(adev, c, &mut svc.jpeg_bufs, &bits, va, pitch_px, &bos)
+    })();
+    svc.jpeg_bits = bits;
+    match r {
+        Ok(f) => {
+            svc.jpeg = Some((seq, f));
+            JOB_OPEN
+        }
+        Err(e) => e,
+    }
+}
+
+/// The JPEG decode ring passed its ring and IB tests.
+fn jpeg_ready(adev: &amdgpu_device) -> bool {
+    adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready)
+}
+
+/// Complete the JPEG job once its fence signaled. True when it was.
+fn poll_jpeg(adev: &mut amdgpu_device, svc: &mut service) -> bool {
+    let Some((seq, f)) = svc.jpeg.as_ref() else { return false };
+    let Some(r) = compose::jpeg_done(adev, f) else { return false };
+    let seq = *seq;
+    svc.jpeg = None;
+    npk_sys::gpudev_complete(seq as i32, r);
+    true
+}
+
 /// Complete the scene's job once its fence signaled. True when it was.
 fn poll_scene(adev: &mut amdgpu_device, svc: &mut service) -> bool {
     let Some((_, _, _, s)) = svc.scene.as_ref() else { return false };
@@ -933,6 +1009,7 @@ fn run_job(adev: &mut amdgpu_device, svc: &mut service, job: &[u8]) -> i32 {
         OP_CURSOR_MOVE => crate::amdgpu_dm::dm_cursor_move(adev, w(2) as i32, w(3) as i32, w(4) != 0),
         OP_BACKLIGHT => backlight(adev, (w(3) != 0).then_some(w(2))),
         OP_SCENE if svc.composer.is_some() => run_scene(adev, svc, seq, w(2), w(3)),
+        OP_JPEG if svc.composer.is_some() => run_jpeg(adev, svc, seq, w(2), w(3), w(4), w(5)),
         OP_CLIENT => {
             if w(3) != 0 {
                 crate::amdgpu_virtio::client_open(adev, &mut svc.native, w(2))
@@ -1217,7 +1294,8 @@ pub fn serve(adev: &mut amdgpu_device) {
     }
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
                             scene: None, scenes: 0, native: Default::default(), waits: Vec::new(),
-                            guest_bos: Vec::new(), named: core::cell::RefCell::new(Vec::new()), present: None };
+                            guest_bos: Vec::new(), named: core::cell::RefCell::new(Vec::new()), present: None,
+                            jpeg: None, jpeg_bufs: Default::default(), jpeg_bits: Vec::new() };
     for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
@@ -1298,7 +1376,8 @@ pub fn serve(adev: &mut amdgpu_device) {
     let caps = if svc.copy_ok { CAP_COPY } else { 0 } | if scene_ok { CAP_SCENE } else { 0 }
         | if native_ok { CAP_NATIVE } else { 0 } | if adev.dm.live.is_some() { CAP_CURSOR } else { 0 }
         | if svc.present.is_some() { CAP_PRESENT } else { 0 }
-        | if adev.dm.backlight_dev[0].is_some() { CAP_BACKLIGHT } else { 0 };
+        | if adev.dm.backlight_dev[0].is_some() { CAP_BACKLIGHT } else { 0 }
+        | if scene_ok && jpeg_ready(adev) { CAP_JPEG } else { 0 };
     npk_sys::gpudev_ready(caps);
     if caps == 0 {
         unbind(adev, &mut svc);
@@ -1310,7 +1389,7 @@ pub fn serve(adev: &mut amdgpu_device) {
     let mut jobs = [0u8; JOB_BYTES * 8];
     let (mut done, mut failed) = (0u64, 0u64);
     loop {
-        let idle_ms = if svc.scene.is_some() { 2 } else { 100 };
+        let idle_ms = if svc.scene.is_some() || svc.jpeg.is_some() { 2 } else { 100 };
         // Queued work runs now, as a kworker would; a timer bounds the sleep.
         let timer_ms = crate::workqueue::next_timer_us(adev).map_or(i32::MAX, |us| us.div_ceil(1000) as i32);
         let wait_ms = crate::amdgpu_virtio::fence_wait_ms(&svc.waits).min(idle_ms).min(timer_ms);
@@ -1323,6 +1402,7 @@ pub fn serve(adev: &mut amdgpu_device) {
             present_poll(adev, p);
         }
         poll_scene(adev, &mut svc);
+        poll_jpeg(adev, &mut svc);
         crate::amdgpu_virtio::poll_rings(adev, &mut svc.native);
         poll_waits(adev, &mut svc);
         let n = npk_sys::gpudev_poll(&mut jobs);

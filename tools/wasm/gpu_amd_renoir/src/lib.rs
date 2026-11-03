@@ -140,6 +140,7 @@ mod amdgpu_cs;
 mod shaders_gen;
 mod radv_stream;
 mod compose;
+mod jpeg_dec;
 mod amdgpu_psp;
 mod amdgpu_ras;
 mod amdgpu_smu;

@@ -80,6 +80,10 @@ pub const OP_CURSOR_MOVE: u32 = 12;
 /// `a0` backlight level (0..=`BACKLIGHT_SCALE`), `a1` 1 = set it, 0 =
 /// only read; the status is the level then.
 pub const OP_BACKLIGHT: u32 = 13;
+/// `a0` target buffer (packed YUYV), `a1` payload length, `a2` width,
+/// `a3` height; the payload is a baseline 4:2:2 JPEG the module decodes
+/// into the target (`CAP_JPEG`).
+pub const OP_JPEG: u32 = 14;
 /// The top of the backlight scale: hundredths of a percent.
 pub const BACKLIGHT_SCALE: u32 = 10_000;
 /// Largest cursor image side (`OP_CURSOR_IMAGE`).
@@ -112,6 +116,8 @@ pub const CAP_CURSOR: i32 = 8;
 pub const CAP_PRESENT: i32 = 16;
 /// The module sets the panel's backlight (`OP_BACKLIGHT`).
 pub const CAP_BACKLIGHT: i32 = 32;
+/// The module decodes JPEG frames into scene buffers (`OP_JPEG`).
+pub const CAP_JPEG: i32 = 64;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
@@ -302,6 +308,8 @@ static CURSOR: AtomicBool = AtomicBool::new(false);
 static PRESENT: AtomicBool = AtomicBool::new(false);
 /// It also sets the backlight (`CAP_BACKLIGHT`).
 static BACKLIGHT: AtomicBool = AtomicBool::new(false);
+/// It also decodes JPEG frames (`CAP_JPEG`).
+static JPEG: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Every job up to this sequence number is completed. Jobs that touch a
 /// buffer complete in order; a job without buffers (a guest's ccmd waiting
@@ -618,11 +626,13 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
     CURSOR.store(caps & CAP_CURSOR != 0, Ordering::Release);
     PRESENT.store(caps & CAP_PRESENT != 0, Ordering::Release);
     BACKLIGHT.store(caps & CAP_BACKLIGHT != 0, Ordering::Release);
-    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}{}",
+    JPEG.store(caps & CAP_JPEG != 0, Ordering::Release);
+    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}{}{}",
         if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
         if caps & CAP_CURSOR != 0 { ", hardware cursor" } else { "" },
         if caps & CAP_PRESENT != 0 { ", presented by flips" } else { "" },
         if caps & CAP_BACKLIGHT != 0 { ", backlight" } else { "" },
+        if caps & CAP_JPEG != 0 { ", JPEG decode" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
         else if crate::drivers::iommu::protected(dev) { ", native contexts for guests" }
         else { ", native contexts need the IOMMU (gpu_iommu off, or see the boot log)" });
@@ -1386,6 +1396,40 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
 /// it: a CPU write of the framebuffer would not show.
 pub fn present_by_module() -> bool {
     READY.load(Ordering::Acquire) && PRESENT.load(Ordering::Acquire)
+}
+
+/// Whether the module decodes JPEG frames (`OP_JPEG`).
+pub fn jpeg_supported() -> bool {
+    READY.load(Ordering::Acquire) && SCENES.load(Ordering::Acquire) && JPEG.load(Ordering::Acquire)
+}
+
+/// Queue the decode of `jpeg` (baseline 4:2:2, `width` x `height`) into
+/// buffer `target`. Its seq, for `job_status`.
+pub fn submit_jpeg(target: u32, width: u32, height: u32, jpeg: Vec<u8>) -> Option<u32> {
+    if !jpeg_supported() || target < FIXED_BOS || stalled() {
+        return None;
+    }
+    let seq = {
+        let mut st = STATE.lock();
+        st.owner?;
+        let len = jpeg.len() as u32;
+        queue_job(&mut st, OP_JPEG, [target, len, width, height, 0, 0], Some(jpeg), &[target])
+    };
+    wake_module();
+    Some(seq)
+}
+
+/// Whether job `seq` completed; its status stays for `job_status`.
+pub fn job_finished(seq: u32) -> bool {
+    is_done(seq)
+}
+
+/// Job `seq`'s status once it completed, without waiting.
+pub fn job_status(seq: u32) -> Option<i32> {
+    if !is_done(seq) {
+        return None;
+    }
+    Some(ERRORS.lock().remove(&seq).unwrap_or(0))
 }
 
 /// Whether the module shows the pointer with the hardware cursor.

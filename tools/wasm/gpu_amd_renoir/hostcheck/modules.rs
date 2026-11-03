@@ -145,6 +145,8 @@ mod shaders_gen;
 mod radv_stream;
 #[path = "../src/compose.rs"]
 mod compose;
+#[path = "../src/jpeg_dec.rs"]
+mod jpeg_dec;
 #[path = "../src/athub_v1_0.rs"]
 mod athub_v1_0;
 #[path = "../src/native_gen.rs"]
