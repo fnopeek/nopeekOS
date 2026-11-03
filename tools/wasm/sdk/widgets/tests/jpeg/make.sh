@@ -25,4 +25,5 @@ open('mjpeg-nodht.jpg', 'wb').write(out)
 PY
 rm mjpeg-dht.jpg $src
 for f in *.jpg; do magick "$f" -depth 8 "ppm:${f%.jpg}.ppm"; done
-ls -la
+
+for f in *.jpg; do for n in 2 4 8; do djpeg -scale 1/$n -ppm "$f" > "${f%.jpg}.$n.ppm"; done; done

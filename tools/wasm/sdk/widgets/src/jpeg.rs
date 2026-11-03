@@ -7,6 +7,11 @@
 //! assume. The IDCT is libjpeg's `jidctint` (islow); chroma is upsampled
 //! by replication. Progressive and arithmetic coding are refused.
 //!
+//! [`Decoder::decode_scaled`] decodes at 1/2, 1/4 or 1/8 of the size with
+//! the reduced IDCTs of libjpeg's `jidctred.c`: the entropy data is read
+//! whole, but the transform and colour work shrink with the picture, so
+//! a preview window costs a fraction of the full frame.
+//!
 //! A [`Decoder`] keeps its planes between frames, so a stream decodes
 //! without allocating once the size is known. Corrupt input gives an
 //! error, never a panic: every read is bounds-checked.
@@ -273,6 +278,14 @@ impl Decoder {
     /// Decode `data` into `out` (BGRA32, resized to `w * h * 4`). Returns
     /// the size.
     pub fn decode(&mut self, data: &[u8], out: &mut Vec<u8>) -> Result<(u32, u32), Error> {
+        self.decode_scaled(data, 1, out)
+    }
+
+    /// `decode` at 1/`scale` of the size (1, 2, 4 or 8), each side
+    /// rounded up. Returns the decoded size.
+    pub fn decode_scaled(&mut self, data: &[u8], scale: u32, out: &mut Vec<u8>) -> Result<(u32, u32), Error> {
+        if !matches!(scale, 1 | 2 | 4 | 8) { return Err(Error::Unsupported); }
+        let bs = 8 / scale as usize;
         if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 { return Err(Error::NotJpeg); }
         // Tables of the previous frame do not carry over: a stream that
         // leaves DHT out means the defaults, not the last frame's.
@@ -367,9 +380,10 @@ impl Decoder {
                         c.ta = (t & 0xF) as usize & 3;
                     }
                     self.defaults()?;
-                    self.scan(data, pos + len, &mut comps[..ncomp], width, height, hmax, vmax, restart)?;
-                    self.color(&comps[..ncomp], width, height, hmax, vmax, out);
-                    return Ok((width as u32, height as u32));
+                    self.scan(data, pos + len, &mut comps[..ncomp], width, height, hmax, vmax, restart, bs)?;
+                    let (ow, oh) = (width.div_ceil(8 / bs), height.div_ceil(8 / bs));
+                    self.color(&comps[..ncomp], ow, oh, hmax, vmax, out);
+                    return Ok((ow as u32, oh as u32));
                 }
                 _ => {}
             }
@@ -379,12 +393,12 @@ impl Decoder {
 
     #[allow(clippy::too_many_arguments)]
     fn scan(&mut self, data: &[u8], start: usize, comps: &mut [Comp], w: usize, h: usize,
-            hmax: usize, vmax: usize, restart: usize) -> Result<(), Error> {
+            hmax: usize, vmax: usize, restart: usize, bs: usize) -> Result<(), Error> {
         let mcux = w.div_ceil(8 * hmax);
         let mcuy = h.div_ceil(8 * vmax);
         for (i, c) in comps.iter_mut().enumerate() {
-            c.pw = mcux * c.h * 8;
-            c.ph = mcuy * c.v * 8;
+            c.pw = mcux * c.h * bs;
+            c.ph = mcuy * c.v * bs;
             let need = c.pw * c.ph;
             if self.planes[i].len() != need { self.planes[i] = vec![0; need]; }
         }
@@ -426,9 +440,16 @@ impl Decoder {
                                 coef[ZIGZAG[k] as usize] = bits.extend(s).wrapping_mul(q[k] as i32);
                                 k += 1;
                             }
-                            let x = (mx * c.h + bx) * 8;
-                            let y = (my * c.v + by) * 8;
-                            idct_islow(&coef, &mut self.planes[ci], y * c.pw + x, c.pw);
+                            let x = (mx * c.h + bx) * bs;
+                            let y = (my * c.v + by) * bs;
+                            let at = y * c.pw + x;
+                            let plane = &mut self.planes[ci];
+                            match bs {
+                                8 => idct_islow(&coef, plane, at, c.pw),
+                                4 => idct_4x4(&coef, plane, at, c.pw),
+                                2 => idct_2x2(&coef, plane, at, c.pw),
+                                _ => idct_1x1(&coef, plane, at),
+                            }
                         }
                     }
                 }
@@ -563,6 +584,106 @@ fn idct_islow(c: &[i32; 64], out: &mut [u8], at: usize, stride: usize) {
     }
 }
 
+const FIX_0_211164243: i32 = 1730;
+const FIX_0_509795579: i32 = 4176;
+const FIX_0_601344887: i32 = 4926;
+const FIX_0_720959822: i32 = 5906;
+const FIX_0_850430095: i32 = 6967;
+const FIX_1_061594337: i32 = 8697;
+const FIX_1_272758580: i32 = 10426;
+const FIX_1_451774981: i32 = 11893;
+const FIX_2_172734803: i32 = 17799;
+const FIX_3_624509785: i32 = 29692;
+
+#[inline(always)]
+fn clamp8(v: i32) -> u8 { (v + 128).clamp(0, 255) as u8 }
+
+/// The 4-point pass of `jpeg_idct_4x4`: the even part from inputs 0, 2,
+/// 6, the odd part from 1, 3, 5, 7.
+#[inline(always)]
+fn idct4(i: [i32; 8]) -> [i32; 4] {
+    let tmp0 = i[0] << (CONST_BITS + 1);
+    let tmp2 = i[2].wrapping_mul(FIX_1_847759065).wrapping_add(i[6].wrapping_mul(-FIX_0_765366865));
+    let tmp10 = tmp0.wrapping_add(tmp2);
+    let tmp12 = tmp0.wrapping_sub(tmp2);
+    let (z1, z2, z3, z4) = (i[7], i[5], i[3], i[1]);
+    let o0 = z1.wrapping_mul(-FIX_0_211164243).wrapping_add(z2.wrapping_mul(FIX_1_451774981))
+        .wrapping_add(z3.wrapping_mul(-FIX_2_172734803)).wrapping_add(z4.wrapping_mul(FIX_1_061594337));
+    let o2 = z1.wrapping_mul(-FIX_0_509795579).wrapping_add(z2.wrapping_mul(-FIX_0_601344887))
+        .wrapping_add(z3.wrapping_mul(FIX_0_899976223)).wrapping_add(z4.wrapping_mul(FIX_2_562915447));
+    [tmp10.wrapping_add(o2), tmp12.wrapping_add(o0), tmp12.wrapping_sub(o0), tmp10.wrapping_sub(o2)]
+}
+
+/// libjpeg's `jpeg_idct_4x4` (jidctred.c): an 8x8 block to 4x4 samples.
+fn idct_4x4(c: &[i32; 64], out: &mut [u8], at: usize, stride: usize) {
+    let mut ws = [0i32; 32];
+    for col in 0..8 {
+        if col == 4 { continue; }
+        let g = |r: usize| c[r * 8 + col];
+        if [1, 2, 3, 5, 6, 7].iter().all(|&r| g(r) == 0) {
+            let dc = g(0) << PASS1_BITS;
+            for r in 0..4 { ws[r * 8 + col] = dc; }
+            continue;
+        }
+        let o = idct4([g(0), g(1), g(2), g(3), g(4), g(5), g(6), g(7)]);
+        for r in 0..4 { ws[r * 8 + col] = descale(o[r], CONST_BITS - PASS1_BITS + 1); }
+    }
+    for row in 0..4 {
+        let w = &ws[row * 8..row * 8 + 8];
+        let Some(dst) = out.get_mut(at + row * stride..at + row * stride + 4) else { return };
+        if [1, 2, 3, 5, 6, 7].iter().all(|&k| w[k] == 0) {
+            dst.fill(clamp8(descale(w[0], PASS1_BITS + 3)));
+            continue;
+        }
+        let o = idct4([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]);
+        for (d, v) in dst.iter_mut().zip(o) {
+            *d = clamp8(descale(v, CONST_BITS + PASS1_BITS + 3 + 1));
+        }
+    }
+}
+
+/// The 2-point pass of `jpeg_idct_2x2`.
+#[inline(always)]
+fn idct2(i: [i32; 8]) -> [i32; 2] {
+    let tmp10 = i[0] << (CONST_BITS + 2);
+    let tmp0 = i[7].wrapping_mul(-FIX_0_720959822).wrapping_add(i[5].wrapping_mul(FIX_0_850430095))
+        .wrapping_add(i[3].wrapping_mul(-FIX_1_272758580)).wrapping_add(i[1].wrapping_mul(FIX_3_624509785));
+    [tmp10.wrapping_add(tmp0), tmp10.wrapping_sub(tmp0)]
+}
+
+/// libjpeg's `jpeg_idct_2x2`: an 8x8 block to 2x2 samples.
+fn idct_2x2(c: &[i32; 64], out: &mut [u8], at: usize, stride: usize) {
+    let mut ws = [0i32; 16];
+    for col in [0usize, 1, 3, 5, 7] {
+        let g = |r: usize| c[r * 8 + col];
+        if [1, 3, 5, 7].iter().all(|&r| g(r) == 0) {
+            let dc = g(0) << PASS1_BITS;
+            ws[col] = dc;
+            ws[8 + col] = dc;
+            continue;
+        }
+        let o = idct2([g(0), g(1), g(2), g(3), g(4), g(5), g(6), g(7)]);
+        ws[col] = descale(o[0], CONST_BITS - PASS1_BITS + 2);
+        ws[8 + col] = descale(o[1], CONST_BITS - PASS1_BITS + 2);
+    }
+    for row in 0..2 {
+        let w = &ws[row * 8..row * 8 + 8];
+        let Some(dst) = out.get_mut(at + row * stride..at + row * stride + 2) else { return };
+        if [1, 3, 5, 7].iter().all(|&k| w[k] == 0) {
+            dst.fill(clamp8(descale(w[0], PASS1_BITS + 3)));
+            continue;
+        }
+        let o = idct2([w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7]]);
+        dst[0] = clamp8(descale(o[0], CONST_BITS + PASS1_BITS + 3 + 2));
+        dst[1] = clamp8(descale(o[1], CONST_BITS + PASS1_BITS + 3 + 2));
+    }
+}
+
+/// libjpeg's `jpeg_idct_1x1`: the DC alone.
+fn idct_1x1(c: &[i32; 64], out: &mut [u8], at: usize) {
+    if let Some(d) = out.get_mut(at) { *d = clamp8(descale(c[0], 3)); }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -593,6 +714,39 @@ mod tests {
         let mut junk = vec![0xFF, 0xD8, 0xFF, 0xC0, 0, 11, 8, 0, 8, 0, 8, 1, 1, 0x11, 0, 0xFF, 0xDA, 0, 8, 1, 1, 0, 0, 63, 0];
         junk.extend(core::iter::repeat_n(0x5A, 64));
         let _ = d.decode(&junk, &mut out);
+    }
+
+    /// Every picture at 1/2, 1/4 and 1/8 against djpeg -scale, which
+    /// make.sh writes as `<name>.<n>.ppm`.
+    #[test]
+    fn scaled_decodes_like_libjpeg() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/jpeg");
+        let Ok(entries) = std::fs::read_dir(&dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.extension().and_then(|s| s.to_str()) != Some("jpg") { continue; }
+            let jpg = std::fs::read(&p).unwrap();
+            for scale in [2u32, 4, 8] {
+                let Ok(ppm) = std::fs::read(p.with_extension(alloc::format!("{}.ppm", scale))) else { continue };
+                let mut d = Decoder::new();
+                let mut out = Vec::new();
+                let (w, h) = d.decode_scaled(&jpg, scale, &mut out).unwrap();
+                // A grey picture comes back from djpeg as PGM, one channel.
+                let ch = if ppm.starts_with(b"P5") { 1 } else { 3 };
+                let px = &ppm[ppm.len() - (w * h) as usize * ch..];
+                let mut se = 0f64;
+                for i in 0..(w * h) as usize {
+                    for c in 0..3 {
+                        let a = out[i * 4 + 2 - c] as f64;
+                        let b = px[i * ch + c.min(ch - 1)] as f64;
+                        se += (a - b) * (a - b);
+                    }
+                }
+                let psnr = 10.0 * (255.0f64 * 255.0 / (se / (w * h * 3) as f64).max(1e-9)).log10();
+                std::println!("{} 1/{}: {}x{} psnr {:.1} dB", p.file_name().unwrap().to_string_lossy(), scale, w, h, psnr);
+                assert!(psnr > 30.0, "{} 1/{}: psnr {:.1}", p.display(), scale, psnr);
+            }
+        }
     }
 
     /// Files from `tests/jpeg/` (made by tests/jpeg/make.sh) against the

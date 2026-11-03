@@ -389,7 +389,14 @@ mod app {
                     match st.kind {
                         uvc::Kind::Mjpeg => {
                             let t0 = host::ticks_ms();
-                            match c.jpeg.decode(&f.data, &mut bgra) {
+                            // The smallest scale that still fills the
+                            // canvas: a preview needs no full frame.
+                            let scale = host::canvas_rect(CANVAS_ID).map_or(1, |(_, _, rw, rh)| {
+                                [8u32, 4, 2].into_iter().find(|&s| {
+                                    (w as i32) / s as i32 >= rw.max(1) && (h as i32) / s as i32 >= rh.max(1)
+                                }).unwrap_or(1)
+                            });
+                            match c.jpeg.decode_scaled(&f.data, scale, &mut bgra) {
                                 Ok((dw, dh)) => {
                                     c.decode_ms += host::ticks_ms() - t0;
                                     c.decoded += 1;
