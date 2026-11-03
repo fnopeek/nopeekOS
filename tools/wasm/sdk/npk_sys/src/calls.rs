@@ -69,6 +69,7 @@ unsafe extern "C" {
     fn npk_audio_set_volume(pct: i32) -> i32;
     fn npk_audio_format(slot: i32, rate: i32, encoding: i32, channels: i32) -> i32;
     fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32) -> i32;
+    fn npk_canvas_frame(canvas_id: i32, ptr: i32, len: i32, w: i32, h: i32, format: i32) -> i32;
     fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
     fn npk_canvas_drop(canvas_id: i32) -> i32;
     fn npk_drag_start(ptr: i32, len: i32) -> i32;
@@ -590,6 +591,14 @@ pub fn fs_stat(name: &[u8], out: &mut [u8; 17]) -> i32 {
 pub fn canvas_commit(canvas_id: i32, px: &[u8], w: i32, h: i32) -> i32 {
     // SAFETY: FFI; the range is borrowed for the call.
     unsafe { npk_canvas_commit(canvas_id, px.as_ptr() as i32, px.len() as i32, w, h) }
+}
+
+/// A frame for canvas `canvas_id`, shown as a scene layer over the window
+/// and scaled on the GPU. `format` 0 = BGRA32. -1 when refused or the
+/// format is not served (then `canvas_commit` is the way).
+pub fn canvas_frame(canvas_id: i32, px: &[u8], w: i32, h: i32, format: i32) -> i32 {
+    // SAFETY: FFI; the kernel reads `px.len()` bytes from `px`.
+    unsafe { npk_canvas_frame(canvas_id, px.as_ptr() as i32, px.len() as i32, w, h, format) }
 }
 
 /// `x, y, w, h` as four i32 LE into `out`.

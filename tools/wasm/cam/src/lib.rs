@@ -57,6 +57,14 @@ mod app {
 
     fn log(msg: &str) { host::log_serial(msg); }
 
+    /// A frame as a scene layer (the compositor scales it on the GPU and
+    /// leaves the window alone), or the plain canvas on a kernel without.
+    fn show(px: &[u8], w: u32, h: u32) {
+        if !host::canvas_frame(CANVAS_ID, px, w, h) {
+            host::canvas_commit(CANVAS_ID, px, w, h);
+        }
+    }
+
     /// A class request to interface `index` (`__uvc_query_ctrl`).
     fn query(h: i32, req: u8, cs: u16, index: u16, data: &mut [u8]) -> i32 {
         let bm = if req & 0x80 != 0 { 0xA1 } else { 0x21 };
@@ -329,8 +337,54 @@ mod app {
         }
     }
 
+    /// `run cam pattern`: colour bars with a moving stripe, 1280x720, through
+    /// the same layer path, no camera. A picture to check the path by.
+    fn pattern() {
+        let (w, h) = (1280usize, 720usize);
+        let bars: [u32; 8] = [0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x000000];
+        let mut px = alloc::vec![0u8; w * h * 4];
+        let mut ev = alloc::vec![0u8; 4096];
+        let mut t = 0usize;
+        let mut layer = true;
+        // The window first: events and canvases need it.
+        commit(None, "Test pattern 1280x720", "");
+        loop {
+            match nopeek_widgets::events::poll(&mut ev) {
+                nopeek_widgets::events::Poll::Event(Event::Key(KeyCode::Escape)) => { host::close_widget(); return; }
+                nopeek_widgets::events::Poll::Gone => return,
+                _ => {}
+            }
+            let stripe = (t * 8) % w;
+            for y in 0..h {
+                for x in 0..w {
+                    let c = if x >= stripe && x < stripe + 16 { 0x808080 } else { bars[x * 8 / w] };
+                    let c = if y >= h * 3 / 4 { (c >> 1) & 0x7F7F7F } else { c };
+                    let o = (y * w + x) * 4;
+                    px[o] = c as u8;
+                    px[o + 1] = (c >> 8) as u8;
+                    px[o + 2] = (c >> 16) as u8;
+                    px[o + 3] = 255;
+                }
+            }
+            if layer && !host::canvas_frame(CANVAS_ID, &px, w as u32, h as u32) {
+                layer = false;
+                log("[cam] pattern: no frame layer, plain canvas");
+            }
+            if !layer { host::canvas_commit(CANVAS_ID, &px, w as u32, h as u32); }
+            if t % 30 == 0 {
+                commit(None, "Test pattern 1280x720", if layer { "scene layer" } else { "canvas" });
+            }
+            t += 1;
+            host::sleep_ms(33);
+        }
+    }
+
     #[unsafe(no_mangle)]
     pub extern "C" fn _start() {
+        if host::launch_arg().as_deref() == Some("pattern") {
+            pattern();
+            return;
+        }
         commit(None, "Opening the camera…", "");
         let mut c = match claim() {
             Ok(c) => c,
@@ -400,7 +454,7 @@ mod app {
                                 Ok((dw, dh)) => {
                                     c.decode_ms += host::ticks_ms() - t0;
                                     c.decoded += 1;
-                                    host::canvas_commit(CANVAS_ID, &bgra, dw, dh);
+                                    show( &bgra, dw, dh);
                                 }
                                 Err(e) => {
                                     c.jpeg_errors += 1;
@@ -414,7 +468,7 @@ mod app {
                         _ => {
                             bgra.resize(w * h * 4, 0);
                             uvc::yuyv_to_bgra(&f.data, w, h, &mut bgra);
-                            host::canvas_commit(CANVAS_ID, &bgra, w as u32, h as u32);
+                            show( &bgra, w as u32, h as u32);
                         }
                     }
                 }

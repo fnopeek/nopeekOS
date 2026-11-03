@@ -1915,6 +1915,9 @@ impl Compositor {
                     } else {
                         let fit = if self.animation.is_some() { Fit::Scale } else { Fit::Extend };
                         items.push(Item::Content { src: Source::Widget(p.id.0), dst: c, radius: inner_r, fit });
+                        if self.animation.is_none() {
+                            frame_layers(p.id.0, c, &mut items);
+                        }
                     }
                 }
                 WindowKind::Surface => {
@@ -1958,7 +1961,11 @@ impl Compositor {
             return alloc::vec![Rect::new(0, 0, self.screen_w, self.screen_h)];
         }
         let screen = Rect::new(0, 0, info.width, info.height);
-        let extra = core::mem::take(&mut self.extra_damage);
+        let mut extra = core::mem::take(&mut self.extra_damage);
+        // Frames committed into canvas layers since the last compose.
+        extra.extend(crate::shade::widgets::canvas::take_frame_damage().into_iter()
+            .filter(|r| r.0 >= 0 && r.1 >= 0)
+            .map(|(x, y, w, h)| Rect::new(x as u32, y as u32, w, h)));
         let mut damage: Vec<Rect> = self.windows.iter()
             .filter(|w| w.dirty && w.workspace == self.active_workspace && w.visible)
             .map(|w| {
@@ -2837,6 +2844,27 @@ fn bar_margin() -> u32 {
 /// Inset of a terminal's text from its content edge, physical px.
 fn term_pad() -> u32 { crate::shade::widgets::scale::len(6) }
 
+/// A widget window's canvas frames, each contain-fit into its canvas rect
+/// as an item of its own over the window (`canvas::commit_frame`). A rect
+/// not wholly inside the window's content (scrolled, mid-layout) is left
+/// out.
+fn frame_layers(window: u32, content: Rect, items: &mut Vec<Item>) {
+    use crate::shade::widgets::canvas;
+    for (cid, fw, fh) in canvas::frames_of(window) {
+        let Some((x, y, w, h)) = canvas::rect_of(window, cid) else { continue };
+        if x < 0 || y < 0 || w == 0 || h == 0 { continue; }
+        // Contain-fit, centred, as the raster's canvas blit does.
+        let (dw, dh) = if (w as u64) * fh as u64 <= (h as u64) * fw as u64 {
+            (w, ((w as u64 * fh as u64) / fw as u64).max(1) as u32)
+        } else {
+            (((h as u64 * fw as u64) / fh as u64).max(1) as u32, h)
+        };
+        let dst = Rect::new(x as u32 + (w - dw) / 2, y as u32 + (h - dh) / 2, dw, dh);
+        if dst.intersect(&content) != dst { continue; }
+        items.push(Item::Content { src: Source::Canvas(window, cid), dst, radius: 0, fit: Fit::Scale });
+    }
+}
+
 /// The overlay scrollbar of a terminal, when its scrollback overflows.
 /// Geometry must match `scroll_hit_at` so the thumb and the drag area agree.
 fn term_scrollbar(terminal_idx: u8, text: Rect) -> Option<Item> {
@@ -2879,6 +2907,7 @@ impl scene::Sources for Compositor {
                     f(b, b.width(), b.height());
                 }
             }
+            Source::Canvas(w, c) => crate::shade::widgets::canvas::with_frame(w, c, f),
         }
     }
 

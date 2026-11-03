@@ -277,12 +277,13 @@ impl Recorder<'_> {
     }
 }
 
-fn source_key(s: Source) -> (u8, u32) {
+fn source_key(s: Source) -> (u8, u32, u32) {
     match s {
-        Source::Widget(i) => (0, i),
-        Source::Surface(i) => (1, i),
-        Source::TermText(i) => (2, i),
-        Source::Label(i) => (3, i),
+        Source::Widget(i) => (0, i, 0),
+        Source::Surface(i) => (1, i, 0),
+        Source::TermText(i) => (2, i, 0),
+        Source::Label(i) => (3, i, 0),
+        Source::Canvas(w, c) => (4, w, c),
     }
 }
 

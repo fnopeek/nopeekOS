@@ -70,6 +70,8 @@ pub enum Source {
     /// A line of compositor text (a window control's hint), same format as
     /// `TermText`.
     Label(u32),
+    /// A canvas frame layer: (window, canvas).
+    Canvas(u32, u32),
 }
 
 /// How a source fills a destination rectangle of a different size.

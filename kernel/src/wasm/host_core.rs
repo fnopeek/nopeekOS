@@ -3264,6 +3264,27 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
     0
 }
 
+/// `npk_canvas_frame(canvas_id, ptr, len, w, h, format)`: a frame shown as
+/// a scene layer over the window (`canvas::commit_frame`): the window is
+/// not rasterized again, only the canvas rect is composed, and the GPU
+/// scales the frame. Format 0 = BGRA32.
+pub(crate) fn npk_canvas_frame(mem: &mut [u8], ctx: &mut HostState, canvas_id: i32, ptr: i32, len: i32,
+                               width: i32, height: i32, format: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::CANVAS).is_err() { return -1; }
+    let wid = ctx.widget_window_id;
+    if wid == 0 || width <= 0 || height <= 0 || format != 0 { return -1; }
+    let Some(bytes) = (width as usize).checked_mul(height as usize).and_then(|n| n.checked_mul(4)) else { return -1 };
+    if glen(len) != Some(bytes) { return -1; }
+    use crate::shade::widgets::canvas::{window_budget, MAX_DIM};
+    if width as u32 > MAX_DIM || height as u32 > MAX_DIM || bytes > window_budget() { return -1; }
+    let Some(src) = guest(mem, ptr, bytes) else { return -1 };
+    if !crate::shade::widgets::canvas::commit_frame(wid, canvas_id as u32, width as u32, height as u32, src) {
+        return -1;
+    }
+    crate::shade::request_render();
+    0
+}
+
 /// `npk_canvas_commit_yuv(canvas_id, y_ptr, u_ptr, v_ptr, ys, cs, w, h, flags)`
 ///
 /// Upload a planar 4:2:0 frame (I420) instead of BGRA. `ys`/`cs` are row

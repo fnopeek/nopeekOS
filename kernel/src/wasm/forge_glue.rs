@@ -540,6 +540,10 @@ host_imports! {
     // contain-fit into the canvas rect on the next rasterise.
     mem fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, width: i32, height: i32) -> i32;
 
+    // npk_canvas_frame(canvas_id, ptr, len, width, height, format) -> 0 / -1:
+    // a frame the compositor shows as a scene layer over the window, scaled
+    // on the GPU. Format 0 = BGRA32. -1 also for a format not served.
+    mem fn npk_canvas_frame(canvas_id: i32, ptr: i32, len: i32, width: i32, height: i32, format: i32) -> i32;
     // npk_canvas_commit_yuv(canvas_id, y, u, v, ys, cs, w, h, flags) -> 0 / -1
     // The same escape hatch for a planar 4:2:0 frame — a video decoder
     // hands over its own planes and the blit converts, at destination

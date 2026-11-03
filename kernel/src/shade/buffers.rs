@@ -55,6 +55,7 @@ impl PixelBuffer {
     }
 
     pub fn width(&self) -> u32 { self.width }
+    pub fn is_empty(&self) -> bool { self.phys == 0 }
     pub fn height(&self) -> u32 { self.height }
     /// Physical address of the first pixel (also its kernel address).
     pub fn phys(&self) -> u64 { self.phys }

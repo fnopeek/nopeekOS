@@ -85,6 +85,11 @@ pub enum Pixels {
         cs: usize,
         coding: YuvCoding,
     },
+    /// A frame the compositor shows as a scene layer over the window
+    /// (`npk_canvas_frame`): BGRA32 in a buffer the GPU reads in place,
+    /// rewritten in place by the next frame of the same size. The window's
+    /// raster leaves the canvas rect alone.
+    Frame(crate::shade::buffers::PixelBuffer),
 }
 
 struct Bitmap {
@@ -100,6 +105,7 @@ impl Pixels {
         match self {
             Pixels::Bgra(px) => px.len(),
             Pixels::I420 { y, u, v, .. } => y.len() + u.len() + v.len(),
+            Pixels::Frame(b) => b.len() * 4,
         }
     }
 }
@@ -167,6 +173,69 @@ pub fn commit_i420(
 pub fn with_bitmap<R>(window_id: u32, canvas_id: u32, f: impl FnOnce(&Pixels, u32, u32) -> R) -> Option<R> {
     let guard = CANVASES.lock();
     guard.get(&(window_id, canvas_id)).map(|b| f(&b.px, b.w, b.h))
+}
+
+/// Frames committed since the last compose, by (window, canvas): their
+/// rects are the compositor's damage (`take_frame_damage`).
+static FRAME_DAMAGE: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
+
+/// Store a BGRA frame `w` x `h` (`src` holds `w * h * 4` bytes) as the
+/// canvas's scene layer. Same size as the last frame: written into its
+/// buffer, after the GPU finished reading it. Only the canvas rect is
+/// damaged; the window is not rasterized again.
+pub fn commit_frame(window_id: u32, canvas_id: u32, w: u32, h: u32, src: &[u8]) -> bool {
+    if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM { return false; }
+    if src.len() != w as usize * h as usize * 4 { return false; }
+    let fill = |buf: &mut crate::shade::buffers::PixelBuffer| {
+        for (d, s) in buf.iter_mut().zip(src.chunks_exact(4)) {
+            *d = u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
+        }
+    };
+    {
+        let mut map = CANVASES.lock();
+        if let Some(b) = map.get_mut(&(window_id, canvas_id)) {
+            if let (Pixels::Frame(buf), true) = (&mut b.px, b.w == w && b.h == h) {
+                fill(buf);
+                drop(map);
+                note_frame(window_id, canvas_id);
+                return true;
+            }
+        }
+    }
+    let mut buf = crate::shade::buffers::PixelBuffer::new(w, h);
+    if buf.is_empty() { return false; }
+    fill(&mut buf);
+    if !insert_within_caps(window_id, canvas_id, Bitmap { w, h, px: Pixels::Frame(buf) }) { return false; }
+    note_frame(window_id, canvas_id);
+    true
+}
+
+fn note_frame(window_id: u32, canvas_id: u32) {
+    let mut d = FRAME_DAMAGE.lock();
+    if !d.contains(&(window_id, canvas_id)) { d.push((window_id, canvas_id)); }
+}
+
+/// The rects of the frames committed since the last call.
+pub fn take_frame_damage() -> Vec<(i32, i32, u32, u32)> {
+    let list = core::mem::take(&mut *FRAME_DAMAGE.lock());
+    let rects = RECTS.lock();
+    list.iter().filter_map(|k| rects.get(k).copied()).collect()
+}
+
+/// The canvases of `window_id` that hold a frame layer, with its size.
+pub fn frames_of(window_id: u32) -> Vec<(u32, u32, u32)> {
+    CANVASES.lock().range((window_id, 0)..=(window_id, u32::MAX))
+        .filter(|(_, b)| matches!(b.px, Pixels::Frame(_)))
+        .map(|(k, b)| (k.1, b.w, b.h))
+        .collect()
+}
+
+/// `f(pixels, w, h)` with a frame layer's pixels.
+pub fn with_frame(window_id: u32, canvas_id: u32, f: &mut dyn FnMut(&[u32], u32, u32)) {
+    let map = CANVASES.lock();
+    if let Some(Bitmap { w, h, px: Pixels::Frame(buf) }) = map.get(&(window_id, canvas_id)) {
+        f(buf, *w, *h);
+    }
 }
 
 /// Record the canvas widget's laid-out rect (called by the render walker).

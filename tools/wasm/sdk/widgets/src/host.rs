@@ -252,6 +252,12 @@ pub fn canvas_commit(id: u32, px: &[u8], w: u32, h: u32) -> bool {
     sys::canvas_commit(id as i32, px, w as i32, h as i32) >= 0
 }
 
+/// A BGRA frame for canvas `id` as a scene layer: the compositor scales it
+/// on the GPU and the window is not drawn again. False when refused.
+pub fn canvas_frame(id: u32, px: &[u8], w: u32, h: u32) -> bool {
+    sys::canvas_frame(id as i32, px, w as i32, h as i32, 0) >= 0
+}
+
 /// Free canvas `id`. False if there was none.
 pub fn canvas_drop(id: u32) -> bool { sys::canvas_drop(id as i32) == 0 }
 
