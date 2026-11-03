@@ -35,6 +35,7 @@ const UVD_JPEG_TIER_CNTL2: u32 = 0x400f;
 const UVD_JPEG_OUTBUF_RPTR: u32 = 0x401e;
 const UVD_JPEG_OUTBUF_CNTL: u32 = 0x401c;
 const UVD_JPEG_INT_EN: u32 = 0x400a;
+const UVD_JPEG_INT_STAT: u32 = 0x400b;
 const UVD_JPEG_CNTL: u32 = 0x4000;
 const UVD_JPEG_RB_RPTR: u32 = 0x4003;
 const UVD_JPEG_OUTBUF_WPTR: u32 = 0x401d;
@@ -56,6 +57,13 @@ pub fn build_ib(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch_px: u
 /// `build_ib` with the two pitch registers as given (the self-test tries
 /// which the engine takes for packed output).
 pub fn build_ib_regs(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch: u32, uv_pitch: u32) -> Vec<u32> {
+    build_ib_variant(bitstream_va, bitstream_size, out_va, pitch, uv_pitch, 0)
+}
+
+/// Self-test variants of the stream: bit 0 zeroes UVD_JPEG_OUTBUF_WPTR
+/// with the read pointer, bit 1 clears UVD_JPEG_INT_STAT too.
+pub fn build_ib_variant(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch: u32, uv_pitch: u32,
+                        variant: u32) -> Vec<u32> {
     let mut c = Vec::with_capacity(128);
     let mut set = |reg: u32, cond: u32, ty: u32, val: u32| {
         c.push(pktj(reg, cond, ty));
@@ -93,6 +101,12 @@ pub fn build_ib_regs(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch:
     }
     set(UVD_JPEG_TIER_CNTL2, COND0, 0, 0);
     set(UVD_JPEG_OUTBUF_RPTR, COND0, TYPE0, 0);
+    if variant & 1 != 0 {
+        set(UVD_JPEG_OUTBUF_WPTR, COND0, TYPE0, 0);
+    }
+    if variant & 2 != 0 {
+        set(UVD_JPEG_INT_STAT, COND0, TYPE0, 0xffff_ffff);
+    }
     set(UVD_JPEG_OUTBUF_CNTL, COND0, TYPE0, (0x0000_1587 & !0x0000_0180) | (1 << 7) | (1 << 6));
     // enable error interrupts
     set(UVD_JPEG_INT_EN, COND0, TYPE0, 0xffff_fffe);

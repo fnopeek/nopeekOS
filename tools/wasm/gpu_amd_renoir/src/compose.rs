@@ -674,6 +674,12 @@ pub fn jpeg_submit(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs
 #[allow(clippy::too_many_arguments)]
 fn jpeg_submit_regs(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
                     pitch: u32, uv_pitch: u32, out_bos: &[usize]) -> Result<Fence, i32> {
+    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch, uv_pitch, 0, out_bos)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn jpeg_submit_variant(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
+                       pitch: u32, uv_pitch: u32, variant: u32, out_bos: &[usize]) -> Result<Fence, i32> {
     let need = (bitstream.len() as u64).next_multiple_of(PAGE);
     if j.bits.as_ref().is_some_and(|g| g.bytes < need) {
         let g = j.bits.take().unwrap();
@@ -689,7 +695,7 @@ fn jpeg_submit_regs(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_buf
     if !write(adev, bits, 0, bitstream) {
         return Err(-ENOMEM);
     }
-    let words = crate::jpeg_dec::build_ib_regs(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch);
+    let words = crate::jpeg_dec::build_ib_variant(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch, variant);
     if words.len() as u64 * 4 > ib.bytes || !write_words(adev, ib, 0, &words) {
         return Err(-E2BIG);
     }
@@ -822,7 +828,8 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let _ = write(adev, &big, 0, &alloc::vec![ST_OUT; room as usize]);
                             let mut bos = alloc::vec![big.bo];
                             if let Some(a) = alias.as_ref() { bos.push(a.bo); }
-                            let Ok(f) = jpeg_submit(adev, c, j, &bigbits, big.va, h2.width, &bos) else { say("720p submit failed"); break };
+                            let variant = k % 3;
+                            let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, variant, &bos) else { say("720p submit failed"); break };
                             let t0 = crate::linux::now_us();
                             let mut d = None;
                             while crate::linux::now_us() - t0 < 300_000 {
@@ -837,6 +844,12 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let inside = buf[..frame as usize].iter().filter(|&&b| b != ST_OUT).count();
                             let behind = buf[frame as usize..].iter().filter(|&&b| b != ST_OUT).count();
                             let ok = matches!(d, Some((0, _))) && inside as u64 > frame * 9 / 10 && behind == 0;
+                            if k < 9 {
+                                let mut l = Line::new();
+                                l.s("jpeg test 720p V").dec(variant as u64 + 1).s(" #").dec(k as u64).s(": ");
+                                match d { Some((e, us)) => { l.s(if e == 0 { "done in " } else { "error in " }).dec(us).s(" us"); } None => { l.s("no fence"); } }
+                                l.s(", ").dec(inside as u64).s(" of ").dec(frame).s(" B written at the fence").say();
+                            }
                             if ok { good += 1; } else if first_err.is_none() {
                                 first_err = Some(k);
                                 let mut l = Line::new();
