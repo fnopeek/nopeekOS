@@ -76,7 +76,8 @@ supported, stereo unless the converter is mono.
 A codec with a fixed microphone pin (`AC_JACK_MIC_IN`, connectivity
 fixed) gets a capture path as `hda_generic` builds it: the first analog
 input converter the pin reaches, the pin as input with its default VREF,
-the path's amps opened. It is entered as "Built-in microphone" and
+the path's amps opened, the converter's capture volume at its top. It is
+entered as "Built-in microphone" and
 records on the first input stream descriptor, in the converter's best
 format, only while the kernel says a capture stream listens. The headset
 microphone on the jack is not set up yet.

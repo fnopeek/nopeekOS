@@ -632,6 +632,9 @@ impl Spec {
         let c = &self.codec;
         c.write(pin as u32, vset_pin_ctl(PIN_IN | self.default_vref(pin as u32)));
         self.activate_path(p);
+        // The capture volume at its top, as a desktop sets it for a
+        // built-in microphone; 0 dB leaves speech at a few percent.
+        self.set_amp_max(adc as u32, false, p.idx[p.depth - 1] as u32);
         c.write(adc as u32, vset_stream_chan(tag << 4));
         c.write(adc as u32, vset_format(format));
         true
@@ -1084,6 +1087,18 @@ impl Spec {
         let chans: u32 = if c.wcaps(nid) & AC_WCAP_STEREO != 0 { 0x3000 } else { 0x2000 };
         let dir: u32 = if out { 0x8000 } else { 0x4000 };
         c.write(nid, vset_amp((dir | chans | ((idx & 0xf) << 8) | val) as u16));
+    }
+
+    /// An amp unmuted at its highest step.
+    fn set_amp_max(&self, nid: u32, out: bool, idx: u32) {
+        let c = &self.codec;
+        let steps = (c.amp_caps(nid, out) & AC_AMPCAP_NUM_STEPS) >> 8;
+        if steps == 0 {
+            return;
+        }
+        let chans: u32 = if c.wcaps(nid) & AC_WCAP_STEREO != 0 { 0x3000 } else { 0x2000 };
+        let dir: u32 = if out { 0x8000 } else { 0x4000 };
+        c.write(nid, vset_amp((dir | chans | ((idx & 0xf) << 8) | steps) as u16));
     }
 
     /// `set_pin_eapd`.
