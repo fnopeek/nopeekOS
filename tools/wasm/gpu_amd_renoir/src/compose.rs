@@ -895,6 +895,15 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                                 if let Some(e) = jpeg_finished(adev, &f, tag) { d = Some((e, crate::linux::now_us() - t0)); break; }
                                 crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
                             }
+                            if d.is_none() {
+                                let r = crate::jpeg_v2_0::jpeg_rreg_mm;
+                                Line::new().s("jpeg test 720p: not finished, fence ")
+                                    .s(if jpeg_done(adev, &f).is_some() { "yes" } else { "no" })
+                                    .s(" cntl ").hex(r(adev, 0x80)).s(" rb_rptr ").hex(r(adev, 0x83))
+                                    .s(" rb_wptr ").hex(r(adev, 0x82)).s(" rb_size ").hex(r(adev, 0x84))
+                                    .s(" int_stat ").hex(r(adev, 0x8b)).s(" jrbc_status ").hex(crate::jpeg_v2_0::jrbc_status(adev))
+                                    .s(", expected rptr ").hex(tag).say();
+                            }
                             let mut buf = alloc::vec![0u8; room as usize];
                             crate::amdgpu_gart::kptr_read(adev, big.k, 0, &mut buf);
                             let inside = buf[..frame as usize].iter().filter(|&&b| b != ST_OUT).count();
