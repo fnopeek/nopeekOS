@@ -6,7 +6,9 @@
 //!
 //! vendor 0x1AF4, device 0x1059, class 04_01_00 (Audio). Four virtqueues
 //! (spec-mandated): controlq(0), eventq(1), txq(2 = playback), rxq(3 =
-//! capture). We service control + tx; event/rx are stubs (output-only).
+//! capture). Stream 0 plays (txq), stream 1 records (rxq) from the
+//! kernel's capture side (`crate::capture`): the active audio input, opened
+//! only between the guest's PCM_START and PCM_STOP. eventq is a stub.
 //!
 //! PCI cap chain / Common Cfg / MMIO machinery is the shared modern-virtio
 //! pattern, as in the other virtio devices. Only the device-cfg, the
@@ -94,6 +96,13 @@ const S_IO_ERR:   u32 = 0x8003;
 const PCM_FMT_S16:   u64 = 1 << 5;  // VIRTIO_SND_PCM_FMT_S16
 const PCM_RATE_48000: u64 = 1 << 7; // VIRTIO_SND_PCM_RATE_48000
 const D_OUTPUT: u8 = 0;
+const D_INPUT: u8 = 1;
+/// Stream ids: one playback, one capture.
+const STREAM_OUT: u32 = 0;
+const STREAM_IN: u32 = 1;
+const STREAMS: u32 = 2;
+/// `sizeof(struct virtio_snd_pcm_info)`.
+const PCM_INFO_SIZE: usize = 32;
 
 /// PCM playback bytes per host 100 Hz tick at our advertised format
 /// (48 kHz × 2 ch × 2 bytes = 192000 B/s ÷ 100 = 1920). Drives the wall-clock
@@ -200,6 +209,11 @@ pub struct VirtioSnd {
     /// Lowest mailbox fill since `drift_since` (TSC), for the drift trim.
     fill_min: u64,
     drift_since: u64,
+
+    /// The capture stream's channels (SET_PARAMS), and the kernel capture
+    /// stream held between PCM_START and PCM_STOP.
+    cap_channels: u8,
+    cap: Option<usize>,
 }
 
 impl VirtioSnd {
@@ -232,6 +246,8 @@ impl VirtioSnd {
             period_bytes: 0,
             fill_min: u64::MAX,
             drift_since: 0,
+            cap_channels: 2,
+            cap: None,
         }
     }
 
@@ -248,12 +264,13 @@ impl VirtioSnd {
         self.pending_kick_queue.take()
     }
 
-    /// Service a kicked queue. control(0) + tx(2) are real; event(1)/rx(3)
-    /// are output-only stubs.
+    /// Service a kicked queue: control(0), tx(2), rx(3); event(1) is a
+    /// stub.
     pub fn service_queues(&mut self, queue_idx: u16, mem: &GuestMem) -> bool {
         match queue_idx {
             0 => self.service_control(mem),
             2 => self.service_tx(mem),
+            3 => self.service_rx(mem),
             _ => false,
         }
     }
@@ -262,10 +279,11 @@ impl VirtioSnd {
     /// buffers complete against the wall clock, so the device needs service
     /// at a steady cadence even while the guest sleeps (QEMU drives the same
     /// with its audio timer).
-    pub fn playing(&self) -> bool { self.slot >= 0 && self.started }
+    pub fn playing(&self) -> bool { (self.slot >= 0 && self.started) || self.cap.is_some() }
 
     pub fn pump(&mut self, mem: &GuestMem) -> bool {
-        self.service_tx(mem)
+        let tx = self.service_tx(mem);
+        self.service_rx(mem) | tx
     }
 
     // ── control queue ────────────────────────────────────────────────────
@@ -308,7 +326,7 @@ impl VirtioSnd {
             }
 
             // Build the response, write it across the writable segments.
-            let mut resp = [0u8; 64];
+            let mut resp = [0u8; 128];
             let resp_len = self.process_control(&req[..req_len], &mut resp, mem);
             let mut off = 0usize;
             let mut written = 0u32;
@@ -336,32 +354,49 @@ impl VirtioSnd {
         let code = le32(req, 0);
         match code {
             R_PCM_INFO => {
-                // virtio_snd_query_info { hdr; start_id; count; size }
+                // virtio_snd_query_info { hdr; start_id; count; size }, then
+                // `count` virtio_snd_pcm_info of `size` bytes each.
                 let start = le32(req, 4);
                 let count = le32(req, 8);
                 let size = le32(req, 12) as usize;
                 put32(resp, 0, S_OK);
                 let mut len = 4usize;
-                // We have exactly one stream (id 0), OUTPUT.
-                if start == 0 && count >= 1 && size >= 27 {
+                if size < 27 || start.saturating_add(count) > STREAMS {
+                    put32(resp, 0, S_BAD_MSG);
+                    return len;
+                }
+                for id in start..start + count {
                     let base = len;
+                    if base + size.max(PCM_INFO_SIZE) > resp.len() { break; }
+                    resp[base..base + size].fill(0);
                     // hda_fn_nid(4)=0, features(4)=0
-                    put32(resp, base + 8, (PCM_FMT_S16 & 0xFFFF_FFFF) as u32);   // formats lo
-                    put32(resp, base + 12, (PCM_FMT_S16 >> 32) as u32);          // formats hi
-                    put32(resp, base + 16, (PCM_RATE_48000 & 0xFFFF_FFFF) as u32); // rates lo
-                    put32(resp, base + 20, (PCM_RATE_48000 >> 32) as u32);        // rates hi
-                    resp[base + 24] = D_OUTPUT;  // direction
-                    resp[base + 25] = 2;         // channels_min
-                    resp[base + 26] = 2;         // channels_max
-                    len += size; // advance by the guest's declared struct size
+                    put32(resp, base + 8, (PCM_FMT_S16 & 0xFFFF_FFFF) as u32);
+                    put32(resp, base + 12, (PCM_FMT_S16 >> 32) as u32);
+                    put32(resp, base + 16, (PCM_RATE_48000 & 0xFFFF_FFFF) as u32);
+                    put32(resp, base + 20, (PCM_RATE_48000 >> 32) as u32);
+                    let input = id == STREAM_IN;
+                    resp[base + 24] = if input { D_INPUT } else { D_OUTPUT };
+                    resp[base + 25] = if input { 1 } else { 2 };
+                    resp[base + 26] = 2;
+                    len += size;
                 }
                 len.min(resp.len())
             }
             R_PCM_SET_PARAMS => {
                 // virtio_snd_pcm_set_params: hdr(4) stream_id(4) buffer_bytes(4)
-                // period_bytes(4) ... — remember the period to size the pacing
-                // cushion. We advertise only S16/48k/stereo, so just accept.
-                self.period_bytes = le32(req, 12);
+                // period_bytes(4) features(4) channels(1) format(1) rate(1).
+                // Playback remembers the period to size the pacing cushion;
+                // capture its channels. S16/48k is all we advertise.
+                if le32(req, 4) == STREAM_IN {
+                    self.cap_channels = req.get(20).copied().unwrap_or(2).clamp(1, 2);
+                } else {
+                    self.period_bytes = le32(req, 12);
+                }
+                put32(resp, 0, S_OK);
+                4
+            }
+            R_PCM_PREPARE | R_PCM_START | R_PCM_STOP | R_PCM_RELEASE if le32(req, 4) == STREAM_IN => {
+                self.capture_control(code, mem);
                 put32(resp, 0, S_OK);
                 4
             }
@@ -421,7 +456,12 @@ impl VirtioSnd {
     /// (the stream is ending) — the guest just needs the buffers handed back +
     /// an IRQ so its tx callback decrements msg_count → wakes msg_empty.
     fn flush_tx(&mut self, mem: &GuestMem) -> u32 {
-        let q = match self.queues.get(2) {
+        self.flush_queue(mem, 2)
+    }
+
+    /// `flush_tx` for queue `qi` (tx 2 or rx 3).
+    fn flush_queue(&mut self, mem: &GuestMem, qi: usize) -> u32 {
+        let q = match self.queues.get(qi) {
             Some(q) if q.enable != 0 && q.size != 0 => *q,
             _ => return 0,
         };
@@ -453,9 +493,113 @@ impl VirtioSnd {
             any = true;
             n += 1;
         }
-        if let Some(qm) = self.queues.get_mut(2) { qm.last_avail_idx = last; qm.used_idx = used; }
+        if let Some(qm) = self.queues.get_mut(qi) { qm.last_avail_idx = last; qm.used_idx = used; }
         if any { self.isr |= 1; }
         n
+    }
+
+    // ── capture stream ───────────────────────────────────────────────────
+
+    /// PCM control for the capture stream. The kernel capture stream, and
+    /// with it the microphone, is open from START to STOP only; RELEASE
+    /// hands back every rx buffer (§5.14.6.6.5.1).
+    fn capture_control(&mut self, code: u32, mem: &GuestMem) {
+        match code {
+            R_PCM_START => {
+                if self.cap.is_none() {
+                    self.cap = crate::capture::open(None);
+                    if let Some(c) = self.cap {
+                        let fmt = crate::audio::Format {
+                            rate: 48_000, encoding: crate::audio::Encoding::S16, channels: self.cap_channels,
+                        };
+                        crate::capture::set_format(c, None, fmt);
+                    }
+                }
+            }
+            R_PCM_STOP | R_PCM_RELEASE => {
+                if let Some(c) = self.cap.take() {
+                    crate::capture::close(c, None);
+                }
+                if code == R_PCM_RELEASE {
+                    self.flush_queue(mem, 3);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // ── rx (capture) queue ───────────────────────────────────────────────
+    // Chain: [virtio_snd_pcm_xfer {le32 stream_id}] readable, then the PCM
+    // space and [virtio_snd_pcm_status {le32 status; le32 latency}] writable.
+    // A buffer goes back once the microphone recorded enough to fill it.
+    fn service_rx(&mut self, mem: &GuestMem) -> bool {
+        let Some(cap) = self.cap else { return false };
+        let q = match self.queues.get(3) {
+            Some(q) if q.enable != 0 && q.size != 0 => *q,
+            _ => return false,
+        };
+        let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return false };
+        let pending = super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size);
+        if pending == 0 { return false; }
+        let avail_top = q.last_avail_idx.wrapping_add(pending);
+        let frame = 2 * self.cap_channels as usize;
+        let mut last = q.last_avail_idx;
+        let mut used = q.used_idx;
+        let mut any = false;
+        let mut chunk = [0u8; 4096];
+        while last != avail_top {
+            let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
+            let mut segs: [(u64, u32); 16] = [(0, 0); 16];
+            let mut seg_n = 0usize;
+            let mut space = 0usize;
+            let mut idx = head;
+            let mut hops = 0u16;
+            loop {
+                let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
+                if d.flags & VRING_DESC_F_WRITE != 0 && seg_n < segs.len() {
+                    segs[seg_n] = (d.addr, d.len);
+                    seg_n += 1;
+                    space += d.len as usize;
+                }
+                idx = match chain_next(&d, &mut hops, q.size) { Some(n) => n, None => break };
+            }
+            if space < 8 { break; }
+            let data = (space - 8) - (space - 8) % frame;
+            if crate::capture::available(cap, None).unwrap_or(0) < data {
+                break;
+            }
+            // The PCM across the writable segments, then the status after it.
+            let mut done = 0usize;
+            let write = |bytes: &[u8], at: usize| {
+                let mut pos = 0usize;
+                let mut off = at;
+                for &(addr, len) in &segs[..seg_n] {
+                    let len = len as usize;
+                    if off >= len { off -= len; continue; }
+                    let n = (len - off).min(bytes.len() - pos);
+                    mem.write_bytes(addr + off as u64, &bytes[pos..pos + n]);
+                    pos += n;
+                    off = 0;
+                    if pos == bytes.len() { break; }
+                }
+            };
+            while done < data {
+                let want = (data - done).min(chunk.len() - chunk.len() % frame);
+                let n = crate::capture::read(cap, None, &mut chunk[..want]).unwrap_or(0);
+                if n == 0 { break; }
+                write(&chunk[..n], done);
+                done += n;
+            }
+            let mut st = [0u8; 8];
+            put32(&mut st, 0, S_OK);
+            write(&st, data);
+            used_push(mem, q.device_gpa(), q.size, &mut used, head, (data + 8) as u32);
+            last = last.wrapping_add(1);
+            any = true;
+        }
+        if let Some(qm) = self.queues.get_mut(3) { qm.last_avail_idx = last; qm.used_idx = used; }
+        if any { self.isr |= 1; }
+        any
     }
 
     // ── tx (playback) queue ──────────────────────────────────────────────
@@ -729,6 +873,7 @@ impl VirtioSnd {
                         };
                     }
                     if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
+                    if let Some(c) = self.cap.take() { crate::capture::close(c, None); }
                     self.started = false;
                     self.driver_features = [0; 2];
                     self.driver_feature_select = 0;
@@ -755,7 +900,7 @@ impl VirtioSnd {
     fn device_read(&self, off: u32, width: u8) -> u64 {
         let mut buf = [0u8; 12];
         put32(&mut buf, 0, 0); // jacks = 0
-        put32(&mut buf, 4, 1); // streams = 1 (one OUTPUT PCM stream)
+        put32(&mut buf, 4, STREAMS); // streams: playback 0, capture 1
         put32(&mut buf, 8, 0); // chmaps = 0
         if off as usize >= buf.len() { return 0; }
         let mut v: u64 = 0;
@@ -768,6 +913,15 @@ impl VirtioSnd {
     fn q_mut(&mut self) -> &mut VirtQueue {
         let idx = self.queue_select as usize % self.queues.len();
         &mut self.queues[idx]
+    }
+}
+
+/// The VM ended: what the device held in the kernel goes back, so the
+/// microphone does not stay open behind a guest that is gone.
+impl Drop for VirtioSnd {
+    fn drop(&mut self) {
+        if let Some(c) = self.cap.take() { crate::capture::close(c, None); }
+        if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
     }
 }
 

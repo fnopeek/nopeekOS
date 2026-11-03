@@ -195,6 +195,11 @@ pub fn read(i: usize, owner: Option<u32>, out: &mut [u8]) -> Option<usize> {
     with_stream(i, owner, |s| s.read(out))
 }
 
+/// Bytes the stream holds.
+pub fn available(i: usize, owner: Option<u32>) -> Option<usize> {
+    with_stream(i, owner, |s| s.len)
+}
+
 /// Frames the stream lost to a full ring since the last call.
 pub fn take_dropped(i: usize, owner: Option<u32>) -> Option<u64> {
     with_stream(i, owner, |s| core::mem::take(&mut s.dropped))

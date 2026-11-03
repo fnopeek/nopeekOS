@@ -56,6 +56,16 @@ While any capture stream is open, the kernel shows the status item
 `kernel/mic` (state Attention), counted from its own streams. `mic [s]` in
 the terminal records from the active input and plays it back.
 
+## microVM
+
+virtio-snd offers two streams: 0 plays into the mixer (txq), 1 records
+from the capture side (rxq), S16LE 48 kHz, mono or stereo. The capture
+stream opens a kernel capture stream at the guest's PCM_START and closes
+it at PCM_STOP, RELEASE, a device reset and the end of the VM: the
+microphone runs only while a guest app records, with `kernel/mic` lit. An
+rx buffer goes back once the microphone filled it, so the microphone's
+own clock paces the guest.
+
 ## ACP driver
 
 `audio_acp` drives the digital microphone of AMD Renoir's audio
