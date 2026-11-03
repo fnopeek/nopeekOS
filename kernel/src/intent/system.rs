@@ -1876,6 +1876,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("drives eject <n>", "Flush and stop a drive for removal");
             help_row("fbinfo", "Framebuffer geometry");
             help_row("beep", "Speaker test");
+            help_row("mic [s]", "Record from the active input, play it back");
             help_row("test-audio", "Audio output test");
         }
         "virt" | "microvm" | "vmx" | "vt-x" => {

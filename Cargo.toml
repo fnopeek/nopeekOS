@@ -8,6 +8,7 @@ exclude = [
     "tools/wasm/gpu_intel_tgl",
     "tools/wasm/gpu_amd_renoir",
     "tools/wasm/audio_hda",
+    "tools/wasm/audio_acp",
     "tools/wasm/debug",
     "tools/wasm/sdk/widgets",
     "tools/wasm/sdk/npk_sys",

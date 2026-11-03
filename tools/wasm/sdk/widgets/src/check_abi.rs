@@ -116,6 +116,7 @@ const _: () = {
     assert!(IconId::SquareSplitVertical.0 == 65);
     assert!(IconId::DotsThree.0           == 66);
     assert!(IconId::Eject.0               == 67);
+    assert!(IconId::Microphone.0          == 68);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);

@@ -150,6 +150,11 @@ fn kernel_items(wlan_shown: bool) -> Vec<Item> {
     if cams > 0 {
         v.push(kernel_item("camera", IconId::Camera, cams as i32, STATE_ATTENTION, "Camera on".into(), ""));
     }
+    // The same for the microphone: on while any capture stream is open.
+    let mics = crate::capture::open_count();
+    if mics > 0 {
+        v.push(kernel_item("mic", IconId::Microphone, mics as i32, STATE_ATTENTION, "Microphone on".into(), ""));
+    }
 
     if let Some(b) = battery_packed() {
         let percent = (b & 0xFF) as u8;

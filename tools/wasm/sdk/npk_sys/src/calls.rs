@@ -983,3 +983,57 @@ pub fn device_select(handle: i32) -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_device_select(handle) }
 }
+
+// ── Audio capture (docs/spec/AUDIO.md) ───────────────────────────────
+
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn npk_audio_capture_device_format(rate: i32, encoding: i32, channels: i32) -> i32;
+    fn npk_audio_capture_wanted() -> i32;
+    fn npk_audio_capture_push(ptr: i32, len: i32) -> i32;
+    fn npk_audio_capture_open() -> i32;
+    fn npk_audio_capture_format(stream: i32, rate: i32, encoding: i32, channels: i32) -> i32;
+    fn npk_audio_capture_read(stream: i32, ptr: i32, max: i32) -> i32;
+    fn npk_audio_capture_close(stream: i32) -> i32;
+}
+
+/// Driver side: what the driver records (encoding 0 S16LE, 1 S32LE, 2 F32LE).
+pub fn audio_capture_device_format(rate: i32, encoding: i32, channels: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_audio_capture_device_format(rate, encoding, channels) }
+}
+
+/// Driver side: streams listening to this driver's input; 0 means the
+/// hardware may stop.
+pub fn audio_capture_wanted() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_audio_capture_wanted() }
+}
+
+/// Driver side: recorded PCM in the driver's format; the bytes taken.
+pub fn audio_capture_push(pcm: &[u8]) -> i32 {
+    // SAFETY: FFI; `pcm` is borrowed for the call.
+    unsafe { npk_audio_capture_push(pcm.as_ptr() as i32, pcm.len() as i32) }
+}
+
+/// A capture stream from the active input (MIC right), or -1.
+pub fn audio_capture_open() -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_audio_capture_open() }
+}
+
+pub fn audio_capture_format(stream: i32, rate: i32, encoding: i32, channels: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_audio_capture_format(stream, rate, encoding, channels) }
+}
+
+/// What the stream has, whole frames, into `buf`: bytes, or -1.
+pub fn audio_capture_read(stream: i32, buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `buf.len()` bytes into `buf`.
+    unsafe { npk_audio_capture_read(stream, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+pub fn audio_capture_close(stream: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_audio_capture_close(stream) }
+}

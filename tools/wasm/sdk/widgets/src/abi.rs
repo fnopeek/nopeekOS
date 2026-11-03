@@ -219,6 +219,7 @@ icon_ids! {
     SquareSplitVertical   = 65,
     DotsThree             = 66,
     Eject                 = 67,
+    Microphone            = 68,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

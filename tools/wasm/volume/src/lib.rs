@@ -89,7 +89,7 @@ const ROW_H: i32 = 32;
 /// The register's kinds as the card shows them.
 const KINDS: [(i32, &str, IconId); 3] = [
     (host::DEVICE_AUDIO_OUT, "OUTPUT", IconId::SpeakerHigh),
-    (host::DEVICE_AUDIO_IN, "INPUT", IconId::SpeakerLow),
+    (host::DEVICE_AUDIO_IN, "INPUT", IconId::Microphone),
     (host::DEVICE_CAMERA, "CAMERA", IconId::Camera),
 ];
 

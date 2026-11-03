@@ -46,6 +46,7 @@ mod status;
 mod input;
 mod net;
 mod audio;
+mod capture;
 mod devices;
 mod intent;
 mod config;

@@ -1421,4 +1421,20 @@ host_imports! {
     // -(needed + 2); npk_device_select(handle) -> 0 (SHELL).
     mem fn npk_device_list(kind: i32, buf_ptr: i32, buf_max: i32) -> i32;
     ctx fn npk_device_select(handle: i32) -> i32;
+
+    // Audio capture (docs/spec/AUDIO.md). Driver side, HARDWARE:
+    // npk_audio_capture_device_format(rate, encoding, channels) -> 0 / -1,
+    // npk_audio_capture_wanted() -> streams listening (0: may sleep),
+    // npk_audio_capture_push(ptr, len) -> bytes taken.
+    ctx fn npk_audio_capture_device_format(rate: i32, encoding: i32, channels: i32) -> i32;
+    ctx fn npk_audio_capture_wanted() -> i32;
+    mem fn npk_audio_capture_push(ptr: i32, len: i32) -> i32;
+    // Reader side, MIC: npk_audio_capture_open() -> stream, in S16LE /
+    // 48 kHz / stereo until npk_audio_capture_format(stream, rate,
+    // encoding, channels) says otherwise; npk_audio_capture_read(stream,
+    // ptr, max) -> bytes; npk_audio_capture_close(stream).
+    ctx fn npk_audio_capture_open() -> i32;
+    ctx fn npk_audio_capture_format(stream: i32, rate: i32, encoding: i32, channels: i32) -> i32;
+    mem fn npk_audio_capture_read(stream: i32, ptr: i32, max: i32) -> i32;
+    ctx fn npk_audio_capture_close(stream: i32) -> i32;
 }

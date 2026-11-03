@@ -5859,3 +5859,53 @@ pub(crate) fn npk_device_select(ctx: &mut HostState, handle: i32) -> i32 {
     }
     if crate::devices::select(handle as u32) { 0 } else { -1 }
 }
+
+fn hardware(ctx: &HostState) -> bool {
+    ctx.pid != 0 && capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_ok()
+}
+
+fn mic(ctx: &HostState) -> bool {
+    ctx.pid != 0 && capability::check_global(&ctx.cap_id, capability::Rights::MIC).is_ok()
+}
+
+pub(crate) fn npk_audio_capture_device_format(ctx: &mut HostState, rate: i32, encoding: i32, channels: i32) -> i32 {
+    if !hardware(ctx) { return -1; }
+    let Some(fmt) = audio_format(rate, encoding, channels) else { return -1 };
+    if crate::capture::set_device_format(ctx.pid, fmt) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_audio_capture_wanted(ctx: &mut HostState) -> i32 {
+    if !hardware(ctx) { return -1; }
+    crate::capture::wanted(ctx.pid) as i32
+}
+
+pub(crate) fn npk_audio_capture_push(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
+    if !hardware(ctx) { return -1; }
+    let Some(data) = glen(len).and_then(|n| guest(mem, ptr, n)) else { return -1 };
+    crate::capture::push(ctx.pid, data) as i32
+}
+
+pub(crate) fn npk_audio_capture_open(ctx: &mut HostState) -> i32 {
+    if !mic(ctx) {
+        kprintln!("[npk] WASM: npk_audio_capture_open DENIED");
+        return -1;
+    }
+    crate::capture::open(Some(ctx.pid)).map_or(-1, |i| i as i32)
+}
+
+pub(crate) fn npk_audio_capture_format(ctx: &mut HostState, stream: i32, rate: i32, encoding: i32, channels: i32) -> i32 {
+    let (Ok(i), Some(fmt)) = (usize::try_from(stream), audio_format(rate, encoding, channels)) else { return -1 };
+    if crate::capture::set_format(i, Some(ctx.pid), fmt) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_audio_capture_read(mem: &mut [u8], ctx: &mut HostState, stream: i32, ptr: i32, max: i32) -> i32 {
+    let Ok(i) = usize::try_from(stream) else { return -1 };
+    if max < 0 { return -1; }
+    let Some(out) = guest_mut(mem, ptr, max as usize) else { return -1 };
+    crate::capture::read(i, Some(ctx.pid), out).map_or(-1, |n| n as i32)
+}
+
+pub(crate) fn npk_audio_capture_close(ctx: &mut HostState, stream: i32) -> i32 {
+    let Ok(i) = usize::try_from(stream) else { return -1 };
+    if crate::capture::close(i, Some(ctx.pid)) { 0 } else { -1 }
+}

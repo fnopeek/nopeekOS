@@ -119,6 +119,7 @@ const ICONS: &[IconEntry] = &[
     IconEntry { id: 65, svg: "square-split-vertical.svg",   name: "SquareSplitVertical" },
     IconEntry { id: 66, svg: "dots-three.svg",              name: "DotsThree" },
     IconEntry { id: 67, svg: "eject-simple.svg",            name: "Eject" },
+    IconEntry { id: 68, svg: "microphone.svg",              name: "Microphone" },
 ];
 
 /// Rasterized sizes, in actual pixels (not HiDPI-scaled).

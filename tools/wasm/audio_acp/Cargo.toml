@@ -1,0 +1,18 @@
+[package]
+name = "audio_acp"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aml_core = { path = "../acpi/core" }
+npk_sys = { path = "../sdk/npk_sys", features = ["alloc"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

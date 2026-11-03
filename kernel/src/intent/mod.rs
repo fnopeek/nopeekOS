@@ -1890,6 +1890,61 @@ fn intent_beep(args: &str) {
     }
 }
 
+/// `mic [seconds]`: record from the active audio input, print the level,
+/// then play the recording back through the active output. Exercises
+/// driver → capture → stream and back.
+fn intent_mic(args: &str) {
+    let secs: u32 = args.trim().parse().unwrap_or(3).clamp(1, 10);
+    let Some(dev) = crate::devices::active(crate::devices::Kind::AudioIn).and_then(crate::devices::get) else {
+        kprintln!("mic: no audio input (is its driver running?)");
+        return;
+    };
+    let Some(s) = crate::capture::open(None) else {
+        kprintln!("mic: no capture stream free");
+        return;
+    };
+    kprintln!("mic: recording {} s from \"{}\"...", secs, dev.name);
+    let want = (crate::audio::DEFAULT_FORMAT.rate * secs) as usize * crate::audio::BYTES_PER_FRAME;
+    let mut pcm = alloc::vec![0u8; want];
+    let mut got = 0;
+    let t0 = crate::interrupts::ticks();
+    while got < want && crate::interrupts::ticks() - t0 < (secs as u64 + 2) * 100 {
+        got += crate::capture::read(s, None, &mut pcm[got..]).unwrap_or(0);
+        if !crate::smp::fiber::yield_sleep(20) { break; }
+    }
+    let dropped = crate::capture::take_dropped(s, None).unwrap_or(0);
+    crate::capture::close(s, None);
+    pcm.truncate(got);
+    let (mut peak, mut sum) = (0i32, 0u64);
+    for f in pcm.chunks_exact(2) {
+        let v = i16::from_le_bytes([f[0], f[1]]) as i32;
+        peak = peak.max(v.abs());
+        sum += (v as i64 * v as i64) as u64;
+    }
+    let n = (pcm.len() / 2).max(1) as u64;
+    let rms = isqrt(sum / n);
+    kprintln!("mic: {} ms recorded, peak {} ({}%), rms {}, {} frame(s) dropped",
+        got / crate::audio::BYTES_PER_FRAME * 1000 / crate::audio::DEFAULT_FORMAT.rate as usize,
+        peak, peak * 100 / 32767, rms, dropped);
+    if got == 0 {
+        kprintln!("mic: nothing came; the driver did not deliver");
+        return;
+    }
+    if crate::audio::play_oneshot(&pcm) {
+        kprintln!("mic: playing it back");
+    }
+}
+
+fn isqrt(v: u64) -> u64 {
+    let mut x = v;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + v / x) / 2;
+    }
+    x
+}
+
 fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
     if input.is_empty() { return; }
 
@@ -2265,6 +2320,9 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "beep" | "test-audio" => {
             intent_beep(args);
+        }
+        "mic" => {
+            intent_mic(args);
         }
         "volume" | "vol" => {
             let a = args.trim();

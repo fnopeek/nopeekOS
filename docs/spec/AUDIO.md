@@ -1,8 +1,9 @@
 # Audio
 
 The kernel's audio mailbox and mixer (`kernel/src/audio.rs`) and the host
-calls around it. The kernel knows no audio hardware; a driver module
-(`audio_hda`) pulls one mixed stream and plays it.
+calls around it, and the capture side. The kernel knows no audio
+hardware; driver modules (`audio_hda`, `audio_acp`) pull the mixed stream
+or push what they record.
 
 ## Streams (sources)
 
@@ -29,6 +30,39 @@ linear interpolation between neighbouring source frames (as ALSA's
 others stay silent; a mono device gets the average of left and right. A
 device encoding wider than 16 bits gets the sample in the most significant
 bits (HDA's 20 and 24 bit containers).
+
+Each driver has its own device format. Only the driver whose output is
+the active one of the device register (`DEVICES.md`) plays the mix; the
+others get silence and take nothing from the streams.
+
+## Capture
+
+`kernel/src/capture.rs`: the driver of the active audio input pushes what
+it records, every open capture stream gets its own copy in its own format
+(the conversion above, in the other direction). A stream that is not read
+loses its oldest bytes when its ring (about 1.4 s) is full.
+
+| Call | Contract |
+|---|---|
+| `npk_audio_capture_open() -> stream` | A capture stream of the caller, S16LE, 48 kHz, stereo. Needs `Rights::MIC`. -1 when refused or the caller holds 4. |
+| `npk_audio_capture_format(stream, rate, encoding, channels) -> 0 / -1` | As `npk_audio_format`; empties the ring. |
+| `npk_audio_capture_read(stream, ptr, max) -> bytes` | Whole frames recorded since the last read, up to `max`. |
+| `npk_audio_capture_close(stream) -> 0 / -1` | Ends the stream; a module's streams end with it. |
+| `npk_audio_capture_device_format(rate, encoding, channels) -> 0 / -1` | Driver: what it pushes, mono or stereo. Needs `Rights::HARDWARE`. |
+| `npk_audio_capture_wanted() -> streams` | Driver: how many streams listen while its input is the active one, else 0. At 0 the driver stops its hardware: the microphone records only while someone listens. |
+| `npk_audio_capture_push(ptr, len) -> bytes` | Driver: recorded whole frames to every stream; 0 while its input is not the active one. |
+
+While any capture stream is open, the kernel shows the status item
+`kernel/mic` (state Attention), counted from its own streams. `mic [s]` in
+the terminal records from the active input and plays it back.
+
+## ACP driver
+
+`audio_acp` drives the digital microphone of AMD Renoir's audio
+coprocessor (`1022:15e2` revision 1) after Linux `snd-rn-pci-acp3x` and
+`acp3x-pdm-dma`: present when the ACP's ACPI node answers `_WOV` with
+non-zero, 48 kHz, S32LE, stereo. The DMI list of machines whose `_WOV` is
+wrong is not applied (no SMBIOS reader yet).
 
 ## HDA driver
 
