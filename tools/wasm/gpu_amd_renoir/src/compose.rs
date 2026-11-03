@@ -727,10 +727,12 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
         Ok(h) => h,
         Err(_) => { say("test picture refused by normalize"); return }
     };
-    let Ok(out) = gem_new(adev, &c.fpriv, &mut c.mm, None, PAGE, AMDGPU_GEM_DOMAIN_GTT) else { say("no output buffer"); return };
+    // Large enough to catch rows written at a wrong stride.
+    const OUT: u64 = 16 * PAGE;
+    let Ok(out) = gem_new(adev, &c.fpriv, &mut c.mm, None, OUT, AMDGPU_GEM_DOMAIN_GTT) else { say("no output buffer"); return };
     let alias_va = (out.va & 0xFFFF_FFFF) | (1u64 << 36);
     let alias = gem_new(adev, &c.fpriv, &mut c.mm, Some(alias_va), PAGE, AMDGPU_GEM_DOMAIN_GTT).ok();
-    let _ = write(adev, &out, 0, &[ST_OUT; PAGE as usize]);
+    let _ = write(adev, &out, 0, &[ST_OUT; OUT as usize]);
     if let Some(a) = alias.as_ref() { let _ = write(adev, a, 0, &[ST_ALIAS; PAGE as usize]); }
     let fence_word = |adev: &amdgpu_device| -> Option<u32> {
         let drv = &adev.rings[r].fence_drv;
@@ -763,9 +765,23 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
         crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
     }
     let after = fence_word(adev);
-    let mut buf = [0u8; PAGE as usize];
+    let mut buf = alloc::vec![0u8; OUT as usize];
     crate::amdgpu_gart::kptr_read(adev, out.k, 0, &mut buf);
     let changed = buf.iter().filter(|&&b| b != ST_OUT).count();
+    // Where the written bytes are: the runs, to read the row stride off.
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for (i, &b) in buf.iter().enumerate() {
+        if b == ST_OUT { continue; }
+        match runs.last_mut() {
+            Some(r) if r.1 == i => r.1 = i + 1,
+            _ => runs.push((i, i + 1)),
+        }
+    }
+    let mut l = Line::new();
+    l.s("jpeg test: written runs (offset+len):");
+    for (a, b) in runs.iter().take(24) { l.s(" ").dec(*a as u64).s("+").dec((b - a) as u64); }
+    if runs.len() > 24 { l.s(" ... (").dec(runs.len() as u64).s(" runs)"); }
+    l.say();
     let mut l = Line::new();
     l.s("jpeg test: ").s(match done { Some(0) => "fence signaled", Some(_) => "fence signaled with an error", None => "no fence after 500 ms" })
         .s(" after ").dec(crate::linux::now_us() - t0).s(" us; output changed ").dec(changed as u64)
@@ -773,8 +789,9 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
     for b in &buf[..16] { l.s(" ").hexw(*b as u32, 2); }
     l.say();
     if let Some(a) = alias.as_ref() {
-        crate::amdgpu_gart::kptr_read(adev, a.k, 0, &mut buf);
-        let n = buf.iter().filter(|&&b| b != ST_ALIAS).count();
+        let mut abuf = alloc::vec![0u8; PAGE as usize];
+        crate::amdgpu_gart::kptr_read(adev, a.k, 0, &mut abuf);
+        let n = abuf.iter().filter(|&&b| b != ST_ALIAS).count();
         Line::new().s("jpeg test: alias buffer (same low 32 bits) changed ").dec(n as u64).s(" B").say();
     }
     let mut l = Line::new();
