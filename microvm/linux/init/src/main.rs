@@ -358,9 +358,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  do echo \"user_pref(\\\"${p%|*}\\\", ${p#*|});\" >> /tmp/moz/user.js; done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
-                 echo 'user_pref(\"media.cubeb.backend\", \"alsa\");' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.cubeb.backend\", \"pulse\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
-                 echo 'user_pref(\"media.cubeb_latency_playback_ms\", 2000);' >> /tmp/moz/user.js; \
                  [ -e /tmp/moz/.npk-owned ] || { find /tmp/moz -xdev ! -user 1000 -exec chown -h 1000:1000 {} + 2>/dev/null; : > /tmp/moz/.npk-owned; }; \
                  chown -h 1000:1000 /tmp/moz /tmp/moz/user.js /tmp/moz/datareporting 2>/dev/null; \
                  chown 1000:1000 /tmp/bcache /tmp/gleandb; \
@@ -393,8 +392,16 @@ fn launch_wayland(kmsg_fd: i64) {
                    head -c 200000000 /dev/zero | gzip -1 > /dev/null; f=$(t); \
                    echo \"<0>[bench] cpu=$(( (b-a)*10 ))ms syscalls=$(( (c-b)*10 ))ms fork-exec1000=$(( (d-c)*10 ))ms memtouch1G=$(( (e-d)*10 ))ms gzip200M=$(( (f-e)*10 ))ms\" > /dev/kmsg; \
                  fi; \
+                 su -s /bin/sh app -c 'export XDG_RUNTIME_DIR=/tmp/xrt DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus; \
+                   dbus-daemon --session --address=$DBUS_SESSION_BUS_ADDRESS --fork --nopidfile; \
+                   pipewire & i=0; while [ ! -S /tmp/xrt/pipewire-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
+                   wireplumber & pipewire-pulse & wait' > /tmp/pipewire.log 2>&1 & \
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
+                 i=0; while [ ! -S /tmp/xrt/pulse/native ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
+                 if [ -S /tmp/xrt/pulse/native ]; then echo \"<0>[pw] pipewire-pulse up after ${i}x5ms\" > /dev/kmsg; \
+                 else echo '<0>[pw] pipewire-pulse did not come up' > /dev/kmsg; \
+                   tail -n 20 /tmp/pipewire.log | while read -r l; do echo \"<0>[pw] $l\" > /dev/kmsg; done; fi; \
                  LOGPAT=$(sed -n 's/.*npklogs=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
                  ALL=0; grep -qE 'npklogs( |$)' /proc/cmdline && ALL=1; \
                  FR=0; grep -q npkframes /proc/cmdline && FR=1; \
@@ -412,6 +419,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
                  [ $GPU = 1 ] && echo \"export LIBVA_DRIVER_NAME=$VA\" >> /tmp/app.sh; \
+                 echo 'export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus' >> /tmp/app.sh; \
                  [ $FR = 1 ] && echo 'export MOZ_LOG=FFmpegVideo:4' >> /tmp/app.sh; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \
                    echo \"export $e\" >> /tmp/app.sh; echo \"<0>[wl] app env $e\" > /dev/kmsg; done; \
@@ -806,8 +814,10 @@ unsafe fn rt_already(tid: i32) -> bool {
     }
 }
 
+/// The browser's audio threads and PipeWire's data loop, which moves the
+/// samples between the streams and the sound card.
 fn rt_match(comm: &[u8]) -> bool {
-    byte_find(comm, b"cubeb") || byte_find(comm, b"AudioIPC")
+    byte_find(comm, b"cubeb") || byte_find(comm, b"AudioIPC") || byte_find(comm, b"data-loop")
 }
 
 fn byte_find(hay: &[u8], needle: &[u8]) -> bool {
@@ -954,15 +964,25 @@ unsafe fn rt_watcher_loop(kmsg_fd: i64) -> ! {
     }
 }
 
-/// True while the playback substream is open (prepared or running); its
-/// status file reads "closed" otherwise, and is absent without a sound card.
+/// True while the playback or the capture substream is open (prepared or
+/// running); a status file reads "closed" otherwise, and is absent without
+/// a sound card.
 unsafe fn playback_open() -> bool {
-    let fd = unsafe {
-        syscall2(SYS_OPEN, b"/proc/asound/card0/pcm0p/sub0/status\0".as_ptr() as u64, O_RDONLY)
-    };
+    // SAFETY: both paths are NUL-terminated literals.
+    unsafe {
+        substream_open(b"/proc/asound/card0/pcm0p/sub0/status\0")
+            || substream_open(b"/proc/asound/card0/pcm0c/sub0/status\0")
+    }
+}
+
+unsafe fn substream_open(path: &[u8]) -> bool {
+    // SAFETY: `path` is NUL-terminated (both callers pass literals).
+    let fd = unsafe { syscall2(SYS_OPEN, path.as_ptr() as u64, O_RDONLY) };
     if fd < 0 { return false; }
     let mut buf = [0u8; 8];
+    // SAFETY: `buf` is a live local of the length passed; `fd` is ours.
     let n = unsafe { syscall3(SYS_READ, fd as u64, buf.as_mut_ptr() as u64, buf.len() as u64) };
+    // SAFETY: closes the descriptor opened above.
     unsafe { let _ = syscall1(SYS_CLOSE, fd as u64); }
     let closed = b"closed";
     let mut is_closed = n >= closed.len() as i64;

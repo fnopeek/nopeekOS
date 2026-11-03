@@ -49,9 +49,11 @@ BUNDLE_NAME="${BUNDLE_NAME:-firefox}"
 # broad Unicode and a sans default.
 # wayland, libdisplay-info: libraries npkwm links (it carries wlroots
 # itself); checked against its NEEDED list below.
-# alsa-lib: libasound for Firefox's cubeb ALSA backend (no PulseAudio /
-# PipeWire in the bundle). cubeb opens the ALSA "default" PCM, which is
-# the virtio-snd card (card 0) backed by the host audio path.
+# pipewire, wireplumber, pipewire-pulse, pipewire-alsa: the guest's sound
+# server on the virtio-snd card (card 0, playback and capture). Firefox
+# talks to it through cubeb's PulseAudio backend; ALSA clients through
+# pipewire-alsa, so no client holds the card alone. The camera and screen
+# share portals sit on the same PipeWire later.
 # mesa-utils: es2gears_wayland and friends, GL test clients the session
 # runs instead of the browser with npkapp= on the guest command line.
 # Video decodes through VA-API: libva, intel-gmmlib for our build of Intel's
@@ -61,7 +63,7 @@ BUNDLE_NAME="${BUNDLE_NAME:-firefox}"
 # busybox: the session scripts in PID-1 are written for its applets (wget,
 # nc, su without PAM, halt -f); linked in /usr/libexec/npk/bb, which the
 # session puts first in PATH.
-COMMON_PACKAGES="busybox seatd libinput systemd mesa vulkan-intel vulkan-icd-loader wayland libdisplay-info ttf-dejavu noto-fonts alsa-lib mesa-utils ffmpeg gdb"
+COMMON_PACKAGES="busybox seatd libinput systemd mesa vulkan-intel vulkan-icd-loader wayland libdisplay-info ttf-dejavu noto-fonts alsa-lib pipewire wireplumber pipewire-pulse pipewire-alsa mesa-utils ffmpeg gdb"
 case "$BUNDLE_NAME" in
     firefox) DEFAULT_PACKAGES="firefox libva libva-utils intel-gmmlib $COMMON_PACKAGES" ;;
     *)       echo "unknown bundle: $BUNDLE_NAME" >&2; exit 1 ;;
@@ -71,6 +73,9 @@ PKG_LIST="$SCRIPT_DIR/packages-${BUNDLE_NAME}.txt"
 # The OTA asset name, section microvm:<name>-sqfs.
 ASSET_NAME="microvm-${BUNDLE_NAME}"
 SNAPSHOT_TAG="arch${ARCH_SNAPSHOT//\//}"
+# A second build on the same client and snapshot (packages or PID-1
+# changed) carries a revision: firefox-159.0-arch20261029-2.
+BUNDLE_REV="-2"
 
 OUT_DIR="$REPO_ROOT/release/apps/${BUNDLE_NAME}"
 
@@ -113,7 +118,7 @@ trap 'arch_rm "$WORK"' EXIT
 mkdir -p "$OUT_DIR"
 
 export MESA_VERSION MESA_OVERLAY IHD_OVERLAY PKG_LIST PID1_BIN REPO_ROOT OUT_DIR
-export BUNDLE_NAME SNAPSHOT_TAG ARCH_SNAPSHOT WORK
+export BUNDLE_NAME SNAPSHOT_TAG BUNDLE_REV ARCH_SNAPSHOT WORK
 arch_run "$WORK/root" "
     cyan()  { printf '\033[0;36m[npk]\033[0m %s\n' \"\$1\"; }
     red()   { printf '\033[0;31m[npk]\033[0m %s\n' \"\$1\" >&2; exit 1; }
@@ -216,7 +221,7 @@ arch_run "$WORK/root" "
     umount \$R/var/cache/pacman/pkg
     for d in dev proc tmp; do [ -z \"\$(ls -A \$R/\$d)\" ] || { ls -A \$R/\$d | head -5; red \"\$d is still mounted\"; }; done
     rm -rf \$R/var/cache/pacman
-    VERSION=\"\$(cat \$WORK/client-version)-\$SNAPSHOT_TAG\"
+    VERSION=\"\$(cat \$WORK/client-version)-\$SNAPSHOT_TAG\$BUNDLE_REV\"
     OUT=\$OUT_DIR/\$BUNDLE_NAME-\$VERSION
 
     cyan \"packing \$BUNDLE_NAME \$VERSION (\$(find \$R -type f | wc -l) files)\"
