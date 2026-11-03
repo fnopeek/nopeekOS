@@ -415,8 +415,8 @@ struct service {
     /// The JPEG decode on the JPEG ring, its job still open (seq, fence,
     /// when it went), a decode the watchdog gave up on whose fence has not
     /// signaled yet, its buffers, and the bitstream being built.
-    jpeg: Option<(u32, crate::dma_fence::Fence, u64)>,
-    jpeg_stuck: Option<crate::dma_fence::Fence>,
+    jpeg: Option<(u32, crate::dma_fence::Fence, u64, u32)>,
+    jpeg_stuck: Option<(crate::dma_fence::Fence, u32)>,
     jpeg_bufs: compose::jpeg_bufs,
     jpeg_bits: Vec<u8>,
 }
@@ -808,8 +808,8 @@ fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, 
     }
     // A decode that hung keeps the engine until the scheduler's timeout
     // has reset the ring and signaled its fence.
-    if let Some(f) = svc.jpeg_stuck.as_ref() {
-        if compose::jpeg_done(adev, f).is_none() {
+    if let Some((f, tag)) = svc.jpeg_stuck.as_ref() {
+        if compose::jpeg_finished(adev, f, *tag).is_none() {
             return -EBUSY;
         }
         svc.jpeg_stuck = None;
@@ -844,12 +844,12 @@ fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, 
         let (va, pitch_px) = (dst.va, dst.pitch / 2);
         let bos: Vec<usize> = dst.pieces.iter().flatten().map(|p| p.0).chain(dst.linear.map(|g| g.bo)).collect();
         let c = svc.composer.as_mut().ok_or(-EINVAL)?;
-        compose::jpeg_submit(adev, c, &mut svc.jpeg_bufs, &bits, va, pitch_px, &bos)
+        compose::jpeg_submit(adev, c, &mut svc.jpeg_bufs, &bits, va, pitch_px, crate::jpeg_dec::tag_for(seq), &bos)
     })();
     svc.jpeg_bits = bits;
     match r {
         Ok(f) => {
-            svc.jpeg = Some((seq, f, crate::linux::now_us()));
+            svc.jpeg = Some((seq, f, crate::linux::now_us(), crate::jpeg_dec::tag_for(seq)));
             JOB_OPEN
         }
         Err(e) => e,
@@ -885,14 +885,14 @@ fn jpeg_mode() -> &'static [u8] {
 
 /// Complete the JPEG job once its fence signaled. True when it was.
 fn poll_jpeg(adev: &mut amdgpu_device, svc: &mut service) -> bool {
-    let Some((seq, f, t0)) = svc.jpeg.as_ref() else { return false };
+    let Some((seq, f, t0, tag)) = svc.jpeg.as_ref() else { return false };
     let seq = *seq;
-    let r = match compose::jpeg_done(adev, f) {
+    let r = match compose::jpeg_finished(adev, f, *tag) {
         Some(r) => r,
         None if crate::linux::now_us().saturating_sub(*t0) > JPEG_WATCHDOG_US => {
             Line::new().s("gpudev: JPEG decode ").dec(seq as u64).s(" hung; dropped, the ring's timeout resets it").say();
-            let (_, f, _) = svc.jpeg.take().unwrap();
-            svc.jpeg_stuck = Some(f);
+            let (_, f, _, tag) = svc.jpeg.take().unwrap();
+            svc.jpeg_stuck = Some((f, tag));
             npk_sys::gpudev_complete(seq as i32, -ETIMEDOUT);
             return true;
         }

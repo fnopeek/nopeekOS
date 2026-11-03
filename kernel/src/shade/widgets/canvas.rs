@@ -241,7 +241,8 @@ pub fn commit_jpeg(window_id: u32, canvas_id: u32, w: u32, h: u32, jpeg: &[u8]) 
     use crate::shade::scene::Yuv;
     use core::sync::atomic::Ordering;
     if !crate::gpu::gpudev::jpeg_supported() || JPEG_FAILS.load(Ordering::Relaxed) >= GIVE_UP { return -1; }
-    if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM || w % 16 != 0 || h % 8 != 0 { return -1; }
+    // The JPEG engine steps the row stride in 256 bytes: 128 YUYV pixels.
+    if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM || w % 128 != 0 || h % 8 != 0 { return -1; }
     reap_decodes();
     if DECODING.lock().iter().any(|&(wi, c, _)| wi == window_id && c == canvas_id) { return -2; }
     let bw = w / 2;

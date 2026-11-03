@@ -665,21 +665,22 @@ pub struct jpeg_bufs {
 /// `amdgpu_jpeg_dec_parse_cs` as a guest's is): `bitstream` from
 /// `jpeg_dec::normalize` into the YUYV buffer at `out_va`, `pitch_px`
 /// pixels a row. `out_bos` go into the buffer list. Its fence.
+#[allow(clippy::too_many_arguments)]
 pub fn jpeg_submit(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
-                   pitch_px: u32, out_bos: &[usize]) -> Result<Fence, i32> {
-    jpeg_submit_regs(adev, c, j, bitstream, out_va, pitch_px >> 4, 0, out_bos)
+                   pitch_px: u32, tag: u32, out_bos: &[usize]) -> Result<Fence, i32> {
+    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch_px >> 4, 0, 4, tag, out_bos)
 }
 
 /// `jpeg_submit` with the pitch registers as given.
 #[allow(clippy::too_many_arguments)]
 fn jpeg_submit_regs(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
                     pitch: u32, uv_pitch: u32, out_bos: &[usize]) -> Result<Fence, i32> {
-    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch, uv_pitch, 0, out_bos)
+    jpeg_submit_variant(adev, c, j, bitstream, out_va, pitch, uv_pitch, 0, 0, out_bos)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn jpeg_submit_variant(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs, bitstream: &[u8], out_va: u64,
-                       pitch: u32, uv_pitch: u32, variant: u32, out_bos: &[usize]) -> Result<Fence, i32> {
+                       pitch: u32, uv_pitch: u32, variant: u32, tag: u32, out_bos: &[usize]) -> Result<Fence, i32> {
     let need = (bitstream.len() as u64).next_multiple_of(PAGE);
     if j.bits.as_ref().is_some_and(|g| g.bytes < need) {
         let g = j.bits.take().unwrap();
@@ -695,7 +696,12 @@ fn jpeg_submit_variant(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_
     if !write(adev, bits, 0, bitstream) {
         return Err(-ENOMEM);
     }
-    let words = crate::jpeg_dec::build_ib_variant(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch, variant);
+    let mut words = crate::jpeg_dec::build_ib_variant(bits.va, bitstream.len() as u32, out_va, pitch, uv_pitch,
+                                                      variant & 3);
+    // Variant bit 2: the end tag (`jpeg_dec::end_tag`).
+    if variant & 4 != 0 {
+        crate::jpeg_dec::end_tag(&mut words, tag);
+    }
     if words.len() as u64 * 4 > ib.bytes || !write_words(adev, ib, 0, &words) {
         return Err(-E2BIG);
     }
@@ -720,6 +726,14 @@ pub fn jpeg_done(adev: &mut amdgpu_device, f: &Fence) -> Option<i32> {
         return None;
     }
     Some(f.error().min(0))
+}
+
+/// `jpeg_done`, and the IB ran to its end: its tag is in the register
+/// (`jpeg_dec::end_tag`). A fence with an error needs no tag.
+pub fn jpeg_finished(adev: &mut amdgpu_device, f: &Fence, tag: u32) -> Option<i32> {
+    let e = jpeg_done(adev, f)?;
+    if e < 0 { return Some(e); }
+    (crate::jpeg_v2_0::jpeg_rreg_mm(adev, crate::jpeg_dec::JPEG_TAG_REG) == tag).then_some(0)
 }
 
 /// What the JPEG self-test writes into its buffers before the decode, to
@@ -828,8 +842,9 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let _ = write(adev, &big, 0, &alloc::vec![ST_OUT; room as usize]);
                             let mut bos = alloc::vec![big.bo];
                             if let Some(a) = alias.as_ref() { bos.push(a.bo); }
-                            let variant = k % 3;
-                            let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, variant, &bos) else { say("720p submit failed"); break };
+                            let variant = 4;
+                            let tag = crate::jpeg_dec::tag_for(1000 + k);
+                            let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, variant, tag, &bos) else { say("720p submit failed"); break };
                             let t0 = crate::linux::now_us();
                             let mut d = None;
                             if k == 0 {
@@ -874,7 +889,7 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                                 crate::workqueue::run_pending(adev);
                                 crate::amdgpu_irq::amdgpu_ih_process(adev, false);
                                 crate::workqueue::run_pending(adev);
-                                if let Some(e) = jpeg_done(adev, &f) { d = Some((e, crate::linux::now_us() - t0)); break; }
+                                if let Some(e) = jpeg_finished(adev, &f, tag) { d = Some((e, crate::linux::now_us() - t0)); break; }
                                 crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
                             }
                             let mut buf = alloc::vec![0u8; room as usize];
@@ -884,9 +899,9 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let ok = matches!(d, Some((0, _))) && inside as u64 > frame * 9 / 10 && behind == 0;
                             if k < 9 {
                                 let mut l = Line::new();
-                                l.s("jpeg test 720p V").dec(variant as u64 + 1).s(" #").dec(k as u64).s(": ");
+                                l.s("jpeg test 720p tagged #").dec(k as u64).s(": ");
                                 match d { Some((e, us)) => { l.s(if e == 0 { "done in " } else { "error in " }).dec(us).s(" us"); } None => { l.s("no fence"); } }
-                                l.s(", ").dec(inside as u64).s(" of ").dec(frame).s(" B written at the fence").say();
+                                l.s(", ").dec(inside as u64).s(" of ").dec(frame).s(" B written when the tag was there").say();
                             }
                             if ok { good += 1; } else if first_err.is_none() {
                                 first_err = Some(k);
