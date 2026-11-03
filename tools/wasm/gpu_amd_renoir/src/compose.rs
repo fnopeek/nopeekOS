@@ -753,8 +753,12 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
     };
     let t0 = crate::linux::now_us();
     let mut done = None;
+    // As the service loop: the scheduler hands the job to the ring from
+    // its work queue, the interrupt signals the fence.
     while crate::linux::now_us() - t0 < 500_000 {
+        crate::workqueue::run_pending(adev);
         crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+        crate::workqueue::run_pending(adev);
         if let Some(e) = jpeg_done(adev, &f) { done = Some(e); break; }
         crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
     }
@@ -779,6 +783,9 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
     l.s(", after 0x");
     match after { Some(v) => { l.hexw(v, 8); } None => { l.s("?"); } }
     l.s(", last emitted ").dec(adev.rings[r].fence_drv.sync_seq as u64);
+    if let Some((rp, wp)) = crate::amdgpu_ring::amdgpu_ring_get_rptr_wptr(adev, r) {
+        l.s(", ring rptr 0x").hexw(rp as u32, 4).s(" wptr 0x").hexw(wp as u32, 4);
+    }
     l.say();
     // Which VMID on the MMHUB points at this client's page directory.
     let hub = adev.vmhub[adev.rings[r].vm_hub as usize];
