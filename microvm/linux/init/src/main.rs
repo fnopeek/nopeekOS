@@ -401,10 +401,12 @@ fn launch_wayland(kmsg_fd: i64) {
                    > /tmp/app/wireplumber/wireplumber.conf.d/50-npk.conf; \
                  chown -R 1000:1000 /tmp/app/wireplumber; \
                  su -s /bin/sh app -c 'export XDG_RUNTIME_DIR=/tmp/xrt DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus; \
-                   dbus-daemon --session --address=$DBUS_SESSION_BUS_ADDRESS --fork --nopidfile; \
+                   dbus-daemon --session --address=$DBUS_SESSION_BUS_ADDRESS --nofork --nopidfile & \
+                   i=0; while [ ! -S /tmp/xrt/bus ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                    pipewire & i=0; while [ ! -S /tmp/xrt/pipewire-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                    wireplumber & pipewire-pulse & \
                    [ -x /usr/libexec/npk/npk-camera ] && /usr/libexec/npk/npk-camera & wait' > /tmp/pipewire.log 2>&1 & \
+                 ( tail -F /tmp/pipewire.log 2>/dev/null | while read -r l; do echo \"<0>[pw] $l\" > /dev/kmsg; done ) & \
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  i=0; while [ ! -S /tmp/xrt/pulse/native ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
