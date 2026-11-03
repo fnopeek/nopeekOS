@@ -80,11 +80,11 @@ const LEVEL: u32 = 3;
 const DEVICE: u32 = 100;
 
 // Card size (logical px): a 28 px button row and the card's padding, a
-// section label and 30 px per device row.
+// section (its label and padding) and a device row with its padding.
 const W: i32 = 280;
 const H: i32 = 44;
-const SECTION_H: i32 = 30;
-const ROW_H: i32 = 30;
+const SECTION_H: i32 = 42;
+const ROW_H: i32 = 32;
 
 /// The register's kinds as the card shows them.
 const KINDS: [(i32, &str, IconId); 3] = [
