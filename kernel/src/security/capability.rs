@@ -57,7 +57,12 @@ bitflags! {
         /// The `ext/` namespace: files on external drives. A module without
         /// it reaches such a file only through the open dialog.
         const EXTERNAL  = 0b10_0000_0000_0000;
-        const ALL       = 0b11_1111_1111_1111;
+        /// `npk_usb_*` on a video interface: the camera. Never a default;
+        /// the kernel's status item is on while a stream is open.
+        const CAMERA    = 0b100_0000_0000_0000;
+        /// `npk_usb_*` on an audio interface, and audio capture.
+        const MIC       = 0b1000_0000_0000_0000;
+        const ALL       = 0b1111_1111_1111_1111;
     }
 }
 
@@ -401,12 +406,16 @@ fn rights_from_caps_byte(b: u8) -> Rights {
 const CAP2_BIT_NET: u8 = 0x01; // npk_http_request (beak's outbound fetch)
 const CAP2_BIT_SHELL: u8 = 0x02; // system UI roles (panel, launcher, picker)
 const CAP2_BIT_EXTERNAL: u8 = 0x04; // files on external drives (`ext/`)
+const CAP2_BIT_CAMERA: u8 = 0x08; // a camera's USB interfaces
+const CAP2_BIT_MIC: u8 = 0x10; // a microphone
 
 fn rights_from_caps_byte2(b: u8) -> Rights {
     let mut r = Rights::empty();
     if b & CAP2_BIT_NET != 0 { r |= Rights::NET; }
     if b & CAP2_BIT_SHELL != 0 { r |= Rights::SHELL; }
     if b & CAP2_BIT_EXTERNAL != 0 { r |= Rights::EXTERNAL; }
+    if b & CAP2_BIT_CAMERA != 0 { r |= Rights::CAMERA; }
+    if b & CAP2_BIT_MIC != 0 { r |= Rights::MIC; }
     r
 }
 

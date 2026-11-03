@@ -1182,6 +1182,7 @@ fn cleanup_instance_state(state: &mut HostState) {
     host_core::drop_ext_writers(state);
     state.files.clear();
     crate::audio::release_owner(state.pid);
+    crate::xhci::usbfn::release_owner(state.pid);
     crate::audio::display_audio_release(state.pid);
     crate::ext::instance_ended(&state.cap_id);
     if let Some(hw) = state.hw.take() {

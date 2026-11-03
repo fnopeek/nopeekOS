@@ -1386,4 +1386,21 @@ host_imports! {
     // npk_ext_eject(label_ptr, label_len) -> 0 or -1: the drive of that
     // volume finishes what runs, is flushed and stopped, and goes.
     mem fn npk_ext_eject(label_ptr: i32, label_len: i32) -> i32;
+
+    // USB interfaces (CAMERA for video, MIC for audio). Errors: -1 gone,
+    // -2 none free, -3 denied, -4 device refused, -5 bandwidth, -6 memory,
+    // -7 bad argument.
+    // npk_usb_claim(class, buf, max) -> handle; device + configuration
+    // descriptors into buf.
+    mem fn npk_usb_claim(class: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    // npk_usb_control(handle, setup8, data, len) -> bytes.
+    mem fn npk_usb_control(handle: i32, setup_ptr: i32, data_ptr: i32, data_len: i32) -> i32;
+    ctx fn npk_usb_set_alt(handle: i32, ifnum: i32, alt: i32) -> i32;
+    // npk_usb_stream_open(handle, ep, td_len, count) -> stream.
+    ctx fn npk_usb_stream_open(handle: i32, ep: i32, td_len: i32, count: i32) -> i32;
+    // npk_usb_stream_read(handle, stream, buf, max) -> bytes of records
+    // `len u16, status u8, 0, data`.
+    mem fn npk_usb_stream_read(handle: i32, sid: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    ctx fn npk_usb_stream_close(handle: i32, sid: i32) -> i32;
+    ctx fn npk_usb_release(handle: i32) -> i32;
 }

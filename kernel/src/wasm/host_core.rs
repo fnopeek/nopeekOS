@@ -5644,3 +5644,122 @@ pub(crate) fn npk_ext_eject(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32,
     let Some(label) = read_str(mem, label_ptr, label_len) else { return -1 };
     if crate::ext::eject(&label).is_ok() { 0 } else { -1 }
 }
+
+// === USB interfaces for modules (`xhci::usbfn`) ===
+
+/// The right a USB class needs: video → CAMERA, audio → MIC. Other
+/// classes have no module path.
+fn usb_class_right(class: u8) -> Option<capability::Rights> {
+    match class {
+        crate::xhci::usbfn::CLASS_VIDEO => Some(capability::Rights::CAMERA),
+        crate::xhci::usbfn::CLASS_AUDIO => Some(capability::Rights::MIC),
+        _ => None,
+    }
+}
+
+fn usb_err(e: crate::xhci::usbfn::FnError) -> i32 {
+    use crate::xhci::usbfn::FnError::*;
+    match e {
+        Gone => -1,
+        NotFound => -2,
+        Denied => -3,
+        Failed => -4,
+        Bandwidth => -5,
+        NoMemory => -6,
+        BadArgument => -7,
+    }
+}
+
+/// `npk_usb_claim(class, buf, max)`: claim the interfaces of `class` on the
+/// first free device; the device and configuration descriptors go to
+/// `buf`. Returns the handle (> 0) or an error (< 0).
+pub(crate) fn npk_usb_claim(mem: &mut [u8], ctx: &mut HostState, class: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    let Some(right) = usb_class_right(class as u8) else { return -3 };
+    if ctx.pid == 0 || capability::check_global(&ctx.cap_id, right).is_err() {
+        kprintln!("[npk] WASM: npk_usb_claim DENIED (class {:02x})", class as u8);
+        return -3;
+    }
+    if buf_max < 0 { return -7; }
+    let Some(out) = guest_mut(mem, buf_ptr, buf_max as usize) else { return -7 };
+    match crate::xhci::usbfn::claim(class as u8, ctx.pid) {
+        Ok((id, descs)) => {
+            let n = descs.len().min(out.len());
+            out[..n].copy_from_slice(&descs[..n]);
+            id as i32
+        }
+        Err(e) => usb_err(e),
+    }
+}
+
+/// `npk_usb_control(handle, setup, data, len)`: `setup` is the 8-byte
+/// SETUP packet; `data` holds OUT bytes or receives IN bytes. Returns the
+/// bytes moved or an error.
+pub(crate) fn npk_usb_control(mem: &mut [u8], ctx: &mut HostState, handle: i32, setup_ptr: i32,
+                              data_ptr: i32, data_len: i32) -> i32 {
+    let Some(setup) = guest(mem, setup_ptr, 8) else { return -7 };
+    let (bm, req) = (setup[0], setup[1]);
+    let value = u16::from_le_bytes([setup[2], setup[3]]);
+    let index = u16::from_le_bytes([setup[4], setup[5]]);
+    let w_length = u16::from_le_bytes([setup[6], setup[7]]);
+    if data_len < w_length as i32 { return -7; }
+    let out: Vec<u8> = if bm & 0x80 == 0 {
+        match guest(mem, data_ptr, w_length as usize) { Some(b) => b.to_vec(), None => return -7 }
+    } else {
+        Vec::new()
+    };
+    match crate::xhci::usbfn::control(handle as u32, ctx.pid, bm, req, value, index, &out, w_length) {
+        Ok(v) => {
+            if bm & 0x80 != 0 {
+                let Some(dst) = guest_mut(mem, data_ptr, v.len()) else { return -7 };
+                dst.copy_from_slice(&v);
+            }
+            w_length as i32
+        }
+        Err(e) => usb_err(e),
+    }
+}
+
+pub(crate) fn npk_usb_set_alt(ctx: &mut HostState, handle: i32, ifnum: i32, alt: i32) -> i32 {
+    match crate::xhci::usbfn::set_alt(handle as u32, ctx.pid, ifnum as u8, alt as u8) {
+        Ok(()) => 0,
+        Err(e) => usb_err(e),
+    }
+}
+
+/// `npk_usb_stream_open(handle, ep, td_len, count)`: an IN stream on
+/// endpoint `ep`; `td_len` 0 = one service interval (isochronous).
+pub(crate) fn npk_usb_stream_open(ctx: &mut HostState, handle: i32, ep: i32, td_len: i32, count: i32) -> i32 {
+    if td_len < 0 || count <= 0 { return -7; }
+    match crate::xhci::usbfn::stream_open(handle as u32, ctx.pid, ep as u8, td_len as usize, count as usize) {
+        Ok(sid) => sid as i32,
+        Err(e) => usb_err(e),
+    }
+}
+
+/// `npk_usb_stream_read(handle, stream, buf, max)`: records of `len: u16,
+/// status: u8, 0` and `len` bytes. Returns the bytes written.
+pub(crate) fn npk_usb_stream_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, sid: i32,
+                                  buf_ptr: i32, buf_max: i32) -> i32 {
+    if buf_max <= 0 { return -7; }
+    if guest_mut(mem, buf_ptr, buf_max as usize).is_none() { return -7; }
+    match crate::xhci::usbfn::stream_read(handle as u32, ctx.pid, sid as u32, buf_max as usize) {
+        Ok(v) => {
+            let Some(dst) = guest_mut(mem, buf_ptr, v.len()) else { return -7 };
+            dst.copy_from_slice(&v);
+            v.len() as i32
+        }
+        Err(e) => usb_err(e),
+    }
+}
+
+pub(crate) fn npk_usb_stream_close(ctx: &mut HostState, handle: i32, sid: i32) -> i32 {
+    match crate::xhci::usbfn::stream_close(handle as u32, ctx.pid, sid as u32) {
+        Ok(()) => 0,
+        Err(e) => usb_err(e),
+    }
+}
+
+pub(crate) fn npk_usb_release(ctx: &mut HostState, handle: i32) -> i32 {
+    crate::xhci::usbfn::release(handle as u32, ctx.pid);
+    0
+}

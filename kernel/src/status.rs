@@ -144,6 +144,13 @@ fn kernel_items(wlan_shown: bool) -> Vec<Item> {
     let icon = if vol == 0 { IconId::SpeakerX } else if vol <= 50 { IconId::SpeakerLow } else { IconId::SpeakerHigh };
     v.push(kernel_item("volume", icon, vol as i32, STATE_NORMAL, alloc::format!("{}%", vol), "volume"));
 
+    // The camera's own light, in software: on while any stream is open,
+    // whoever opened it.
+    let cams = crate::xhci::usbfn::camera_streams();
+    if cams > 0 {
+        v.push(kernel_item("camera", IconId::Camera, cams as i32, STATE_ATTENTION, "Camera on".into(), ""));
+    }
+
     if let Some(b) = battery_packed() {
         let percent = (b & 0xFF) as u8;
         let status = (b >> 8) & 0xFF; // 0 discharging, 1 charging, 2 full, 3 plugged idle

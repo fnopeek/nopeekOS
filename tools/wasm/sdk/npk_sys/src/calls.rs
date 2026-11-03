@@ -868,3 +868,60 @@ pub fn ext_reply(seq: u32, status: i32, data: &[u8]) -> i32 {
     // SAFETY: FFI; `data` is borrowed for the call.
     unsafe { npk_ext_reply(seq as i32, status, data.as_ptr() as i32, data.len() as i32) }
 }
+
+// USB interfaces: class video needs CAMERA, class audio MIC. Errors: -1
+// gone, -2 none free, -3 denied, -4 device refused, -5 bandwidth, -6
+// memory, -7 bad argument.
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn npk_usb_claim(class: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_usb_control(handle: i32, setup_ptr: i32, data_ptr: i32, data_len: i32) -> i32;
+    fn npk_usb_set_alt(handle: i32, ifnum: i32, alt: i32) -> i32;
+    fn npk_usb_stream_open(handle: i32, ep: i32, td_len: i32, count: i32) -> i32;
+    fn npk_usb_stream_read(handle: i32, sid: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_usb_stream_close(handle: i32, sid: i32) -> i32;
+    fn npk_usb_release(handle: i32) -> i32;
+}
+
+/// Claim the interfaces of `class` on the first free device: the handle,
+/// with the device descriptor (18 bytes) and the configuration descriptor
+/// written to `buf`.
+pub fn usb_claim(class: u8, buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `buf.len()` bytes into `buf`.
+    unsafe { npk_usb_claim(class as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+/// A control request on a claimed interface or its endpoints. `data`
+/// holds the OUT bytes or receives the IN bytes (wLength of `setup`).
+pub fn usb_control(handle: i32, setup: &[u8; 8], data: &mut [u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_usb_control(handle, setup.as_ptr() as i32, data.as_mut_ptr() as i32, data.len() as i32) }
+}
+
+pub fn usb_set_alt(handle: i32, ifnum: u8, alt: u8) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_usb_set_alt(handle, ifnum as i32, alt as i32) }
+}
+
+/// An IN stream: `count` TDs of `td_len` bytes kept queued; `td_len` 0 is
+/// one service interval of an isochronous endpoint.
+pub fn usb_stream_open(handle: i32, ep: u8, td_len: u32, count: u32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_usb_stream_open(handle, ep as i32, td_len as i32, count as i32) }
+}
+
+/// What came back: records of `len: u16, status: u8, 0`, then the bytes.
+pub fn usb_stream_read(handle: i32, sid: i32, buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; the kernel writes at most `buf.len()` bytes into `buf`.
+    unsafe { npk_usb_stream_read(handle, sid, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+pub fn usb_stream_close(handle: i32, sid: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_usb_stream_close(handle, sid) }
+}
+
+pub fn usb_release(handle: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_usb_release(handle) }
+}

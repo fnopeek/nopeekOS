@@ -14,11 +14,14 @@ use crate::{kprintln, pci};
 use crate::hw::{DmaRegion, Mmio};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
 
+pub mod usbfn;
+
 // === Capability register offsets (from BAR0) ===
 const CAP_CAPLENGTH:  u32 = 0x00;
 const CAP_HCSPARAMS1: u32 = 0x04;
 const CAP_HCSPARAMS2: u32 = 0x08;
 const CAP_HCCPARAMS1: u32 = 0x10;
+const CAP_HCCPARAMS2: u32 = 0x1C;
 const CAP_DBOFF:      u32 = 0x14;
 const CAP_RTSOFF:     u32 = 0x18;
 
@@ -136,7 +139,14 @@ const USB_SET_FEATURE:    u8 = 3;
 const USB_SET_INTERFACE:  u8 = 11;
 
 const NUM_CMD_TRBS: usize = 32;
-const NUM_EVT_TRBS: usize = 256;
+/// Event ring: `ERST_DEFAULT_SEGS` segments of `TRBS_PER_SEGMENT`, or as
+/// many as ERST Max allows (`xhci_alloc_interrupter`), one after the other
+/// in memory so the dequeue pointer walks them as one ring. An
+/// isochronous stream raises up to 8000 events a second.
+const ERST_DEFAULT_SEGS: usize = 2;
+const EVT_SEG_TRBS: usize = 256;
+/// Most events one `drain` takes: the largest ring.
+const NUM_EVT_TRBS: usize = ERST_DEFAULT_SEGS * EVT_SEG_TRBS;
 const NUM_TR_TRBS:  usize = 64;
 
 // HID usage code to ASCII table (keyboard page, US layout base)
@@ -444,6 +454,8 @@ struct XhciState {
     evt_ring: DmaRegion,
     evt_cycle: u32,
     evt_dequeue: usize,
+    /// Entries of the event ring, all segments.
+    evt_trbs: usize,
     evt_seg_table: DmaRegion,
     input_ctx: DmaRegion,
     /// Data stage of control transfers, `MAX_CONTROL_LEN` bytes.
@@ -472,6 +484,10 @@ struct XhciState {
     nic: Option<NicRings>,
     /// Mass storage interfaces (`usb_storage`).
     msc: Vec<MscPipe>,
+    /// Interfaces modules claimed (`usbfn`), and the devices configured
+    /// for them.
+    fns: Vec<usbfn::UsbFn>,
+    fn_devs: Vec<usbfn::FnDev>,
 }
 
 /// One state per controller. Devices of different kinds (keyboard, mouse,
@@ -591,6 +607,8 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
     let caplength = mmio.r8(CAP_CAPLENGTH) as u32;
     let hcsparams1 = mmio.r32(CAP_HCSPARAMS1);
     let hcsparams2 = mmio.r32(CAP_HCSPARAMS2);
+    // HCS_ERST_MAX: ERST Max in bits 7..4, as a power of two.
+    let evt_segs = ERST_DEFAULT_SEGS.min(1 << ((hcsparams2 >> 4) & 0xF));
     let hccparams1 = mmio.r32(CAP_HCCPARAMS1);
     let dboff = mmio.r32(CAP_DBOFF) & 0xFFFF_FFFC;
     let rtsoff = mmio.r32(CAP_RTSOFF) & 0xFFFF_FFE0;
@@ -641,7 +659,7 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
          Some(input_ctx), Some(data_buf)) = (
         alloc_dma(1, "DCBAA"),
         alloc_dma(1, "cmd ring"),
-        alloc_dma(1, "evt ring"),
+        alloc_dma(evt_segs * EVT_SEG_TRBS * 16 / 4096, "evt ring"),
         alloc_dma(1, "evt seg table"),
         alloc_dma(1, "input ctx"),
         alloc_dma(MAX_CONTROL_LEN.div_ceil(4096), "data buf"),
@@ -653,9 +671,11 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
     // Set up Link TRBs at end of rings (wrap back to start)
     write_trb(cmd_ring, NUM_CMD_TRBS - 1, cmd_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1)); // Toggle Cycle
 
-    // Set up Event Ring Segment Table (1 entry)
-    evt_seg_table.w64(0u32, evt_ring.phys());           // ring base address
-    evt_seg_table.w64(8u32, NUM_EVT_TRBS as u64);       // ring size
+    // Event Ring Segment Table: base and size of each segment.
+    for i in 0..evt_segs {
+        evt_seg_table.w64(i * 16, evt_ring.phys() + (i * EVT_SEG_TRBS * 16) as u64);
+        evt_seg_table.w64(i * 16 + 8, EVT_SEG_TRBS as u64);
+    }
 
     // Scratchpad buffers
     let sp_hi = (hcsparams2 >> 21) & 0x1F;
@@ -683,7 +703,7 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
 
     // Program Event Ring (interrupter 0)
     let ir0 = rt.sub(IR0, IR_LEN);
-    ir0.w32(0x08u32, 1);                            // ERSTSZ = 1 segment
+    ir0.w32(0x08u32, evt_segs as u32);              // ERSTSZ
     ir0.w64_lo_hi(0x18u32, evt_ring.phys());        // ERDP
     ir0.w64_lo_hi(0x10u32, evt_seg_table.phys());   // ERSTBA (write AFTER ERSTSZ)
     // Enable interrupter (for event ring to work, even in polling mode)
@@ -712,10 +732,11 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
         pci_addr: dev.addr,
         mmio, oper, rt, db, ctx_size, max_ports, hci_version,
         dcbaa, cmd_ring, cmd_cycle: 1, cmd_enqueue: 0,
-        evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table,
+        evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table, evt_trbs: evt_segs * EVT_SEG_TRBS,
         input_ctx, data_buf,
         devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
         last_fail: ("", 0), failed: Vec::new(), nic: None, msc: Vec::new(),
+        fns: Vec::new(), fn_devs: Vec::new(),
     };
 
     // Power on all ports
@@ -2224,6 +2245,8 @@ fn usb_disconnect(state: &mut XhciState, slot: u8) {
         pages.push(m.out_ring);
     }
     state.msc.retain(|m| m.slot != slot);
+    let (fn_pages, fn_bufs) = usbfn::detached(state, slot);
+    pages.extend(fn_pages);
     let dev = state.devs.remove(d);
     if let Some(h) = dev.hub {
         pages.push(h.ring);
@@ -2234,6 +2257,9 @@ fn usb_disconnect(state: &mut XhciState, slot: u8) {
     for (id, buf) in gone_msc {
         crate::memory::deallocate_contiguous(buf.phys(), MSC_BUF_PAGES);
         crate::usb_storage::detached(id);
+    }
+    for (phys, n) in fn_bufs {
+        crate::memory::deallocate_contiguous(phys, n);
     }
     state.free_pages.extend(pages);
     state.free_pages.push(dev.dctx);
@@ -4144,11 +4170,13 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
                    controller RESET (everything addressed there loses its slot)",
             a.bus, a.device, a.function);
         let mut msc_bufs = Vec::new();
+        let mut fn_bufs: Vec<(u64, usize)> = Vec::new();
         {
             let mut g = CTRLS.lock();
             for s in g.iter_mut().filter(|s| s.pci_addr == a) {
                 hid_forget(s);
                 msc_bufs.extend(msc_forget(s));
+                fn_bufs.extend(usbfn::forget(s));
             }
             g.retain(|s| s.pci_addr != a);
         }
@@ -4164,6 +4192,7 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
         // controller; a failed one may have left it running, so they stay.
         let Some(mut x) = bring_up_controller(pci_dev) else { continue };
         for b in msc_bufs { crate::memory::deallocate_contiguous(b.phys(), MSC_BUF_PAGES); }
+        for (phys, n) in fn_bufs { crate::memory::deallocate_contiguous(phys, n); }
         enumerate_root_ports(&mut x);
         let found = nic_probe(&mut x, vid, pid, ep_in, ep_out);
         store_ctrl(x);
@@ -4422,7 +4451,7 @@ fn next_event(state: &mut XhciState) -> Option<Evt> {
     let param = state.evt_ring.r32(off) as u64 | (state.evt_ring.r32(off + 4) as u64) << 32;
     let status = state.evt_ring.r32(off + 8);
     state.evt_dequeue += 1;
-    if state.evt_dequeue >= NUM_EVT_TRBS {
+    if state.evt_dequeue >= state.evt_trbs {
         state.evt_dequeue = 0;
         state.evt_cycle ^= 1;
     }
@@ -4454,6 +4483,7 @@ fn in_ring(a: u64, base: u64) -> bool {
 /// Returns `false` if the event belongs to no device here (then it belongs
 /// to a synchronous waiter running a control transfer or command).
 fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
+    if !state.fn_devs.is_empty() && usbfn::dispatch(state, e) { return true; }
     let a = e.param;
     let cc = e.cc;
     let ok = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;

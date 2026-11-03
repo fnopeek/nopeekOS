@@ -124,6 +124,11 @@ pub mod caps {
         /// Files on external drives (`ext/`), with READ. See
         /// docs/spec/EXTERNAL_STORAGE.md.
         pub const EXTERNAL: u8 = 0x04;
+        /// A camera's USB interfaces (`npk_usb_*` on class video). The
+        /// kernel's camera item is on while a stream is open.
+        pub const CAMERA: u8 = 0x08;
+        /// A microphone (`npk_usb_*` on class audio, audio capture).
+        pub const MIC: u8 = 0x10;
     }
 }
 
