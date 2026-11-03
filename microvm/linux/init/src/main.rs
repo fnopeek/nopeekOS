@@ -274,6 +274,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  udevadm settle --timeout=10 2>/dev/null; \
                  W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
                  [ -n \"$W\" ] && chown 1001 \"$W\" && chmod 0600 \"$W\"; \
+                 for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.camera ] \
+                   && chown 1000 /dev/${p##*/} && chmod 0600 /dev/${p##*/}; done; \
                  GPU=0; for d in /sys/bus/virtio/devices/*; do \
                    [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
                  done; \
@@ -359,6 +361,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.cubeb.backend\", \"pulse\");' >> /tmp/moz/user.js; \
+                 echo 'user_pref(\"media.webrtc.camera.allow-pipewire\", true);' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"media.audioipc.shm_area_size\", 262144);' >> /tmp/moz/user.js; \
                  [ -e /tmp/moz/.npk-owned ] || { find /tmp/moz -xdev ! -user 1000 -exec chown -h 1000:1000 {} + 2>/dev/null; : > /tmp/moz/.npk-owned; }; \
                  chown -h 1000:1000 /tmp/moz /tmp/moz/user.js /tmp/moz/datareporting 2>/dev/null; \
@@ -400,7 +403,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  su -s /bin/sh app -c 'export XDG_RUNTIME_DIR=/tmp/xrt DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus; \
                    dbus-daemon --session --address=$DBUS_SESSION_BUS_ADDRESS --fork --nopidfile; \
                    pipewire & i=0; while [ ! -S /tmp/xrt/pipewire-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
-                   wireplumber & pipewire-pulse & wait' > /tmp/pipewire.log 2>&1 & \
+                   wireplumber & pipewire-pulse & \
+                   [ -x /usr/libexec/npk/npk-camera ] && /usr/libexec/npk/npk-camera & wait' > /tmp/pipewire.log 2>&1 & \
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  i=0; while [ ! -S /tmp/xrt/pulse/native ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \

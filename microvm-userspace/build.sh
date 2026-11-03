@@ -52,8 +52,9 @@ BUNDLE_NAME="${BUNDLE_NAME:-firefox}"
 # pipewire, wireplumber, pipewire-pulse, pipewire-alsa: the guest's sound
 # server on the virtio-snd card (card 0, playback and capture). Firefox
 # talks to it through cubeb's PulseAudio backend; ALSA clients through
-# pipewire-alsa, so no client holds the card alone. The camera and screen
-# share portals sit on the same PipeWire later.
+# pipewire-alsa, so no client holds the card alone.
+# xdg-desktop-portal: the Camera portal, through which the browser finds
+# the guest's camera (npk-camera, microvm/linux/npkcam) on PipeWire.
 # mesa-utils: es2gears_wayland and friends, GL test clients the session
 # runs instead of the browser with npkapp= on the guest command line.
 # Video decodes through VA-API: libva, intel-gmmlib for our build of Intel's
@@ -63,7 +64,7 @@ BUNDLE_NAME="${BUNDLE_NAME:-firefox}"
 # busybox: the session scripts in PID-1 are written for its applets (wget,
 # nc, su without PAM, halt -f); linked in /usr/libexec/npk/bb, which the
 # session puts first in PATH.
-COMMON_PACKAGES="busybox seatd libinput systemd mesa vulkan-intel vulkan-icd-loader wayland libdisplay-info ttf-dejavu noto-fonts alsa-lib pipewire wireplumber pipewire-pulse pipewire-alsa mesa-utils ffmpeg gdb"
+COMMON_PACKAGES="busybox seatd libinput systemd mesa vulkan-intel vulkan-icd-loader wayland libdisplay-info ttf-dejavu noto-fonts alsa-lib pipewire wireplumber pipewire-pulse pipewire-alsa xdg-desktop-portal mesa-utils ffmpeg gdb"
 case "$BUNDLE_NAME" in
     firefox) DEFAULT_PACKAGES="firefox libva libva-utils intel-gmmlib $COMMON_PACKAGES" ;;
     *)       echo "unknown bundle: $BUNDLE_NAME" >&2; exit 1 ;;
@@ -75,7 +76,7 @@ ASSET_NAME="microvm-${BUNDLE_NAME}"
 SNAPSHOT_TAG="arch${ARCH_SNAPSHOT//\//}"
 # A second build on the same client and snapshot (packages or PID-1
 # changed) carries a revision: firefox-159.0-arch20261029-2.
-BUNDLE_REV="-2"
+BUNDLE_REV="-3"
 
 OUT_DIR="$REPO_ROOT/release/apps/${BUNDLE_NAME}"
 
@@ -179,6 +180,11 @@ arch_run "$WORK/root" "
     # gles2); the init runs it instead of PID-1's npkwm when the host offers
     # native contexts.
     install -D -m 0755 \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2 \$R/usr/libexec/npk/npkwm-gles2
+    # The guest's camera on PipeWire (microvm/linux/npkcam/build.sh).
+    install -D -m 0755 \$REPO_ROOT/microvm/linux/npkcam/npk-camera \$R/usr/libexec/npk/npk-camera
+    for lib in \$(readelf -d \$REPO_ROOT/microvm/linux/npkcam/npk-camera | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+        [ -e \$R/usr/lib/\$lib ] || red \"npk-camera needs \$lib, not in the image\"
+    done
     # npkwm is embedded in PID-1 and loads its libraries from this image, as
     # does npkwm-gles2: every library they need must be here, or the session
     # never starts.

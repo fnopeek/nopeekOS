@@ -1184,6 +1184,7 @@ fn cleanup_instance_state(state: &mut HostState) {
     crate::audio::release_owner(state.pid);
     crate::devices::release_owner(state.pid);
     crate::capture::release_owner(state.pid);
+    crate::camfeed::release_owner(state.pid);
     crate::xhci::usbfn::release_owner(state.pid);
     crate::audio::display_audio_release(state.pid);
     crate::ext::instance_ended(&state.cap_id);

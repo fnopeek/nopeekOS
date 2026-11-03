@@ -447,6 +447,15 @@ pub fn claim(class: u8, owner: u32) -> Result<(u32, Vec<u8>), FnError> {
     Err(FnError::NotFound)
 }
 
+/// Whether `owner` holds the video interfaces of the active camera: only
+/// that module may feed `camfeed`.
+pub fn holds_active_camera(owner: u32) -> bool {
+    let Some(active) = crate::devices::active(crate::devices::Kind::Camera) else { return false };
+    let g = CTRLS.lock();
+    g.iter().any(|s| s.fns.iter().any(|f| f.owner == owner && f.class == CLASS_VIDEO
+        && s.cams.iter().any(|c| c.0 == f.slot && c.1 == active)))
+}
+
 /// `f(state, fn index)` on claim `id` of `owner`, under the controller lock.
 fn with_fn<R>(id: u32, owner: u32, f: impl FnOnce(&mut XhciState, usize) -> Result<R, FnError>) -> Result<R, FnError> {
     let mut g = CTRLS.lock();
@@ -850,8 +859,15 @@ pub fn release(id: u32, owner: u32) {
         Ok(())
     });
     for ifnum in alts { let _ = set_alt(id, owner, ifnum, 0); }
+    let mut video = false;
     let mut g = CTRLS.lock();
-    for s in g.iter_mut() { s.fns.retain(|f| f.id != id); }
+    for s in g.iter_mut() {
+        video |= s.fns.iter().any(|f| f.id == id && f.class == CLASS_VIDEO);
+        s.fns.retain(|f| f.id != id);
+    }
+    drop(g);
+    // The camera's driver let go: its last frame is not news to a reader.
+    if video { crate::camfeed::clear(); }
 }
 
 /// The module `owner` ended: every claim it held goes.
@@ -876,6 +892,7 @@ pub(super) fn detached(s: &mut XhciState, slot: u8) -> (Vec<DmaRegion>, Vec<(u64
             bufs.push((st.bufs.phys(), st.pages));
         }
     }
+    if s.fns.iter().any(|f| f.slot == slot && f.class == CLASS_VIDEO) { crate::camfeed::clear(); }
     s.fns.retain(|f| f.slot != slot);
     if let Some(p) = s.fn_devs.iter().position(|d| d.slot == slot) {
         let fd = s.fn_devs.remove(p);

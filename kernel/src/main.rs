@@ -47,6 +47,7 @@ mod input;
 mod net;
 mod audio;
 mod capture;
+mod camfeed;
 mod devices;
 mod intent;
 mod config;

@@ -1437,4 +1437,18 @@ host_imports! {
     ctx fn npk_audio_capture_format(stream: i32, rate: i32, encoding: i32, channels: i32) -> i32;
     mem fn npk_audio_capture_read(stream: i32, ptr: i32, max: i32) -> i32;
     ctx fn npk_audio_capture_close(stream: i32) -> i32;
+
+    // The camera feed (docs/spec/CAMERA.md), all CAMERA. Producer:
+    // npk_camera_wanted() -> readers | width << 16 | height << 32;
+    // npk_camera_push(ptr, len, width, height, format) -> 0 / -1, only the
+    // module holding the active camera. Reader: npk_camera_open(width,
+    // height) -> reader; npk_camera_read(reader, buf, max, info) -> bytes of
+    // the newest unseen frame, 0 for none, -(needed + 2) if it does not fit
+    // (info: width u16, height u16, format u8, 3 pad, seq u64);
+    // npk_camera_close(reader).
+    ctx fn npk_camera_wanted() -> i64;
+    mem fn npk_camera_push(ptr: i32, len: i32, width: i32, height: i32, format: i32) -> i32;
+    ctx fn npk_camera_open(width: i32, height: i32) -> i32;
+    mem fn npk_camera_read(reader: i32, buf_ptr: i32, buf_max: i32, info_ptr: i32) -> i32;
+    ctx fn npk_camera_close(reader: i32) -> i32;
 }

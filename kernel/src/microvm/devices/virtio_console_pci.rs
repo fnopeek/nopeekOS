@@ -13,7 +13,11 @@
 //! length. Unknown types are dropped; a frame that cannot be one (zero or
 //! oversized length) ends the VM, since only a misbehaving guest sends it.
 //! Port 0 ("npk.control") is PID 1's, port 1 ("npk.windows") the
-//! compositor's, which runs as its own user, apart from the app.
+//! compositor's, which runs as its own user, apart from the app. Port 2
+//! ("npk.camera") is the guest camera's (`npk-camera`): it asks with
+//! `CAM_START` and `CAM_STOP` in the frames above, and gets the camera's
+//! frames as `u32 len | u8 CAM_FRAME | u16 width | u16 height | u8 format |
+//! 3 pad | data`, the newest only.
 
 #![allow(dead_code)]
 
@@ -79,7 +83,7 @@ const CC_QUEUE_DEVICE_HI:        u32 = 0x34;
 
 const VIRTIO_CONSOLE_F_MULTIPORT: u32 = 1 << 1;
 
-const NUM_PORTS: usize = 2;
+const NUM_PORTS: usize = 3;
 const NUM_QUEUES: u16 = 2 + 2 * NUM_PORTS as u16;
 const MAX_QUEUE_SIZE: u16 = 64;
 
@@ -93,9 +97,10 @@ const VIRTIO_CONSOLE_PORT_READY:   u16 = 3;
 const VIRTIO_CONSOLE_PORT_OPEN:    u16 = 6;
 const VIRTIO_CONSOLE_PORT_NAME:    u16 = 7;
 
-const PORT_NAMES: [&[u8]; NUM_PORTS] = [b"npk.control", b"npk.windows"];
+const PORT_NAMES: [&[u8]; NUM_PORTS] = [b"npk.control", b"npk.windows", b"npk.camera"];
 const PORT_CONTROL: usize = 0;
 const PORT_WINDOWS: usize = 1;
+const PORT_CAMERA: usize = 2;
 
 /// Largest frame (type byte + payload) either side may send.
 pub const MAX_FRAME: usize = 4096;
@@ -162,6 +167,37 @@ const WIN_CLOSED: u8 = 0x84;
 const WIN_FULLSCREEN: u8 = 0x85;
 /// Bytes of a guest title kept.
 const TITLE_MAX: usize = 200;
+
+// Camera-port message types.
+/// Guest -> host: open the camera at `u16` x `u16`; again for another size.
+const CAM_START: u8 = 0x81;
+/// Guest -> host: no frames any more.
+const CAM_STOP: u8 = 0x82;
+/// Host -> guest: one frame, in the camera port's own framing (above).
+const CAM_FRAME: u8 = 0x10;
+
+/// The guest camera's reader of the kernel camera feed, open from
+/// `CAM_START` to `CAM_STOP`, and the frame being delivered with how much
+/// of it went out.
+struct CamBridge {
+    reader: Option<usize>,
+    out: Vec<u8>,
+    sent: usize,
+}
+
+static CAM: Mutex<CamBridge> = Mutex::new(CamBridge { reader: None, out: Vec::new(), sent: 0 });
+
+/// The camera reader goes (STOP, reset, the VM ends): the camera is off
+/// unless another reader wants it.
+fn cam_stop() {
+    let mut c = CAM.lock();
+    if let Some(r) = c.reader.take() {
+        crate::camfeed::close(r, None);
+        crate::kprintln!("[microvm] guest camera stopped");
+    }
+    c.out = Vec::new();
+    c.sent = 0;
+}
 
 /// The guest's control process has said READY on this launch.
 static CONTROL_READY: AtomicBool = AtomicBool::new(false);
@@ -265,6 +301,14 @@ pub fn reset() {
     OPEN_REQ.store(0, Ordering::Release);
     CLOSED_REQ.store(0, Ordering::Release);
     *FS_REQ.lock() = [None; MAX_OUTPUTS];
+    cam_stop();
+}
+
+/// The VM ended: the camera it asked for goes back.
+impl Drop for VirtioConsole {
+    fn drop(&mut self) {
+        cam_stop();
+    }
 }
 
 /// A guest title as the host shows it: invalid UTF-8 replaced, control
@@ -408,6 +452,7 @@ impl VirtioConsole {
             self.ctrl_out.pop_front();
             any = true;
         }
+        any |= self.pump_camera(mem);
         for port in 0..NUM_PORTS {
             let rx = (if port == 0 { 0 } else { 2 * port + 2 }) as u16;
             loop {
@@ -423,6 +468,38 @@ impl VirtioConsole {
             }
         }
         if any { self.isr |= 1; }
+        any
+    }
+
+    /// The camera port: the frame in flight into the receive buffers the
+    /// guest posted, then the next one once the feed has a newer frame.
+    fn pump_camera(&mut self, mem: &GuestMem) -> bool {
+        let rx = (2 * PORT_CAMERA + 2) as u16;
+        let mut any = false;
+        let mut c = CAM.lock();
+        let Some(reader) = c.reader else { return false };
+        loop {
+            if c.sent >= c.out.len() {
+                let n = crate::camfeed::pending(reader, None).unwrap_or(0);
+                if n == 0 { break; }
+                let mut frame = alloc::vec![0u8; 12 + n];
+                let Some((got, info)) = crate::camfeed::read(reader, None, &mut frame[12..]) else { break };
+                if got == 0 || got > n { break; }
+                frame.truncate(12 + got);
+                frame[0..4].copy_from_slice(&((got + 8) as u32).to_le_bytes());
+                frame[4] = CAM_FRAME;
+                frame[5..7].copy_from_slice(&info.width.to_le_bytes());
+                frame[7..9].copy_from_slice(&info.height.to_le_bytes());
+                frame[9] = info.format;
+                c.out = frame;
+                c.sent = 0;
+            }
+            let sent = c.sent;
+            let Some(n) = self.deliver_partial(rx, &c.out[sent..], mem) else { break };
+            if n == 0 { break; }
+            c.sent += n;
+            any = true;
+        }
         any
     }
 
@@ -593,6 +670,16 @@ impl VirtioConsole {
                         }
                     }
                 }
+                (PORT_CAMERA, CAM_START) if payload.len() >= 4 => {
+                    let w = u16::from_le_bytes([payload[0], payload[1]]);
+                    let h = u16::from_le_bytes([payload[2], payload[3]]);
+                    cam_stop();
+                    let r = crate::camfeed::open(None, w, h);
+                    crate::kprintln!("[microvm] guest camera wants {}x{}{}", w, h,
+                        if r.is_some() { "" } else { ", no reader free" });
+                    CAM.lock().reader = r;
+                }
+                (PORT_CAMERA, CAM_STOP) => cam_stop(),
                 (PORT_WINDOWS, WIN_FULLSCREEN)
                     if payload.first().is_some_and(|&k| (k as usize) < MAX_OUTPUTS) =>
                 {
@@ -733,6 +820,7 @@ impl VirtioConsole {
             CC_DEVICE_STATUS => {
                 self.device_status = val as u8;
                 if self.device_status == 0 {
+                    cam_stop();
                     self.queues = [VirtQueue::fresh(); NUM_QUEUES as usize];
                     self.driver_features = [0; 2];
                     self.driver_feature_select = 0;

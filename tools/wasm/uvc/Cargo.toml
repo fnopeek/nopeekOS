@@ -1,0 +1,18 @@
+[package]
+name = "uvc"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "USB video class driver - nopeekOS."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
+npk_sys = { path = "../sdk/npk_sys" }
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

@@ -5909,3 +5909,53 @@ pub(crate) fn npk_audio_capture_close(ctx: &mut HostState, stream: i32) -> i32 {
     let Ok(i) = usize::try_from(stream) else { return -1 };
     if crate::capture::close(i, Some(ctx.pid)) { 0 } else { -1 }
 }
+
+fn camera_right(ctx: &HostState) -> bool {
+    ctx.pid != 0 && capability::check_global(&ctx.cap_id, capability::Rights::CAMERA).is_ok()
+}
+
+pub(crate) fn npk_camera_wanted(ctx: &mut HostState) -> i64 {
+    if !camera_right(ctx) { return -1; }
+    let (n, w, h) = crate::camfeed::wanted();
+    n.min(0xFFFF) as i64 | (w as i64) << 16 | (h as i64) << 32
+}
+
+/// A frame from the camera's driver; only the module that holds the
+/// active camera may, so no other module can show a picture as the camera.
+pub(crate) fn npk_camera_push(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32, width: i32, height: i32,
+                              format: i32) -> i32 {
+    if !camera_right(ctx) || !crate::xhci::usbfn::holds_active_camera(ctx.pid) { return -1; }
+    let (Ok(w), Ok(h), Ok(f)) = (u16::try_from(width), u16::try_from(height), u8::try_from(format)) else { return -1 };
+    let Some(data) = glen(len).and_then(|n| guest(mem, ptr, n)) else { return -1 };
+    if crate::camfeed::push(data, w, h, f) { 0 } else { -1 }
+}
+
+pub(crate) fn npk_camera_open(ctx: &mut HostState, width: i32, height: i32) -> i32 {
+    if !camera_right(ctx) { return -1; }
+    let (Ok(w), Ok(h)) = (u16::try_from(width), u16::try_from(height)) else { return -1 };
+    crate::camfeed::open(Some(ctx.pid), w, h).map_or(-1, |i| i as i32)
+}
+
+pub(crate) fn npk_camera_read(mem: &mut [u8], ctx: &mut HostState, reader: i32, buf_ptr: i32, buf_max: i32,
+                              info_ptr: i32) -> i32 {
+    let Ok(id) = usize::try_from(reader) else { return -1 };
+    let Some(max) = glen(buf_max) else { return -1 };
+    let owner = Some(ctx.pid);
+    let Some(n) = crate::camfeed::pending(id, owner) else { return -1 };
+    if n == 0 { return 0; }
+    if n > max { return too_small(n); }
+    let Some(out) = guest_mut(mem, buf_ptr, n) else { return -1 };
+    let Some((got, info)) = crate::camfeed::read(id, owner, out) else { return -1 };
+    let mut rec = [0u8; 16];
+    rec[0..2].copy_from_slice(&info.width.to_le_bytes());
+    rec[2..4].copy_from_slice(&info.height.to_le_bytes());
+    rec[4] = info.format;
+    rec[8..16].copy_from_slice(&info.seq.to_le_bytes());
+    if write_bytes(mem, info_ptr, &rec) < 0 { return -1; }
+    got as i32
+}
+
+pub(crate) fn npk_camera_close(ctx: &mut HostState, reader: i32) -> i32 {
+    let Ok(id) = usize::try_from(reader) else { return -1 };
+    if crate::camfeed::close(id, Some(ctx.pid)) { 0 } else { -1 }
+}

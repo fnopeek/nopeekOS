@@ -1037,3 +1037,70 @@ pub fn audio_capture_close(stream: i32) -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_audio_capture_close(stream) }
 }
+
+// ── Camera feed (docs/spec/CAMERA.md) ────────────────────────────────
+
+#[link(wasm_import_module = "env")]
+unsafe extern "C" {
+    fn npk_camera_wanted() -> i64;
+    fn npk_camera_push(ptr: i32, len: i32, width: i32, height: i32, format: i32) -> i32;
+    fn npk_camera_open(width: i32, height: i32) -> i32;
+    fn npk_camera_read(reader: i32, buf_ptr: i32, buf_max: i32, info_ptr: i32) -> i32;
+    fn npk_camera_close(reader: i32) -> i32;
+}
+
+/// Feed formats, as `npk_canvas_frame` numbers them.
+pub const CAMERA_YUYV: i32 = 1;
+pub const CAMERA_MJPEG: i32 = 3;
+
+/// Producer side: (readers, width, height) the largest reader wants, or
+/// None when refused.
+pub fn camera_wanted() -> Option<(u32, u16, u16)> {
+    // SAFETY: FFI without pointers.
+    let v = unsafe { npk_camera_wanted() };
+    (v >= 0).then(|| ((v & 0xFFFF) as u32, (v >> 16) as u16, (v >> 32) as u16))
+}
+
+/// Producer side: a frame as the camera sent it.
+pub fn camera_push(frame: &[u8], width: u16, height: u16, format: i32) -> bool {
+    // SAFETY: FFI; `frame` is borrowed for the call.
+    unsafe { npk_camera_push(frame.as_ptr() as i32, frame.len() as i32, width as i32, height as i32, format) == 0 }
+}
+
+/// A reader of the active camera wanting `width` x `height`, or -1.
+pub fn camera_open(width: u16, height: u16) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_camera_open(width as i32, height as i32) }
+}
+
+/// One feed frame's description.
+#[derive(Clone, Copy, Default, Debug)]
+pub struct CameraFrame {
+    pub width: u16,
+    pub height: u16,
+    pub format: i32,
+    pub seq: u64,
+}
+
+/// The newest frame not seen yet into `buf`: Ok(Some(len, info)), Ok(None)
+/// for none, Err(needed) when `buf` is too small, or Err(0) when refused.
+pub fn camera_read(reader: i32, buf: &mut [u8]) -> Result<Option<(usize, CameraFrame)>, usize> {
+    let mut info = [0u8; 16];
+    // SAFETY: FFI; both buffers are borrowed for the call.
+    let n = unsafe { npk_camera_read(reader, buf.as_mut_ptr() as i32, buf.len() as i32, info.as_mut_ptr() as i32) };
+    if n == 0 { return Ok(None); }
+    if n == -1 { return Err(0); }
+    if n < -1 { return Err((-n - 2) as usize); }
+    let f = CameraFrame {
+        width: u16::from_le_bytes([info[0], info[1]]),
+        height: u16::from_le_bytes([info[2], info[3]]),
+        format: info[4] as i32,
+        seq: u64::from_le_bytes([info[8], info[9], info[10], info[11], info[12], info[13], info[14], info[15]]),
+    };
+    Ok(Some((n as usize, f)))
+}
+
+pub fn camera_close(reader: i32) -> i32 {
+    // SAFETY: FFI without pointers.
+    unsafe { npk_camera_close(reader) }
+}

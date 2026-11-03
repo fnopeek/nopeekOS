@@ -362,23 +362,3 @@ impl Decoder {
         }
     }
 }
-
-/// YUY2 (BT.601, limited range) to BGRA.
-pub fn yuyv_to_bgra(src: &[u8], w: usize, h: usize, dst: &mut [u8]) {
-    let n = (w * h / 2).min(src.len() / 4).min(dst.len() / 8);
-    for i in 0..n {
-        let s = &src[i * 4..i * 4 + 4];
-        let (y0, u, y1, v) = (s[0] as i32, s[1] as i32 - 128, s[2] as i32, s[3] as i32 - 128);
-        for (k, y) in [y0, y1].into_iter().enumerate() {
-            let c = 298 * (y - 16);
-            let r = (c + 409 * v + 128) >> 8;
-            let g = (c - 100 * u - 208 * v + 128) >> 8;
-            let b = (c + 516 * u + 128) >> 8;
-            let o = (i * 2 + k) * 4;
-            dst[o] = b.clamp(0, 255) as u8;
-            dst[o + 1] = g.clamp(0, 255) as u8;
-            dst[o + 2] = r.clamp(0, 255) as u8;
-            dst[o + 3] = 255;
-        }
-    }
-}
