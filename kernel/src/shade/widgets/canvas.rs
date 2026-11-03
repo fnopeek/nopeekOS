@@ -235,6 +235,7 @@ pub fn commit_jpeg(window_id: u32, canvas_id: u32, w: u32, h: u32, jpeg: &[u8]) 
     use crate::shade::scene::Yuv;
     if !crate::gpu::gpudev::jpeg_supported() { return -1; }
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM || w % 16 != 0 || h % 8 != 0 { return -1; }
+    reap_decodes();
     if DECODING.lock().iter().any(|&(wi, c, _)| wi == window_id && c == canvas_id) { return -2; }
     let bw = w / 2;
     let phys = {
@@ -264,29 +265,33 @@ pub fn commit_jpeg(window_id: u32, canvas_id: u32, w: u32, h: u32, jpeg: &[u8]) 
     0
 }
 
-/// Whether a decode is still running; one that finished asks for a render
-/// so its frame shows at once.
+/// Decodes that finished leave `DECODING`; a good one damages its layer
+/// and asks for a render, so its frame shows without waiting for one.
+fn reap_decodes() {
+    let mut done = Vec::new();
+    DECODING.lock().retain(|&(w, c, seq)| match crate::gpu::gpudev::job_status(seq) {
+        None => true,
+        Some(status) => {
+            if status == 0 { done.push((w, c)); }
+            false
+        }
+    });
+    if done.is_empty() { return; }
+    for (w, c) in done { note_frame(w, c); }
+    crate::shade::request_render();
+}
+
+/// Whether a decode is still running (the shell keeps ticking for it).
 pub fn poll_decodes() -> bool {
-    let list = DECODING.lock();
-    if list.is_empty() { return false; }
-    if list.iter().any(|&(_, _, seq)| crate::gpu::gpudev::job_finished(seq)) {
-        crate::shade::request_render();
-    }
-    true
+    reap_decodes();
+    !DECODING.lock().is_empty()
 }
 
 /// The rects of the frames committed since the last call, on the screen
 /// (canvas rects are relative to their window's content origin).
 pub fn take_frame_damage() -> Vec<(i32, i32, u32, u32)> {
-    let mut list = core::mem::take(&mut *FRAME_DAMAGE.lock());
-    // Decodes that finished: their layer shows the new frame.
-    DECODING.lock().retain(|&(w, c, seq)| match crate::gpu::gpudev::job_status(seq) {
-        None => true,
-        Some(status) => {
-            if status == 0 && !list.contains(&(w, c)) { list.push((w, c)); }
-            false
-        }
-    });
+    reap_decodes();
+    let list = core::mem::take(&mut *FRAME_DAMAGE.lock());
     list.iter().filter_map(|&(w, c)| {
         let (x, y, rw, rh) = RECTS.lock().get(&(w, c)).copied()?;
         let (ox, oy) = super::origin_of(w)?;
