@@ -41,6 +41,8 @@ const HALF_FRAMES: usize = 2048; // ~43 ms per half @ 48 kHz
 const MAX_FRAME_BYTES: usize = 8 * 4;
 
 const STREAM_TAG: u32 = 1;
+/// The microphone's stream tag, beside the output's.
+const CAPTURE_TAG: u32 = 2;
 
 // ── small hex/dec logging helpers (no alloc) ──────────────────────────────
 fn loghex(prefix: &str, v: u32) {
@@ -200,6 +202,128 @@ fn setup_output(out: &mut Output) -> Option<DevFormat> {
             let fmt = pick_format(rates, widths, 2)?;
             (intelhdmi::setup(c.mmio, c.cad, c.afg, STREAM_TAG, fmt.word) != 0).then_some(fmt)
         }
+    }
+}
+
+// ── capture ───────────────────────────────────────────────────────────────
+
+/// The built-in microphone on the first input stream descriptor: a ring
+/// of two halves like the output's, run only while the kernel says a
+/// capture stream listens (`npk_audio_capture_wanted`).
+struct Capture {
+    base: u32,
+    ring: i32,
+    bdl_phys: u64,
+    ring_bytes: usize,
+    fb: usize,
+    fmt: DevFormat,
+    running: bool,
+    /// Where the next unread recorded byte is.
+    read_pos: usize,
+}
+
+/// `azx_pcm_open` and `azx_pcm_prepare` for the capture side, short of
+/// starting: the format the converter takes, the ring and its BDL, the
+/// microphone in the device register.
+fn capture_init(spec: &codec::Spec, ids: u32) -> Option<Capture> {
+    let (_, adc, _) = spec.mic?;
+    let (rates, widths) = spec.codec.supported_pcm(adc as u32);
+    let fmt = pick_format(rates, widths, 2)?;
+    let fb = fmt.frame_bytes();
+    let half = HALF_FRAMES * fb;
+    let ring_bytes = half * 2;
+    let ring = dma_alloc(((ring_bytes + 4095) / 4096) as u16);
+    let bdl = dma_alloc(1);
+    if ring < 0 || bdl < 0 {
+        log("[audio_hda] capture: DMA alloc failed\n");
+        return None;
+    }
+    let ring_phys = dma_phys(ring);
+    let mut bdl_buf = [0u8; 32];
+    for (i, off) in [0usize, half].iter().enumerate() {
+        let at = i * 16;
+        bdl_buf[at..at + 8].copy_from_slice(&(ring_phys + *off as u64).to_le_bytes());
+        bdl_buf[at + 8..at + 12].copy_from_slice(&(half as u32).to_le_bytes());
+    }
+    dma_write(bdl, 0, &bdl_buf);
+    let encoding = if fmt.bits == 16 { 0 } else { 1 };
+    if npk_sys::audio_capture_device_format(fmt.rate as i32, encoding, fmt.channels as i32) != 0 {
+        log("[audio_hda] capture: the kernel does not take the format\n");
+        return None;
+    }
+    let mut idb = *b"hda-vvvv:dddd-mic";
+    for (i, sh) in [12u32, 8, 4, 0].iter().enumerate() {
+        idb[4 + i] = b"0123456789abcdef"[((ids >> sh) & 0xF) as usize];
+        idb[9 + i] = b"0123456789abcdef"[((ids >> (16 + sh)) & 0xF) as usize];
+    }
+    let id = core::str::from_utf8(&idb).unwrap_or("hda-mic");
+    if npk_sys::device_register(npk_sys::DEVICE_AUDIO_IN, npk_sys::RANK_BUILTIN, id, "Built-in microphone") < 0 {
+        log("[audio_hda] capture: not in the device register\n");
+        return None;
+    }
+    loghex("[audio_hda] built-in microphone on pin 0x", spec.mic?.0 as u32);
+    loghex(" adc 0x", adc as u32);
+    log(", ");
+    logdec(fmt.rate);
+    log(" Hz ");
+    logdec(fmt.bits);
+    log(" bit\n");
+    Some(Capture { base: SD_BASE, ring, bdl_phys: dma_phys(bdl), ring_bytes, fb, fmt, running: false, read_pos: 0 })
+}
+
+/// `azx_pcm_prepare` + `azx_pcm_trigger(START)`: the stream reset and
+/// programmed, the converter set up, the stream running.
+fn capture_start(mmio: i32, c: &mut Capture, spec: &codec::Spec) {
+    reset_stream(mmio, c.base);
+    mmio_w32(mmio, c.base + SD_BDLPL, (c.bdl_phys & 0xFFFF_FFFF) as u32);
+    mmio_w32(mmio, c.base + SD_BDLPU, (c.bdl_phys >> 32) as u32);
+    mmio_w32(mmio, c.base + SD_CBL, c.ring_bytes as u32);
+    mmio_w16(mmio, c.base + SD_LVI, 1);
+    mmio_w16(mmio, c.base + SD_FORMAT, c.fmt.word);
+    fence();
+    spec.setup_capture(CAPTURE_TAG, c.fmt.word);
+    mmio_w32(mmio, c.base + SD_CTL, (CAPTURE_TAG << SD_CTL_STRM_SHIFT) | SD_CTL_RUN);
+    fence();
+    c.read_pos = 0;
+    c.running = true;
+    log("[audio_hda] recording\n");
+}
+
+/// `azx_pcm_trigger(STOP)` + `snd_hda_codec_cleanup_stream`.
+fn capture_stop(mmio: i32, c: &mut Capture, spec: &codec::Spec) {
+    let ctl = mmio_r32(mmio, c.base + SD_CTL);
+    mmio_w32(mmio, c.base + SD_CTL, ctl & !SD_CTL_RUN);
+    fence();
+    spec.cleanup_capture();
+    c.running = false;
+    log("[audio_hda] recording stopped\n");
+}
+
+/// One turn of the loop: start or stop by demand, and while running hand
+/// what the DMA wrote since the last turn to the kernel.
+fn capture_poll(mmio: i32, c: &mut Capture, spec: &codec::Spec) {
+    let wanted = npk_sys::audio_capture_wanted() > 0;
+    if wanted && !c.running {
+        capture_start(mmio, c, spec);
+        return;
+    }
+    if !wanted && c.running {
+        capture_stop(mmio, c, spec);
+        return;
+    }
+    if !c.running {
+        return;
+    }
+    let lpib = (mmio_r32(mmio, c.base + SD_LPIB) as usize) % c.ring_bytes;
+    let mut avail = (lpib + c.ring_bytes - c.read_pos) % c.ring_bytes;
+    avail -= avail % c.fb;
+    let mut chunk = [0u8; 4096];
+    while avail > 0 {
+        let n = avail.min(c.ring_bytes - c.read_pos).min(chunk.len() - chunk.len() % c.fb);
+        npk_sys::dma_read(c.ring, c.read_pos as i32, &mut chunk[..n]);
+        npk_sys::audio_capture_push(&chunk[..n]);
+        c.read_pos = (c.read_pos + n) % c.ring_bytes;
+        avail -= n;
     }
 }
 
@@ -536,6 +660,10 @@ pub extern "C" fn _start() {
     mmio_w32(mmio, base + SD_CTL, sd_ctl);
     fence();
 
+    let mut cap = match &out {
+        Output::Generic(spec) if iss > 0 => capture_init(spec, ids),
+        _ => None,
+    };
     log(if irq {
         "[audio_hda] streaming from audio mailbox (MSI: one wake per half)\n"
     } else {
@@ -580,6 +708,9 @@ pub extern "C" fn _start() {
             if now - last_jack_poll >= JACK_POLL_MS {
                 last_jack_poll = now;
                 spec.poll_jacks();
+            }
+            if let Some(c) = cap.as_mut() {
+                capture_poll(mmio, c, spec);
             }
         }
         let lpib = (mmio_r32(mmio, base + SD_LPIB) as usize) % ring_bytes;

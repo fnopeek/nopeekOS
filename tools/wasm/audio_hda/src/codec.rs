@@ -57,6 +57,8 @@ const AC_PINCTL_OUT_EN: u32 = 1 << 6;
 const AC_PINCTL_HP_EN: u32 = 1 << 7;
 const PIN_OUT: u32 = AC_PINCTL_OUT_EN;
 const PIN_HP: u32 = AC_PINCTL_OUT_EN | AC_PINCTL_HP_EN;
+const AC_PINCTL_IN_EN: u32 = 1 << 5;
+const PIN_IN: u32 = AC_PINCTL_IN_EN;
 const AC_AMPCAP_OFFSET: u32 = 0x7f;
 const AC_AMPCAP_NUM_STEPS: u32 = 0x7f << 8;
 const AC_AMPCAP_MIN_MUTE: u32 = 1 << 30;
@@ -73,6 +75,7 @@ const AC_JACK_SPEAKER: u32 = 0x1;
 const AC_JACK_HP_OUT: u32 = 0x2;
 const AC_JACK_SPDIF_OUT: u32 = 0x4;
 const AC_JACK_DIG_OTHER_OUT: u32 = 0x5;
+const AC_JACK_MIC_IN: u32 = 0xa;
 const AC_JACK_PORT_NONE: u32 = 1;
 const AC_JACK_PORT_FIXED: u32 = 2;
 const AC_JACK_PORT_BOTH: u32 = 3;
@@ -558,6 +561,9 @@ pub struct Spec {
     automute_lo: bool,
     hp_present: bool,
     line_present: bool,
+    /// The built-in microphone's pin, its converter and the path between
+    /// them (index plus one), when the codec has one.
+    pub mic: Option<(u8, u8, usize)>,
 }
 
 impl Spec {
@@ -570,13 +576,95 @@ impl Spec {
             dig_dacs: [0; HDA_MAX_OUTS], out_paths: [0; HDA_MAX_OUTS], hp_paths: [0; HDA_MAX_OUTS],
             speaker_paths: [0; HDA_MAX_OUTS], dig_paths: [0; HDA_MAX_OUTS], pin_target: [0; NIDS],
             detect_hp: false, detect_lo: false, automute_speaker: false, automute_lo: false,
-            hp_present: false, line_present: false,
+            hp_present: false, line_present: false, mic: None,
         };
         s.fill_all_dac_nids();
         s.parse_output_paths();
         s.parse_digital();
         s.check_auto_mute_availability();
+        s.parse_internal_mic();
         s
+    }
+
+    /// The input half of `snd_hda_parse_pin_defcfg` for the built-in
+    /// microphone (`AC_JACK_MIC_IN`, fixed), and `parse_capture_source`
+    /// for it: the first input converter (`fill_adc_nids`: analog, with
+    /// connections) it reaches.
+    fn parse_internal_mic(&mut self) {
+        let c = &self.codec;
+        let mut pin = None;
+        for nid in c.nodes() {
+            if c.wtype(nid) != AC_WID_PIN {
+                continue;
+            }
+            let cfg = c.pincfg(nid);
+            let conn = (cfg >> 30) & 0x3;
+            if (cfg >> 20) & 0xf == AC_JACK_MIC_IN && conn == AC_JACK_PORT_FIXED && c.pin_caps(nid) & AC_PINCAP_IN != 0 {
+                pin = Some(nid);
+                break;
+            }
+        }
+        let Some(pin) = pin else { return };
+        let mut adcs = [0u32; 8];
+        let mut n = 0;
+        for nid in self.codec.nodes() {
+            let w = self.codec.wcaps(nid);
+            if self.codec.wtype(nid) == AC_WID_AUD_IN && w & AC_WCAP_DIGITAL == 0 && w & AC_WCAP_CONN_LIST != 0 && n < adcs.len() {
+                adcs[n] = nid;
+                n += 1;
+            }
+        }
+        for &adc in &adcs[..n] {
+            let idx = self.add_new_path(pin, adc, 0);
+            if idx != 0 {
+                self.mic = Some((pin as u8, adc as u8, idx));
+                return;
+            }
+        }
+    }
+
+    /// `set_pin_target(pin, PIN_IN | snd_hda_get_default_vref)` and
+    /// `snd_hda_activate_path` for the microphone's capture path, then
+    /// `snd_hda_codec_setup_stream` on its converter.
+    pub fn setup_capture(&self, tag: u32, format: u16) -> bool {
+        let Some((pin, adc, idx)) = self.mic else { return false };
+        let Some(p) = self.path(idx) else { return false };
+        let c = &self.codec;
+        c.write(pin as u32, vset_pin_ctl(PIN_IN | self.default_vref(pin as u32)));
+        self.activate_path(p);
+        c.write(adc as u32, vset_stream_chan(tag << 4));
+        c.write(adc as u32, vset_format(format));
+        true
+    }
+
+    /// `snd_hda_codec_cleanup_stream` on the microphone's converter.
+    pub fn cleanup_capture(&self) {
+        if let Some((_, adc, _)) = self.mic {
+            self.codec.write(adc as u32, vset_stream_chan(0));
+        }
+    }
+
+    /// `snd_hda_get_default_vref`: VREF 80 unless the pin is set to 50
+    /// already, else 50, 100, ground, Hi-Z, as the pin's caps allow.
+    fn default_vref(&self, pin: u32) -> u32 {
+        const VREF_50: u32 = 1 << 1;
+        const VREF_GRD: u32 = 1 << 2;
+        const VREF_80: u32 = 1 << 4;
+        const VREF_100: u32 = 1 << 5;
+        const PIN_VREF50: u32 = AC_PINCTL_IN_EN | 1;
+        let oldval = self.codec.read(pin, 0xf0700);
+        let caps = (self.codec.pin_caps(pin) & (0x37 << 8)) >> 8;
+        if caps & VREF_80 != 0 && oldval != PIN_VREF50 {
+            4
+        } else if caps & VREF_50 != 0 {
+            1
+        } else if caps & VREF_100 != 0 {
+            5
+        } else if caps & VREF_GRD != 0 {
+            2
+        } else {
+            0
+        }
     }
 
     /// Is there an analog output with a path from a DAC?
