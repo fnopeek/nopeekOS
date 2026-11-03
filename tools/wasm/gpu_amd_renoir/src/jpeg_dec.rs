@@ -219,13 +219,12 @@ pub fn normalize(src: &[u8], out: &mut Vec<u8>) -> Result<header, i32> {
             0xDA => {
                 if hdr.is_none() { return Err(-EINVAL); }
                 if !dht { out.extend_from_slice(&DHT_DEFAULT); }
-                // SOS and everything up to and with EOI.
+                // SOS and everything up to and with EOI. A frame without
+                // EOI was cut short: the engine would wait for the rest.
                 let rest = &src[pos..];
-                let end = rest.windows(2).rposition(|w| w == [0xFF, 0xD9]).map_or(rest.len(), |e| e + 2);
+                let end = rest.windows(2).rposition(|w| w == [0xFF, 0xD9]).ok_or(-EINVAL)? + 2;
+                if end < 2 + len + 4 { return Err(-EINVAL); }
                 out.extend_from_slice(&rest[..end]);
-                if end == rest.len() && !rest.ends_with(&[0xFF, 0xD9]) {
-                    out.extend_from_slice(&[0xFF, 0xD9]);
-                }
                 break;
             }
             0xC2 | 0xC3 | 0xC5..=0xCF => return Err(-EINVAL),

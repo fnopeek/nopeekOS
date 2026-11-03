@@ -412,9 +412,11 @@ struct service {
     named: core::cell::RefCell<Vec<u32>>,
     /// With DC driving the panel: the buffers it shows.
     present: Option<present>,
-    /// The JPEG decode on the JPEG ring, its job still open (seq, fence),
-    /// its buffers, and the bitstream being built.
-    jpeg: Option<(u32, crate::dma_fence::Fence)>,
+    /// The JPEG decode on the JPEG ring, its job still open (seq, fence,
+    /// when it went), a decode the watchdog gave up on whose fence has not
+    /// signaled yet, its buffers, and the bitstream being built.
+    jpeg: Option<(u32, crate::dma_fence::Fence, u64)>,
+    jpeg_stuck: Option<crate::dma_fence::Fence>,
     jpeg_bufs: compose::jpeg_bufs,
     jpeg_bits: Vec<u8>,
 }
@@ -804,6 +806,14 @@ fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, 
     if svc.jpeg.is_some() && !poll_jpeg(adev, svc) {
         return -EBUSY;
     }
+    // A decode that hung keeps the engine until the scheduler's timeout
+    // has reset the ring and signaled its fence.
+    if let Some(f) = svc.jpeg_stuck.as_ref() {
+        if compose::jpeg_done(adev, f).is_none() {
+            return -EBUSY;
+        }
+        svc.jpeg_stuck = None;
+    }
     if len == 0 || len > MAX_JPEG {
         return -EINVAL;
     }
@@ -836,12 +846,18 @@ fn run_jpeg(adev: &mut amdgpu_device, svc: &mut service, seq: u32, target: u32, 
     svc.jpeg_bits = bits;
     match r {
         Ok(f) => {
-            svc.jpeg = Some((seq, f));
+            svc.jpeg = Some((seq, f, crate::linux::now_us()));
             JOB_OPEN
         }
         Err(e) => e,
     }
 }
+
+/// A decode takes milliseconds; one still running after this is taken as
+/// hung. Its job completes with an error at once, so the kernel does not
+/// wait on the ring's own timeout (seconds) and take the module for dead.
+const JPEG_WATCHDOG_US: u64 = 200_000;
+const ETIMEDOUT: i32 = 110;
 
 /// The JPEG decode ring passed its ring and IB tests.
 fn jpeg_ready(adev: &amdgpu_device) -> bool {
@@ -850,9 +866,19 @@ fn jpeg_ready(adev: &amdgpu_device) -> bool {
 
 /// Complete the JPEG job once its fence signaled. True when it was.
 fn poll_jpeg(adev: &mut amdgpu_device, svc: &mut service) -> bool {
-    let Some((seq, f)) = svc.jpeg.as_ref() else { return false };
-    let Some(r) = compose::jpeg_done(adev, f) else { return false };
+    let Some((seq, f, t0)) = svc.jpeg.as_ref() else { return false };
     let seq = *seq;
+    let r = match compose::jpeg_done(adev, f) {
+        Some(r) => r,
+        None if crate::linux::now_us().saturating_sub(*t0) > JPEG_WATCHDOG_US => {
+            Line::new().s("gpudev: JPEG decode ").dec(seq as u64).s(" hung; dropped, the ring's timeout resets it").say();
+            let (_, f, _) = svc.jpeg.take().unwrap();
+            svc.jpeg_stuck = Some(f);
+            npk_sys::gpudev_complete(seq as i32, -ETIMEDOUT);
+            return true;
+        }
+        None => return false,
+    };
     svc.jpeg = None;
     npk_sys::gpudev_complete(seq as i32, r);
     true
@@ -1295,7 +1321,7 @@ pub fn serve(adev: &mut amdgpu_device) {
     let mut svc = service { bos: [bo::default(); NUM_BOS], dyn_bos: Vec::new(), copy_ok: false, composer: None,
                             scene: None, scenes: 0, native: Default::default(), waits: Vec::new(),
                             guest_bos: Vec::new(), named: core::cell::RefCell::new(Vec::new()), present: None,
-                            jpeg: None, jpeg_bufs: Default::default(), jpeg_bits: Vec::new() };
+                            jpeg: None, jpeg_stuck: None, jpeg_bufs: Default::default(), jpeg_bits: Vec::new() };
     for id in 0..NUM_BOS {
         let Some(info) = bo_info(id as u32) else {
             Line::new().s("gpudev: no buffer ").dec(id as u64).say();
@@ -1389,7 +1415,7 @@ pub fn serve(adev: &mut amdgpu_device) {
     let mut jobs = [0u8; JOB_BYTES * 8];
     let (mut done, mut failed) = (0u64, 0u64);
     loop {
-        let idle_ms = if svc.scene.is_some() || svc.jpeg.is_some() { 2 } else { 100 };
+        let idle_ms = if svc.scene.is_some() || svc.jpeg.is_some() || svc.jpeg_stuck.is_some() { 2 } else { 100 };
         // Queued work runs now, as a kworker would; a timer bounds the sleep.
         let timer_ms = crate::workqueue::next_timer_us(adev).map_or(i32::MAX, |us| us.div_ceil(1000) as i32);
         let wait_ms = crate::amdgpu_virtio::fence_wait_ms(&svc.waits).min(idle_ms).min(timer_ms);

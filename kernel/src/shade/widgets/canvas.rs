@@ -227,13 +227,20 @@ fn note_frame(window_id: u32, canvas_id: u32) {
 /// canvas, job). The layer is damaged when the job is done.
 static DECODING: Mutex<Vec<(u32, u32, u32)>> = Mutex::new(Vec::new());
 
+/// Decodes that failed in a row. Past `GIVE_UP` the GPU decode is not
+/// offered for this boot and the app decodes on the CPU instead of
+/// losing frame after frame.
+static JPEG_FAILS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+const GIVE_UP: u32 = 30;
+
 /// Hand an MJPEG frame of `w` x `h` (baseline 4:2:2) to the GPU module,
 /// which decodes it into the canvas's YUYV frame layer. 0 when queued,
 /// -2 while the canvas's last frame is still being decoded (the frame is
 /// dropped), -1 when there is no GPU decode or the frame is refused.
 pub fn commit_jpeg(window_id: u32, canvas_id: u32, w: u32, h: u32, jpeg: &[u8]) -> i32 {
     use crate::shade::scene::Yuv;
-    if !crate::gpu::gpudev::jpeg_supported() { return -1; }
+    use core::sync::atomic::Ordering;
+    if !crate::gpu::gpudev::jpeg_supported() || JPEG_FAILS.load(Ordering::Relaxed) >= GIVE_UP { return -1; }
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM || w % 16 != 0 || h % 8 != 0 { return -1; }
     reap_decodes();
     if DECODING.lock().iter().any(|&(wi, c, _)| wi == window_id && c == canvas_id) { return -2; }
@@ -272,7 +279,13 @@ fn reap_decodes() {
     DECODING.lock().retain(|&(w, c, seq)| match crate::gpu::gpudev::job_status(seq) {
         None => true,
         Some(status) => {
-            if status == 0 { done.push((w, c)); }
+            use core::sync::atomic::Ordering;
+            if status == 0 {
+                done.push((w, c));
+                JPEG_FAILS.store(0, Ordering::Relaxed);
+            } else if JPEG_FAILS.fetch_add(1, Ordering::Relaxed) + 1 == GIVE_UP {
+                crate::kprintln!("[npk] canvas: {} JPEG decodes failed in a row, GPU decode off for this boot", GIVE_UP);
+            }
             false
         }
     });
