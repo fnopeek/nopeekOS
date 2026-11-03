@@ -482,11 +482,14 @@ impl VirtioConsole {
             if c.sent >= c.out.len() {
                 let n = crate::camfeed::pending(reader, None).unwrap_or(0);
                 if n == 0 { break; }
-                let mut frame = alloc::vec![0u8; 12 + n];
-                let Some((got, info)) = crate::camfeed::read(reader, None, &mut frame[12..]) else { break };
+                // u32 len | u8 CAM_FRAME | u16 width | u16 height | u8 format
+                // | 3 pad: 13 bytes before the data, `len` counts from the type.
+                const HEAD: usize = 13;
+                let mut frame = alloc::vec![0u8; HEAD + n];
+                let Some((got, info)) = crate::camfeed::read(reader, None, &mut frame[HEAD..]) else { break };
                 if got == 0 || got > n { break; }
-                frame.truncate(12 + got);
-                frame[0..4].copy_from_slice(&((got + 8) as u32).to_le_bytes());
+                frame.truncate(HEAD + got);
+                frame[0..4].copy_from_slice(&((HEAD - 4 + got) as u32).to_le_bytes());
                 frame[4] = CAM_FRAME;
                 frame[5..7].copy_from_slice(&info.width.to_le_bytes());
                 frame[7..9].copy_from_slice(&info.height.to_le_bytes());
