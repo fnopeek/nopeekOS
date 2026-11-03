@@ -1244,7 +1244,7 @@ fn poll_live(l: &mut Live, buf: &mut [u8]) -> Step {
     // Pick the decoder for this report ID. If none matches, log the ID once;
     // that is the missing information when nothing moves.
     let Some(d) = l.decoders.iter().find(|d| d.rid == id) else {
-        if l.unknown_logged < 3 {
+        if verbose() && l.unknown_logged < 3 {
             l.unknown_logged += 1;
             logln(&alloc::format!(
                 "[i2c-hid]   report id {id} arrived, {} bytes — the descriptor does not \
