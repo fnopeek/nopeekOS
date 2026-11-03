@@ -2846,13 +2846,14 @@ fn bar_margin() -> u32 {
 fn term_pad() -> u32 { crate::shade::widgets::scale::len(6) }
 
 /// A widget window's canvas frames, each contain-fit into its canvas rect
-/// as an item of its own over the window (`canvas::commit_frame`). A rect
-/// not wholly inside the window's content (scrolled, mid-layout) is left
-/// out.
+/// as an item of its own over the window (`canvas::commit_frame`). Canvas
+/// rects are recorded relative to the window's content origin. A rect not
+/// wholly inside the window's content (scrolled, mid-layout) is left out.
 fn frame_layers(window: u32, content: Rect, items: &mut Vec<Item>) {
     use crate::shade::widgets::canvas;
     for (cid, fw, fh, yuv) in canvas::frames_of(window) {
         let Some((x, y, w, h)) = canvas::rect_of(window, cid) else { continue };
+        let (x, y) = (x + content.x as i32, y + content.y as i32);
         if x < 0 || y < 0 || w == 0 || h == 0 { continue; }
         // Contain-fit, centred, as the raster's canvas blit does.
         let (dw, dh) = if (w as u64) * fh as u64 <= (h as u64) * fw as u64 {

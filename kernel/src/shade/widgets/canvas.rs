@@ -223,11 +223,15 @@ fn note_frame(window_id: u32, canvas_id: u32) {
     if !d.contains(&(window_id, canvas_id)) { d.push((window_id, canvas_id)); }
 }
 
-/// The rects of the frames committed since the last call.
+/// The rects of the frames committed since the last call, on the screen
+/// (canvas rects are relative to their window's content origin).
 pub fn take_frame_damage() -> Vec<(i32, i32, u32, u32)> {
     let list = core::mem::take(&mut *FRAME_DAMAGE.lock());
-    let rects = RECTS.lock();
-    list.iter().filter_map(|k| rects.get(k).copied()).collect()
+    list.iter().filter_map(|&(w, c)| {
+        let (x, y, rw, rh) = RECTS.lock().get(&(w, c)).copied()?;
+        let (ox, oy) = super::origin_of(w)?;
+        Some((x + ox, y + oy, rw, rh))
+    }).collect()
 }
 
 /// The canvases of `window_id` that hold a frame layer, with its size in

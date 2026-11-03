@@ -236,6 +236,11 @@ fn to_local(window_id: u32, x: i32, y: i32) -> (i32, i32) {
     }
 }
 
+/// Where `window_id`'s layout coordinates start on the screen.
+pub fn origin_of(window_id: u32) -> Option<(i32, i32)> {
+    SCENES.lock().get(&window_id).map(|s| (s.origin_x, s.origin_y))
+}
+
 /// A layout rect of `s` in screen coordinates.
 fn to_screen(s: &WidgetScene, r: abi::Rect) -> abi::Rect {
     abi::Rect { x: r.x + s.origin_x, y: r.y + s.origin_y, ..r }
