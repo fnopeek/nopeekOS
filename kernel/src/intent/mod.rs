@@ -1910,7 +1910,13 @@ fn intent_mic(args: &str) {
     let t0 = crate::interrupts::ticks();
     while got < want && crate::interrupts::ticks() - t0 < (secs as u64 + 2) * 100 {
         got += crate::capture::read(s, None, &mut pcm[got..]).unwrap_or(0);
-        if !crate::smp::fiber::yield_sleep(20) { break; }
+        // Outside a fiber the wait is a spin, as the prompt's.
+        if !crate::smp::fiber::yield_sleep(20) {
+            let end = crate::interrupts::rdtsc() + 20 * (crate::interrupts::tsc_freq() / 1000);
+            while crate::interrupts::rdtsc() < end {
+                core::hint::spin_loop();
+            }
+        }
     }
     let dropped = crate::capture::take_dropped(s, None).unwrap_or(0);
     crate::capture::close(s, None);
