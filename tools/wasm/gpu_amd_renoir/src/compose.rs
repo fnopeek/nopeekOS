@@ -849,6 +849,30 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                                 crate::jpeg_v2_0::amdgpu_jpeg_print_ip_state(adev);
                             }
                             if k == 0 {
+                                // Contiguous from the start (the engine stopped or still
+                                // runs) or scattered (the CPU reads stale cache lines)?
+                                let mut runs: Vec<(usize, usize)> = Vec::new();
+                                for (i, &b) in buf[..frame as usize].iter().enumerate() {
+                                    if b == ST_OUT { continue; }
+                                    match runs.last_mut() {
+                                        Some(r) if r.1 + 64 >= i => r.1 = i + 1,
+                                        _ => runs.push((i, i + 1)),
+                                    }
+                                }
+                                let mut l = Line::new();
+                                l.s("jpeg test 720p: written ranges (gaps under 64 B joined): ").dec(runs.len() as u64);
+                                for (a, b) in runs.iter().take(12) { l.s(" ").dec(*a as u64).s("+").dec((b - a) as u64); }
+                                l.say();
+                                // Again after 30 ms: more now means the engine wrote after the fence.
+                                let t1 = crate::linux::now_us();
+                                while crate::linux::now_us() - t1 < 30_000 {
+                                    crate::workqueue::run_pending(adev);
+                                    crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
+                                }
+                                let mut again = alloc::vec![0u8; frame as usize];
+                                crate::amdgpu_gart::kptr_read(adev, big.k, 0, &mut again);
+                                let later = again.iter().filter(|&&b| b != ST_OUT).count();
+                                Line::new().s("jpeg test 720p: 30 ms later ").dec(later as u64).s(" B written").say();
                                 let mut l = Line::new();
                                 l.s("jpeg test 720p: first decode ");
                                 match d {
