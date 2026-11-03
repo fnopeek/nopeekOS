@@ -57,13 +57,17 @@ pub fn build_ib(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch_px: u
 /// `build_ib` with the two pitch registers as given (the self-test tries
 /// which the engine takes for packed output).
 pub fn build_ib_regs(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch: u32, uv_pitch: u32) -> Vec<u32> {
-    build_ib_variant(bitstream_va, bitstream_size, out_va, pitch, uv_pitch, 0)
+    build_ib_variant(bitstream_va, bitstream_size, out_va, pitch, uv_pitch, 0, COND_RD_TIMER)
 }
 
+/// The JRBC poll timer Mesa sets before the stream's waits.
+pub const COND_RD_TIMER: u32 = 0x0140_0200;
+
 /// Self-test variants of the stream: bit 1 clears UVD_JPEG_INT_STAT
-/// before the start.
+/// before the start; `timer` goes into UVD_JRBC_IB_COND_RD_TIMER before
+/// the waits for the end.
 pub fn build_ib_variant(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch: u32, uv_pitch: u32,
-                        variant: u32) -> Vec<u32> {
+                        variant: u32, timer: u32) -> Vec<u32> {
     let mut c = Vec::with_capacity(128);
     let mut set = |reg: u32, cond: u32, ty: u32, val: u32| {
         c.push(pktj(reg, cond, ty));
@@ -115,7 +119,7 @@ pub fn build_ib_variant(bitstream_va: u64, bitstream_size: u32, out_va: u64, pit
     set(UVD_JPEG_CNTL, COND0, TYPE0, 0x6);
     // wait for job completion, wait for job JBSI fetch done
     set(UVD_JRBC_IB_REF_DATA, COND0, TYPE0, bitstream_size >> 2);
-    set(UVD_JRBC_IB_COND_RD_TIMER, COND0, TYPE0, 0x0140_0200);
+    set(UVD_JRBC_IB_COND_RD_TIMER, COND0, TYPE0, timer);
     set(UVD_JPEG_RB_RPTR, COND3, TYPE3, 0xffff_ffff);
     // wait for job jpeg outbuf idle
     set(UVD_JRBC_IB_REF_DATA, COND0, TYPE0, 0xffff_ffff);
