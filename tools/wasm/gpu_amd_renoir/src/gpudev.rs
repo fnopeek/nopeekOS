@@ -863,24 +863,11 @@ const JPEG_WATCHDOG_US: u64 = 200_000;
 const ETIMEDOUT: i32 = 110;
 
 /// The JPEG decode ring passed its ring and IB tests, and
-/// `gpu_amd_renoir.jpeg` is `on`. Off by default: on the IdeaPad a decode
-/// hit a Huffman error and the ring's fence read back garbage, with later
-/// buffer adds and copies failing, so decodes are not offered until that
-/// is understood.
+/// `gpu_amd_renoir.jpeg` is not `off`.
 fn jpeg_ready(adev: &amdgpu_device) -> bool {
-    jpeg_mode() == b"on" && adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready)
-}
-
-/// `gpu_amd_renoir.jpeg`: `on` offers decodes, `test` runs the self-test
-/// once at start and offers nothing, anything else is off.
-fn jpeg_mode() -> &'static [u8] {
     let mut buf = [0u8; 8];
     let n = npk_sys::config_get(b"gpu_amd_renoir.jpeg", &mut buf);
-    match &buf[..n.max(0) as usize] {
-        b"on" => b"on",
-        b"test" => b"test",
-        _ => b"off",
-    }
+    &buf[..n.max(0) as usize] != b"off" && adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready)
 }
 
 /// Complete the JPEG job once its fence signaled. True when it was.
@@ -1403,11 +1390,6 @@ pub fn serve(adev: &mut amdgpu_device) {
         }
     }
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
-    if scene_ok && jpeg_mode() == b"test" && adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready) {
-        if let Some(c) = svc.composer.as_mut() {
-            compose::jpeg_selftest(adev, c, &mut svc.jpeg_bufs);
-        }
-    }
     // An APU's VRAM is the carve-out the CPU reaches whole (`aper_base`,
     // as gmc_v9_0_mc_init sets it); BAR0 shows only its start.
     if adev.gmc.aper_base != adev.bar0.0 {

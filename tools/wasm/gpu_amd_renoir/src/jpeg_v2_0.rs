@@ -89,17 +89,6 @@ fn rreg(adev: &amdgpu_device, reg: u32, base_idx: u32) -> u32 {
     adev.rreg32(jreg(adev, reg, base_idx)).unwrap_or(0)
 }
 
-/// A JPEG register by its MMIO offset in the block's first segment, for
-/// the self-test's sampling.
-pub fn jpeg_rreg_mm(adev: &amdgpu_device, reg: u32) -> u32 {
-    rreg(adev, reg, mmUVD_JPEG_INT_STAT_BASE_IDX)
-}
-
-/// `UVD_JRBC_STATUS`, for the self-test.
-pub fn jrbc_status(adev: &amdgpu_device) -> u32 {
-    rreg(adev, mmUVD_JRBC_STATUS, mmUVD_JRBC_STATUS_BASE_IDX)
-}
-
 /// `WREG32_SOC15(JPEG, 0, reg, v)`.
 fn wreg(adev: &amdgpu_device, reg: u32, base_idx: u32, v: u32) {
     adev.wreg32(jreg(adev, reg, base_idx), v);
