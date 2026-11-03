@@ -1159,7 +1159,7 @@ fn paint_node_eff(
                         rast.canvas_blit_i420(target, &p, w, h, rect, zoom, pan);
                     }
                     // A scene layer: the compositor draws it over the window.
-                    super::canvas::Pixels::Frame(_) => {}
+                    super::canvas::Pixels::Frame(..) => {}
                 }
             }).is_some();
             if !drawn {

@@ -31,7 +31,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "gpu_amd_renoir"
-version = "0.39.0"
+version = "0.40.0"
 dependencies = [
  "gpu_scene",
  "nopeek_widgets",
@@ -53,7 +53,7 @@ dependencies = [
 
 [[package]]
 name = "nopeek_widgets"
-version = "0.46.2"
+version = "0.49.0"
 dependencies = [
  "npk_sys",
  "postcard",
@@ -64,7 +64,7 @@ dependencies = [
 
 [[package]]
 name = "npk_sys"
-version = "0.2.0"
+version = "0.4.0"
 
 [[package]]
 name = "postcard"

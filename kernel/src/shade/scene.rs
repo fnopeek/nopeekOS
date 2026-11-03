@@ -86,6 +86,36 @@ pub enum Fit {
     Extend,
 }
 
+/// How a source's words encode pixels.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Yuv {
+    /// Each word is a pixel, 0x00RRGGBB.
+    None = 0,
+    /// Each word is two pixels, bytes Y0 U Y1 V; BT.601 limited range
+    /// (a camera's YUY2).
+    Limited = 1,
+    /// The same, full range (JFIF, a JPEG decoder's output).
+    Full = 2,
+}
+
+/// One pixel of packed YUYV: `y` and the pair's `u`, `v`, as 0xFFRRGGBB.
+/// The GPU executor (compose.comp `yuv_pixel`) computes the same.
+#[inline]
+pub fn yuv_pixel(y: u32, u: u32, v: u32, kind: Yuv) -> u32 {
+    let (y, u, v) = (y as i32, u as i32 - 128, v as i32 - 128);
+    let (r, g, b) = match kind {
+        Yuv::Full => {
+            let l = y << 16;
+            ((l + 91881 * v + 32768) >> 16, (l - 22554 * u - 46802 * v + 32768) >> 16, (l + 116130 * u + 32768) >> 16)
+        }
+        _ => {
+            let c = 298 * (y - 16);
+            ((c + 409 * v + 128) >> 8, (c - 100 * u - 208 * v + 128) >> 8, (c + 516 * u + 128) >> 8)
+        }
+    };
+    0xFF00_0000 | ((r.clamp(0, 255) as u32) << 16) | ((g.clamp(0, 255) as u32) << 8) | b.clamp(0, 255) as u32
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Item {
     /// The wallpaper, or the plain background colour without one.
@@ -103,7 +133,8 @@ pub enum Item {
         paint_content: bool,
     },
     /// Opaque window content in a rounded inner rect, corners anti-aliased.
-    Content { src: Source, dst: Rect, radius: u32, fit: Fit },
+    /// With `yuv`, the source words are packed YUYV pairs, two pixels each.
+    Content { src: Source, dst: Rect, radius: u32, fit: Fit, yuv: Yuv },
     /// A panel: per-pixel alpha, translucent pixels as glass
     /// over a blur of what lies beneath.
     Panel { src: Source, dst: Rect },
@@ -199,9 +230,13 @@ fn paint(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &R
             render::fill_rounded_chrome_aa(t, info, rect.x, rect.y, rect.w, rect.h, border_a, border_b, bg,
                 rounding, border, border_opacity, bg_opacity, paint_content, clip);
         }
-        Item::Content { src, dst, radius, fit } => {
+        Item::Content { src, dst, radius, fit, yuv } => {
             let area = dst.intersect(clip);
             if area.is_empty() { return; }
+            if yuv != Yuv::None {
+                sources.with_source(src, &mut |px, sw, sh| content_yuv(t, info, px, sw, sh, dst, radius, fit, yuv, &area));
+                return;
+            }
             sources.with_source(src, &mut |px, sw, sh| content(t, info, px, sw, sh, dst, radius, fit, &area));
         }
         Item::Panel { src, dst } => {
@@ -307,6 +342,32 @@ fn content(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, r
             }
         }
         for x in hi..area.x1() { edge(x, y); }
+    }
+}
+
+/// `content` for packed YUYV: `sw` words per row are `2 * sw` pixels.
+/// Per pixel, as compose.comp's `content` does.
+#[allow(clippy::too_many_arguments)]
+fn content_yuv(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, radius: u32, fit: Fit,
+               yuv: Yuv, area: &Rect) {
+    if px.is_empty() || sw == 0 || sh == 0 || px.len() < (sw * sh) as usize { return; }
+    let r = radius.min(dst.w / 2).min(dst.h / 2);
+    let spx = sw * 2;
+    for y in area.y..area.y1() {
+        for x in area.x..area.x1() {
+            let cov = render::rect_coverage_sdf(x, y, dst.x, dst.y, dst.w, dst.h, r);
+            if cov == 0 { continue; }
+            let (lx, ly) = (x - dst.x, y - dst.y);
+            let (sx, sy) = match fit {
+                Fit::Scale if spx != dst.w || sh != dst.h => (lx * spx / dst.w.max(1), ly * sh / dst.h.max(1)),
+                _ => (lx, ly),
+            };
+            let (sx, sy) = (sx.min(spx - 1), sy.min(sh - 1));
+            let w = px[(sy * sw + sx / 2) as usize];
+            let luma = if sx & 1 == 0 { w & 0xFF } else { (w >> 16) & 0xFF };
+            let c = yuv_pixel(luma, (w >> 8) & 0xFF, w >> 24, yuv);
+            if cov >= 256 { render::put_pixel(t, info, x, y, c); } else { render::blend_pixel(t, info, x, y, c, cov); }
+        }
     }
 }
 

@@ -318,10 +318,31 @@ uint chrome(Blk it, uint px, uint py, uint c) {
     return glass_blend(glass_fill, blend(border_color, c, bo), min(go * inner / 256u, 255u), ceil_);
 }
 
-// scene::content at one pixel.
+// scene::yuv_pixel: one pixel of packed YUYV as 0xFFRRGGBB; kind 2 full
+// range (JFIF), else BT.601 limited.
+uint yuv_pixel(uint yy, uint uu, uint vv, uint kind) {
+    int y = int(yy), u = int(uu) - 128, v = int(vv) - 128;
+    int r, g, b;
+    if (kind == 2u) {
+        int l = y << 16;
+        r = (l + 91881 * v + 32768) >> 16;
+        g = (l - 22554 * u - 46802 * v + 32768) >> 16;
+        b = (l + 116130 * u + 32768) >> 16;
+    } else {
+        int c = 298 * (y - 16);
+        r = (c + 409 * v + 128) >> 8;
+        g = (c - 100 * u - 208 * v + 128) >> 8;
+        b = (c + 516 * u + 128) >> 8;
+    }
+    return 0xFF000000u | (uint(clamp(r, 0, 255)) << 16) | (uint(clamp(g, 0, 255)) << 8) | uint(clamp(b, 0, 255));
+}
+
+// scene::content at one pixel; with a YUYV kind in fit bits 2..1,
+// scene::content_yuv (a word is two pixels).
 uint content(Blk it, uint x, uint y, uint c) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
-    uint radius = BC(it, 5), fit = BC(it, 6);
+    uint radius = BC(it, 5), fw = BC(it, 6);
+    uint fit = fw & 1u, yuv = fw >> 1;
     Words src = mkaddr(BC(it, 7), BC(it, 8));
     uint sw = BC(it, 9), sh = BC(it, 10), spitch = BC(it, 11);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh)
@@ -334,11 +355,20 @@ uint content(Blk it, uint x, uint y, uint c) {
     uint ly = y - dy;
     uint sx = lx;
     uint sy = ly;
-    if (fit == 0u && (sw != dw || sh != dh)) {
-        sx = lx * sw / max(dw, 1u);
+    uint spx = yuv != 0u ? sw * 2u : sw;
+    if (fit == 0u && (spx != dw || sh != dh)) {
+        sx = lx * spx / max(dw, 1u);
         sy = ly * sh / max(dh, 1u);
     }
-    uint v = src.v[min(sy, sh - 1u) * spitch + min(sx, sw - 1u)];
+    uint v;
+    if (yuv != 0u) {
+        sx = min(sx, spx - 1u);
+        uint w = src.v[min(sy, sh - 1u) * spitch + sx / 2u];
+        uint luma = (sx & 1u) == 0u ? (w & 255u) : ((w >> 16) & 255u);
+        v = yuv_pixel(luma, (w >> 8) & 255u, w >> 24, yuv);
+    } else {
+        v = src.v[min(sy, sh - 1u) * spitch + min(sx, sw - 1u)];
+    }
     return cov >= 256u ? v : blend(v, c, cov);
 }
 
@@ -499,7 +529,8 @@ void main() {
             }
             return;
         }
-        if (kind == 5u) {
+        // YUYV content takes the per-pixel path below.
+        if (kind == 5u && (BC(it, 6) >> 1) == 0u) {
             uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
             uint fit = BC(it, 6);
             Words src = mkaddr(BC(it, 7), BC(it, 8));

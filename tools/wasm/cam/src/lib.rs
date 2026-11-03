@@ -339,7 +339,7 @@ mod app {
 
     /// `run cam pattern`: colour bars with a moving stripe, 1280x720, through
     /// the same layer path, no camera. A picture to check the path by.
-    fn pattern() {
+    fn pattern(yuv: bool) {
         let (w, h) = (1280usize, 720usize);
         let bars: [u32; 8] = [0xFFFFFF, 0xFFFF00, 0x00FFFF, 0x00FF00, 0xFF00FF, 0xFF0000, 0x0000FF, 0x000000];
         let mut px = alloc::vec![0u8; w * h * 4];
@@ -366,6 +366,30 @@ mod app {
                     px[o + 3] = 255;
                 }
             }
+            if yuv {
+                // The same bars as YUYV (BT.601 limited), through the GPU's
+                // conversion.
+                let mut yv = alloc::vec![0u8; w * h * 2];
+                for i in 0..w * h / 2 {
+                    let p0 = &px[i * 8..i * 8 + 4];
+                    let p1 = &px[i * 8 + 4..i * 8 + 8];
+                    let luma = |p: &[u8]| ((66 * p[2] as i32 + 129 * p[1] as i32 + 25 * p[0] as i32 + 128) >> 8) + 16;
+                    let (r, g, b) = (p0[2] as i32, p0[1] as i32, p0[0] as i32);
+                    let u = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
+                    let v = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
+                    yv[i * 4] = luma(p0) as u8;
+                    yv[i * 4 + 1] = u.clamp(0, 255) as u8;
+                    yv[i * 4 + 2] = luma(p1) as u8;
+                    yv[i * 4 + 3] = v.clamp(0, 255) as u8;
+                }
+                if !host::canvas_frame_as(CANVAS_ID, &yv, w as u32, h as u32, host::frame::YUYV) {
+                    log("[cam] pattern-yuv: refused");
+                }
+                if t % 30 == 0 { commit(None, "Test pattern 1280x720 YUYV", "scene layer, GPU converts"); }
+                t += 1;
+                host::sleep_ms(33);
+                continue;
+            }
             if layer && !host::canvas_frame(CANVAS_ID, &px, w as u32, h as u32) {
                 layer = false;
                 log("[cam] pattern: no frame layer, plain canvas");
@@ -381,9 +405,10 @@ mod app {
 
     #[unsafe(no_mangle)]
     pub extern "C" fn _start() {
-        if host::launch_arg().as_deref() == Some("pattern") {
-            pattern();
-            return;
+        match host::launch_arg().as_deref() {
+            Some("pattern") => { pattern(false); return; }
+            Some("pattern-yuv") => { pattern(true); return; }
+            _ => {}
         }
         commit(None, "Opening the camera…", "");
         let mut c = match claim() {
@@ -454,7 +479,7 @@ mod app {
                                 Ok((dw, dh)) => {
                                     c.decode_ms += host::ticks_ms() - t0;
                                     c.decoded += 1;
-                                    show( &bgra, dw, dh);
+                                    show(&bgra, dw, dh);
                                 }
                                 Err(e) => {
                                     c.jpeg_errors += 1;
@@ -466,9 +491,16 @@ mod app {
                             }
                         }
                         _ => {
-                            bgra.resize(w * h * 4, 0);
-                            uvc::yuyv_to_bgra(&f.data, w, h, &mut bgra);
-                            show( &bgra, w as u32, h as u32);
+                            // The layer takes YUY2 as it comes; the GPU
+                            // converts. A kernel without falls back.
+                            let n = w * h * 2;
+                            if f.data.len() < n
+                                || !host::canvas_frame_as(CANVAS_ID, &f.data[..n], w as u32, h as u32, host::frame::YUYV)
+                            {
+                                bgra.resize(w * h * 4, 0);
+                                uvc::yuyv_to_bgra(&f.data, w, h, &mut bgra);
+                                show(&bgra, w as u32, h as u32);
+                            }
                         }
                     }
                 }

@@ -89,7 +89,8 @@ pub enum Pixels {
     /// (`npk_canvas_frame`): BGRA32 in a buffer the GPU reads in place,
     /// rewritten in place by the next frame of the same size. The window's
     /// raster leaves the canvas rect alone.
-    Frame(crate::shade::buffers::PixelBuffer),
+    /// In YUYV the buffer is `w / 2` words wide, two pixels a word.
+    Frame(crate::shade::buffers::PixelBuffer, crate::shade::scene::Yuv),
 }
 
 struct Bitmap {
@@ -105,7 +106,7 @@ impl Pixels {
         match self {
             Pixels::Bgra(px) => px.len(),
             Pixels::I420 { y, u, v, .. } => y.len() + u.len() + v.len(),
-            Pixels::Frame(b) => b.len() * 4,
+            Pixels::Frame(b, _) => b.len() * 4,
         }
     }
 }
@@ -179,22 +180,29 @@ pub fn with_bitmap<R>(window_id: u32, canvas_id: u32, f: impl FnOnce(&Pixels, u3
 /// rects are the compositor's damage (`take_frame_damage`).
 static FRAME_DAMAGE: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
 
-/// Store a BGRA frame `w` x `h` (`src` holds `w * h * 4` bytes) as the
-/// canvas's scene layer. Same size as the last frame: written into its
-/// buffer, after the GPU finished reading it. Only the canvas rect is
-/// damaged; the window is not rasterized again.
-pub fn commit_frame(window_id: u32, canvas_id: u32, w: u32, h: u32, src: &[u8]) -> bool {
+/// Store a frame `w` x `h` as the canvas's scene layer: BGRA (`src` holds
+/// `w * h * 4` bytes) or packed YUYV (`w` even, `w * h * 2` bytes). Same
+/// size and format as the last frame: written into its buffer, after the
+/// GPU finished reading it. Only the canvas rect is damaged; the window is
+/// not rasterized again.
+pub fn commit_frame(window_id: u32, canvas_id: u32, w: u32, h: u32, yuv: crate::shade::scene::Yuv,
+                    src: &[u8]) -> bool {
+    use crate::shade::scene::Yuv;
     if w == 0 || h == 0 || w > MAX_DIM || h > MAX_DIM { return false; }
-    if src.len() != w as usize * h as usize * 4 { return false; }
+    let bpp = if yuv == Yuv::None { 4 } else { 2 };
+    if yuv != Yuv::None && w % 2 != 0 { return false; }
+    if src.len() != w as usize * h as usize * bpp { return false; }
+    let bw = if yuv == Yuv::None { w } else { w / 2 };
     let fill = |buf: &mut crate::shade::buffers::PixelBuffer| {
         for (d, s) in buf.iter_mut().zip(src.chunks_exact(4)) {
             *d = u32::from_le_bytes([s[0], s[1], s[2], s[3]]);
         }
     };
-    {
+    'reuse: {
         let mut map = CANVASES.lock();
         if let Some(b) = map.get_mut(&(window_id, canvas_id)) {
-            if let (Pixels::Frame(buf), true) = (&mut b.px, b.w == w && b.h == h) {
+            if let (Pixels::Frame(buf, f), true) = (&mut b.px, b.w == w && b.h == h) {
+                if *f != yuv { break 'reuse; }
                 fill(buf);
                 drop(map);
                 note_frame(window_id, canvas_id);
@@ -202,10 +210,10 @@ pub fn commit_frame(window_id: u32, canvas_id: u32, w: u32, h: u32, src: &[u8]) 
             }
         }
     }
-    let mut buf = crate::shade::buffers::PixelBuffer::new(w, h);
+    let mut buf = crate::shade::buffers::PixelBuffer::new(bw, h);
     if buf.is_empty() { return false; }
     fill(&mut buf);
-    if !insert_within_caps(window_id, canvas_id, Bitmap { w, h, px: Pixels::Frame(buf) }) { return false; }
+    if !insert_within_caps(window_id, canvas_id, Bitmap { w, h, px: Pixels::Frame(buf, yuv) }) { return false; }
     note_frame(window_id, canvas_id);
     true
 }
@@ -222,19 +230,19 @@ pub fn take_frame_damage() -> Vec<(i32, i32, u32, u32)> {
     list.iter().filter_map(|k| rects.get(k).copied()).collect()
 }
 
-/// The canvases of `window_id` that hold a frame layer, with its size.
-pub fn frames_of(window_id: u32) -> Vec<(u32, u32, u32)> {
+/// The canvases of `window_id` that hold a frame layer, with its size in
+/// pixels and its format.
+pub fn frames_of(window_id: u32) -> Vec<(u32, u32, u32, crate::shade::scene::Yuv)> {
     CANVASES.lock().range((window_id, 0)..=(window_id, u32::MAX))
-        .filter(|(_, b)| matches!(b.px, Pixels::Frame(_)))
-        .map(|(k, b)| (k.1, b.w, b.h))
+        .filter_map(|(k, b)| match b.px { Pixels::Frame(_, yuv) => Some((k.1, b.w, b.h, yuv)), _ => None })
         .collect()
 }
 
-/// `f(pixels, w, h)` with a frame layer's pixels.
+/// `f(words, words per row, rows)` with a frame layer's buffer.
 pub fn with_frame(window_id: u32, canvas_id: u32, f: &mut dyn FnMut(&[u32], u32, u32)) {
     let map = CANVASES.lock();
-    if let Some(Bitmap { w, h, px: Pixels::Frame(buf) }) = map.get(&(window_id, canvas_id)) {
-        f(buf, *w, *h);
+    if let Some(Bitmap { px: Pixels::Frame(buf, _), .. }) = map.get(&(window_id, canvas_id)) {
+        f(buf, buf.width(), buf.height());
     }
 }
 

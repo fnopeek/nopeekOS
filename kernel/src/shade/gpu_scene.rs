@@ -493,12 +493,12 @@ fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage: &[Rect])
                 w[5..13].copy_from_slice(&[border_a, border_b, bg, rounding, border, border_opacity, bg_opacity,
                     paint_content as u32]);
             }
-            Item::Content { src, dst, radius, fit } => {
+            Item::Content { src, dst, radius, fit, yuv } => {
                 let Some(id) = source_bo(sources, src)? else { continue };
                 srcs.push(id);
                 w[0] = 5;
                 r(&mut w, dst);
-                w[5..8].copy_from_slice(&[radius, (fit == Fit::Extend) as u32, id]);
+                w[5..8].copy_from_slice(&[radius, (fit == Fit::Extend) as u32 | (yuv as u32) << 1, id]);
             }
             Item::Panel { src, dst } | Item::Text { src, dst } => {
                 let Some(id) = source_bo(sources, src)? else { continue };
@@ -634,8 +634,7 @@ pub fn iommu_probe() {
         }
     }
     let frame = Scene { items: alloc::vec![Item::Content {
-        src: Source::Surface(u32::MAX), dst: Rect::new(0, 0, W, H), radius: 0, fit: Fit::Extend,
-    }] };
+        src: Source::Surface(u32::MAX), dst: Rect::new(0, 0, W, H), radius: 0, fit: Fit::Extend, yuv: scene::Yuv::None }] };
     let damage = [Rect::new(0, 0, W, H)];
     let info = dst.info();
     let run = |src: &PixelBuffer, dst: &PixelBuffer| -> Option<i32> {

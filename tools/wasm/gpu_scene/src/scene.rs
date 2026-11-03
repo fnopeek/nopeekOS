@@ -281,7 +281,9 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
                 }
             }
             KIND_CONTENT => {
-                if w[5] > MAX_COORD || w[6] > 1 {
+                // Bit 0: extend instead of scale; bits 2..1: YUYV kind
+                // (0 none, 1 limited, 2 full).
+                if w[5] > MAX_COORD || w[6] > 5 {
                     return Err(-EINVAL);
                 }
                 let Some(s) = src(w[7])? else { continue };

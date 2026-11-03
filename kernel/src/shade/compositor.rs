@@ -7,7 +7,7 @@
 use alloc::vec::Vec;
 use crate::framebuffer::FbInfo;
 use super::buffers::PixelBuffer;
-use super::scene::{self, Fit, Item, Rect, Scene, Source};
+use super::scene::{self, Fit, Item, Rect, Scene, Source, Yuv};
 
 use super::window::{Window, WindowId, WindowState};
 use super::terminal;
@@ -1914,7 +1914,8 @@ impl Compositor {
                         items.push(Item::Panel { src: Source::Widget(p.id.0), dst: Rect::new(c.x, c.y, sw, sh) });
                     } else {
                         let fit = if self.animation.is_some() { Fit::Scale } else { Fit::Extend };
-                        items.push(Item::Content { src: Source::Widget(p.id.0), dst: c, radius: inner_r, fit });
+                        items.push(Item::Content { src: Source::Widget(p.id.0), dst: c, radius: inner_r, fit,
+                            yuv: Yuv::None });
                         if self.animation.is_none() {
                             frame_layers(p.id.0, c, &mut items);
                         }
@@ -1922,7 +1923,7 @@ impl Compositor {
                 }
                 WindowKind::Surface => {
                     items.push(Item::Content { src: Source::Surface(p.id.0), dst: p.content, radius: inner_r,
-                        fit: Fit::Extend });
+                        fit: Fit::Extend, yuv: Yuv::None });
                 }
             }
             items.extend_from_slice(&p.controls);
@@ -2850,7 +2851,7 @@ fn term_pad() -> u32 { crate::shade::widgets::scale::len(6) }
 /// out.
 fn frame_layers(window: u32, content: Rect, items: &mut Vec<Item>) {
     use crate::shade::widgets::canvas;
-    for (cid, fw, fh) in canvas::frames_of(window) {
+    for (cid, fw, fh, yuv) in canvas::frames_of(window) {
         let Some((x, y, w, h)) = canvas::rect_of(window, cid) else { continue };
         if x < 0 || y < 0 || w == 0 || h == 0 { continue; }
         // Contain-fit, centred, as the raster's canvas blit does.
@@ -2861,7 +2862,7 @@ fn frame_layers(window: u32, content: Rect, items: &mut Vec<Item>) {
         };
         let dst = Rect::new(x as u32 + (w - dw) / 2, y as u32 + (h - dh) / 2, dw, dh);
         if dst.intersect(&content) != dst { continue; }
-        items.push(Item::Content { src: Source::Canvas(window, cid), dst, radius: 0, fit: Fit::Scale });
+        items.push(Item::Content { src: Source::Canvas(window, cid), dst, radius: 0, fit: Fit::Scale, yuv });
     }
 }
 

@@ -258,6 +258,20 @@ pub fn canvas_frame(id: u32, px: &[u8], w: u32, h: u32) -> bool {
     sys::canvas_frame(id as i32, px, w as i32, h as i32, 0) >= 0
 }
 
+/// Pixel formats of `canvas_frame_as`.
+pub mod frame {
+    pub const BGRA: i32 = 0;
+    /// Packed YUYV, BT.601 limited range (a camera's YUY2); even width.
+    pub const YUYV: i32 = 1;
+    /// Packed YUYV, full range (JFIF).
+    pub const YUYV_FULL: i32 = 2;
+}
+
+/// `canvas_frame` in format `fmt` (`frame::*`); the GPU converts.
+pub fn canvas_frame_as(id: u32, px: &[u8], w: u32, h: u32, fmt: i32) -> bool {
+    sys::canvas_frame(id as i32, px, w as i32, h as i32, fmt) >= 0
+}
+
 /// Free canvas `id`. False if there was none.
 pub fn canvas_drop(id: u32) -> bool { sys::canvas_drop(id as i32) == 0 }
 
