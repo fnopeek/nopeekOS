@@ -865,10 +865,19 @@ const ETIMEDOUT: i32 = 110;
 /// buffer adds and copies failing, so decodes are not offered until that
 /// is understood.
 fn jpeg_ready(adev: &amdgpu_device) -> bool {
+    jpeg_mode() == b"on" && adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready)
+}
+
+/// `gpu_amd_renoir.jpeg`: `on` offers decodes, `test` runs the self-test
+/// once at start and offers nothing, anything else is off.
+fn jpeg_mode() -> &'static [u8] {
     let mut buf = [0u8; 8];
     let n = npk_sys::config_get(b"gpu_amd_renoir.jpeg", &mut buf);
-    let on = n > 0 && &buf[..n as usize] == b"on";
-    on && adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready)
+    match &buf[..n.max(0) as usize] {
+        b"on" => b"on",
+        b"test" => b"test",
+        _ => b"off",
+    }
 }
 
 /// Complete the JPEG job once its fence signaled. True when it was.
@@ -1391,6 +1400,11 @@ pub fn serve(adev: &mut amdgpu_device) {
         }
     }
     let scene_ok = svc.copy_ok && scenes_init(adev, &mut svc);
+    if scene_ok && jpeg_mode() == b"test" && adev.jpeg.inst0_ring_dec.is_some_and(|r| adev.rings[r].sched.ready) {
+        if let Some(c) = svc.composer.as_mut() {
+            compose::jpeg_selftest(adev, c, &mut svc.jpeg_bufs);
+        }
+    }
     // An APU's VRAM is the carve-out the CPU reaches whole (`aper_base`,
     // as gmc_v9_0_mc_init sets it); BAR0 shows only its start.
     if adev.gmc.aper_base != adev.bar0.0 {

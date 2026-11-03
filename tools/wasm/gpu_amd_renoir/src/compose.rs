@@ -708,3 +708,94 @@ pub fn jpeg_done(adev: &mut amdgpu_device, f: &Fence) -> Option<i32> {
     }
     Some(f.error().min(0))
 }
+
+/// What the JPEG self-test writes into its buffers before the decode, to
+/// tell whose bytes changed.
+const ST_OUT: u8 = 0xAA;
+const ST_ALIAS: u8 = 0xBB;
+
+/// `gpu_amd_renoir.jpeg test`: one decode of a 64x16 4:2:2 picture into a
+/// buffer of this client, with a second buffer at a VA with the same low
+/// 32 bits, and the JPEG ring's fence and the MMHUB contexts read around
+/// it. Says where the engine's output lands; offers nothing afterwards.
+pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bufs) {
+    const PIC: &[u8] = include_bytes!("jpeg_selftest.jpg");
+    let say = |s: &str| Line::new().s("jpeg test: ").s(s).say();
+    let Some(r) = adev.jpeg.inst0_ring_dec else { say("no JPEG ring"); return };
+    let mut bits = Vec::new();
+    let hdr = match crate::jpeg_dec::normalize(PIC, &mut bits) {
+        Ok(h) => h,
+        Err(_) => { say("test picture refused by normalize"); return }
+    };
+    let Ok(out) = gem_new(adev, &c.fpriv, &mut c.mm, None, PAGE, AMDGPU_GEM_DOMAIN_GTT) else { say("no output buffer"); return };
+    let alias_va = (out.va & 0xFFFF_FFFF) | (1u64 << 36);
+    let alias = gem_new(adev, &c.fpriv, &mut c.mm, Some(alias_va), PAGE, AMDGPU_GEM_DOMAIN_GTT).ok();
+    let _ = write(adev, &out, 0, &[ST_OUT; PAGE as usize]);
+    if let Some(a) = alias.as_ref() { let _ = write(adev, a, 0, &[ST_ALIAS; PAGE as usize]); }
+    let fence_word = |adev: &amdgpu_device| -> Option<u32> {
+        let drv = &adev.rings[r].fence_drv;
+        Some(crate::amdgpu_gart::kptr_r32(adev, adev.wb.wb?, drv.cpu_addr? as u64 * 4))
+    };
+    let before = fence_word(adev);
+    let mut l = Line::new();
+    l.s("jpeg test: ").dec(hdr.width as u64).s("x").dec(hdr.height as u64).s(", bitstream ").dec(bits.len() as u64)
+        .s(" B, out va 0x").hexw((out.va >> 32) as u32, 8).hexw(out.va as u32, 8)
+        .s(", alias va 0x").hexw((alias_va >> 32) as u32, 8).hexw(alias_va as u32, 8)
+        .s(if alias.is_some() { "" } else { " (not mapped)" })
+        .s(", ring fence gpu 0x").hexw((adev.rings[r].fence_drv.gpu_addr >> 32) as u32, 8)
+        .hexw(adev.rings[r].fence_drv.gpu_addr as u32, 8);
+    l.say();
+    let mut bos = alloc::vec![out.bo];
+    if let Some(a) = alias.as_ref() { bos.push(a.bo); }
+    let f = match jpeg_submit(adev, c, j, &bits, out.va, hdr.width, &bos) {
+        Ok(f) => f,
+        Err(e) => { Line::new().s("jpeg test: submit failed (").dec((-e) as u64).s(")").say(); return }
+    };
+    let t0 = crate::linux::now_us();
+    let mut done = None;
+    while crate::linux::now_us() - t0 < 500_000 {
+        crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+        if let Some(e) = jpeg_done(adev, &f) { done = Some(e); break; }
+        crate::amdgpu_irq::amdgpu_irq_wait(adev, 2);
+    }
+    let after = fence_word(adev);
+    let mut buf = [0u8; PAGE as usize];
+    crate::amdgpu_gart::kptr_read(adev, out.k, 0, &mut buf);
+    let changed = buf.iter().filter(|&&b| b != ST_OUT).count();
+    let mut l = Line::new();
+    l.s("jpeg test: ").s(match done { Some(0) => "fence signaled", Some(_) => "fence signaled with an error", None => "no fence after 500 ms" })
+        .s(" after ").dec(crate::linux::now_us() - t0).s(" us; output changed ").dec(changed as u64)
+        .s(" of ").dec((hdr.width * hdr.height * 2) as u64).s(" B, first bytes");
+    for b in &buf[..16] { l.s(" ").hexw(*b as u32, 2); }
+    l.say();
+    if let Some(a) = alias.as_ref() {
+        crate::amdgpu_gart::kptr_read(adev, a.k, 0, &mut buf);
+        let n = buf.iter().filter(|&&b| b != ST_ALIAS).count();
+        Line::new().s("jpeg test: alias buffer (same low 32 bits) changed ").dec(n as u64).s(" B").say();
+    }
+    let mut l = Line::new();
+    l.s("jpeg test: ring fence word before 0x");
+    match before { Some(v) => { l.hexw(v, 8); } None => { l.s("?"); } }
+    l.s(", after 0x");
+    match after { Some(v) => { l.hexw(v, 8); } None => { l.s("?"); } }
+    l.s(", last emitted ").dec(adev.rings[r].fence_drv.sync_seq as u64);
+    l.say();
+    // Which VMID on the MMHUB points at this client's page directory.
+    let hub = adev.vmhub[adev.rings[r].vm_hub as usize];
+    let root = crate::amdgpu_vm::base(adev, adev.vm(c.fpriv.vm).root).bo;
+    let pd = root.map(|b| crate::amdgpu_gmc::amdgpu_gmc_pd_addr(adev, b)).unwrap_or(0);
+    let mut l = Line::new();
+    l.s("jpeg test: client pd 0x").hexw((pd >> 32) as u32, 8).hexw(pd as u32, 8).s(", mmhub contexts:");
+    for vmid in 1..8u32 {
+        let lo = adev.rreg32(hub.ctx0_ptb_addr_lo32 + vmid * hub.ctx_addr_distance).unwrap_or(0);
+        let hi = adev.rreg32(hub.ctx0_ptb_addr_hi32 + vmid * hub.ctx_addr_distance).unwrap_or(0);
+        l.s(" ").dec(vmid as u64).s("=").hexw(hi, 8).hexw(lo, 8);
+    }
+    l.say();
+    crate::jpeg_v2_0::amdgpu_jpeg_dump_ip_state(adev);
+    crate::jpeg_v2_0::amdgpu_jpeg_print_ip_state(adev);
+    if done.is_some() {
+        gem_free(adev, &c.fpriv, &mut c.mm, out);
+        if let Some(a) = alias { gem_free(adev, &c.fpriv, &mut c.mm, a); }
+    }
+}
