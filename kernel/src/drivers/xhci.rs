@@ -102,7 +102,6 @@ const TRB_NOOP_CMD:       u32 = 23 << 10;
 const TRB_CYCLE:     u32 = 1 << 0;
 const TRB_IOC:       u32 = 1 << 5;  // Interrupt On Completion
 const TRB_IDT:       u32 = 1 << 6;  // Immediate Data
-#[allow(dead_code)]
 const TRB_BSR:       u32 = 1 << 9;  // Block Set Address Request (address device)
 const TRB_DIR_IN:    u32 = 1 << 16; // Direction: IN
 const TRB_TRT_NO:    u32 = 0;       // Transfer Type: No Data
@@ -460,8 +459,10 @@ struct XhciState {
     /// Completion code of the last command or control transfer, for the
     /// log when enumeration fails; 0 = it timed out.
     last_cc: u32,
-    /// The enumeration step that failed last (`port_failed`).
-    last_fail: &'static str,
+    /// The enumeration step that failed last and its completion code
+    /// (`port_failed`), kept apart from `last_cc`, which the Disable Slot
+    /// after the failure overwrites.
+    last_fail: (&'static str, u32),
     /// Devices enumeration gave up on, until their port changes: what
     /// `usb` lists beside the addressed ones.
     failed: Vec<UsbSeen>,
@@ -714,7 +715,7 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
         evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table,
         input_ctx, data_buf,
         devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
-        last_fail: "", failed: Vec::new(), nic: None, msc: Vec::new(),
+        last_fail: ("", 0), failed: Vec::new(), nic: None, msc: Vec::new(),
     };
 
     // Power on all ports
@@ -1502,21 +1503,21 @@ fn hub_port_reset(state: &mut XhciState, hub: u8, port1: u8, mut delay: u64, mut
 }
 
 /// `hub_port_connect`: reset, enumerate and hand the device to its driver,
-/// `PORT_INIT_TRIES` times; a port nothing would enumerate on is disabled.
+/// `PORT_INIT_TRIES` times, the port power-cycled halfway; a port nothing
+/// would enumerate on is disabled.
 fn hub_port_connect(state: &mut XhciState, hub: u8, port1: u8, path: String) {
     let Some(ss) = hub_of(state, hub).map(|h| h.ss) else { return };
     let mut speed = 0;
-    for attempt in 0..PORT_INIT_TRIES {
-        if attempt > 0 {
-            kprintln!("[npk] xhci: port {} retrying ({}/{})", path, attempt + 1, PORT_INIT_TRIES);
+    for i in 0..PORT_INIT_TRIES {
+        if i > 0 {
+            kprintln!("[npk] xhci: port {} retrying ({}/{})", path, i + 1, PORT_INIT_TRIES);
         }
-        let delay = if attempt == 0 { HUB_SHORT_RESET_TIME } else { HUB_LONG_RESET_TIME };
-        match hub_port_reset(state, hub, port1, delay, false) {
+        match hub_port_reset(state, hub, port1, HUB_SHORT_RESET_TIME, false) {
             Ok(s) => {
                 speed = s;
                 let Some(h) = dev_idx(state, hub) else { return };
                 let place = Place::below(&state.devs[h], port1, speed);
-                if let Some(slot) = usb_port_init(state, place, speed) {
+                if let Some(slot) = usb_port_init(state, place, speed, i) {
                     usb_new_device(state, slot);
                     return;
                 }
@@ -1527,6 +1528,14 @@ fn hub_port_connect(state: &mut XhciState, hub: u8, port1: u8, path: String) {
         match hub_port_status(state, hub, port1) {
             Some((s, _)) if s & USB_PORT_STAT_CONNECTION != 0 => {}
             _ => return,
+        }
+        if i == (PORT_INIT_TRIES - 1) / 2 {
+            kprintln!("[npk] xhci: port {}: attempt power cycle", path);
+            let power_ms = hub_of(state, hub).map_or(100, |h| h.power_ms);
+            clear_port_feature(state, hub, port1, USB_PORT_FEAT_POWER);
+            wait_ms(state, 2 * power_ms);
+            set_port_feature(state, hub, port1, USB_PORT_FEAT_POWER);
+            wait_ms(state, power_ms);
         }
     }
     kprintln!("[npk] xhci: port {}: unable to enumerate USB device, port disabled", path);
@@ -1808,22 +1817,49 @@ fn initial_mps0(speed: u32) -> u16 {
     }
 }
 
-/// Address device `slot`, then read bMaxPacketSize0 and correct EP0 if it
-/// differs (Linux `hub_port_init` with the new scheme: Address Device,
-/// GET_DESCRIPTOR 8 bytes, `usb_ep0_reinit` → Evaluate Context).
-fn address_device(state: &mut XhciState, slot: u8) -> bool {
+/// bDescriptorType of a device descriptor.
+const USB_DT_DEVICE: u8 = 1;
+
+/// `get_bMaxPacketSize0`: GET_DESCRIPTOR(device) of `size` bytes until
+/// a plausible bMaxPacketSize0 comes back, `GET_MAXPACKET0_TRIES` times.
+/// A high speed device that times out on the first attempt wants a second
+/// reset, so that returns at once.
+fn get_bmaxpacketsize0(state: &mut XhciState, slot: u8, size: u16, first_time: bool) -> Option<u8> {
+    let Some(d) = dev_idx(state, slot) else { return None };
+    let speed = state.devs[d].speed;
+    for _ in 0..GET_MAXPACKET0_TRIES {
+        let ok = usb_get_descriptor(state, slot, DESC_DEVICE, size);
+        let (ty, maxp0) = (state.data_buf.r8(1u32), state.data_buf.r8(7u32));
+        if ok && ty == USB_DT_DEVICE && matches!(maxp0, 8 | 16 | 32 | 64 | 9) {
+            return Some(maxp0);
+        }
+        let timed_out = !ok && state.last_cc == 0;
+        if timed_out && first_time && speed != SPEED_FULL && speed != SPEED_LOW {
+            break;
+        }
+    }
+    None
+}
+
+/// The tail of `hub_port_init`'s retry loop: the EP0 max packet guess
+/// checked against bMaxPacketSize0 and corrected (`usb_ep0_reinit`).
+fn fix_ep0_maxpacket(state: &mut XhciState, slot: u8, mps0: u16, maxp0: u8) -> bool {
     let Some(d) = dev_idx(state, slot) else { return false };
     let speed = state.devs[d].speed;
-    let mps0 = initial_mps0(speed);
-    if !cmd_address_device(state, slot, mps0) { return false; }
-    if !usb_get_descriptor(state, slot, DESC_DEVICE, 8) { return false; }
-    let b = state.data_buf.r8(7u32);
-    let real = if speed >= SPEED_SUPER { 1u16 << b.min(15) } else { b as u16 };
-    if real != 0 && real != mps0 {
-        crate::kdebug!("[npk] xhci: slot {} ep0 max packet {} -> {}", slot, mps0, real);
-        return cmd_evaluate_ep0(state, slot, real);
+    let i = if speed >= SPEED_SUPER {
+        if maxp0 <= 16 { 1u16 << maxp0 } else { 0 }
+    } else {
+        maxp0 as u16
+    };
+    if i == mps0 { return true; }
+    let valid = ((speed == SPEED_FULL || speed == SPEED_HIGH) && matches!(i, 8 | 16 | 32 | 64))
+        || (speed >= SPEED_SUPER && i > 0);
+    if !valid {
+        kprintln!("[npk] xhci: slot {} invalid ep0 maxpacket: {}", slot, maxp0);
+        return false;
     }
-    true
+    crate::kdebug!("[npk] xhci: slot {} ep0 max packet {} -> {}", slot, mps0, i);
+    cmd_evaluate_ep0(state, slot, i)
 }
 
 /// A zeroed DMA page: one given back by an unplugged device, else new.
@@ -1844,13 +1880,33 @@ fn take_ring(state: &mut XhciState, name: &str) -> Option<DmaRegion> {
 /// `PORT_INIT_TRIES` (drivers/usb/core/hub.c): a device that fails reset,
 /// addressing or its first descriptors is reset and tried again.
 const PORT_INIT_TRIES: u32 = 4;
+const GET_DESCRIPTOR_TRIES: u32 = 2;
+const SET_ADDRESS_TRIES: u32 = 2;
+const GET_MAXPACKET0_TRIES: u32 = 3;
+const HUB_ROOT_RESET_TIME: u64 = 60;
 
-/// Enable a slot for a device of `speed` at `place`, address it and read
-/// its device and configuration descriptors (the part of `hub_port_init`
-/// after the reset, and `usb_get_configuration`). The device stays in
-/// `devs` with its slot; None when a step failed, and then it is gone
-/// again.
-fn usb_port_init(state: &mut XhciState, place: Place, speed: u32) -> Option<u8> {
+/// `use_new_scheme` with `use_both_schemes` and the new scheme first: the
+/// first half of the tries reads 64 bytes of the device descriptor before
+/// SET_ADDRESS, as Windows does, the second half addresses first. Never
+/// for USB 3 devices.
+fn use_new_scheme(speed: u32, retry: u32) -> bool {
+    speed < SPEED_SUPER && retry < PORT_INIT_TRIES.div_ceil(2)
+}
+
+/// Reset the port a device at `place` hangs on again, inside `hub_port_init`.
+fn port_reset_at(state: &mut XhciState, place: Place, delay: u64) -> Result<u32, PortReset> {
+    match place.parent {
+        None => root_port_reset(state, place.root_port, delay, false),
+        Some((hub, port1)) => hub_port_reset(state, hub, port1, delay, false),
+    }
+}
+
+/// `hub_port_init` after the first reset: enable a slot for a device of
+/// `speed` at `place`, address it by the scheme `retry` picks and read its
+/// device and configuration descriptors (and `usb_get_configuration`).
+/// The device stays in `devs` with its slot; None when a step failed, and
+/// then it is gone again.
+fn usb_port_init(state: &mut XhciState, place: Place, speed: u32, retry: u32) -> Option<u8> {
     let dctx = take_page(state, "usb dev ctx")?;
     let Some(ep0) = take_ring(state, "usb EP0") else {
         state.free_pages.push(dctx);
@@ -1873,9 +1929,64 @@ fn usb_port_init(state: &mut XhciState, place: Place, speed: u32) -> Option<u8> 
         hub: None,
     });
 
+    let delay = if place.parent.is_none() { HUB_ROOT_RESET_TIME } else { HUB_SHORT_RESET_TIME };
+    let mps0 = initial_mps0(speed);
+    let new_scheme = use_new_scheme(speed, retry);
     let descs = (|| {
-        if !address_device(state, slot) {
-            port_failed(state, slot, "address device");
+        let mut maxp0 = None;
+        for retries in 0..GET_DESCRIPTOR_TRIES {
+            if retries > 0 { wait_ms(state, 100); }
+            let mut read64 = None;
+            if new_scheme {
+                let d = dev_idx(state, slot)?;
+                if slot_state(state, d) != SLOT_STATE_DEFAULT && !cmd_address_device(state, slot, mps0, true) {
+                    port_failed(state, slot, "enable device");
+                    return None;
+                }
+                read64 = get_bmaxpacketsize0(state, slot, 64, retries == 0);
+                match port_reset_at(state, place, delay) {
+                    Ok(s) if s == speed => {}
+                    Ok(_) => {
+                        kprintln!("[npk] xhci: slot {} device reset changed speed", slot);
+                        return None;
+                    }
+                    Err(_) => {
+                        port_failed(state, slot, "reset");
+                        return None;
+                    }
+                }
+                if read64.is_none() {
+                    port_failed(state, slot, "device descriptor read/64");
+                    continue;
+                }
+            }
+            let mut addressed = false;
+            for op in 0..SET_ADDRESS_TRIES {
+                if op > 0 { wait_ms(state, 200); }
+                if cmd_address_device(state, slot, mps0, false) {
+                    addressed = true;
+                    break;
+                }
+            }
+            if !addressed {
+                port_failed(state, slot, "address device");
+                return None;
+            }
+            // Let SET_ADDRESS settle; some devices want it.
+            wait_ms(state, 10);
+            if new_scheme {
+                maxp0 = read64;
+                break;
+            }
+            match get_bmaxpacketsize0(state, slot, 8, retries == 0) {
+                Some(m) => {
+                    maxp0 = Some(m);
+                    break;
+                }
+                None => port_failed(state, slot, "device descriptor read/8"),
+            }
+        }
+        if !fix_ep0_maxpacket(state, slot, mps0, maxp0?) {
             return None;
         }
         if !usb_get_descriptor(state, slot, DESC_DEVICE, 18) {
@@ -1924,7 +2035,7 @@ fn usb_port_init(state: &mut XhciState, place: Place, speed: u32) -> Option<u8> 
 
 /// Which step of enumeration failed, with what the controller said.
 fn port_failed(state: &mut XhciState, slot: u8, step: &'static str) {
-    state.last_fail = step;
+    state.last_fail = (step, state.last_cc);
     let Some(d) = dev_idx(state, slot) else { return };
     let (place, speed) = (state.devs[d].place, state.devs[d].speed);
     let path = &state.devs[d].seen.port;
@@ -1963,23 +2074,30 @@ fn usb_release_slot(state: &mut XhciState, slot: u8) {
 }
 
 /// `hub_port_connect` for a root port: reset, enumerate, hand the device
-/// to its driver; tried `PORT_INIT_TRIES` times.
+/// to its driver; tried `PORT_INIT_TRIES` times, the port power-cycled
+/// halfway.
 fn port_connect_root(state: &mut XhciState, port: u32) {
     let place = Place::root(port);
     let mut slot = None;
     let mut speed = 0;
-    for attempt in 0..PORT_INIT_TRIES {
-        if attempt > 0 {
-            kprintln!("[npk] xhci: port {} retrying ({}/{})", port + 1, attempt + 1, PORT_INIT_TRIES);
+    for i in 0..PORT_INIT_TRIES {
+        if i > 0 {
+            kprintln!("[npk] xhci: port {} retrying ({}/{})", port + 1, i + 1, PORT_INIT_TRIES);
         }
-        if reset_port(state, port) {
-            speed = (state.oper.r32(portsc_off(port)) >> 10) & 0xF;
-            slot = usb_port_init(state, place, speed);
-            if slot.is_some() { break; }
-        } else {
-            kprintln!("[npk] xhci: port {} reset failed", port + 1);
+        match root_port_reset(state, port, HUB_ROOT_RESET_TIME, false) {
+            Ok(s) => {
+                speed = s;
+                slot = usb_port_init(state, place, speed, i);
+                if slot.is_some() { break; }
+            }
+            Err(PortReset::NotConnected) => return,
+            Err(_) => {}
         }
         if state.oper.r32(portsc_off(port)) & PORTSC_CCS == 0 { return; }
+        if i == (PORT_INIT_TRIES - 1) / 2 {
+            kprintln!("[npk] xhci: port {}: attempt power cycle", port + 1);
+            root_port_power_cycle(state, port);
+        }
     }
     match slot {
         Some(slot) => usb_new_device(state, slot),
@@ -1997,7 +2115,7 @@ fn enumeration_failed(state: &mut XhciState, port: String, speed: u32) {
     state.failed.push(UsbSeen {
         port, speed, device: Vec::new(), cfg: Vec::new(),
         manufacturer: String::new(), product: String::new(),
-        failed: Some((state.last_fail, state.last_cc)),
+        failed: Some(state.last_fail),
     });
 }
 
@@ -2654,7 +2772,7 @@ pub struct UsbSeen {
 /// One entry of `devices`.
 pub struct UsbListed {
     pub ctrl: pci::PciAddr,
-    /// What took the device: `hid`, `hub`, `net`, or empty.
+    /// What took the device: `hid`, `hub`, `net`, `usb-storage`, or empty.
     pub driver: &'static str,
     pub dev: UsbSeen,
 }
@@ -2669,6 +2787,7 @@ pub fn devices() -> Vec<UsbListed> {
             let driver = if d.hub.is_some() { "hub" }
                 else if s.hid.iter().any(|h| h.slot == d.slot) { "hid" }
                 else if s.nic.as_ref().is_some_and(|n| n.slot_id == d.slot) { "net" }
+                else if s.msc.iter().any(|m| m.slot == d.slot) { "usb-storage" }
                 else { "" };
             out.push(UsbListed { ctrl: s.pci_addr, driver, dev: d.seen.clone() });
         }
@@ -2679,26 +2798,82 @@ pub fn devices() -> Vec<UsbListed> {
     out
 }
 
-fn reset_port(state: &XhciState, port: u32) -> bool {
+/// `hub_port_wait_reset` on a root port, PORTSC read the way
+/// `xhci_get_port_status` reports it: the speed once the reset ended.
+fn root_port_wait_reset(state: &mut XhciState, port: u32, mut delay: u64) -> Result<u32, PortReset> {
     let off = portsc_off(port);
-    // Linux SetPortFeature(PORT_RESET): neutral state + PR.
-    let sc = state.oper.r32(off);
-    state.oper.w32(off, port_neutral(sc) | PORTSC_PR);
-
-    // Done when PR has self-cleared and PRC is set (hub_port_wait_reset) —
-    // not merely when PED reads 1, which an enabled port still does in the
-    // instant before the controller starts the reset. 500 ms timeout.
-    let deadline = crate::interrupts::ticks() + 50;
-    loop {
-        let sc = state.oper.r32(off);
-        if sc & PORTSC_PR == 0 && sc & PORTSC_PRC != 0 {
-            state.oper.w32(off, port_neutral(sc) | PORTSC_PRC);
-            return sc & PORTSC_PED != 0;
+    let ss = port_usb_version(state.mmio, port) >= 3;
+    let mut waited = 0;
+    let mut sc = 0;
+    while waited < HUB_RESET_TIMEOUT {
+        wait_ms(state, delay);
+        sc = state.oper.r32(off);
+        if sc & PORTSC_PR == 0 && sc & PORTSC_CCS != 0 { break; }
+        waited += delay;
+        if waited >= 2 * HUB_SHORT_RESET_TIME {
+            delay = HUB_LONG_RESET_TIME;
         }
-        if crate::interrupts::ticks() >= deadline { break; }
-        core::hint::spin_loop();
     }
-    false
+    if sc & PORTSC_PR != 0 { return Err(PortReset::Busy); }
+    if warm_reset_required(ss, sc as u16) { return Err(PortReset::NotConnected); }
+    if sc & PORTSC_CCS == 0 { return Err(PortReset::NotConnected); }
+    if !ss && sc & PORTSC_CSC != 0 {
+        state.oper.w32(off, port_neutral(sc) | PORTSC_CSC);
+        return Err(PortReset::Again);
+    }
+    if sc & PORTSC_PED == 0 { return Err(PortReset::Busy); }
+    Ok((sc >> 10) & 0xF)
+}
+
+/// `hub_port_reset` on a root port: PR, or WPR for a USB 3 link that
+/// needs a warm reset, retried; then the reset recovery time.
+fn root_port_reset(state: &mut XhciState, port: u32, mut delay: u64, mut warm: bool) -> Result<u32, PortReset> {
+    let off = portsc_off(port);
+    let ss = port_usb_version(state.mmio, port) >= 3;
+    if ss && !warm {
+        warm = warm_reset_required(ss, state.oper.r32(off) as u16);
+    }
+    let mut result = Err(PortReset::Failed);
+    for i in 0..PORT_RESET_TRIES {
+        let sc = state.oper.r32(off);
+        state.oper.w32(off, port_neutral(sc) | if warm { PORTSC_WPR } else { PORTSC_PR });
+        result = root_port_wait_reset(state, port, delay);
+        let last = i == PORT_RESET_TRIES - 1;
+        if matches!(result, Ok(_) | Err(PortReset::NotConnected)) || (matches!(result, Err(PortReset::Busy)) && last) {
+            let sc = state.oper.r32(off);
+            state.oper.w32(off, port_neutral(sc) | PORTSC_PRC);
+            if !ss { break; }
+            let sc = state.oper.r32(off);
+            state.oper.w32(off, port_neutral(sc) | PORTSC_WRC | PORTSC_PLC);
+            if warm_reset_required(ss, state.oper.r32(off) as u16) {
+                warm = true;
+            } else {
+                break;
+            }
+        }
+        delay = HUB_LONG_RESET_TIME;
+    }
+    if result.is_ok() {
+        // TRSTRCY = 10 ms; plus some extra.
+        wait_ms(state, 10 + 40);
+    } else {
+        kprintln!("[npk] xhci: port {}: cannot enable. Maybe the USB cable is bad?", port + 1);
+    }
+    result
+}
+
+/// `usb_hub_set_port_power` off and on again for a root port, with the
+/// root hub's bPwrOn2PwrGood (xhci-hub.c: 10 for USB 2, 50 for USB 3,
+/// in 2 ms units). Without Port Power Control the write changes nothing.
+fn root_port_power_cycle(state: &mut XhciState, port: u32) {
+    let off = portsc_off(port);
+    let good = if port_usb_version(state.mmio, port) >= 3 { 100 } else { 20 };
+    let sc = state.oper.r32(off);
+    state.oper.w32(off, port_neutral(sc) & !PORTSC_PP);
+    wait_ms(state, 2 * good);
+    let sc = state.oper.r32(off);
+    state.oper.w32(off, port_neutral(sc) | PORTSC_PP);
+    wait_ms(state, good);
 }
 
 // === Mass storage pipes — Linux drivers/usb/storage (usb.c probe,
@@ -3215,9 +3390,15 @@ fn cmd_disable_slot(state: &mut XhciState, slot_id: u8) {
 /// Address Device for `slot` (`xhci_setup_addressable_virt_dev`): its
 /// speed, route string, root port and TT in the slot context, EP0 on its
 /// own ring.
-fn cmd_address_device(state: &mut XhciState, slot: u8, max_packet: u16) -> bool {
+/// Address Device; with `bsr` the slot only goes to Default and no
+/// SET_ADDRESS reaches the device (`xhci_setup_device`, SETUP_CONTEXT_ONLY).
+/// EP0's dequeue pointer is where the next TD goes, since a Default slot
+/// may have used the ring already (`xhci_copy_ep0_dequeue_into_input_ctx`).
+fn cmd_address_device(state: &mut XhciState, slot: u8, max_packet: u16, bsr: bool) -> bool {
     let Some(d) = dev_idx(state, slot) else { return false };
-    let (place, speed, ring) = (state.devs[d].place, state.devs[d].speed, state.devs[d].ep0.phys());
+    let (place, speed) = (state.devs[d].place, state.devs[d].speed);
+    let deq = state.devs[d].ep0.phys() + (state.devs[d].ep0_enqueue * 16) as u64;
+    let dcs = state.devs[d].ep0_cycle;
     let ctx = state.ctx_size;
     let input = state.input_ctx;
 
@@ -3246,15 +3427,22 @@ fn cmd_address_device(state: &mut XhciState, slot: u8, max_packet: u16) -> bool 
     // Dword 1: CErr + EP Type
     input.w32(ep0_off + 4, ep_type_mps | mps_field);
     // Dword 2-3: TR Dequeue Pointer (with DCS=1)
-    input.w32(ep0_off + 8, (ring as u32) | 1);
-    input.w32(ep0_off + 12, (ring >> 32) as u32);
+    input.w32(ep0_off + 8, (deq as u32) | dcs);
+    input.w32(ep0_off + 12, (deq >> 32) as u32);
     // Dword 4: Average TRB Length
     input.w32(ep0_off + 16, 8);
 
-    post_command(state, input.phys(), 0, TRB_ADDRESS_DEVICE | ((slot as u32) << 24));
+    let bsr = if bsr { TRB_BSR } else { 0 };
+    post_command(state, input.phys(), 0, TRB_ADDRESS_DEVICE | bsr | ((slot as u32) << 24));
     match wait_command_completion(state) {
-        Some((cc, _)) => cc == CC_SUCCESS,
-        None => false,
+        Some((cc, _)) => {
+            state.last_cc = cc;
+            cc == CC_SUCCESS
+        }
+        None => {
+            state.last_cc = 0;
+            false
+        }
     }
 }
 
@@ -3287,6 +3475,8 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
         enq = 0;
     }
 
+    let td_first = ring.phys() + (enq * 16) as u64;
+
     // Setup Stage TRB
     let setup_lo = bm_request as u32 | ((b_request as u32) << 8)
         | ((w_value as u32) << 16);
@@ -3306,6 +3496,7 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
     // Status Stage TRB
     let status_dir = if w_length > 0 && dir_in { 0 } else { TRB_DIR_IN };
     write_trb(ring, enq, 0, 0, TRB_STATUS_STAGE | TRB_IOC | status_dir | cycle);
+    let td_last = ring.phys() + (enq * 16) as u64;
     enq += 1;
 
     // Wrap check
@@ -3321,11 +3512,15 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
     ring_doorbell(state, slot as u32, 1);
 
     // Wait for the reply (1 s) and dispatch events of other devices. Our own
-    // event is recognised by its TRB address lying in this device's EP0 ring.
+    // event points into this TD; one left by an earlier, abandoned TD on
+    // the same ring is dropped.
     let deadline = crate::interrupts::ticks() + 100;
     state.last_cc = 0;
     loop {
-        if crate::interrupts::ticks() >= deadline { return false; }
+        if crate::interrupts::ticks() >= deadline {
+            ep0_recover(state, slot);
+            return false;
+        }
         let e = match next_event(state) {
             Some(e) => e,
             None => { core::hint::spin_loop(); continue; }
@@ -3333,13 +3528,51 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
         flush_erdp(state);
         if e.trb_type == EVT_PORT_STATUS { note_port_change(state, &e); }
         if e.trb_type != EVT_TRANSFER { continue; }
-        let ok = e.cc == CC_SUCCESS || e.cc == CC_SHORT_PACKET;
-        if in_ring(e.param, ring.phys()) {
+        if e.param >= td_first && e.param <= td_last {
             state.last_cc = e.cc;
+            let ok = e.cc == CC_SUCCESS || e.cc == CC_SHORT_PACKET;
+            if !ok { ep0_recover(state, slot); }
             return ok;
         }
+        if in_ring(e.param, ring.phys()) { continue; }
         dispatch_transfer(state, &e);
     }
+}
+
+/// EP0 after a TD that did not complete: a halted endpoint is reset, a
+/// running one (timed out) stopped, then its dequeue pointer moves past
+/// the TD to where the next one goes (`xhci_handle_halted_endpoint`,
+/// `xhci_move_dequeue_past_td`). Without this a stall leaves EP0 halted
+/// and every later request on it fails.
+fn ep0_recover(state: &mut XhciState, slot: u8) {
+    let Some(d) = dev_idx(state, slot) else { return };
+    let (ring, cycle, enq) = (state.devs[d].ep0, state.devs[d].ep0_cycle, state.devs[d].ep0_enqueue);
+    let ep_state = state.devs[d].dctx.r32(state.ctx_size) & 0x7;
+    let sel = ((slot as u32) << 24) | (1 << 16);
+    match ep_state {
+        EP_STATE_HALTED => post_command(state, 0, 0, TRB_RESET_EP | sel),
+        EP_STATE_RUNNING => post_command(state, 0, 0, TRB_STOP_RING | sel),
+        EP_STATE_STOPPED | EP_STATE_ERROR => {}
+        _ => return,
+    }
+    if ep_state == EP_STATE_HALTED || ep_state == EP_STATE_RUNNING {
+        let _ = wait_command_completion(state);
+    }
+    post_command(state, ring.phys() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
+    let _ = wait_command_completion(state);
+}
+
+/// Endpoint Context EP State (xHCI 6.2.3).
+const EP_STATE_RUNNING: u32 = 1;
+const EP_STATE_HALTED: u32 = 2;
+const EP_STATE_STOPPED: u32 = 3;
+const EP_STATE_ERROR: u32 = 4;
+
+/// Slot Context Slot State (xHCI 6.2.2).
+const SLOT_STATE_DEFAULT: u32 = 1;
+
+fn slot_state(state: &XhciState, d: usize) -> u32 {
+    state.devs[d].dctx.r32(12u32) >> 27
 }
 
 fn usb_get_descriptor(state: &mut XhciState, slot: u8, desc_type: u16, length: u16) -> bool {
