@@ -832,6 +832,44 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                             let Ok(f) = jpeg_submit_variant(adev, c, j, &bigbits, big.va, h2.width >> 4, 0, variant, &bos) else { say("720p submit failed"); break };
                             let t0 = crate::linux::now_us();
                             let mut d = None;
+                            if k == 0 {
+                                // Watch the engine through the decode: which register changes
+                                // when the last row is written. MMIO offsets of the internal
+                                // 0x40xx ones (0x4000 + n is 0x80 + n).
+                                let regs = |adev: &amdgpu_device| {
+                                    let r = crate::jpeg_v2_0::jpeg_rreg_mm;
+                                    [r(adev, 0x9d), r(adev, 0x9e), r(adev, 0x8b), r(adev, 0x80), r(adev, 0x83),
+                                     r(adev, 0xaf), crate::jpeg_v2_0::jrbc_status(adev)]
+                                };
+                                let last_row = (frame - 2560) as u64;
+                                let mut prev = [0u32; 7];
+                                let mut prev_rows = u64::MAX;
+                                let mut lines = 0;
+                                let mut row = [0u8; 4];
+                                while crate::linux::now_us() - t0 < 20_000 && lines < 40 {
+                                    crate::workqueue::run_pending(adev);
+                                    crate::amdgpu_irq::amdgpu_ih_process(adev, false);
+                                    let v = regs(adev);
+                                    // How far the output got: the first written row from the bottom.
+                                    let mut rows = 0u64;
+                                    for r in (0..h2.height as u64).rev().step_by(16) {
+                                        crate::amdgpu_gart::kptr_read(adev, big.k, r * 2560, &mut row);
+                                        if row != [ST_OUT; 4] { rows = r + 1; break; }
+                                    }
+                                    let _ = last_row;
+                                    if v != prev || rows != prev_rows {
+                                        let mut l = Line::new();
+                                        l.s("jpeg watch ").dec(crate::linux::now_us() - t0).s(" us: outbuf wptr ").hex(v[0])
+                                            .s(" rptr ").hex(v[1]).s(" int_stat ").hex(v[2]).s(" cntl ").hex(v[3])
+                                            .s(" rb_rptr ").hex(v[4]).s(" soft_rst ").hex(v[5]).s(" jrbc_status ").hex(v[6])
+                                            .s(", rows ~").dec(rows).s(if jpeg_done(adev, &f).is_some() { ", fence" } else { "" });
+                                        l.say();
+                                        prev = v;
+                                        prev_rows = rows;
+                                        lines += 1;
+                                    }
+                                }
+                            }
                             while crate::linux::now_us() - t0 < 300_000 {
                                 crate::workqueue::run_pending(adev);
                                 crate::amdgpu_irq::amdgpu_ih_process(adev, false);
