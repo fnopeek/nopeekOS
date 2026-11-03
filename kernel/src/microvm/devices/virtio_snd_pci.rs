@@ -214,6 +214,8 @@ pub struct VirtioSnd {
     /// stream held between PCM_START and PCM_STOP.
     cap_channels: u8,
     cap: Option<usize>,
+    /// rx buffers completed since the capture START.
+    rx_done: u64,
 }
 
 impl VirtioSnd {
@@ -248,6 +250,7 @@ impl VirtioSnd {
             drift_since: 0,
             cap_channels: 2,
             cap: None,
+            rx_done: 0,
         }
     }
 
@@ -352,6 +355,20 @@ impl VirtioSnd {
     /// because RELEASE must flush the tx queue (return all pending I/O buffers).
     fn process_control(&mut self, req: &[u8], resp: &mut [u8], mem: &GuestMem) -> usize {
         let code = le32(req, 0);
+        let name = match code {
+            R_PCM_INFO => "PCM_INFO", R_PCM_SET_PARAMS => "SET_PARAMS", R_PCM_PREPARE => "PREPARE",
+            R_PCM_RELEASE => "RELEASE", R_PCM_START => "START", R_PCM_STOP => "STOP",
+            R_JACK_INFO => "JACK_INFO", R_CHMAP_INFO => "CHMAP_INFO", _ => "?",
+        };
+        if code == R_PCM_SET_PARAMS {
+            crate::kprintln!("[virtio_snd] stream {} SET_PARAMS buffer {} period {} channels {} format {} rate {}",
+                le32(req, 4), le32(req, 8), le32(req, 12), req.get(20).copied().unwrap_or(0),
+                req.get(21).copied().unwrap_or(0), req.get(22).copied().unwrap_or(0));
+        } else if code == R_PCM_INFO {
+            crate::kprintln!("[virtio_snd] PCM_INFO start {} count {} size {}", le32(req, 4), le32(req, 8), le32(req, 12));
+        } else {
+            crate::kprintln!("[virtio_snd] stream {} {} ({:#x})", le32(req, 4), name, code);
+        }
         match code {
             R_PCM_INFO => {
                 // virtio_snd_query_info { hdr; start_id; count; size }, then
@@ -508,6 +525,8 @@ impl VirtioSnd {
             R_PCM_START => {
                 if self.cap.is_none() {
                     self.cap = crate::capture::open(None);
+                    crate::kprintln!("[virtio_snd] capture stream {:?}, {} channel(s)", self.cap, self.cap_channels);
+                    self.rx_done = 0;
                     if let Some(c) = self.cap {
                         let fmt = crate::audio::Format {
                             rate: 48_000, encoding: crate::audio::Encoding::S16, channels: self.cap_channels,
@@ -519,6 +538,7 @@ impl VirtioSnd {
             R_PCM_STOP | R_PCM_RELEASE => {
                 if let Some(c) = self.cap.take() {
                     crate::capture::close(c, None);
+                    crate::kprintln!("[virtio_snd] capture closed after {} rx buffer(s)", self.rx_done);
                 }
                 if code == R_PCM_RELEASE {
                     self.flush_queue(mem, 3);
@@ -568,6 +588,10 @@ impl VirtioSnd {
             if crate::capture::available(cap, None).unwrap_or(0) < data {
                 break;
             }
+            if self.rx_done == 0 {
+                crate::kprintln!("[virtio_snd] first rx buffer: {} B of PCM in {} segment(s)", data, seg_n);
+            }
+            self.rx_done += 1;
             // The PCM across the writable segments, then the status after it.
             let mut done = 0usize;
             let write = |bytes: &[u8], at: usize| {
