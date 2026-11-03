@@ -725,18 +725,19 @@ pub fn jpeg_done(adev: &mut amdgpu_device, f: &Fence) -> Option<i32> {
     Some(f.error().min(0))
 }
 
-/// `jpeg_done`, and the IB ran to its end: the engine stopped
-/// (UVD_JPEG_CNTL 4, the stream's last write) with its bitstream read to
-/// `dwords` (UVD_JPEG_RB_RPTR, which the stream sets to 0 as it starts).
-/// The ring's fence alone comes before the decode ends: it waits for
-/// UVD_JRBC_STATUS.IB_JOB_DONE, which stays set from the job before. A
+/// `jpeg_done`, and the decode ended by the conditions the IB's own waits
+/// test (Mesa `vcn_jpeg_build_decode_cmd`): the bitstream read to `dwords`
+/// (UVD_JPEG_RB_RPTR) and the output idle (UVD_JPEG_OUTBUF_WPTR bit 0).
+/// The fence alone comes before that: the IB's waits run out and the ring
+/// moves on while the engine still decodes, without the IB's last write
+/// (UVD_JPEG_CNTL 4). The IB clears both registers before its start. A
 /// fence with an error needs no more.
 pub fn jpeg_finished(adev: &mut amdgpu_device, f: &Fence, dwords: u32) -> Option<i32> {
     let e = jpeg_done(adev, f)?;
     if e < 0 { return Some(e); }
-    let cntl = crate::jpeg_v2_0::jpeg_rreg_mm(adev, 0x80);
     let rptr = crate::jpeg_v2_0::jpeg_rreg_mm(adev, 0x83);
-    (cntl == 0x4 && rptr == dwords).then_some(0)
+    let outbuf = crate::jpeg_v2_0::jpeg_rreg_mm(adev, 0x9d);
+    (rptr == dwords && outbuf & 1 != 0).then_some(0)
 }
 
 /// What the JPEG self-test writes into its buffers before the decode, to
@@ -899,7 +900,7 @@ pub fn jpeg_selftest(adev: &mut amdgpu_device, c: &mut composer, j: &mut jpeg_bu
                                 let r = crate::jpeg_v2_0::jpeg_rreg_mm;
                                 Line::new().s("jpeg test 720p: not finished, fence ")
                                     .s(if jpeg_done(adev, &f).is_some() { "yes" } else { "no" })
-                                    .s(" cntl ").hex(r(adev, 0x80)).s(" rb_rptr ").hex(r(adev, 0x83))
+                                    .s(" cntl ").hex(r(adev, 0x80)).s(" outbuf_wptr ").hex(r(adev, 0x9d)).s(" rb_rptr ").hex(r(adev, 0x83))
                                     .s(" rb_wptr ").hex(r(adev, 0x82)).s(" rb_size ").hex(r(adev, 0x84))
                                     .s(" int_stat ").hex(r(adev, 0x8b)).s(" jrbc_status ").hex(crate::jpeg_v2_0::jrbc_status(adev))
                                     .s(", expected rptr ").hex(tag).say();

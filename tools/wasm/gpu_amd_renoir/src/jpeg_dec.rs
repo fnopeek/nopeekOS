@@ -60,8 +60,8 @@ pub fn build_ib_regs(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch:
     build_ib_variant(bitstream_va, bitstream_size, out_va, pitch, uv_pitch, 0)
 }
 
-/// Self-test variants of the stream: bit 0 zeroes UVD_JPEG_OUTBUF_WPTR
-/// with the read pointer, bit 1 clears UVD_JPEG_INT_STAT too.
+/// Self-test variants of the stream: bit 1 clears UVD_JPEG_INT_STAT
+/// before the start.
 pub fn build_ib_variant(bitstream_va: u64, bitstream_size: u32, out_va: u64, pitch: u32, uv_pitch: u32,
                         variant: u32) -> Vec<u32> {
     let mut c = Vec::with_capacity(128);
@@ -101,9 +101,10 @@ pub fn build_ib_variant(bitstream_va: u64, bitstream_size: u32, out_va: u64, pit
     }
     set(UVD_JPEG_TIER_CNTL2, COND0, 0, 0);
     set(UVD_JPEG_OUTBUF_RPTR, COND0, TYPE0, 0);
-    if variant & 1 != 0 {
-        set(UVD_JPEG_OUTBUF_WPTR, COND0, TYPE0, 0);
-    }
+    // Not in Mesa: the two registers `jpeg_finished` reads, cleared before
+    // the start so the previous job's end state does not count for this one.
+    set(UVD_JPEG_RB_RPTR, COND0, TYPE0, 0);
+    set(UVD_JPEG_OUTBUF_WPTR, COND0, TYPE0, 0);
     if variant & 2 != 0 {
         set(UVD_JPEG_INT_STAT, COND0, TYPE0, 0xffff_ffff);
     }
