@@ -392,6 +392,11 @@ fn launch_wayland(kmsg_fd: i64) {
                    head -c 200000000 /dev/zero | gzip -1 > /dev/null; f=$(t); \
                    echo \"<0>[bench] cpu=$(( (b-a)*10 ))ms syscalls=$(( (c-b)*10 ))ms fork-exec1000=$(( (d-c)*10 ))ms memtouch1G=$(( (e-d)*10 ))ms gzip200M=$(( (f-e)*10 ))ms\" > /dev/kmsg; \
                  fi; \
+                 mkdir -p /tmp/app/wireplumber/wireplumber.conf.d; \
+                 printf '%s\\n' 'wireplumber.settings = { device.routes.default-sink-volume = 1.0 }' \
+                   'monitor.alsa.rules = [ { matches = [ { node.name = \"~alsa_output.*\" } ] actions = { update-props = { api.alsa.headroom = 2048 } } } ]' \
+                   > /tmp/app/wireplumber/wireplumber.conf.d/50-npk.conf; \
+                 chown -R 1000:1000 /tmp/app/wireplumber; \
                  su -s /bin/sh app -c 'export XDG_RUNTIME_DIR=/tmp/xrt DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus; \
                    dbus-daemon --session --address=$DBUS_SESSION_BUS_ADDRESS --fork --nopidfile; \
                    pipewire & i=0; while [ ! -S /tmp/xrt/pipewire-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \

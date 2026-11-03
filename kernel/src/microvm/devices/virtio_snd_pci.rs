@@ -126,19 +126,13 @@ const BYTES_PER_TICK: u64 = 192_000 / 100;
 /// real-time budget uses this directly.
 const PLAYBACK_BYTES_PER_SEC: u64 = 192_000;
 
-/// How far ahead of real-time playback we keep the mailbox filled (~43 ms).
-/// audio_hda refills in bursts (one worker-timer period of drain at once),
-/// so a burst pull against a near-empty mailbox would drain it to silence.
-/// This lead keeps a cushion. Frame-aligned.
-const LEAD: u64 = 8_192;
-
 /// The CPU TSC can run slightly faster than the HDA codec crystal, so
 /// `bytes_completed` (TSC-paced) creeps ahead of what audio_hda drains and
 /// the mailbox slowly fills. When its lowest fill over `DRIFT_WINDOW_MS`
 /// stays above this, the clock is held back by `DRIFT_TRIM_MS` (192 B/s of
 /// correction against a drift of tens of bytes per second). Completions
 /// never wait for audio_hda's pulls, so the guest's clock stays smooth.
-const DRIFT_FILL: u64 = LEAD + 4_096;
+const DRIFT_FILL: u64 = 12_288;
 const DRIFT_WINDOW_MS: u64 = 1_000;
 const DRIFT_TRIM_MS: u64 = 1;
 /// Mailbox fill at which completions stop: a safety bound well above the
@@ -206,6 +200,16 @@ pub struct VirtioSnd {
     /// handed back as one instant burst on resume → hw_ptr jump → underrun.
     /// Clamping keeps resume paced.
     period_bytes: u32,
+    /// Buffers whose PCM is in the mailbox but which go back to the guest
+    /// only when the clock has played them: (head, PCM bytes, status
+    /// address), oldest at `tx_pend_head`. `tx_submit` is the avail index
+    /// of the next buffer to take in.
+    tx_pend: [(u16, u32, u64); MAX_QUEUE_SIZE as usize],
+    tx_pend_head: usize,
+    tx_pend_n: usize,
+    tx_submit: u16,
+    /// PCM bytes taken into the mailbox since PCM_START.
+    bytes_submitted: u64,
     /// Lowest mailbox fill since `drift_since` (TSC), for the drift trim.
     fill_min: u64,
     drift_since: u64,
@@ -246,6 +250,11 @@ impl VirtioSnd {
             play_start_tsc: 0,
             bytes_completed: 0,
             period_bytes: 0,
+            tx_pend: [(0, 0, 0); MAX_QUEUE_SIZE as usize],
+            tx_pend_head: 0,
+            tx_pend_n: 0,
+            tx_submit: 0,
+            bytes_submitted: 0,
             fill_min: u64::MAX,
             drift_since: 0,
             cap_channels: 2,
@@ -355,20 +364,6 @@ impl VirtioSnd {
     /// because RELEASE must flush the tx queue (return all pending I/O buffers).
     fn process_control(&mut self, req: &[u8], resp: &mut [u8], mem: &GuestMem) -> usize {
         let code = le32(req, 0);
-        let name = match code {
-            R_PCM_INFO => "PCM_INFO", R_PCM_SET_PARAMS => "SET_PARAMS", R_PCM_PREPARE => "PREPARE",
-            R_PCM_RELEASE => "RELEASE", R_PCM_START => "START", R_PCM_STOP => "STOP",
-            R_JACK_INFO => "JACK_INFO", R_CHMAP_INFO => "CHMAP_INFO", _ => "?",
-        };
-        if code == R_PCM_SET_PARAMS {
-            crate::kprintln!("[virtio_snd] stream {} SET_PARAMS buffer {} period {} channels {} format {} rate {}",
-                le32(req, 4), le32(req, 8), le32(req, 12), req.get(20).copied().unwrap_or(0),
-                req.get(21).copied().unwrap_or(0), req.get(22).copied().unwrap_or(0));
-        } else if code == R_PCM_INFO {
-            crate::kprintln!("[virtio_snd] PCM_INFO start {} count {} size {}", le32(req, 4), le32(req, 8), le32(req, 12));
-        } else {
-            crate::kprintln!("[virtio_snd] stream {} {} ({:#x})", le32(req, 4), name, code);
-        }
         match code {
             R_PCM_INFO => {
                 // virtio_snd_query_info { hdr; start_id; count; size }, then
@@ -427,6 +422,7 @@ impl VirtioSnd {
                 else { crate::audio::reset(self.slot as usize); }
                 self.started = false;
                 self.bytes_completed = 0;
+                self.tx_reset();
                 put32(resp, 0, if self.slot >= 0 { S_OK } else { S_IO_ERR });
                 4
             }
@@ -435,6 +431,7 @@ impl VirtioSnd {
                 self.started = true;
                 self.play_start_tsc = crate::interrupts::rdtsc();
                 self.bytes_completed = 0;
+                self.tx_reset();
                 self.fill_min = u64::MAX;
                 self.drift_since = self.play_start_tsc;
                 put32(resp, 0, S_OK);
@@ -473,7 +470,9 @@ impl VirtioSnd {
     /// (the stream is ending) — the guest just needs the buffers handed back +
     /// an IRQ so its tx callback decrements msg_count → wakes msg_empty.
     fn flush_tx(&mut self, mem: &GuestMem) -> u32 {
-        self.flush_queue(mem, 2)
+        let n = self.flush_queue(mem, 2);
+        self.tx_reset();
+        n
     }
 
     /// `flush_tx` for queue `qi` (tx 2 or rx 3).
@@ -628,11 +627,16 @@ impl VirtioSnd {
 
     // ── tx (playback) queue ──────────────────────────────────────────────
     // Chain: [virtio_snd_pcm_xfer {le32 stream_id}] [PCM data...] [virtio_snd_pcm_status {le32 status; le32 latency} writable]
+    //
+    // Two steps, as a real device works: a buffer's PCM goes into the
+    // mailbox as soon as the guest queues it (so audio_hda's bursty pulls
+    // find a cushion of whatever the guest queued ahead), and the buffer
+    // goes back on the used ring only when the 48 kHz clock has played it.
+    // Returning a buffer early moves the guest's hw_ptr past what it
+    // wrote; a sound server that keeps only a few milliseconds queued
+    // (PipeWire) sees an underrun and restarts the stream.
     fn service_tx(&mut self, mem: &GuestMem) -> bool {
-        // Per virtio-sound: do not consume tx buffers until PCM_START. cubeb
-        // pre-fills the tx queue before START; completing that pre-roll early
-        // advances the guest's ALSA hw_ptr before playback begins -> underrun
-        // -> cubeb errors right at START. Hold the pre-roll until started.
+        // Per virtio-sound: do not consume tx buffers until PCM_START.
         if self.slot < 0 || !self.started { return false; }
         let slot = self.slot as usize;
 
@@ -640,20 +644,12 @@ impl VirtioSnd {
             Some(q) if q.enable != 0 && q.size != 0 => *q,
             _ => return false,
         };
-        let avail_top = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return false };
-        let pending = super::virtqueue::avail_pending(q.last_avail_idx, avail_top, q.size);
-        if pending == 0 { return false; }
-        let avail_top = q.last_avail_idx.wrapping_add(pending);
+        let avail_raw = match avail_idx(mem, q.driver_gpa()) { Some(v) => v, None => return false };
+        let avail_top = q.last_avail_idx
+            .wrapping_add(super::virtqueue::avail_pending(q.last_avail_idx, avail_raw, q.size));
 
-        let mut last = q.last_avail_idx;
-        let mut used = q.used_idx;
-        let mut any = false;
-        let mut chunk = [0u8; 4096];
-
-        // Real-time playback budget from the TSC (constant rate, immune to
-        // interrupt-load jitter, unlike `interrupts::ticks()`). Buffers
-        // complete only up to this watermark, so the guest sees an honest
-        // real-time sink instead of an instant drain.
+        // The clock: PCM bytes that should have reached the speaker by now,
+        // from the TSC (constant rate, immune to interrupt-load jitter).
         let tsc_now = crate::interrupts::rdtsc();
         let tsc_hz = crate::interrupts::tsc_freq().max(1);
         // Clock drift against the HDA crystal: the mailbox never ran low
@@ -666,50 +662,39 @@ impl VirtioSnd {
             self.fill_min = u64::MAX;
             self.drift_since = tsc_now;
         }
-        // Real-time playback position (bytes that should have reached the speaker
-        // by now), from the TSC.
-        let mut position = ((tsc_now.wrapping_sub(self.play_start_tsc) as u128)
+        let at = |start: u64| ((tsc_now.wrapping_sub(start) as u128)
             .saturating_mul(PLAYBACK_BYTES_PER_SEC as u128) / tsc_hz as u128) as u64;
-
-        // Complete up to LEAD ahead of real playback so the mailbox keeps a
-        // cushion against audio_hda's bursty poll-pulls (else it momentarily
-        // empties → brief dropout).
-        let mut budget = position.saturating_add(LEAD);
-
-        // Cushion clamp: while the guest stopped feeding (buffering / pause) the
-        // budget ran ahead of what we completed; handing that back as one burst on
-        // resume fast-forwards the guest's hw_ptr → underrun. Re-anchor the TSC
-        // clock so the lead never exceeds LEAD + two periods of catch-up.
+        let mut position = at(self.play_start_tsc);
+        // Nothing was queued while the clock ran on (the guest paused or
+        // buffers late): the clock waits for the guest instead of handing
+        // the gap back as one burst on resume.
         let period = (self.period_bytes as u64).max(BYTES_PER_TICK);
-        let cap = LEAD.saturating_add(period.saturating_mul(2));
-        if budget > self.bytes_completed.wrapping_add(cap) {
-            let target = self.bytes_completed.wrapping_add(cap);
-            // Re-anchor so `position` (= target - LEAD) maps to `tsc_now`.
-            let pos_cycles = ((target.wrapping_sub(LEAD) as u128).saturating_mul(tsc_hz as u128)
+        if self.tx_pend_n == 0 && position > self.bytes_completed.wrapping_add(period) {
+            let cycles = ((self.bytes_completed as u128).saturating_mul(tsc_hz as u128)
                 / PLAYBACK_BYTES_PER_SEC as u128) as u64;
-            self.play_start_tsc = tsc_now.wrapping_sub(pos_cycles);
-            budget = target;
-            position = target.wrapping_sub(LEAD);
+            self.play_start_tsc = tsc_now.wrapping_sub(cycles);
+            position = self.bytes_completed;
         }
 
-        while last != avail_top {
-            let head = match avail_ring(mem, q.driver_gpa(), q.size, last) { Some(v) => v, None => break };
-
-            // Pass 1: walk the chain, collect readable PCM segments + the status
-            // desc. 16 segs covers any guest period (≤80 ms = ≤5 pages) with margin.
+        // Take in what the guest queued.
+        let mut chunk = [0u8; 4096];
+        let mut idx = self.tx_submit;
+        while idx != avail_top && self.tx_pend_n < self.tx_pend.len() {
+            let head = match avail_ring(mem, q.driver_gpa(), q.size, idx) { Some(v) => v, None => break };
+            // Readable PCM segments after the 4-byte xfer header, and the
+            // status descriptor. 16 segments cover any guest period.
             let mut pcm_segs: [(u64, u32); 16] = [(0, 0); 16];
             let mut pcm_seg_n = 0usize;
             let mut pcm_len = 0usize;
             let mut status_addr: u64 = 0;
-            let mut readable_seen = 0usize; // bytes of readable seen (first 4 = stream_id)
-            let mut idx = head;
+            let mut readable_seen = 0usize;
+            let mut d_idx = head;
             let mut hops = 0u16;
             loop {
-                let d = match read_desc(mem, q.desc_gpa(), idx, q.size) { Some(d) => d, None => break };
+                let d = match read_desc(mem, q.desc_gpa(), d_idx, q.size) { Some(d) => d, None => break };
                 if d.flags & VRING_DESC_F_WRITE != 0 {
                     if status_addr == 0 { status_addr = d.addr; }
                 } else {
-                    // Skip the 4-byte xfer header that prefixes the readable data.
                     let mut a = d.addr;
                     let mut l = d.len as usize;
                     if readable_seen < 4 {
@@ -722,24 +707,15 @@ impl VirtioSnd {
                         pcm_len += l;
                     }
                 }
-                idx = match chain_next(&d, &mut hops, q.size) { Some(n) => n, None => break };
+                d_idx = match chain_next(&d, &mut hops, q.size) { Some(n) => n, None => break };
             }
-
-            // Wall-clock floor: hold this buffer until the 48 kHz clock has
-            // advanced past it — completing early fast-forwards the guest's
-            // hw_ptr → underrun → cubeb abort.
-            if self.bytes_completed.wrapping_add(pcm_len as u64) > budget {
-                break; // too early; retry next pump tick
-            }
-            // Safety bound, so the whole buffer always fits (MAX_FILL ≪
-            // SLOT_BYTES) and nothing is dropped half-submitted.
+            // Safety bound, so a whole buffer always fits (MAX_FILL is far
+            // below the slot's ring) and nothing goes in half.
             if (crate::audio::buffered(slot) as u64).wrapping_add(pcm_len as u64) > MAX_FILL {
                 break;
             }
-
-            // Submit the PCM into the mailbox in ≤4 KB chunks.
-            for s in 0..pcm_seg_n {
-                let (mut a, mut remaining) = (pcm_segs[s].0, pcm_segs[s].1 as usize);
+            for &(seg_a, seg_l) in &pcm_segs[..pcm_seg_n] {
+                let (mut a, mut remaining) = (seg_a, seg_l as usize);
                 while remaining > 0 {
                     let n = remaining.min(chunk.len());
                     mem.read_bytes(a, &mut chunk[..n]);
@@ -747,28 +723,51 @@ impl VirtioSnd {
                     a += n as u64; remaining -= n;
                 }
             }
+            self.bytes_submitted = self.bytes_submitted.wrapping_add(pcm_len as u64);
+            let at = (self.tx_pend_head + self.tx_pend_n) % self.tx_pend.len();
+            self.tx_pend[at] = (head, pcm_len as u32, status_addr);
+            self.tx_pend_n += 1;
+            idx = idx.wrapping_add(1);
+        }
+        self.tx_submit = idx;
 
-            // Write the status response (S_OK + latency) + complete the
-            // buffer. latency_bytes is what QEMU reports: bytes taken from the
-            // guest and not yet played, on the clock that paces completions.
-            // Linux feeds it into runtime->delay (sound/virtio/virtio_pcm_msg.c),
-            // so cubeb's A/V clock reads that clock's position, smooth.
-            self.bytes_completed = self.bytes_completed.wrapping_add(pcm_len as u64);
+        // Hand back what the clock has played, oldest first. The latency is
+        // what QEMU reports: bytes taken from the guest and not yet played,
+        // which Linux feeds into runtime->delay (virtio_pcm_msg.c).
+        let mut last = q.last_avail_idx;
+        let mut used = q.used_idx;
+        let mut any = false;
+        while self.tx_pend_n > 0 {
+            let (head, len, status_addr) = self.tx_pend[self.tx_pend_head];
+            if self.bytes_completed.wrapping_add(len as u64) > position {
+                break;
+            }
+            self.bytes_completed = self.bytes_completed.wrapping_add(len as u64);
             if status_addr != 0 {
                 let mut st = [0u8; 8];
                 put32(&mut st, 0, S_OK);
-                let latency = self.bytes_completed.saturating_sub(position);
+                let latency = self.bytes_submitted.saturating_sub(position);
                 put32(&mut st, 4, latency.min(u32::MAX as u64) as u32);
                 mem.write_bytes(status_addr, &st);
             }
             used_push(mem, q.device_gpa(), q.size, &mut used, head, 8);
+            self.tx_pend_head = (self.tx_pend_head + 1) % self.tx_pend.len();
+            self.tx_pend_n -= 1;
             last = last.wrapping_add(1);
             any = true;
         }
-
         if let Some(qm) = self.queues.get_mut(2) { qm.last_avail_idx = last; qm.used_idx = used; }
         if any { self.isr |= 1; }
         any
+    }
+
+    /// The tx queue's take-in state starts over at the completed position
+    /// (after PREPARE, RELEASE or a flush).
+    fn tx_reset(&mut self) {
+        self.tx_pend_head = 0;
+        self.tx_pend_n = 0;
+        self.tx_submit = self.queues.get(2).map_or(0, |q| q.last_avail_idx);
+        self.bytes_submitted = 0;
     }
 
     // ── PCI config space ─────────────────────────────────────────────────
@@ -899,6 +898,7 @@ impl VirtioSnd {
                     if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
                     if let Some(c) = self.cap.take() { crate::capture::close(c, None); }
                     self.started = false;
+                    self.tx_reset();
                     self.driver_features = [0; 2];
                     self.driver_feature_select = 0;
                     self.device_feature_select = 0;
