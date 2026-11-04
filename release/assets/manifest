@@ -1,4 +1,4 @@
-issued=1793802761
+issued=1793810024
 
 [font:ibm-plex-mono]
 size=173052
@@ -501,8 +501,8 @@ size=1370
 sha384=c7533ebdf648f56e94b37ccd188c5712c337189ffc2ae1c42bd1a936e83ad2971a6eb24a231c324982a179d440c5c019
 
 [microvm:initramfs]
-size=391593
-sha384=dd909fba1b066dbf5f4e87564582e25be23ef79e05442622191a6260ccc851ac0fcd80d7a72367f798b31dea9cedb30d
+size=391587
+sha384=062808c6d39aa8fd47e48130e2ec802e112885a2e488ddbd3f9c6648a3f3be16046d66478d28a4c025e360e032332de8
 
 [python:stdlib]
 size=10992310
@@ -514,7 +514,7 @@ sha384=d0bc7a43ea61d1d3e132da2574233751ad9f4882e6c3386e03783f9cea61ef6241b72cfad
 
 [microvm:firefox-sqfs]
 size=623292416
-sha384=8446bf7514a62b3c9f8876b4e3d0f6757bafc121199fcf14b7da0784085034287cd10a7fd9495dd20eb6c0adee5d1c12
-url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-159.0-arch20261029-6/microvm-firefox.sqfs
+sha384=ea161e6c2ff18d10259ea414a64e4c6e1d87cf677025278485f84be95d206d349b0c18cbd81f84d4b515040d696d5ffc
+url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-159.0-arch20261029-7/microvm-firefox.sqfs
 
 
