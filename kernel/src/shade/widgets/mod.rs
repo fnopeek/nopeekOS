@@ -679,7 +679,10 @@ static PICK_SESSIONS: Mutex<BTreeMap<u32, PickSession>> = Mutex::new(BTreeMap::n
 
 #[derive(Clone, Copy)]
 pub struct PickSession {
-    /// Widget window of the app that asked for the dialog.
+    /// The picker's own window.
+    pub picker: u32,
+    /// Widget window of the app that asked for the dialog (for `Screen`,
+    /// the guest window it is shown over).
     pub requester: u32,
     /// Caller-owned correlation value, returned in `Event::Picked`.
     pub tag: u32,
@@ -698,13 +701,16 @@ pub enum PickMode {
     Save,
     /// A folder and everything below it, READ and WRITE.
     Folder,
+    /// Whether a guest may see the whole screen (`shade::capture`). The
+    /// answer is `"screen"` or empty; nothing is granted.
+    Screen,
 }
 
 /// Register a picker window as belonging to `requester`. Called by
 /// `npk_pick` right after it creates the picker's window.
 pub fn register_pick(picker: u32, requester: u32, tag: u32,
                      cap: crate::security::capability::CapId, mode: PickMode) {
-    PICK_SESSIONS.lock().insert(picker, PickSession { requester, tag, cap, mode });
+    PICK_SESSIONS.lock().insert(picker, PickSession { picker, requester, tag, cap, mode });
 }
 
 /// True if `requester` already has a picker open — one dialog per app, so
@@ -753,6 +759,10 @@ pub fn finish_pick(session: PickSession, path: alloc::string::String) {
     // Nothing is granted on a cancel (empty path). A folder the kernel
     // will not hand out (root, `sys`, `.system`, `priv`) answers like a cancel, so the
     // app never holds a folder it cannot work in.
+    if session.mode == PickMode::Screen {
+        crate::shade::capture::picked(session.picker, path == "screen");
+        return;
+    }
     let mut path = path;
     if !path.is_empty() {
         use crate::security::capability::{self, Rights};
@@ -762,6 +772,7 @@ pub fn finish_pick(session: PickSession, path: alloc::string::String) {
             PickMode::Folder => if !capability::grant_tree(session.cap, &path, Rights::READ | Rights::WRITE) {
                 path.clear();
             },
+            PickMode::Screen => {}
         }
     }
     push_event(session.requester, abi::Event::Picked { path, tag: session.tag });

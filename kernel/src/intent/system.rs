@@ -1346,9 +1346,28 @@ pub fn intent_gpu(args: &str) {
             crate::shade::gpu_scene::iommu_probe();
             return;
         }
+        "capture" => {
+            crate::shade::capture::report();
+            return;
+        }
+        "capture stop" => {
+            if !crate::shade::capture::host_stop() {
+                kprintln!("[npk] gpu: no screen is shared");
+            }
+            return;
+        }
+        "capture test" => {
+            if crate::shade::capture::request_test() {
+                kprintln!("[npk] gpu: the next captured frame is the test frame, its crc32 follows");
+            } else {
+                kprintln!("[npk] gpu: no screen is shared");
+            }
+            return;
+        }
         "" => {}
         _ => {
-            kprintln!("usage: gpu [verify | cpu | iommu | iommu enable | iommu protect | iommu test]");
+            kprintln!("usage: gpu [verify | cpu | iommu | iommu enable | iommu protect | iommu test | \
+                       capture | capture stop | capture test]");
             return;
         }
     }

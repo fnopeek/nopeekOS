@@ -1075,11 +1075,69 @@ fn commit_tree(p: &Pick) {
     }
 }
 
+// ── Screen mode ───────────────────────────────────────────────────────
+//
+// A guest asks to share the screen (`shade::capture`). The kernel opens us
+// with "screen\0<app>\0" and takes "screen" as consent; nothing else is
+// granted. Only a click on Share consents: Enter does not, so a key typed
+// into the guest as the dialog appears cannot share the screen, and a click
+// within `SCREEN_ARM_MS` of the dialog appearing is ignored, so a click
+// aimed at whatever was there before cannot either.
+
+const SCREEN_TITLE: &str = "Share your screen";
+const SCREEN_BODY: &str = "{} wants to see your whole screen. Everything on it is shared until the app stops.";
+const SCREEN_SHARE: &str = "Share";
+const SCREEN_ANSWER: &str = "screen";
+
+const ACT_SHARE: u32 = 11;
+const SCREEN_ARM_MS: u64 = 600;
+
+fn render_screen(app: &str) -> Widget {
+    let app = if app.is_empty() { "An app" } else { app };
+    prefab::dialog(
+        SCREEN_TITLE,
+        sheet_body(prefab::body(&fill(SCREEN_BODY, app)),
+                   buttons(ACT_CANCEL, SCREEN_SHARE, prefab::ButtonStyle::Primary, ACT_SHARE, true)),
+        None,
+        360,
+    )
+}
+
+fn screen_main(app: &str) {
+    let tree = render_screen(app);
+    match wire::encode(&tree) {
+        Ok(bytes) => { if !host::scene_commit(&bytes) { log("[pick] commit failed"); } }
+        Err(_) => log("[pick] encode failed"),
+    }
+    let shown = host::ticks_ms();
+    let mut event_buf = alloc::vec![0u8; EVENT_BUF_SIZE];
+    loop {
+        match poll_event(&mut event_buf) {
+            PollResult::Event(Event::Action(ActionId(ACT_SHARE))) => {
+                if host::ticks_ms().saturating_sub(shown) >= SCREEN_ARM_MS {
+                    return answer(SCREEN_ANSWER);
+                }
+            }
+            PollResult::Event(Event::Action(ActionId(ACT_CANCEL)) | Event::Key(KeyCode::Escape)) => {
+                return answer("");
+            }
+            PollResult::Event(_) => {}
+            PollResult::Empty => host::sleep_ms(16),
+            PollResult::WindowGone => return,
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
     // The kernel already made this window a centred overlay; modal keeps
     // stray keystrokes out of the app behind us while a dialog is up.
     host::window_set_modal(true);
+
+    let arg = read_launch_arg();
+    if let Some(rest) = arg.strip_prefix("screen\0") {
+        return screen_main(rest.split('\0').next().unwrap_or(""));
+    }
 
     let mut p = Pick::new();
     let mut event_buf = alloc::vec![0u8; EVENT_BUF_SIZE];

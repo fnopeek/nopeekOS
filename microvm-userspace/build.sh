@@ -76,7 +76,7 @@ ASSET_NAME="microvm-${BUNDLE_NAME}"
 SNAPSHOT_TAG="arch${ARCH_SNAPSHOT//\//}"
 # A second build on the same client and snapshot (packages or PID-1
 # changed) carries a revision: firefox-159.0-arch20261029-2.
-BUNDLE_REV="-4"
+BUNDLE_REV="-5"
 
 OUT_DIR="$REPO_ROOT/release/apps/${BUNDLE_NAME}"
 
@@ -181,8 +181,13 @@ arch_run "$WORK/root" "
     # native contexts.
     install -D -m 0755 \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2 \$R/usr/libexec/npk/npkwm-gles2
     # The guest's portal backend (microvm/linux/portal): Access, without
-    # which xdg-desktop-portal offers no Camera portal.
+    # which xdg-desktop-portal offers no Camera portal, and ScreenCast.
     install -D -m 0755 \$REPO_ROOT/microvm/linux/portal/portal-npk \$R/usr/libexec/npk/portal-npk
+    for lib in \$(readelf -d \$REPO_ROOT/microvm/linux/portal/portal-npk | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+        [ -e \$R/usr/lib/\$lib ] || red \"portal-npk needs \$lib, not in the image\"
+    done
+    # Its check from inside the guest (\`npkcapprobe=<mode>\` on the cmdline).
+    install -D -m 0755 \$REPO_ROOT/microvm/linux/portal/npk-capture-probe \$R/usr/libexec/npk/npk-capture-probe
     install -D -m 0644 \$REPO_ROOT/microvm/linux/portal/npk.portal \$R/usr/share/xdg-desktop-portal/portals/npk.portal
     install -D -m 0644 \$REPO_ROOT/microvm/linux/portal/portals.conf \$R/usr/share/xdg-desktop-portal/portals.conf
     install -D -m 0644 \$REPO_ROOT/microvm/linux/portal/org.freedesktop.impl.portal.desktop.npk.service \

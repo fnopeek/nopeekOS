@@ -274,8 +274,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  udevadm settle --timeout=10 2>/dev/null; \
                  W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
                  [ -n \"$W\" ] && chown 1001 \"$W\" && chmod 0600 \"$W\"; \
-                 for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.camera ] \
-                   && chown 1000 /dev/${p##*/} && chmod 0600 /dev/${p##*/}; done; \
+                 for p in /sys/class/virtio-ports/*; do case \"$(cat $p/name 2>/dev/null)\" in npk.camera|npk.capture) \
+                   chown 1000 /dev/${p##*/} && chmod 0600 /dev/${p##*/};; esac; done; \
                  GPU=0; for d in /sys/bus/virtio/devices/*; do \
                    [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
                  done; \
@@ -413,6 +413,10 @@ fn launch_wayland(kmsg_fd: i64) {
                  if [ -S /tmp/xrt/pulse/native ]; then echo \"<0>[pw] pipewire-pulse up after ${i}x5ms\" > /dev/kmsg; \
                  else echo '<0>[pw] pipewire-pulse did not come up' > /dev/kmsg; \
                    tail -n 20 /tmp/pipewire.log | while read -r l; do echo \"<0>[pw] $l\" > /dev/kmsg; done; fi; \
+                 CAPPROBE=$(sed -n 's/.*npkcapprobe=\\([a-z]*\\).*/\\1/p' /proc/cmdline); \
+                 [ -n \"$CAPPROBE\" ] && [ -x /usr/libexec/npk/npk-capture-probe ] && \
+                   su -s /bin/sh app -c \"XDG_RUNTIME_DIR=/tmp/xrt DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus /usr/libexec/npk/npk-capture-probe $CAPPROBE 2>&1\" \
+                   | sed 's/^/<0>[capprobe] /' > /dev/kmsg & \
                  LOGPAT=$(sed -n 's/.*npklogs=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
                  ALL=0; grep -qE 'npklogs( |$)' /proc/cmdline && ALL=1; \
                  FR=0; grep -q npkframes /proc/cmdline && FR=1; \

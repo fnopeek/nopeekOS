@@ -1554,6 +1554,12 @@ impl VirtioGpu {
         self.latch_max_us = 0;
     }
 
+    /// The pages of resource `rid` when it is a blob of this guest: the
+    /// only buffers a capture may write (`shade::capture`).
+    pub fn guest_blob(&self, rid: u32) -> Option<Arc<ForeignPixels>> {
+        self.resources.iter().find(|r| r.id == rid).and_then(|r| r.blob.clone())
+    }
+
     /// The guest gives resource `rid`'s blob pages back (or replaces it):
     /// nothing shows them any more and gpudev unbinds them. The frames stay
     /// the VM's until `wait_released` says gpudev let go of them.
@@ -1580,6 +1586,7 @@ impl VirtioGpu {
         if !crate::shade::surface::detach_blob(serial) {
             kprintln!("[gpu] a reader kept a guest frame that is being given back");
         }
+        crate::shade::capture::forget_blob(serial);
         crate::gpu::gpudev::forget_pages(serial);
         self.retired.push(blob);
     }

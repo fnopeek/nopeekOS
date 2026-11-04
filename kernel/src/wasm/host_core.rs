@@ -4988,6 +4988,7 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
         crate::shade::widgets::PickMode::Open => "open",
         crate::shade::widgets::PickMode::Save => "save",
         crate::shade::widgets::PickMode::Folder => "folder",
+        crate::shade::widgets::PickMode::Screen => return -1,
     };
     let arg = alloc::format!("{}\0{}\0{}", verb, start, suggest);
 
@@ -5014,6 +5015,54 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
             crate::shade::widgets::finish_pick(s, String::new());
         }
         -1
+    }
+}
+
+/// The screen picker's overlay: one question and two buttons.
+const SCREEN_PICKER_W: u32 = 480;
+const SCREEN_PICKER_H: u32 = 260;
+
+/// The screen picker for a guest that asks to share the screen
+/// (`shade::capture`), over the guest's window `requester`. Its window, or
+/// None when it could not be started.
+pub(crate) fn open_screen_pick(requester: u32, app: &str) -> Option<u32> {
+    use crate::shade::widgets::{self, PickMode};
+    if widgets::has_open_pick(requester) {
+        return None;
+    }
+    let module = picker_module_name();
+    let bytes = match crate::npkfs::fetch(&alloc::format!("sys/wasm/{}", module)) {
+        Ok((b, _)) => b,
+        Err(_) => {
+            kprintln!("[npk] screen picker: module `{}` not installed", module);
+            return None;
+        }
+    };
+    let rights = capability::widget_rights_from_wasm(&bytes);
+    let module_cap = capability::create_module_cap(rights, None).ok()?;
+    // "screen\0<app>\0": the app is shown, it grants nothing.
+    let app: String = app.chars().filter(|c| *c != '\0').take(64).collect();
+    let arg = alloc::format!("screen\0{}\0", app);
+    let win = match crate::shade::with_compositor(|c| {
+        let id = c.create_widget_window(&module);
+        c.set_overlay(id, SCREEN_PICKER_W, SCREEN_PICKER_H);
+        id
+    }) {
+        Some(id) => id,
+        None => {
+            capability::release_module_cap(&module_cap);
+            return None;
+        }
+    };
+    widgets::register_pick(win.0, requester, 0, [0; 32], PickMode::Screen);
+    crate::shade::focus_window(win);
+    crate::shade::request_render();
+    if spawn_on_worker_inner(bytes, module_cap, 255, &module, false, win.0, Some(arg)) {
+        Some(win.0)
+    } else {
+        widgets::take_pick(win.0);
+        crate::shade::close_window(win);
+        None
     }
 }
 

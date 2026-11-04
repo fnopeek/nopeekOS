@@ -17,7 +17,10 @@
 //! ("npk.camera") is the guest camera's (`npk-camera`): it asks with
 //! `CAM_START` and `CAM_STOP` in the frames above, and gets the camera's
 //! frames as `u32 len | u8 CAM_FRAME | u16 width | u16 height | u8 format |
-//! 3 pad | data`, the newest only.
+//! 3 pad | data`, the newest only. Port 3 ("npk.capture") is the guest's
+//! screen-cast portal (`portal-npk`), in the frames above with at most
+//! `CAP_MAX_FRAME` bytes; it carries only control messages, the pixels go
+//! into the guest's own buffers (`shade::capture`).
 
 #![allow(dead_code)]
 
@@ -83,7 +86,7 @@ const CC_QUEUE_DEVICE_HI:        u32 = 0x34;
 
 const VIRTIO_CONSOLE_F_MULTIPORT: u32 = 1 << 1;
 
-const NUM_PORTS: usize = 3;
+const NUM_PORTS: usize = 4;
 const NUM_QUEUES: u16 = 2 + 2 * NUM_PORTS as u16;
 const MAX_QUEUE_SIZE: u16 = 64;
 
@@ -97,10 +100,11 @@ const VIRTIO_CONSOLE_PORT_READY:   u16 = 3;
 const VIRTIO_CONSOLE_PORT_OPEN:    u16 = 6;
 const VIRTIO_CONSOLE_PORT_NAME:    u16 = 7;
 
-const PORT_NAMES: [&[u8]; NUM_PORTS] = [b"npk.control", b"npk.windows", b"npk.camera"];
+const PORT_NAMES: [&[u8]; NUM_PORTS] = [b"npk.control", b"npk.windows", b"npk.camera", b"npk.capture"];
 const PORT_CONTROL: usize = 0;
 const PORT_WINDOWS: usize = 1;
 const PORT_CAMERA: usize = 2;
+const PORT_CAPTURE: usize = 3;
 
 /// Largest frame (type byte + payload) either side may send.
 pub const MAX_FRAME: usize = 4096;
@@ -176,6 +180,33 @@ const CAM_STOP: u8 = 0x82;
 /// Host -> guest: one frame, in the camera port's own framing (above).
 const CAM_FRAME: u8 = 0x10;
 
+// Capture-port message types (`shade::capture` holds the session).
+/// Largest capture frame (type byte + payload).
+const CAP_MAX_FRAME: usize = 32;
+/// Guest -> host: share the screen, at most `u16` x `u16` (0 = no limit).
+/// The host asks the user; a START while a session runs ends that one.
+const CAP_START: u8 = 0x81;
+/// Guest -> host: `u8 slot | 3 pad | u32 resource | u32 offset | u32 stride
+/// | u16 width | u16 height`: a buffer of the guest's for the stream.
+const CAP_BUFFER: u8 = 0x82;
+/// Guest -> host: `u8 slot`: the buffer may be written again.
+const CAP_QUEUE: u8 = 0x83;
+/// Guest -> host: end the session.
+const CAP_STOP: u8 = 0x84;
+/// Host -> guest: `u16 width | u16 height`: the user chose; buffers of this
+/// size are wanted.
+pub const CAP_STARTED: u8 = 0x01;
+/// Host -> guest: `u8 reason`: the session is over.
+pub const CAP_ENDED: u8 = 0x02;
+/// Host -> guest: `u8 slot`: the buffer was taken.
+pub const CAP_ACCEPTED: u8 = 0x03;
+/// Host -> guest: `u8 slot | u8 reason`: the buffer was refused.
+pub const CAP_REFUSED: u8 = 0x04;
+/// Host -> guest: `u8 slot | u8 flags | 2 pad | u32 sequence`: the buffer
+/// holds a new frame and is the guest's until its next `CAP_QUEUE`; flag 1
+/// marks the test frame.
+pub const CAP_FRAME: u8 = 0x05;
+
 /// The guest camera's reader of the kernel camera feed, open from
 /// `CAM_START` to `CAM_STOP`, and the frame being delivered with how much
 /// of it went out.
@@ -222,6 +253,9 @@ static CLOSED_REQ: AtomicU32 = AtomicU32::new(0);
 /// out; the newest request per output wins.
 static FS_REQ: Mutex<[Option<bool>; MAX_OUTPUTS]> = Mutex::new([None; MAX_OUTPUTS]);
 
+/// The guest's screen-cast portal has the capture port open on this launch.
+static CAPTURE_OPEN: AtomicBool = AtomicBool::new(false);
+
 /// Whether a guest is listening on the control port.
 pub fn control_ready() -> bool { CONTROL_READY.load(Ordering::Acquire) }
 
@@ -241,6 +275,12 @@ pub fn send(msg_type: u8, payload: &[u8]) -> bool {
 /// listening or the payload is too large.
 pub fn send_windows(msg_type: u8, payload: &[u8]) -> bool {
     windows_ready() && queue(PORT_WINDOWS, WIN_MAX_FRAME, msg_type, payload)
+}
+
+/// Queue one capture frame for the guest's portal. False if it never spoke
+/// on the port or the payload is too large.
+pub fn send_capture(msg_type: u8, payload: &[u8]) -> bool {
+    CAPTURE_OPEN.load(Ordering::Acquire) && queue(PORT_CAPTURE, CAP_MAX_FRAME, msg_type, payload)
 }
 
 fn queue(port: usize, max_frame: usize, msg_type: u8, payload: &[u8]) -> bool {
@@ -302,12 +342,15 @@ pub fn reset() {
     CLOSED_REQ.store(0, Ordering::Release);
     *FS_REQ.lock() = [None; MAX_OUTPUTS];
     cam_stop();
+    CAPTURE_OPEN.store(false, Ordering::Release);
+    crate::shade::capture::guest_gone();
 }
 
-/// The VM ended: the camera it asked for goes back.
+/// The VM ended: the camera it asked for and the screen it shares go back.
 impl Drop for VirtioConsole {
     fn drop(&mut self) {
         cam_stop();
+        crate::shade::capture::guest_gone();
     }
 }
 
@@ -619,7 +662,11 @@ impl VirtioConsole {
 
     /// Take whole frames off a port's input.
     fn parse_port(&mut self, port: usize) {
-        let max_frame = if port == PORT_WINDOWS { WIN_MAX_FRAME } else { MAX_FRAME };
+        let max_frame = match port {
+            PORT_WINDOWS => WIN_MAX_FRAME,
+            PORT_CAPTURE => CAP_MAX_FRAME,
+            _ => MAX_FRAME,
+        };
         loop {
             let input = &mut self.port_in[port];
             if input.len() < 2 { return; }
@@ -683,6 +730,10 @@ impl VirtioConsole {
                     CAM.lock().reader = r;
                 }
                 (PORT_CAMERA, CAM_STOP) => cam_stop(),
+                (PORT_CAPTURE, _) => {
+                    CAPTURE_OPEN.store(true, Ordering::Release);
+                    parse_capture(msg_type, payload);
+                }
                 (PORT_WINDOWS, WIN_FULLSCREEN)
                     if payload.first().is_some_and(|&k| (k as usize) < MAX_OUTPUTS) =>
                 {
@@ -824,6 +875,8 @@ impl VirtioConsole {
                 self.device_status = val as u8;
                 if self.device_status == 0 {
                     cam_stop();
+                    CAPTURE_OPEN.store(false, Ordering::Release);
+                    crate::shade::capture::guest_gone();
                     self.queues = [VirtQueue::fresh(); NUM_QUEUES as usize];
                     self.driver_features = [0; 2];
                     self.driver_feature_select = 0;
@@ -869,6 +922,25 @@ impl VirtioConsole {
     fn q_mut(&mut self) -> &mut VirtQueue {
         let idx = self.queue_select as usize % self.queues.len();
         &mut self.queues[idx]
+    }
+}
+
+/// One capture-port frame. A known type with a short payload is dropped and
+/// logged; the session state decides whether the request is allowed.
+fn parse_capture(msg_type: u8, p: &[u8]) {
+    use crate::shade::capture;
+    let u16_at = |i: usize| u16::from_le_bytes([p[i], p[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes([p[i], p[i + 1], p[i + 2], p[i + 3]]);
+    match msg_type {
+        CAP_START if p.len() >= 4 => capture::guest_start(u16_at(0) as u32, u16_at(2) as u32),
+        CAP_BUFFER if p.len() >= 20 => capture::guest_buffer(capture::GuestBuffer {
+            slot: p[0], resource: u32_at(4), offset: u32_at(8), stride: u32_at(12),
+            width: u16_at(16) as u32, height: u16_at(18) as u32,
+        }),
+        CAP_QUEUE if !p.is_empty() => capture::guest_queue(p[0]),
+        CAP_STOP => capture::guest_stop(),
+        CAP_START | CAP_BUFFER | CAP_QUEUE => capture::note_dropped(msg_type, p.len()),
+        _ => {}
     }
 }
 

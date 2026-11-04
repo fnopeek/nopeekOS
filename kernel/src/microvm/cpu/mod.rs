@@ -1565,6 +1565,7 @@ pub fn vm_poll_slice() {
     // loft. Spawn it here on Core 0 (compositor op). Runs on both the
     // cooperative and dedicated paths since it's before the early return.
     sync_vm_windows();
+    crate::shade::capture::sync();
     if OPEN_LOFT_REQUESTED.swap(false, Ordering::AcqRel) {
         // `launch_app` dedups by open window, but loading runs on a worker:
         // a burst of guest requests before the window exists would start

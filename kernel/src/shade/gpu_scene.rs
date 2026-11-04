@@ -447,7 +447,7 @@ fn source_bo(sources: &dyn Sources, src: Source) -> Option<Option<u32>> {
 
 /// The scene as `OP_SCENE` payload, with the handles of every buffer it
 /// reads. None when a buffer cannot be handed to the module.
-fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage: &[Rect])
+pub(crate) fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage: &[Rect])
     -> Option<(Vec<u8>, Vec<u32>)>
 {
     let planes = crate::gui::background::planes();

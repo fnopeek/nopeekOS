@@ -12,6 +12,7 @@ pub mod window;
 pub mod buffers;
 pub mod scene;
 pub mod gpu_scene;
+pub mod capture;
 pub mod compositor;
 pub mod terminal;
 pub mod input;

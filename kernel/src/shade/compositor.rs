@@ -1727,6 +1727,7 @@ impl Compositor {
         let frame = self.build_scene();
         scene::expand_damage(&frame, &mut damage, Rect::new(0, 0, info.width, info.height));
         crate::shade::gpu_scene::compose(&frame, &*self, target, info, &damage);
+        crate::shade::capture::note_damage();
         damage
     }
 
