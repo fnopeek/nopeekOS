@@ -1356,18 +1356,21 @@ pub fn intent_gpu(args: &str) {
             }
             return;
         }
-        "capture test" => {
-            if crate::shade::capture::request_test() {
-                kprintln!("[npk] gpu: the next captured frame is the test frame, its crc32 follows");
-            } else {
-                kprintln!("[npk] gpu: no screen is shared");
-            }
+        "capture test" | "capture test on" => {
+            crate::shade::capture::set_test(true);
+            kprintln!("[npk] gpu: every captured frame is the test frame, its crc32 is logged per session \
+                       (`gpu capture test off` ends it)");
+            return;
+        }
+        "capture test off" => {
+            crate::shade::capture::set_test(false);
+            kprintln!("[npk] gpu: captured frames show the screen again");
             return;
         }
         "" => {}
         _ => {
             kprintln!("usage: gpu [verify | cpu | iommu | iommu enable | iommu protect | iommu test | \
-                       capture | capture stop | capture test]");
+                       capture | capture stop | capture test [off]]");
             return;
         }
     }

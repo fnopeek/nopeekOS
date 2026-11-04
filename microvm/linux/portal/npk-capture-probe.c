@@ -11,7 +11,11 @@
  *              through the backend's D-Bus interface (the user clicks
  *              Share), the dmabuf imported, the checksum of every frame
  *              logged, so the host's test frame can be found in it.
+ *   all        port, then consume.
  *   malformed  one frame that cannot be one; the host ends the VM.
+ *
+ * The test frame: `gpu capture test` on the host, before or during the run,
+ * makes every captured frame the known test frame.
  *
  * Every check prints PASS or FAIL and the run ends with the counts.
  */
@@ -30,6 +34,7 @@
 
 #define CHOICE_TIMEOUT_MS 120000
 #define REPLY_TIMEOUT_MS 2000
+#define CONSUME_MS 20000
 
 static int passed, failed;
 
@@ -179,6 +184,8 @@ static int run_port(void)
 	int type = next_frame(fd, p, &n, CHOICE_TIMEOUT_MS);
 	if (type != CAP_STARTED || n < 4) {
 		check(0, type == CAP_ENDED ? "session (the host ended it: cancelled?)" : "session (no answer)");
+		port_send(fd, CAP_STOP, NULL, 0);
+		close(fd);
 		printf("probe: %d passed, %d failed\n", passed, failed);
 		return 1;
 	}
@@ -189,9 +196,12 @@ static int run_port(void)
 
 	uint32_t res = 0, small_res = 0;
 	struct gbm_bo *bo = bo_create(gbm, w, h, &res);
-	struct gbm_bo *small = bo_create(gbm, w / 4, h / 4, &small_res);
+	/* Rows enough for the pitch, too few for the stream. */
+	struct gbm_bo *small = bo_create(gbm, w, h / 4, &small_res);
 	if (bo == NULL || small == NULL) {
 		check(0, "guest buffers allocated");
+		port_send(fd, CAP_STOP, NULL, 0);
+		close(fd);
 		return 1;
 	}
 	uint32_t stride = gbm_bo_get_stride(bo), offset = gbm_bo_get_offset(bo, 0);
@@ -223,7 +233,7 @@ static int run_port(void)
 	check(got, "first frame arrived in the good buffer");
 
 	/* The test frame: `gpu capture test` on the host. */
-	printf("run `gpu capture test` on the host within %d s\n", CHOICE_TIMEOUT_MS / 1000);
+	printf("waiting %d s for a test frame (`gpu capture test` on the host)\n", CHOICE_TIMEOUT_MS / 1000);
 	uint64_t end = now_ms() + CHOICE_TIMEOUT_MS;
 	int test = 0;
 	while (!test && now_ms() < end) {
@@ -440,10 +450,11 @@ static int run_consume(void)
 	spa_pod_builder_long(&b, DRM_FORMAT_MOD_LINEAR);
 	const struct spa_pod *params[1] = { spa_pod_builder_pop(&b, &f) };
 	pw_stream_connect(c.stream, PW_DIRECTION_INPUT, node, PW_STREAM_FLAG_AUTOCONNECT, params, 1);
-	printf("consuming for %d s; run `gpu capture test` on the host meanwhile\n", CHOICE_TIMEOUT_MS / 1000);
+	printf("consuming for %d s (with `gpu capture test` on, every frame is the test frame)\n",
+	       CONSUME_MS / 1000);
 	fflush(stdout);
 	struct spa_source *timer = pw_loop_add_timer(pw_main_loop_get_loop(c.loop), stop_after, c.loop);
-	struct timespec to = { .tv_sec = CHOICE_TIMEOUT_MS / 1000 };
+	struct timespec to = { .tv_sec = CONSUME_MS / 1000 };
 	pw_loop_update_timer(pw_main_loop_get_loop(c.loop), timer, &to, NULL, false);
 	pw_main_loop_run(c.loop);
 	check(c.frames > 0, "frames reached the PipeWire consumer");
@@ -470,6 +481,11 @@ int main(int argc, char **argv)
 		return run_consume();
 	if (strcmp(mode, "malformed") == 0)
 		return run_malformed();
-	printf("usage: npk-capture-probe port | consume | malformed\n");
+	if (strcmp(mode, "all") == 0) {
+		int r = run_port();
+		passed = failed = 0;
+		return run_consume() | r;
+	}
+	printf("usage: npk-capture-probe port | consume | all | malformed\n");
 	return 2;
 }

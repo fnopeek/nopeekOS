@@ -102,15 +102,17 @@ struct Session {
     seq: u32,
     verified: bool,
     failures: u32,
-    /// The next frame is the known test frame (`gpu capture test`).
-    test: bool,
+    /// This session's test frame checksum is in the log.
+    test_logged: bool,
 }
 
 static SESSION: Mutex<Session> = Mutex::new(Session {
     phase: Phase::Idle, max: (0, 0), width: 0, height: 0, picker: 0,
-    slots: [const { None }; MAX_SLOTS], seq: 0, verified: false, failures: 0, test: false,
+    slots: [const { None }; MAX_SLOTS], seq: 0, verified: false, failures: 0, test_logged: false,
 });
 
+/// Every frame is the known test frame (`gpu capture test`, until `off`).
+static TEST_MODE: AtomicBool = AtomicBool::new(false);
 /// The screen changed since the last frame sent.
 static DIRTY: AtomicBool = AtomicBool::new(false);
 /// A START waits for core 0 to open the picker.
@@ -255,15 +257,11 @@ pub fn host_stop() -> bool {
     true
 }
 
-/// A known frame next, its checksum in the log (`gpu capture test`).
-pub fn request_test() -> bool {
-    let mut s = SESSION.lock();
-    if s.phase != Phase::Running {
-        return false;
-    }
-    s.test = true;
+/// `gpu capture test [off]`: every frame is the known test frame (its
+/// checksum logged once per session), or the screen again.
+pub fn set_test(on: bool) {
+    TEST_MODE.store(on, Ordering::Release);
     DIRTY.store(true, Ordering::Release);
-    true
 }
 
 /// A frame the guest named a capture-port message too short for its type.
@@ -305,7 +303,7 @@ pub fn picked(picker: u32, chosen: bool) {
     s.seq = 0;
     s.verified = false;
     s.failures = 0;
-    s.test = false;
+    s.test_logged = false;
     drop(s);
     SESSIONS.fetch_add(1, Ordering::Relaxed);
     DIRTY.store(true, Ordering::Release);
@@ -376,7 +374,6 @@ fn end(s: &mut Session, reason: Option<u8>) {
     let was = s.phase;
     s.phase = Phase::Idle;
     s.picker = 0;
-    s.test = false;
     let mut n = 0;
     for slot in s.slots.iter_mut() {
         if let Some(o) = slot.take() {
@@ -449,12 +446,14 @@ fn capture_frame() {
         let i = s.slots.iter().position(|o| o.as_ref().is_some_and(|o| o.host))?;
         DIRTY.store(false, Ordering::Release);
         let view = s.slots[i].as_ref()?.view.clone();
-        let (w, h, verify, test) = (s.width, s.height, !s.verified, core::mem::take(&mut s.test));
+        let test = TEST_MODE.load(Ordering::Acquire);
+        let log_crc = test && !core::mem::replace(&mut s.test_logged, true);
+        let (w, h, verify) = (s.width, s.height, !s.verified);
         let pattern = if test { test_pattern(info.width, info.height) } else { PixelBuffer::empty() };
         let screen = (!test).then(|| fb.front_ptr());
         let job = submit(&pattern, screen, &info, &view, w, h);
         drop(s);
-        let r = job.and_then(|seq| settle(seq, &pattern, screen, &info, &view, w, h, verify, test));
+        let r = job.and_then(|seq| settle(seq, &pattern, screen, &info, &view, w, h, verify, log_crc));
         Some((i, view.pixels.serial, test, r))
     });
     let Some(Some((i, serial, test, r))) = done else { return };
@@ -536,16 +535,16 @@ fn submit(pattern: &PixelBuffer, screen: Option<*mut u8>, info: &FbInfo, view: &
 }
 
 /// Wait for capture `seq`. With `verify`, the frame is also composed on the
-/// CPU and compared bit for bit; with `test`, the checksum of what the
+/// CPU and compared bit for bit; with `log_crc`, the checksum of what the
 /// guest receives is logged.
 #[allow(clippy::too_many_arguments)]
 fn settle(seq: u32, pattern: &PixelBuffer, screen: Option<*mut u8>, info: &FbInfo, view: &ForeignView, w: u32,
-          h: u32, verify: bool, test: bool) -> Result<(), Failure> {
+          h: u32, verify: bool, log_crc: bool) -> Result<(), Failure> {
     let status = gpudev::wait_scene_bound(seq);
     if status != 0 {
         return Err(Failure::Gpu(if status == -62 { "the module did not finish in time" } else { "the module failed it" }));
     }
-    if !verify && !test {
+    if !verify && !log_crc {
         return Ok(());
     }
     view.clflush_rect((0, 0, w, h));
@@ -590,7 +589,7 @@ fn settle(seq: u32, pattern: &PixelBuffer, screen: Option<*mut u8>, info: &FbInf
         }
         crate::kprintln!("[capture] verification: the GPU frame equals the CPU frame ({}x{}, 0 pixels differ)", w, h);
     }
-    if test {
+    if log_crc {
         let bytes: Vec<u8> = got.iter().flat_map(|p| p.to_le_bytes()).collect();
         crate::kprintln!("[capture] test frame {}x{} sent, crc32 {:08x}", w, h, crate::storage::gpt::crc32(&bytes));
     }

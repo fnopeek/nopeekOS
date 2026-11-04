@@ -76,7 +76,7 @@ ASSET_NAME="microvm-${BUNDLE_NAME}"
 SNAPSHOT_TAG="arch${ARCH_SNAPSHOT//\//}"
 # A second build on the same client and snapshot (packages or PID-1
 # changed) carries a revision: firefox-159.0-arch20261029-2.
-BUNDLE_REV="-5"
+BUNDLE_REV="-6"
 
 OUT_DIR="$REPO_ROOT/release/apps/${BUNDLE_NAME}"
 
