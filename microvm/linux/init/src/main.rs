@@ -416,7 +416,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  CAPPROBE=$(sed -n 's/.*npkcapprobe=\\([a-z]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$CAPPROBE\" ] && [ -x /usr/libexec/npk/npk-capture-probe ] && \
                    su -s /bin/sh app -c \"XDG_RUNTIME_DIR=/tmp/xrt DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus /usr/libexec/npk/npk-capture-probe $CAPPROBE 2>&1\" \
-                   | sed 's/^/<0>[capprobe] /' > /dev/kmsg & \
+                   | while read -r l; do echo \"<0>[capprobe] $l\" > /dev/kmsg; done & \
                  LOGPAT=$(sed -n 's/.*npklogs=\\([^ ]*\\).*/\\1/p' /proc/cmdline); \
                  ALL=0; grep -qE 'npklogs( |$)' /proc/cmdline && ALL=1; \
                  FR=0; grep -q npkframes /proc/cmdline && FR=1; \
