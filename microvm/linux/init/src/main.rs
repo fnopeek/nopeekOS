@@ -142,7 +142,8 @@ unsafe extern "C" fn rust_main() -> ! {
 ///     here and written to /tmp; it speaks to the host over the
 ///     "npk.windows" port.
 ///   - firefox: the client. Needs MOZ_ENABLE_WAYLAND=1
-///     or it tries X11 (there is no X).
+///     or it tries X11 (there is no X), and XDG_SESSION_TYPE=wayland or
+///     its WebRTC looks for screens over X11 instead of the portal.
 /// Renderer = pixman (software, no GL/Mesa driver). Backend = wlroots
 /// DRM on /dev/dri/card0 (virtio-gpu KMS) → our Surface tile. Seat =
 /// the seatd daemon (the guest runs no logind for libseat), its
@@ -284,7 +285,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
-                 MOZ_ENABLE_WAYLAND=1; \
+                 MOZ_ENABLE_WAYLAND=1 XDG_SESSION_TYPE=wayland; \
                  grep -q npkswcursor /proc/cmdline && export WLR_NO_HARDWARE_CURSORS=1; \
                  WM=/tmp/npkwm; \
                  if [ $GPU = 1 ] && [ -x /usr/libexec/npk/npkwm-gles2 ]; then WM=/usr/libexec/npk/npkwm-gles2; unset WLR_RENDERER; fi; \

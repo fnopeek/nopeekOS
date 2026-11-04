@@ -239,6 +239,15 @@ static void reply_start(uint32_t response)
 	cast.start_inv = NULL;
 }
 
+/* A stream that failed after Start ends the session, outside the stream's
+ * own callback since that destroys the stream. */
+static gboolean end_after_error(gpointer user)
+{
+	if (cast.session_path != NULL)
+		cast_end(1, 1);
+	return G_SOURCE_REMOVE;
+}
+
 static void on_state_changed(void *data, enum pw_stream_state old, enum pw_stream_state state, const char *error)
 {
 	fprintf(stderr, "portal-npk: stream %s%s%s\n", pw_stream_state_as_string(state),
@@ -252,7 +261,10 @@ static void on_state_changed(void *data, enum pw_stream_state old, enum pw_strea
 		pw_stream_trigger_process(cast.stream);
 		break;
 	case PW_STREAM_STATE_ERROR:
-		reply_start(2);
+		if (cast.start_inv != NULL)
+			reply_start(2);
+		else
+			g_idle_add(end_after_error, NULL);
 		break;
 	default:
 		break;
@@ -365,8 +377,16 @@ static int stream_start(void)
 		SPA_FORMAT_VIDEO_maxFramerate,
 		SPA_POD_CHOICE_RANGE_Fraction(&SPA_FRACTION(60, 1), &SPA_FRACTION(1, 1), &SPA_FRACTION(60, 1)),
 		0);
+	/* The buffers are linear; a consumer that can only import with the
+	 * implicit modifier (Firefox's WebRTC) gets the same linear buffer,
+	 * whose layout the driver reads from the buffer itself. */
+	struct spa_pod_frame c;
 	spa_pod_builder_prop(&b, SPA_FORMAT_VIDEO_modifier, SPA_POD_PROP_FLAG_MANDATORY);
+	spa_pod_builder_push_choice(&b, &c, SPA_CHOICE_Enum, 0);
 	spa_pod_builder_long(&b, DRM_FORMAT_MOD_LINEAR);
+	spa_pod_builder_long(&b, DRM_FORMAT_MOD_LINEAR);
+	spa_pod_builder_long(&b, DRM_FORMAT_MOD_INVALID);
+	spa_pod_builder_pop(&b, &c);
 	const struct spa_pod *params[1] = { spa_pod_builder_pop(&b, &f) };
 
 	int r = pw_stream_connect(cast.stream, PW_DIRECTION_OUTPUT, PW_ID_ANY,
