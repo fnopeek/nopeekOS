@@ -550,6 +550,23 @@ pub fn parse_addba_req(f: &[u8]) -> Option<AddbaReq> {
     })
 }
 
+/// A DELBA (802.11-2020 §9.6.4.4): category, action, then the parameter
+/// field with the initiator bit (11) and the TID (12..15), then the reason.
+/// Returns the TID and whether the sender was the session's originator
+/// (`WLAN_BACK_INITIATOR`).
+pub fn parse_delba(f: &[u8]) -> Option<(u8, bool)> {
+    if f.len() < 24 + 1 + 1 + 2 + 2 {
+        return None;
+    }
+    if f[24] != DOT11_ACTION_CAT_BA || f[25] != DOT11_ACTION_DELBA {
+        return None;
+    }
+    let params = u16::from_le_bytes([f[26], f[27]]);
+    let tid = ((params & IEEE80211_DELBA_PARAM_TID_MASK) >> 12) as u8;
+    let initiator = (params & IEEE80211_DELBA_PARAM_INITIATOR_MASK) >> 11 == 1;
+    Some((tid, initiator))
+}
+
 /// tx.c:95-105 `get_tx_ampdu_factor`.
 ///
 /// The descriptor holds not the exponent but `MAX_AGG_NUM`, whose value

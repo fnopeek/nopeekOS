@@ -516,6 +516,11 @@ pub struct WdAcc {
     /// the state change belongs after draining the ring, where `link` is
     /// mutable.
     pub addba_resp: Option<crate::sta::AddbaResp>,
+    /// TIDs named in a DELBA from the AP, by its role: the AP as
+    /// originator (our receive session) and as recipient (our transmit
+    /// session).
+    pub delba_rx: u16,
+    pub delba_tx: u16,
     /// rx.c:14-32 `rtw_rx_stats`: bytes and frames, unicast only.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
@@ -537,7 +542,7 @@ impl WdAcc {
             addba: [crate::sta::AddbaReq::default(); 4], n_addba: 0,
             addba_drop: 0, heard_ap: false, beacon_dbm: None,
             beacon_ohne_csa: false, csa: None,
-            addba_resp: None,
+            addba_resp: None, delba_rx: 0, delba_tx: 0,
             rx_unicast: 0, rx_cnt: 0, bw_cnt: [0; 4],
         }
     }

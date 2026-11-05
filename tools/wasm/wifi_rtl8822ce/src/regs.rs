@@ -706,6 +706,7 @@ pub const BIT_APP_ICV: u32 = 1 << 29; // reg.h:505
 pub const BIT_VHT_DACK: u32 = 1 << 26; // reg.h:508
 pub const BIT_PKTCTL_DLEN: u32 = 1 << 20; // reg.h:514
 pub const BIT_HTC_LOC_CTRL: u32 = 1 << 14; // reg.h:520
+pub const BIT_CBSSID_BCN: u32 = 1 << 7; // reg.h:527
 pub const BIT_AB: u32 = 1 << 3; // reg.h:531
 pub const BIT_AM: u32 = 1 << 2; // reg.h:532
 pub const BIT_APM: u32 = 1 << 1; // reg.h:533
@@ -1424,6 +1425,9 @@ pub const ADDBA_PARAM_AMSDU_MASK: u16 = 0x0001; // ieee80211.h:2032
 pub const ADDBA_PARAM_POLICY_MASK: u16 = 0x0002; // ieee80211.h:2033
 pub const ADDBA_PARAM_TID_MASK: u16 = 0x003C; // ieee80211.h:2034
 pub const ADDBA_PARAM_BUF_SIZE_MASK: u16 = 0xFFC0; // ieee80211.h:2035
+/// `IEEE80211_DELBA_PARAM_*_MASK`, ieee80211-ht.h:241-242
+pub const IEEE80211_DELBA_PARAM_TID_MASK: u16 = 0xF000; // ieee80211-ht.h:241
+pub const IEEE80211_DELBA_PARAM_INITIATOR_MASK: u16 = 0x0800; // ieee80211-ht.h:242
 /// `WLAN_STATUS_SUCCESS`, ieee80211.h:3536
 pub const WLAN_STATUS_SUCCESS: u16 = 0; // ieee80211.h:3536
 /// Management subtype 13 (action) in the first byte: protocol version 0,

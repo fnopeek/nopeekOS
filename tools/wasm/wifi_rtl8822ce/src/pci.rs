@@ -55,7 +55,7 @@ pub const Q_H2C: usize = 7;
 pub const N_TX_QUEUES: usize = 8;
 
 /// pci.h `max_num_of_tx_queue`
-fn max_num_of_tx_queue(q: usize) -> u32 {
+const fn max_num_of_tx_queue(q: usize) -> u32 {
     match q {
         Q_BE => RTK_BEQ_TX_DESC_NUM,
         Q_BCN => 1,
@@ -574,11 +574,23 @@ pub fn tx_write_data(_h: i32, trx: &mut Trx, stage: i32, queue: usize,
     let mut desc = [0u8; crate::tx::TX_PKT_DESC_SZ];
     crate::tx::fill_tx_desc(info, &mut desc);
 
-    // One slot per ring index, so a packet not yet fetched is not overwritten
-    // under the chip. The H2C path has its own smaller stride; its payload is
-    // always 32 bytes.
+    // One slot per ring and ring index, so a packet not yet fetched is not
+    // overwritten under the chip, neither by its own ring nor by another
+    // ring at the same index. The H2C path has its own buffer and a smaller
+    // stride; its payload is always 32 bytes.
+    let slot = if queue == Q_H2C {
+        wp * H2C_SLOT_BYTES
+    } else if let Some(base) = stage_slot_base(queue) {
+        (base + wp) * TX_SLOT_BYTES
+    } else {
+        host::loud_begin();
+        host::print("[rtl8822ce] Queue ohne Zwischenpuffer: ");
+        host::print_dec(queue as u32);
+        host::print(" — NICHTS gesendet\n");
+        host::loud_end();
+        return false;
+    };
     let stride = if queue == Q_H2C { H2C_SLOT_BYTES } else { TX_SLOT_BYTES };
-    let slot = wp * stride;
     // Both writes are checked: `npk_dma_write` rejects an offset beyond the
     // buffer with -1, and ignoring that would put an address the driver does
     // not own into the buffer descriptor, so the chip would transmit whatever
@@ -866,20 +878,43 @@ pub fn rx_poll(h: i32, trx: &mut Trx, limit: u32, buf: &mut [u8],
 /// here, so there is a fixed slot per ring index, as on the H2C path.
 pub const TX_SLOT_BYTES: u32 = 2048;
 
-/// Size of the staging buffer: one slot per ring index of the largest ring
-/// using it.
-///
-/// If it were smaller than `Q_BE`'s 256 entries, `wp * TX_SLOT_BYTES` would
-/// run past the buffer; `npk_dma_write` would reject the write, but the
-/// buffer descriptor would still point outside our allocation and the chip
-/// would transmit foreign memory.
-pub const MGMT_STAGE_SLOTS: u32 = RTK_BEQ_TX_DESC_NUM;
-pub const MGMT_STAGE_BYTES: u32 = MGMT_STAGE_SLOTS * TX_SLOT_BYTES;
+/// The rings that send through the staging buffer, in the order of their
+/// regions. Each has a region of one slot per ring index because each
+/// keeps its own `wp`; a shared region would let index k of one ring
+/// overwrite index k of another before the chip has fetched it. Only the
+/// rings in use get one: the module's DMA budget is mostly the RX ring.
+const STAGE_QUEUES: [usize; 4] = [Q_BE, Q_MGMT, Q_HI0, Q_BCN];
 
-// A limit that cannot drift: if a ring grows, the build fails instead of
-// silently writing out of bounds from a certain frame on.
-const _: () = assert!(MGMT_STAGE_SLOTS >= RTK_BEQ_TX_DESC_NUM);
-const _: () = assert!(MGMT_STAGE_SLOTS >= RTK_DEFAULT_TX_DESC_NUM);
+/// The first slot of `queue`'s region, `None` for a ring without one.
+const fn stage_slot_base(queue: usize) -> Option<u32> {
+    let mut base = 0;
+    let mut i = 0;
+    while i < STAGE_QUEUES.len() {
+        if STAGE_QUEUES[i] == queue {
+            return Some(base);
+        }
+        base += max_num_of_tx_queue(STAGE_QUEUES[i]);
+        i += 1;
+    }
+    None
+}
+
+/// Size of the staging buffer: the regions of all `STAGE_QUEUES`.
+///
+/// If it were smaller, an offset would run past the buffer;
+/// `npk_dma_write` would reject the write, but the buffer descriptor would
+/// still point outside our allocation and the chip would transmit foreign
+/// memory.
+pub const MGMT_STAGE_SLOTS: u32 = {
+    let mut n = 0;
+    let mut i = 0;
+    while i < STAGE_QUEUES.len() {
+        n += max_num_of_tx_queue(STAGE_QUEUES[i]);
+        i += 1;
+    }
+    n
+};
+pub const MGMT_STAGE_BYTES: u32 = MGMT_STAGE_SLOTS * TX_SLOT_BYTES;
 const _: () = assert!(H2C_STAGE_BYTES / H2C_SLOT_BYTES >= RTK_DEFAULT_TX_DESC_NUM);
 
 /// pci.c:897-913 `rtw_pci_tx_write`.

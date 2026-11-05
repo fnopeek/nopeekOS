@@ -4092,10 +4092,13 @@ struct LinkStats {
     /// bits, so any value 0..15 can arrive.
     last_seq_ctrl: [u32; 17],
     /// Last CCMP packet number accepted per TID (16 = non-QoS), for the
-    /// pairwise key [0] and the group key [1]: `key->u.ccmp.rx_pn` in
-    /// mac80211, checked in `ieee80211_crypto_ccmp_decrypt`. The hardware
-    /// decrypts but does not check for replays.
-    rx_pn: [[u64; 17]; 2],
+    /// pairwise key [0] and each group key index [1 + keyidx]:
+    /// `key->u.ccmp.rx_pn` in mac80211, one counter set per key, checked in
+    /// `ieee80211_crypto_ccmp_decrypt`. During a group rekey the AP still
+    /// sends with the old index for a while; a shared counter would let
+    /// those packet numbers block the new key. The hardware decrypts but
+    /// does not check for replays.
+    rx_pn: [[u64; 17]; 5],
     /// Protected frames the hardware did not decrypt or whose ICV failed.
     rx_undecrypted: u32,
     /// Unprotected data frames dropped once the link is keyed.
@@ -4104,6 +4107,10 @@ struct LinkStats {
     rx_pn_replay: u32,
     /// Dropped 802.11 retransmissions (`dot11FrameDuplicateCount`).
     dup_rx: u32,
+    /// Data frames from a sender other than our AP (another cell).
+    rx_foreign: u32,
+    /// Data frames that did not fit into the BE ring and were dropped.
+    tx_ring_full: u32,
     /// Frames with the retry bit set (802.11 §9.2.4.1.8).
     ///
     /// This shows whether the AP has reason to slow down. `dup_rx` does
@@ -4121,6 +4128,11 @@ struct LinkStats {
     ro_held: [u8; RO_TIDS],
     /// When the head was last blocked (ms), for the timeout.
     ro_since: [u32; RO_TIDS],
+    /// The dialog token of the ADDBA request that opened the session
+    /// (`tid_rx_token`).
+    ro_token: [u8; RO_TIDS],
+    /// DELBA frames received from the AP (`ieee80211_process_delba`).
+    delba_rx: u32,
     /// Counters for the report.
     ro_sorted: u32,
     ro_old: u32,
@@ -4277,11 +4289,11 @@ impl Default for LinkStats {
         LinkStats {
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
             authorized: false, link_up_sent: false, extra_reported: 0,
-            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 17], rx_pn: [[0; 17]; 2], rx_undecrypted: 0, rx_plain_dropped: 0, rx_pn_replay: 0, dup_rx: 0,
+            llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 17], rx_pn: [[0; 17]; 5], rx_undecrypted: 0, rx_plain_dropped: 0, rx_pn_replay: 0, dup_rx: 0, rx_foreign: 0, tx_ring_full: 0,
             retry_rx: 0,
             ro_on: [false; RO_TIDS], ro_head: [0; RO_TIDS],
             ro_slot: [[0; RO_WIN]; RO_TIDS], ro_held: [0; RO_TIDS],
-            ro_since: [0; RO_TIDS], ro_sorted: 0, ro_old: 0,
+            ro_since: [0; RO_TIDS], ro_token: [0; RO_TIDS], delba_rx: 0, ro_sorted: 0, ro_old: 0,
             ro_timeout: 0, ro_full: 0, amsdu_rx: 0, amsdu_sub: 0, amsdu_bad: 0,
             rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
             gone: None, kicked: 0, last_reason: 0,
@@ -4814,8 +4826,6 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
         info.sec_type = 0x3; // AES
     }
 
-    link.seq = link.seq.wrapping_add(1) & 0x0fff;
-
     // tx.c:432-433 `if (info->flags & IEEE80211_TX_CTL_REQ_TX_STATUS)`. The
     // caller assigns the number (`rtw_tx_report_enable`) because it enters
     // it into its open list right after.
@@ -4844,8 +4854,16 @@ fn tx_8023(h: i32, trx: &mut pci::Trx, mgmt_buf: i32, link: &mut Link,
     // `rtw_hci_tx_kick_off` once afterwards. That is a precondition for
     // aggregation, not an MMIO saving: the hardware can only combine what
     // is already in the ring when it gets a transmit opportunity.
+    // The sequence number is used only by a frame that went into the ring.
+    // A number spent on a frame dropped at a full ring would leave a hole
+    // the AP's reorder buffer waits on (Linux stops the queue instead,
+    // pci.c:931, and the frame keeps waiting with no number yet).
     let queue = pci::Q_BE;
-    pci::tx_write(h, trx, mgmt_buf, queue, &mut info, &frame[..total])
+    let ok = pci::tx_write(h, trx, mgmt_buf, queue, &mut info, &frame[..total]);
+    if ok {
+        link.seq = link.seq.wrapping_add(1) & 0x0fff;
+    }
+    ok
 }
 
 /// The 802.11 header length of a data frame, which locates the LLC/SNAP
@@ -5526,8 +5544,10 @@ fn ccmp_pn_ok(ls: &mut LinkStats, f: &[u8]) -> bool {
         | (c[5] as u64) << 24 | (c[6] as u64) << 32 | (c[7] as u64) << 40;
     let qos = f[0] & (DOT11_STYPE_QOS << 4) != 0;
     let tid = if qos && f.len() >= 26 { (f[24] & 0x0f) as usize } else { 16 };
-    let group = f[4] & 0x01 != 0; // addr1 is a group address
-    let last = &mut ls.rx_pn[group as usize][tid];
+    // addr1 a group address: the group key named by the key ID in the
+    // CCMP header (rx.c `ieee80211_rx_h_decrypt`, `keyidx = keyid >> 6`).
+    let key = if f[4] & 0x01 != 0 { 1 + (c[3] >> 6) as usize } else { 0 };
+    let last = &mut ls.rx_pn[key][tid];
     if pn <= *last {
         return false;
     }
@@ -5704,10 +5724,17 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     static RXBUF7: Single<RxBuf> = Single::new([0; RX_BUF_LEN]);
     static ETHBUF: Single<[u8; 2048]> = Single::new([0; 2048]);
     static CMDBUF: Single<[u8; 2048]> = Single::new([0; 2048]);
-    RXBUF7.with(|rxbuf| ETHBUF.with(|ethbuf| CMDBUF.with(|cmdbuf| {
+    // rtw88 mac80211.c:308-313 `rtw_ops_configure_filter`: outside a scan
+    // mac80211 clears `FIF_BCN_PRBRESP_PROMISC`, and the chip then passes
+    // only beacons and probe responses of the BSSID in the port register.
+    // Every other phase (scan, connect) needs the beacons of all cells.
+    host::set32(h, REG_RCR, BIT_CBSSID_BCN);
+    let end = RXBUF7.with(|rxbuf| ETHBUF.with(|ethbuf| CMDBUF.with(|cmdbuf| {
         link_pump_in(h, hal, trx, mgmt_buf, link, ls, mac, frist_us, d, h2c, e,
                      t_pwr, caps, fw_feature, rxbuf, ethbuf, cmdbuf)
-    })))
+    })));
+    host::clr32(h, REG_RCR, BIT_CBSSID_BCN);
+    end
 }
 
 fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
@@ -5940,6 +5967,15 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 {
                     acc.addba_resp = sta::parse_addba_resp(f);
                 }
+                if act == Some((DOT11_ACTION_CAT_BA, DOT11_ACTION_DELBA)) {
+                    if let Some((tid, initiator)) = sta::parse_delba(f) {
+                        if initiator {
+                            acc.delba_rx |= 1 << tid;
+                        } else {
+                            acc.delba_tx |= 1 << tid;
+                        }
+                    }
+                }
             }
             if let Some(r) = disconnect_reason(f, &bssid) {
                 if ls.gone.is_none() {
@@ -5959,10 +5995,26 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             // The whole field is compared, not only the sequence number: the
             // lower four bits are the fragment number, and two fragments of
             // the same frame are not duplicates.
+            // `ieee80211_rx_h_check` (rx.c:1500-1542): a data frame is
+            // class 3 and taken only from the station we are associated
+            // with. Without its own BSSID filter the hardware passes group
+            // data of every cell on the channel; such a frame must not reach
+            // the duplicate cache or the reorder window below, whose state
+            // belongs to our AP alone.
+            if f.len() >= 24 && f[0] & 0x0c == DOT11_FC_TYPE_DATA
+                && f[10..16] != bssid
+            {
+                ls.rx_foreign += 1;
+                return;
+            }
             let mut ro_tid = RO_TIDS;
             let mut ro_sn = 0u16;
             let mut ro_have = false;
-            if f.len() >= 24 {
+            // rx.c:1374-1376 and 1468: a group-addressed frame is neither
+            // reordered nor checked against the unicast duplicate cache; the
+            // AP numbers group frames with a counter of their own.
+            let group_addr = f.len() >= 24 && f[4] & 0x01 != 0;
+            if f.len() >= 24 && !group_addr {
                 let fc = u16::from_le_bytes([f[0], f[1]]);
                 if fc & 0x000c == 0x0008 {
                     let is_qos = fc & 0x0080 != 0;
@@ -5984,7 +6036,10 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     // are the fragment number; a fragment belongs to
                     // defragmentation, which mac80211 runs separately and
                     // before the buffer (`ieee80211_rx_h_defragment`).
-                    if is_qos && idx < RO_TIDS && sc & 0x000f == 0 {
+                    // rx.c:1406: a frame sent with No Ack policy is not
+                    // part of a block ack session.
+                    let no_ack = is_qos && (f[24] >> 5) & 0x03 == 1;
+                    if is_qos && idx < RO_TIDS && sc & 0x000f == 0 && !no_ack {
                         ro_tid = idx;
                         ro_sn = (sc >> 4) as u16;
                         ro_have = true;
@@ -6167,6 +6222,21 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // ── Allow aggregation ────────────────────────────────────
         // The AP asks with an ADDBA request and repeats it until answered;
         // it cannot aggregate until then.
+        // ht.c:485-506 `ieee80211_process_delba`: the AP as originator ends
+        // our receive session, as recipient our transmit session. Both
+        // before the ADDBA requests of this pass, which may open a new one.
+        for t in 0..16usize {
+            if acc.delba_rx & (1 << t) != 0 {
+                ls.delba_rx += 1;
+                ro_close(ls, t);
+            }
+        }
+        if acc.delba_tx & (1 << link.ba_tx.tid) != 0 {
+            ls.delba_rx += 1;
+            // `AGG_STOP_PEER_REQUEST`: the session is gone; asking again
+            // later is allowed, as mac80211 does from rate control.
+            link.ba_tx = BaTx::new();
+        }
         ls.addba_drop += acc.addba_drop;
         for ai in 0..acc.n_addba {
             let req = acc.addba[ai];
@@ -6186,7 +6256,19 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     // from this frame on the AP aggregates and reordering is
                     // needed. Earlier would leave a head without a session,
                     // later a hole at the start.
+                    // agg-rx.c:352-381: the same dialog token on a running
+                    // session is a repeat and changes nothing; another
+                    // token ends the old session first, so its held frames
+                    // free their pool slots.
+                    let t = req.tid as usize;
+                    if t < RO_TIDS && ls.ro_on[t] && ls.ro_token[t] == req.dialog_token {
+                        continue;
+                    }
+                    ro_close(ls, t);
                     ro_open(ls, req.tid, req.ssn);
+                    if t < RO_TIDS {
+                        ls.ro_token[t] = req.dialog_token;
+                    }
                     if ls.addba_resp <= 3 {
                         host::loud_begin();
                         host::print("[rtl8822ce] ADDBA angenommen: TID ");
@@ -6492,7 +6574,11 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         // RSC the AP gave with it (`ieee80211_key_alloc`).
                         let rsc = &cmd[5 + key_len..5 + key_len + 6];
                         let start = rsc.iter().rev().fold(0u64, |a, &b| a << 8 | b as u64);
-                        ls.rx_pn[group as usize] = [if group { start } else { 0 }; 17];
+                        if group {
+                            ls.rx_pn[1 + (key_idx & 3) as usize] = [start; 17];
+                        } else {
+                            ls.rx_pn[0] = [0; 17];
+                        }
                         if group {
                             ls.gtk_set += 1;
                         } else {
@@ -6595,6 +6681,8 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                         d.stats.tx_unicast += n as u64;
                         d.stats.tx_cnt += 1;
                     }
+                } else {
+                    ls.tx_ring_full += 1;
                 }
             }
             if gestapelt > 0 {
@@ -7264,6 +7352,8 @@ fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
               passive_5g: bool, dwell_ms: u32,
               found: &mut Vec<Bss>) -> u32 {
     let mac = link.mac;
+    // A scan listens to every cell (`FIF_BCN_PRBRESP_PROMISC`).
+    host::clr32(h, REG_RCR, BIT_CBSSID_BCN);
 
     // (1) doze
     let mut nf = [0u8; 32];
@@ -7330,6 +7420,7 @@ fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &nf[..n]) {
         pci::tx_kick_off_queue(h, trx, q);
     }
+    host::set32(h, REG_RCR, BIT_CBSSID_BCN);
     ((host::now_us() - t0) / 1000) as u32
 }
 
@@ -8094,6 +8185,19 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.eapol_tx, &mut b, &mut n);
     put("  schluessel ", &mut b, &mut n);
     num(ls.keys_set, &mut b, &mut n);
+    // What the receive path drops before the IP stack, and why.
+    put("\nverworfen: fremde zelle ", &mut b, &mut n);
+    num(ls.rx_foreign, &mut b, &mut n);
+    put("  klartext ", &mut b, &mut n);
+    num(ls.rx_plain_dropped, &mut b, &mut n);
+    put("  nicht entschluesselt ", &mut b, &mut n);
+    num(ls.rx_undecrypted, &mut b, &mut n);
+    put("  replay ", &mut b, &mut n);
+    num(ls.rx_pn_replay, &mut b, &mut n);
+    put("  delba ", &mut b, &mut n);
+    num(ls.delba_rx, &mut b, &mut n);
+    put("  senden ring voll ", &mut b, &mut n);
+    num(ls.tx_ring_full, &mut b, &mut n);
     // Link watchdog and roaming: a probe followed by a recovery is a case in
     // which the link would otherwise have been dropped.
     if link.roam.scans > 0 || link.roam.roams > 0 {
