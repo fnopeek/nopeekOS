@@ -522,6 +522,10 @@ fn intent_worker_task(arg: u64) {
     // Redirect kprint output to this terminal
     crate::shade::terminal::set_output_redirect(job.terminal_idx);
 
+    // A Ctrl+C from before this intent (a copy in a text field sets the
+    // flag too) must not cancel it.
+    clear_cancel();
+
     // Get vault reference
     let vault_ptr = VAULT_REF.load(AtOrd::Acquire);
     if !vault_ptr.is_null() {
@@ -1576,10 +1580,21 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_action(action);
                 }
 
-                // Typed keys are dropped — except while the intent asks for
+                // Typed keys are dropped, except while the intent asks for
                 // one (`confirm`, `read_secret`): it reads the same buffer.
+                // Window keybinds still reach shade, so a busy terminal does
+                // not hold the desktop. Mod+Q is not one of them: closing
+                // frees the terminal the worker is still writing to.
+                // Ctrl+C was already turned into a cancel by the interrupt.
                 if PROMPTS_WAITING.load(core::sync::atomic::Ordering::Acquire) == 0 {
-                    while let Some(_key) = crate::keyboard::read_key() {}
+                    while let Some(event) = crate::keyboard::read_event() {
+                        let close = event.modifiers.super_key && matches!(
+                            event.key,
+                            crate::input::KeyCode::Char(b'q') | crate::input::KeyCode::Char(b'Q'));
+                        if !close {
+                            crate::shade::input::try_keybind_event(&event);
+                        }
+                    }
                 }
 
                 // Idle until the next IRQ (≤10 ms via the per-core 100 Hz

@@ -285,6 +285,15 @@ fn poll_socks(out: &mut Out) {
 
 /// Look `name` up, blocking until the resolver has an outcome.
 pub fn lookup(name: &str) -> Outcome {
+    match lookup_until(name, false) {
+        Some(o) => o,
+        None => Outcome::Failed(net_core::dns::Failure::Timeout),
+    }
+}
+
+/// `lookup`, which with `cancellable` also ends on Ctrl+C: the query is
+/// given up and its sockets closed, and the result is `None`.
+fn lookup_until(name: &str, cancellable: bool) -> Option<Outcome> {
     let routable = super::arp::our_ip() != [0; 4];
     let mtu = super::ipv4::mtu() as usize;
     let mut out = Out::default();
@@ -293,11 +302,16 @@ pub fn lookup(name: &str) -> Outcome {
         r.mtu = mtu;
         r.query(name, now(), &mut crate::csprng::random_u64, &mut out)
     });
-    let Some(q) = q else { return Outcome::NxDomain };
+    let Some(q) = q else { return Some(Outcome::NxDomain) };
     loop {
         run(core::mem::take(&mut out));
         if let Some(o) = with(|r| r.take(q)) {
-            return o;
+            return Some(o);
+        }
+        if cancellable && crate::intent::cancel_requested() {
+            with(|r| r.cancel(q, &mut out));
+            run(out);
+            return None;
         }
         super::poll();
         poll_socks(&mut out);
@@ -317,12 +331,25 @@ pub fn lookup(name: &str) -> Outcome {
 
 /// Resolve a hostname to an IPv4 address. Blocking.
 pub fn resolve(name: &str) -> Option<[u8; 4]> {
+    resolve_with(name, false)
+}
+
+/// `resolve` for an intent in the foreground: Ctrl+C ends the wait.
+pub fn resolve_cancellable(name: &str) -> Option<[u8; 4]> {
+    resolve_with(name, true)
+}
+
+fn resolve_with(name: &str, cancellable: bool) -> Option<[u8; 4]> {
     if net_core::dns::normalize(name).is_none() {
         crate::kprintln!("[npk] dns: {}: not a valid name", name);
         return None;
     }
     let t0 = now();
-    match lookup(name) {
+    let Some(outcome) = lookup_until(name, cancellable) else {
+        crate::kprintln!("[npk] dns: {}: cancelled ({} ms)", name, (now() - t0) / 1000);
+        return None;
+    };
+    match outcome {
         Outcome::Addrs(a, _) if !a.is_empty() => Some(a[0]),
         o => {
             let why = match o {

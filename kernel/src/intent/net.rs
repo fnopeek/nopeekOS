@@ -17,7 +17,7 @@ pub fn intent_ping(args: &str) {
     let ip = if let Some(ip) = parse_ip(host) {
         ip
     } else {
-        match crate::net::dns::resolve(host) {
+        match crate::net::dns::resolve_cancellable(host) {
             Some(ip) => {
                 kprintln!("[npk] {} -> {}.{}.{}.{}", host, ip[0], ip[1], ip[2], ip[3]);
                 ip
@@ -102,7 +102,7 @@ pub fn intent_traceroute(args: &str) {
     let ip = if let Some(ip) = parse_ip(target) {
         ip
     } else {
-        match crate::net::dns::resolve(target) {
+        match crate::net::dns::resolve_cancellable(target) {
             Some(ip) => {
                 kprintln!("[npk] {} -> {}.{}.{}.{}", target, ip[0], ip[1], ip[2], ip[3]);
                 ip
@@ -699,7 +699,7 @@ pub fn intent_resolve(args: &str) {
         kprintln!("[npk] Usage: resolve <hostname>");
         return;
     }
-    match crate::net::dns::resolve(name) {
+    match crate::net::dns::resolve_cancellable(name) {
         Some(ip) => kprintln!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3]),
         None => kprintln!("[npk] Could not resolve '{}'", name),
     }
