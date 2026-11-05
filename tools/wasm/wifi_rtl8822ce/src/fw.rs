@@ -380,6 +380,39 @@ pub fn scan_notify(h: i32, st: &mut H2cState, start: bool) -> bool {
     send_h2c_command(h, st, &pkt)
 }
 
+/// fw.c:804-853 `rtw_fw_beacon_filter_config`.
+///
+/// The firmware watches the AP's beacons itself and reports loss,
+/// connection loss and signal changes as `C2H_BCN_FILTER_NOTIFY`. The CQM
+/// threshold and hysteresis are the defaults; nothing here sets
+/// `cqm_rssi_thold`.
+pub fn beacon_filter_config(h: i32, st: &mut H2cState, connect: bool,
+                            bssid: &[u8; 6], mac_id: u8, beacon_int: u16) -> bool {
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    if !connect {
+        set_cmd_id_class(&mut pkt, H2C_CMD_BCN_FILTER_OFFLOAD_P1);
+        h2c_set(&mut pkt, 0, 1 << 16, 0); // ENABLE
+        return send_h2c_command(h, st, &pkt);
+    }
+    set_cmd_id_class(&mut pkt, H2C_CMD_BCN_FILTER_OFFLOAD_P0);
+    pkt[1..7].copy_from_slice(bssid);
+    if !send_h2c_command(h, st, &pkt) {
+        return false;
+    }
+    let (rssi_min, rssi_max, rssi_offset) = (0i32, 100i32, 100i32);
+    let thold = (RTW_DEFAULT_CQM_THOLD + rssi_offset).clamp(rssi_min, rssi_max);
+    let mut pkt = [0u8; H2C_PKT_SIZE];
+    set_cmd_id_class(&mut pkt, H2C_CMD_BCN_FILTER_OFFLOAD_P1);
+    h2c_set(&mut pkt, 0, 1 << 16, 1); // ENABLE
+    h2c_set(&mut pkt, 0, 0x00e0_0000, BCN_FILTER_OFFLOAD_MODE_DEFAULT); // OFFLOAD_MODE GENMASK(23, 21)
+    h2c_set(&mut pkt, 0, 0xff00_0000, thold as u32); // THRESHOLD GENMASK(31, 24)
+    h2c_set(&mut pkt, 1, 0x0000_000f, BCN_LOSS_CNT); // BCN_LOSS_CNT GENMASK(3, 0)
+    h2c_set(&mut pkt, 0, 0x0000_ff00, mac_id as u32); // MACID GENMASK(15, 8)
+    h2c_set(&mut pkt, 0, 0x001e_0000, RTW_DEFAULT_CQM_HYST); // HYST GENMASK(20, 17)
+    h2c_set(&mut pkt, 1, 0x0000_3ff0, beacon_int as u32); // BCN_INTERVAL GENMASK(13, 4)
+    send_h2c_command(h, st, &pkt)
+}
+
 /// fw.c:437-446 `rtw_fw_inform_rfk_status`, command 0x6d, mailbox.
 pub fn inform_rfk_status(h: i32, st: &mut H2cState, start: bool) -> bool {
     let mut pkt = [0u8; H2C_PKT_SIZE];

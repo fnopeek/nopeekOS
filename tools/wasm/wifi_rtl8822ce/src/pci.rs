@@ -983,6 +983,27 @@ pub fn tx_pending(h: i32, trx: &Trx, queue: usize) -> u32 {
     }
 }
 
+/// pci.c:712-735 `__pci_flush_queue` for each ring, as
+/// `__rtw_pci_flush_queues` does for all of them: wait briefly
+/// until the chip has fetched every descriptor. BCN, H2C and HI0 are left
+/// out as in Linux.
+pub fn flush_queues(h: i32, trx: &Trx) {
+    for q in 0..N_TX_QUEUES {
+        if q == Q_BCN || q == Q_H2C || q == Q_HI0 {
+            continue;
+        }
+        let Some(idx_reg) = TXQ[q].idx else { continue };
+        // pci.c:724-730: thirty polls with a microsecond between them.
+        for _ in 0..30 {
+            let cur_rp = (host::r32(h, idx_reg) >> 16) & TRX_BD_IDX_MASK;
+            if cur_rp == trx.tx[q].wp {
+                break;
+            }
+            host::delay_us(1);
+        }
+    }
+}
+
 /// pci.c:915-1021 `rtw_pci_tx_isr`, the part that advances the read
 /// pointer. Without it `r.rp` stands still and `avail_desc` slowly counts
 /// the ring full although the chip has fetched everything.

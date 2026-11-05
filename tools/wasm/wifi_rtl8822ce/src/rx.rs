@@ -521,6 +521,10 @@ pub struct WdAcc {
     /// session).
     pub delba_rx: u16,
     pub delba_tx: u16,
+    /// `C2H_BCN_FILTER_NOTIFY`: type, threshold direction, signal in dBm.
+    pub bcn_notify: Option<(u8, bool, i32)>,
+    /// `C2H_SCAN_RESULT`: the channel density the firmware measured.
+    pub scan_density: Option<u8>,
     /// rx.c:14-32 `rtw_rx_stats`: bytes and frames, unicast only.
     pub rx_unicast: u64,
     pub rx_cnt: u64,
@@ -542,7 +546,7 @@ impl WdAcc {
             addba: [crate::sta::AddbaReq::default(); 4], n_addba: 0,
             addba_drop: 0, heard_ap: false, beacon_dbm: None,
             beacon_ohne_csa: false, csa: None,
-            addba_resp: None, delba_rx: 0, delba_tx: 0,
+            addba_resp: None, delba_rx: 0, delba_tx: 0, bcn_notify: None, scan_density: None,
             rx_unicast: 0, rx_cnt: 0, bw_cnt: [0; 4],
         }
     }

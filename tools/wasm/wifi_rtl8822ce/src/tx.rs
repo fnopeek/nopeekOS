@@ -76,24 +76,39 @@ fn bits(v: u32, mask: u32) -> u32 {
     (v << mask.trailing_zeros()) & mask
 }
 
-/// tx.c:44-58 `rtw_get_mgmt_rate`.
-///
-/// Without vif, without `basic_rates`, with `ignore_rate` or with
-/// `RTW_FLAG_FORCE_LOWEST_RATE` the result is `lowest_rate`. `basic_rates`
-/// come from `bss_conf`, which this driver does not track, so the `__ffs`
-/// branch is not ported.
-fn get_mgmt_rate(lowest_rate: u8) -> u8 {
-    lowest_rate
+/// `vif->bss_conf.basic_rates` of the cell we are linked with, as a bitmap
+/// in the order of the 2.4 GHz rate table (bit 0 = 1 Mbit/s ... bit 11 =
+/// 54 Mbit/s), which is also the order of the `DESC_RATE` values. Zero
+/// while not linked.
+static BASIC_RATES: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
+
+/// Set while a link runs, zero when it ends.
+pub fn set_basic_rates(rates: u16) {
+    BASIC_RATES.store(rates, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// tx.c:265-276 `rtw_get_mgmt_rate`: the lowest basic rate of the cell,
+/// else `lowest_rate`. `__ffs(basic_rates) + lowest_rate` indexes the
+/// band's rate table; the 5 GHz table is the 2.4 GHz one without the four
+/// CCK rates, so in the 2.4 GHz order both come out as the bit position.
+/// `RTW_FLAG_FORCE_LOWEST_RATE` is a debugfs switch and not ported.
+fn get_mgmt_rate(lowest_rate: u8, ignore_rate: bool) -> u8 {
+    let basic = BASIC_RATES.load(core::sync::atomic::Ordering::Relaxed);
+    if basic == 0 || ignore_rate {
+        return lowest_rate;
+    }
+    (basic.trailing_zeros() as u8).max(lowest_rate)
 }
 
 /// tx.c:60-77 `rtw_tx_pkt_info_update_rate`.
-fn pkt_info_update_rate(info: &mut TxPktInfo, current_band_type: u8) {
+fn pkt_info_update_rate(info: &mut TxPktInfo, current_band_type: u8,
+                        ignore_rate: bool) {
     if current_band_type == RTW_BAND_2G {
         info.rate_id = RTW_RATEID_B_20M;
-        info.rate = get_mgmt_rate(DESC_RATE1M);
+        info.rate = get_mgmt_rate(DESC_RATE1M, ignore_rate);
     } else {
         info.rate_id = RTW_RATEID_G;
-        info.rate = get_mgmt_rate(DESC_RATE6M);
+        info.rate = get_mgmt_rate(DESC_RATE6M, ignore_rate);
     }
     info.use_rate = true;
     info.dis_rate_fallback = true;
@@ -109,7 +124,8 @@ pub fn rsvd_page_pkt_info_update(payload: &[u8], current_band_type: u8) -> TxPkt
     let mut info = TxPktInfo::default();
 
     // type == RSVD_BEACON -> qsel is not set here (pci.c does it).
-    pkt_info_update_rate(&mut info, current_band_type);
+    // tx.c:466: reserved pages ignore the basic rates.
+    pkt_info_update_rate(&mut info, current_band_type, true);
 
     let a1 = &payload[4..10.min(payload.len())];
     let bcast = a1.len() == 6 && a1.iter().all(|&b| b == 0xff);
@@ -198,7 +214,8 @@ pub fn write_data_h2c_get(size: u32) -> TxPktInfo {
 
 /// tx.c:391-398 `rtw_tx_mgmt_pkt_info_update`
 fn mgmt_pkt_info_update(info: &mut TxPktInfo, current_band_type: u8) {
-    pkt_info_update_rate(info, current_band_type);
+    // tx.c:329
+    pkt_info_update_rate(info, current_band_type, false);
     info.dis_qselseq = true;
     info.en_hwseq = true;
     info.hw_ssn_sel = 0;

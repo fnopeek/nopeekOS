@@ -351,6 +351,10 @@ pub const REG_EDCA_VO_PARAM: u32 = 0x0500; // reg.h:447
 pub const REG_EDCA_VI_PARAM: u32 = 0x0504; // reg.h:448
 pub const REG_EDCA_BE_PARAM: u32 = 0x0508; // reg.h:449
 pub const REG_EDCA_BK_PARAM: u32 = 0x050C; // reg.h:450
+pub const BIT_MASK_TXOP_LMT: u32 = 0x07FF_0000; // reg.h:451
+pub const BIT_MASK_CWMAX: u32 = 0x0000_F000; // reg.h:452
+pub const BIT_MASK_CWMIN: u32 = 0x0000_0F00; // reg.h:453
+pub const BIT_MASK_AIFS: u32 = 0x0000_00FF; // reg.h:454
 pub const REG_PIFS: u32 = 0x0512; // reg.h:456
 pub const REG_TX_PTCL_CTRL: u32 = 0x0520; // reg.h:463
 pub const BIT_SIFS_BK_EN: u32 = 1 << 12; // reg.h:465
@@ -1371,6 +1375,18 @@ pub const BIT_STATIS_BT_EN: u32 = 1 << 2; // reg.h:570
 pub const H2C_CMD_RSSI_MONITOR: u32 = 0x42; // fw.h:559
 pub const H2C_CMD_WL_PHY_INFO: u32 = 0x58; // fw.h:563
 pub const H2C_CMD_ADAPTIVITY: u32 = 0x5A; // fw.h:565
+
+// ── rtw_fw_beacon_filter_config (fw.c:804-853) ───────────────────
+pub const H2C_CMD_BCN_FILTER_OFFLOAD_P0: u32 = 0x56; // fw.h:561
+pub const H2C_CMD_BCN_FILTER_OFFLOAD_P1: u32 = 0x57; // fw.h:562
+pub const BCN_LOSS_CNT: u32 = 10; // fw.h:27
+pub const BCN_FILTER_NOTIFY_SIGNAL_CHANGE: u8 = 0; // fw.h:28
+pub const BCN_FILTER_CONNECTION_LOSS: u8 = 1; // fw.h:29
+pub const BCN_FILTER_CONNECTED: u8 = 2; // fw.h:30
+pub const BCN_FILTER_NOTIFY_BEACON_LOSS: u8 = 3; // fw.h:31
+pub const RTW_DEFAULT_CQM_THOLD: i32 = -70; // fw.h:32
+pub const RTW_DEFAULT_CQM_HYST: u32 = 4; // fw.h:33
+pub const BCN_FILTER_OFFLOAD_MODE_DEFAULT: u32 = 0; // fw.h:167
 
 // ── rtw8822c_adaptivity (rtw8822c.c:2178-2196) ───────────────────
 pub const EDCCA_TH_L2H_LB: i8 = 48; // main.h:1663

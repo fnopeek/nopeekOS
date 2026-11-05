@@ -770,11 +770,12 @@ const WLAN_STATUS_SUCCESS: u16 = 0;
 
 const BSS_LEER: Bss = Bss {
     bssid: [0; 6], ssid: [0; 32], ssid_len: 0, channel: 0, best: -128,
-    beacons: 0, resps: 0, capability: 0, rsn: [0; 64], rsn_len: 0,
+    beacons: 0, resps: 0, capability: 0, beacon_int: 0, rsn: [0; 64], rsn_len: 0,
     ht_param: 0, ht_op_seen: false, ht_cap: 0, vht_chanwidth: 0,
     vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
     ap_vht_cap: 0, ap_vht_cap_seen: false,
     bss_load: 0, bss_load_seen: false, wmm: false, wpa1: false,
+    country: [0; 2],
 };
 
 const BSSID: [u8; 6] = [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff];

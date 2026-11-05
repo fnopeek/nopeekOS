@@ -356,15 +356,25 @@ fn cck_pd_init(dm: &mut DmInfo) {
 }
 /// phy.h:193
 
-/// phy.c:175-200 `rtw_phy_adaptivity_set_mode`.
-///
-/// `rtwdev->regd.dfs_region` is `NL80211_DFS_UNSET` before the first
-/// channel is chosen, and the `default` branch then sets
-/// `RTW_EDCCA_NORMAL` without `l2h_th_ini`. The two special cases (ETSI,
-/// Japan) need a regulatory domain from `rtw_regd_init`, which is not
-/// ported.
-fn adaptivity_set_mode(dm: &mut DmInfo) {
-    dm.edcca_mode = 0; // RTW_EDCCA_NORMAL (main.h:1683)
+/// rtw8822c.c:5394-5395 `.l2h_th_ini_cs`, `.l2h_th_ini_ad`.
+const L2H_TH_INI_CS: u8 = 60;
+const L2H_TH_INI_AD: u8 = 45;
+
+/// phy.c:175-200 `rtw_phy_adaptivity_set_mode`, with
+/// `rtwdev->regd.dfs_region` as the argument. The regulatory notifier
+/// calls it whenever the country in force changes (regd.c:461-489).
+pub fn adaptivity_set_mode(dm: &mut DmInfo, dfs_region: u8) {
+    match dfs_region {
+        crate::regdb::NL80211_DFS_ETSI => {
+            dm.edcca_mode = 1; // RTW_EDCCA_ADAPTIVITY (main.h:1684)
+            dm.l2h_th_ini = L2H_TH_INI_AD;
+        }
+        crate::regdb::NL80211_DFS_JP => {
+            dm.edcca_mode = 1;
+            dm.l2h_th_ini = L2H_TH_INI_CS;
+        }
+        _ => dm.edcca_mode = 0, // RTW_EDCCA_NORMAL (main.h:1683)
+    }
 }
 
 /// phy.c:2245-2257 `rtw_phy_set_edcca_th`
@@ -403,7 +413,8 @@ pub fn adaptivity(h: i32, dm: &DmInfo) {
 /// phy.c:202-209 `rtw_phy_adaptivity_init` + `chip->ops->adaptivity_init`
 /// = rtw8822c.c `rtw8822c_adaptivity_init`.
 fn adaptivity_init(h: i32, dm: &mut DmInfo) {
-    adaptivity_set_mode(dm);
+    // regd.c:361: `dfs_region` starts unset; the notifier sets it later.
+    adaptivity_set_mode(dm, crate::regdb::NL80211_DFS_UNSET);
 
     set_edcca_th(h, RTW8822C_EDCCA_MAX, RTW8822C_EDCCA_MAX);
     // mac edcca state setting

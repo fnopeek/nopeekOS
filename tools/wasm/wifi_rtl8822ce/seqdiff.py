@@ -151,6 +151,11 @@ DEVIATION = {
         "bei uns als Kommentar, damit er nicht wie eine Auslassung "
         "aussieht -- und nicht als Code, weil ein Zweig, den niemand "
         "erreicht, beim naechsten Leser Fragen aufwirft.",
+    "__pci_flush_queue":
+        "__pci_get_hw_tx_ring_rp ist eingesetzt statt aufgerufen: ein "
+        "32-Bit-Lesezugriff auf das Indexregister des Rings, oben die "
+        "Lesezeiger-Haelfte. Linux' Rumpf ruft nur die Hilfsfunktion, der "
+        "Zaehler sieht dort keinen Zugriff.",
     "__rtw_mac_flush_prio_queue":
         "Linux schreibt beide Breiten aus (`wsize ? rtw_read16 : "
         "rtw_read8`) und der Zaehler sieht deshalb VIER Lesezugriffe; "
@@ -196,6 +201,7 @@ HEX_SKIP = {
     "rtw_fw_send_rssi_info": "wie rtw_fw_send_general_info.",
     "rtw_fw_update_wl_phy_info": "wie rtw_fw_send_general_info.",
     "rtw_fw_adaptivity": "wie rtw_fw_send_general_info.",
+    "rtw_fw_beacon_filter_config": "wie rtw_fw_send_general_info.",
     "rtw_coex_monitor_bt_ctr":
         "Linux zieht die zwei Haelften mit FIELD_GET(MASKLWORD/MASKHWORD, "
         "tmp) heraus -- Makros ohne eine Hexzahl. Bei uns stehen dieselben "

@@ -51,6 +51,7 @@ mod tx;
 mod vif;
 mod txpower;
 mod regs;
+mod regdb;
 use regs::*;
 use alloc::vec::Vec;
 use npk_sys::cell::Single;
@@ -862,6 +863,7 @@ fn command_loop(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     let mut calibrated = false;
     let mut link: Option<Link> = None;
     let mut lstats = LinkStats::default();
+    lstats.own_mac = e.addr;
     let mut linked: Option<vif::Vif> = None;
     let mut caps = sta::PeerCaps::default();
 
@@ -2055,6 +2057,8 @@ struct Bss {
     resps: u16,
     /// Capability field from beacon/probe response (802.11 §9.4.1.4).
     capability: u16,
+    /// Beacon interval in TU (802.11 §9.4.1.3), `bss_conf.beacon_int`.
+    beacon_int: u16,
     /// The AP's RSN element, raw. The association request picks the AP's
     /// suites from it; otherwise the AP rejects with status 43.
     rsn: [u8; 64],
@@ -2111,6 +2115,10 @@ struct Bss {
     /// A WPA (version 1) element: vendor 00:50:f2 type 1, as mac80211
     /// `parse.c` tells it from WMM. Only for reporting the network as WPA.
     wpa1: bool,
+    /// The first two characters of the Country element (id 7), zero
+    /// without one: what cfg80211 hands to `regulatory_hint_country_ie`
+    /// on connect (sme.c `__cfg80211_connect_result`).
+    country: [u8; 2],
 }
 
 /// Cells one scan list holds at most; the list grows up to it. Protection
@@ -2138,11 +2146,12 @@ impl Bss {
     const EMPTY: Bss = Bss {
         bssid: [0; 6], ssid: [0; 32], ssid_len: 0,
         channel: 0, best: -128, beacons: 0, resps: 0,
-        capability: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
+        capability: 0, beacon_int: 0, rsn: [0; 64], rsn_len: 0, ht_param: 0,
         ht_op_seen: false, ht_cap: 0,
         vht_chanwidth: 0, vht_cch0: 0, vht_cch1: 0, vht_op_seen: false,
         ap_vht_cap: 0, ap_vht_cap_seen: false,
         bss_load: 0, bss_load_seen: false, wmm: false, wpa1: false,
+        country: [0; 2],
     };
 
     fn width(&self) -> CellWidth {
@@ -2978,6 +2987,7 @@ fn record_bss(found: &mut Vec<Bss>, f: &[u8], ch: u8,
     // 24 header + 8 timestamp + 2 beacon interval, then the capability
     // field, then the elements.
     if f.len() >= 36 {
+        e.beacon_int = u16::from_le_bytes([f[32], f[33]]);
         e.capability = u16::from_le_bytes([f[34], f[35]]);
     }
     let mut i = 36;
@@ -3008,6 +3018,10 @@ fn record_bss(found: &mut Vec<Bss>, f: &[u8], ch: u8,
             11 if len >= 3 => {
                 e.bss_load = f[i + 4];
                 e.bss_load_seen = true;
+            }
+            // 7 = Country (802.11 §9.4.2.8): the country string first.
+            7 if len >= 2 => {
+                e.country = [f[i + 2], f[i + 3]];
             }
             45 if len >= 2 => {
                 e.ht_cap = u16::from_le_bytes([f[i + 2], f[i + 3]]);
@@ -4126,13 +4140,23 @@ struct LinkStats {
     ro_slot: [[u8; RO_WIN]; RO_TIDS],
     /// How many frames of this TID are currently held.
     ro_held: [u8; RO_TIDS],
-    /// When the head was last blocked (ms), for the timeout.
-    ro_since: [u32; RO_TIDS],
+    /// When each held frame arrived (ms), `reorder_time` in mac80211.
+    ro_time: [[u32; RO_WIN]; RO_TIDS],
+    /// Block Ack Requests from the AP (`ieee80211_rx_h_ctrl`).
+    bar_rx: u32,
     /// The dialog token of the ADDBA request that opened the session
     /// (`tid_rx_token`).
     ro_token: [u8; RO_TIDS],
     /// DELBA frames received from the AP (`ieee80211_process_delba`).
     delba_rx: u32,
+    /// `C2H_BCN_FILTER_NOTIFY` by type: beacon loss, connection loss, and
+    /// signal changes across the CQM threshold with the last signal.
+    fw_beacon_loss: u32,
+    fw_conn_loss: u32,
+    /// Off-channel flushes whose priority queues did not drain in 100 ms.
+    flush_timeout: u32,
+    cqm_events: u32,
+    cqm_last_dbm: i32,
     /// Counters for the report.
     ro_sorted: u32,
     ro_old: u32,
@@ -4279,6 +4303,11 @@ struct LinkStats {
     /// would mean `dm.tx_rate` is 0 = CCK 1M, which makes
     /// `config_swing_table` pick the CCK curve of TX power tracking.
     ra_rpt_n: u32,
+    /// Our address, for the source check of `ieee80211_data_to_8023`.
+    own_mac: [u8; 6],
+    /// Data frames dropped by the DS bit and source checks of the 802.3
+    /// conversion.
+    rx_ds_drop: u32,
 }
 
 impl Default for LinkStats {
@@ -4287,13 +4316,14 @@ impl Default for LinkStats {
     /// numbers and `bool`.
     fn default() -> Self {
         LinkStats {
+            own_mac: [0; 6], rx_ds_drop: 0,
             eapol_rx: 0, eapol_tx: 0, keys_set: 0, data_rx: 0, data_tx: 0,
             authorized: false, link_up_sent: false, extra_reported: 0,
             llc_miss: 0, rx_wd: 0, last_seq_ctrl: [u32::MAX; 17], rx_pn: [[0; 17]; 5], rx_undecrypted: 0, rx_plain_dropped: 0, rx_pn_replay: 0, dup_rx: 0, rx_foreign: 0, tx_ring_full: 0,
             retry_rx: 0,
             ro_on: [false; RO_TIDS], ro_head: [0; RO_TIDS],
             ro_slot: [[0; RO_WIN]; RO_TIDS], ro_held: [0; RO_TIDS],
-            ro_since: [0; RO_TIDS], ro_token: [0; RO_TIDS], delba_rx: 0, ro_sorted: 0, ro_old: 0,
+            ro_time: [[0; RO_WIN]; RO_TIDS], bar_rx: 0, ro_token: [0; RO_TIDS], delba_rx: 0, fw_beacon_loss: 0, fw_conn_loss: 0, flush_timeout: 0, cqm_events: 0, cqm_last_dbm: 0, ro_sorted: 0, ro_old: 0,
             ro_timeout: 0, ro_full: 0, amsdu_rx: 0, amsdu_sub: 0, amsdu_bad: 0,
             rekey_rx: 0, rekey_tx: 0, gtk_set: 0,
             gone: None, kicked: 0, last_reason: 0,
@@ -4681,6 +4711,10 @@ impl BaTx {
 /// State of a running link, stage 6a.
 struct Link {
     bssid: [u8; 6],
+    /// The Country element's code from the cell's beacon, zero without one.
+    country: [u8; 2],
+    /// The cell's beacon interval in TU, zero when unknown.
+    beacon_int: u16,
     mac: [u8; 6],
     channel: u8,
     /// The cell name. Needed for the directed probe request
@@ -4700,7 +4734,9 @@ struct Link {
     /// starts at one and increments per frame; the AP drops a repeated
     /// number as a replay.
     tx_pn: u64,
-    cam: [sec::CamEntry; 4],
+    cam: [sec::CamEntry; PTK_SLOT_FIRST as usize + 1],
+    /// The CAM slot of the pairwise key in use.
+    ptk_slot: Option<u8>,
     /// Our block ack session in the transmit direction.
     ba_tx: BaTx,
     /// Roaming: smoothed level, holds, candidate.
@@ -4991,12 +5027,33 @@ fn reason_name(code: u16) -> &'static str {
 /// stack.
 ///
 /// Returns the length of the 802.3 frame in `out` and whether it was EAPOL.
-fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
+fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32, own: &[u8; 6],
+              ds_drop: &mut u32)
     -> Option<(usize, bool)>
 {
     if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA {
         return None;
     }
+    // util.c:591-631 `ieee80211_data_to_8023_exthdr` for a station: ToDS
+    // alone is a frame to an AP; four addresses only with `use_4addr`,
+    // which mac80211 drops before (`ieee80211_rx_h_data`); FromDS group
+    // traffic whose source is our own address is our broadcast coming
+    // back. Without FromDS the source is addr2, else addr3.
+    let ds = f[1] & 0x03;
+    let src: &[u8] = match ds {
+        0x00 => &f[10..16],
+        0x02 => {
+            if f[4] & 0x01 != 0 && f[16..22] == own[..] {
+                *ds_drop += 1;
+                return None;
+            }
+            &f[16..22]
+        }
+        _ => {
+            *ds_drop += 1;
+            return None;
+        }
+    };
     // Null and QoS null carry no body.
     if f[0] & DOT11_STYPE_NODATA != 0 {
         return None;
@@ -5011,13 +5068,148 @@ fn rx_to_8023(f: &[u8], out: &mut [u8], miss: &mut u32)
     if out.len() < 14 + payload.len() {
         return None;
     }
-    // FromDS: addr1 = us, addr2 = BSSID, addr3 = source.
+    // addr1 = destination, then the source chosen above.
     out[0..6].copy_from_slice(&f[4..10]);
-    out[6..12].copy_from_slice(&f[16..22]);
+    out[6..12].copy_from_slice(src);
     out[12..14].copy_from_slice(&f[llc + 6..llc + 8]);
     out[14..14 + payload.len()].copy_from_slice(payload);
     Some((14 + payload.len(), et == ETHERTYPE_EAPOL))
 }
+
+/// The data path of a received frame, after the decrypt check: the sender
+/// check, duplicate detection and the reorder buffer, then delivery.
+/// `None` when the frame was dropped, else whether it was unicast (for
+/// `rtw_rx_stats`).
+fn rx_data(ls: &mut LinkStats, bssid: &[u8; 6], f: &[u8]) -> Option<bool> {
+    // `ieee80211_rx_h_check` (rx.c:1500-1542): a data frame is
+    // class 3 and taken only from the station we are associated
+    // with. Without its own BSSID filter the hardware passes group
+    // data of every cell on the channel; such a frame must not reach
+    // the duplicate cache or the reorder window below, whose state
+    // belongs to our AP alone.
+    if f.len() >= 24 && f[0] & 0x0c == DOT11_FC_TYPE_DATA
+        && f[10..16] != bssid[..]
+    {
+        ls.rx_foreign += 1;
+        return None;
+    }
+    // Drop duplicate 802.11 retransmissions:
+    // `ieee80211_rx_h_check_dup` (rx.c:1438-1490), 802.11-2012
+    // §9.3.2.10 "Duplicate detection and recovery".
+    //
+    // The AP retransmits at MAC level when our ACK is missing or
+    // late; the retransmission carries the same sequence control
+    // field and the retry bit. Not dropping it delivers the same
+    // bytes to TCP twice.
+    //
+    // The whole field is compared, not only the sequence number: the
+    // lower four bits are the fragment number, and two fragments of
+    // the same frame are not duplicates.
+    let mut ro_tid = RO_TIDS;
+    let mut ro_sn = 0u16;
+    let mut ro_have = false;
+    // rx.c:1374-1376 and 1468: a group-addressed frame is neither
+    // reordered nor checked against the unicast duplicate cache; the
+    // AP numbers group frames with a counter of their own.
+    let group_addr = f.len() >= 24 && f[4] & 0x01 != 0;
+    if f.len() >= 24 && !group_addr {
+        let fc = u16::from_le_bytes([f[0], f[1]]);
+        if fc & 0x000c == 0x0008 {
+            let is_qos = fc & 0x0080 != 0;
+            let idx = if is_qos && f.len() >= 26 {
+                (f[24] & 0x0f) as usize
+            } else {
+                16
+            };
+            let sc = u16::from_le_bytes([f[22], f[23]]) as u32;
+            if fc & 0x0800 != 0 {
+                ls.retry_rx += 1;
+            }
+            if fc & 0x0800 != 0 && ls.last_seq_ctrl[idx] == sc {
+                ls.dup_rx += 1;
+                return None;
+            }
+            ls.last_seq_ctrl[idx] = sc;
+            // Only whole frames are reordered. The lower four bits
+            // are the fragment number; a fragment belongs to
+            // defragmentation, which mac80211 runs separately and
+            // before the buffer (`ieee80211_rx_h_defragment`).
+            // rx.c:1406: a frame sent with No Ack policy is not
+            // part of a block ack session.
+            let no_ack = is_qos && (f[24] >> 5) & 0x03 == 1;
+            if is_qos && idx < RO_TIDS && sc & 0x000f == 0 && !no_ack {
+                ro_tid = idx;
+                ro_sn = (sc >> 4) as u16;
+                ro_have = true;
+            }
+        }
+    }
+    // Only data frames with a body continue, the same first check as
+    // in `rx_to_8023`. Conversion happens on delivery
+    // (`deliver_mpdu`), after reordering.
+    if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA
+        || f[0] & DOT11_STYPE_NODATA != 0
+    {
+        return None;
+    }
+    ls.data_rx += 1;
+    // rx.c:14-32 `rtw_rx_stats`: only unicast counts, and the length
+    // of the 802.11 frame is counted.
+    let unicast = f[4] & 0x01 == 0;
+    deliver_or_reorder(ls, ro_tid, ro_sn, ro_have, f);
+    Some(unicast)
+}
+
+/// mac80211.c:345-361 `__rtw_conf_tx` for each AC, as `rtw_conf_tx` does:
+/// the AP's WMM parameters into the four EDCA registers. `use_short_slot` as `ieee80211_handle_bss_capability`
+/// (mlme.c:3826-3828): the capability bit, always on 5 GHz. Without a WMM
+/// parameter element the values from `rtw8822c_mac_init` stay; mac80211
+/// would write its own defaults there (`ieee80211_set_wmm_default`).
+fn conf_tx(h: i32, caps: &sta::PeerCaps, band_5g: bool) {
+    let Some(wmm) = caps.wmm else { return };
+    let use_short_slot = caps.short_slot_cap || band_5g;
+    let slot_time: u32 = if use_short_slot { 9 } else { 20 };
+    let sifs: u32 = if band_5g { 16 } else { 10 };
+    const AC_TO_EDCA_PARAM: [u32; 4] = [REG_EDCA_VO_PARAM, REG_EDCA_VI_PARAM,
+                                        REG_EDCA_BE_PARAM, REG_EDCA_BK_PARAM];
+    for (ac, p) in wmm.iter().enumerate() {
+        let edca_param = AC_TO_EDCA_PARAM[ac];
+        // 2^ecw - 1 = cw; ecw = log2(cw + 1)
+        let ecw_max = (p.cw_max as u32 + 1).ilog2();
+        let ecw_min = (p.cw_min as u32 + 1).ilog2();
+        let aifs = p.aifs as u32 * slot_time + sifs;
+        host::w32_mask(h, edca_param, BIT_MASK_TXOP_LMT, p.txop as u32);
+        host::w32_mask(h, edca_param, BIT_MASK_CWMAX, ecw_max);
+        host::w32_mask(h, edca_param, BIT_MASK_CWMIN, ecw_min);
+        host::w32_mask(h, edca_param, BIT_MASK_AIFS, aifs);
+    }
+}
+
+/// The DFS region in force, as rtw88's regulatory notifier gets it:
+///
+/// * an efuse country code rtw88 knows makes the device `PROGRAMMED`
+///   (regd.c:345-357); `regulatory_hint` with that code sets the region and
+///   the country element of an AP is ignored (`REGULATORY_COUNTRY_IE_IGNORE`).
+/// * otherwise the device is `WORLDWIDE`: on connect cfg80211 hints the
+///   AP's country element (sme.c `regulatory_hint_country_ie`), and after
+///   the link ends the region falls back to the world domain, unset.
+///
+/// cfg80211 takes the region from the regulatory database for the code
+/// (`regdb.rs`). The TX power limits stay on `RTW_REGD_WW`, the strictest.
+fn regd_dfs_region(e: &efuse::Efuse, link: Option<&Link>) -> u8 {
+    if regdb::rtw_reg_known(e.country_code) {
+        return regdb::dfs_region(e.country_code);
+    }
+    match link {
+        Some(l) if l.country != [0; 2] => regdb::dfs_region(l.country),
+        _ => regdb::NL80211_DFS_UNSET,
+    }
+}
+
+/// sec.h:14 `RTW_SEC_DEFAULT_KEY_NUM`: the first slot a pairwise key may
+/// take. One pairwise key at a time: a rekey clears the old one before it
+/// installs the new.
+const PTK_SLOT_FIRST: u8 = 4;
 
 /// tx.c:367-374, the order in `rtw_tx_data_pkt_info_update`.
 #[allow(clippy::too_many_arguments)]
@@ -5046,6 +5238,8 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
               mac: [u8; 6]) -> Link {
     let link = Link {
         bssid: bss.bssid,
+        country: bss.country,
+        beacon_int: bss.beacon_int,
         mac,
         channel: bss.channel,
         ssid: bss.ssid,
@@ -5055,7 +5249,8 @@ fn link_setup(hal: &Hal, bss: &Bss, caps: &sta::PeerCaps, si: sta::StaInfo,
         seq: 0,
         ptk_installed: false,
         tx_pn: 1,
-        cam: [sec::CamEntry::default(); 4],
+        cam: [sec::CamEntry::default(); PTK_SLOT_FIRST as usize + 1],
+        ptk_slot: None,
         ba_tx: BaTx::new(),
         roam: Roam { last_roam_ms: host::now_ms(), ..Roam::new() },
         ht_param_now: bss.ht_param,
@@ -5160,6 +5355,13 @@ fn watch_dog(h: i32, hal: &Hal, d: &mut Dev, h2c: &mut fw::H2cState,
     d.stats.rx_unicast = 0;
     d.stats.tx_cnt = 0;
     d.stats.rx_cnt = 0;
+
+    // main.c:271-272: no dynamic mechanism while a scan runs. Between two
+    // slices of a background scan the false alarm counters still carry the
+    // other channels; DIG would read them as the home channel.
+    if BG_SCAN.with(|b| b.active) {
+        return;
+    }
 
     let mut tp = host::now_us();
     // main.c:275-279
@@ -5380,7 +5582,6 @@ fn ro_close(ls: &mut LinkStats, tid: usize) {
     ls.ro_on[tid] = false;
     ls.ro_held[tid] = 0;
     ls.ro_head[tid] = 0;
-    ls.ro_since[tid] = 0;
 }
 
 /// A session starts: the ADDBA names the starting sequence.
@@ -5437,9 +5638,7 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
     match ro_take(mpdu) {
         Some(i) => {
             ls.ro_slot[tid][pos] = (i + 1) as u8;
-            if ls.ro_held[tid] == 0 {
-                ls.ro_since[tid] = host::now_us() as u32 / 1000;
-            }
+            ls.ro_time[tid][pos] = (host::now_us() / 1000) as u32;
             ls.ro_held[tid] += 1;
         }
         None => {
@@ -5452,8 +5651,10 @@ fn deliver_or_reorder(ls: &mut LinkStats, tid: usize, sn: u16, have_sn: bool,
     ro_release_ready(ls, tid);
 }
 
-/// Once per round: a hole open too long is skipped. Otherwise a single lost
-/// frame stalls the stream until the sender has sent 64 more.
+/// Once per round, rx.c:1195-1256 `ieee80211_sta_reorder_release`: a held
+/// frame older than the timeout is released together with every hole
+/// before it, and the contiguous frames after it follow. Otherwise a single
+/// lost frame stalls the stream until the sender has sent 64 more.
 fn ro_tick(ls: &mut LinkStats) {
     // The cheap check first. This runs in the pump loop on every iteration,
     // and the normal case "nothing held" must cost no host call; `now_us()`
@@ -5461,22 +5662,61 @@ fn ro_tick(ls: &mut LinkStats) {
     if ls.ro_held.iter().all(|&h| h == 0) {
         return;
     }
-    let now = host::now_us() as u32 / 1000;
+    let now = (host::now_us() / 1000) as u32;
     for tid in 0..RO_TIDS {
         if ls.ro_held[tid] == 0 {
             continue;
         }
-        if now.wrapping_sub(ls.ro_since[tid]) < RO_TIMEOUT_MS {
-            continue;
+        // The head slot is a hole, else `ro_release_ready` would have
+        // delivered it.
+        let head = ls.ro_head[tid];
+        let mut skipped = 1u16;
+        for k in 1..RO_WIN as u16 {
+            let sn = (head + k) & 0x0fff;
+            let pos = (sn as usize) % RO_WIN;
+            let slot = ls.ro_slot[tid][pos];
+            if slot == 0 {
+                skipped += 1;
+                continue;
+            }
+            if skipped > 0 && now.wrapping_sub(ls.ro_time[tid][pos]) < RO_TIMEOUT_MS {
+                break;
+            }
+            if skipped > 0 {
+                ls.ro_timeout += 1;
+            }
+            ls.ro_slot[tid][pos] = 0;
+            ls.ro_held[tid] = ls.ro_held[tid].saturating_sub(1);
+            ls.ro_head[tid] = (sn + 1) & 0x0fff;
+            ro_release_slot(ls, (slot - 1) as usize);
+            skipped = 0;
         }
-        ls.ro_timeout += 1;
-        // Advance the head by one, skipping the hole, then release
-        // everything contiguous.
-        let want = (ls.ro_head[tid] + 1) & 0x0fff;
-        ro_advance_to(ls, tid, want);
-        ro_release_ready(ls, tid);
-        ls.ro_since[tid] = now;
     }
+}
+
+/// rx.c:3263-3320 `ieee80211_rx_h_ctrl`: a Block Ack Request from the AP
+/// releases everything below its starting sequence number
+/// (`ieee80211_release_reorder_frames`). One for a TID without a session
+/// is dropped; Linux also answers it with a DELBA, which is not sent here.
+fn rx_bar(ls: &mut LinkStats, f: &[u8]) {
+    // fc 2, duration 2, RA 6, TA 6, BAR control 2, starting sequence 2.
+    if f.len() < 20 {
+        return;
+    }
+    ls.bar_rx += 1;
+    let control = u16::from_le_bytes([f[16], f[17]]);
+    let tid = (control >> 12) as usize;
+    if tid >= RO_TIDS || !ls.ro_on[tid] {
+        return;
+    }
+    let ssn = (u16::from_le_bytes([f[18], f[19]]) >> 4) & 0x0fff;
+    // `while (ieee80211_sn_less(head_seq_num, ssn))`: only forward.
+    let d = ssn.wrapping_sub(ls.ro_head[tid]) & 0x0fff;
+    if d == 0 || d >= 0x800 {
+        return;
+    }
+    ro_advance_to(ls, tid, ssn);
+    ro_release_ready(ls, tid);
 }
 
 /// In how many milliseconds `ro_tick` skips the next hole; `None` while
@@ -5485,10 +5725,12 @@ fn ro_due_ms(ls: &LinkStats) -> Option<u64> {
     if ls.ro_held.iter().all(|&h| h == 0) {
         return None;
     }
-    let now = host::now_us() as u32 / 1000;
+    let now = (host::now_us() / 1000) as u32;
     (0..RO_TIDS)
         .filter(|&tid| ls.ro_held[tid] != 0)
-        .map(|tid| RO_TIMEOUT_MS.saturating_sub(now.wrapping_sub(ls.ro_since[tid])) as u64)
+        .flat_map(|tid| (0..RO_WIN).filter(move |&p| ls.ro_slot[tid][p] != 0)
+                  .map(move |p| (tid, p)))
+        .map(|(tid, p)| RO_TIMEOUT_MS.saturating_sub(now.wrapping_sub(ls.ro_time[tid][p])) as u64)
         .min()
 }
 
@@ -5517,7 +5759,9 @@ fn deliver_mpdu(ls: &mut LinkStats, f: &[u8]) {
         amsdu_to_8023s(ls, f, &mut out);
         return;
     }
-    if let Some((n, is_eapol)) = rx_to_8023(f, &mut out, &mut ls.llc_miss) {
+    let own = ls.own_mac;
+    if let Some((n, is_eapol)) = rx_to_8023(f, &mut out, &mut ls.llc_miss, &own,
+                                            &mut ls.rx_ds_drop) {
         // The one unprotected frame a keyed link takes is EAPOL: the AP
         // may send a rekey before the station has the new key in use
         // (rx.c `ieee80211_802_1x_port_control`).
@@ -5734,6 +5978,13 @@ fn link_pump(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                      t_pwr, caps, fw_feature, rxbuf, ethbuf, cmdbuf)
     })));
     host::clr32(h, REG_RCR, BIT_CBSSID_BCN);
+    tx::set_basic_rates(0);
+    phy::adaptivity_set_mode(&mut d.dm, regd_dfs_region(e, None));
+    // mac80211.c:534 `rtw_ops_sta_remove`: the link ends or is handed to
+    // a connect, which configures it again.
+    if fw_feature & FW_FEATURE_BCN_FILTER != 0 {
+        fw::beacon_filter_config(h, h2c, false, &link.bssid, link.si.mac_id, 0);
+    }
     end
 }
 
@@ -5774,10 +6025,22 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     // switch. Default on.
     let txagg = read_txagg();
     let roam_mode = read_roam_mode();
-    // `bss_conf.beacon_int`: 100 TU is what practically every AP announces.
-    // It is not read from the beacon yet, and zero would be worse than the
-    // normal case (it divides).
-    let beacon_int: u16 = 100;
+    // `bss_conf.beacon_int` from the cell's beacon. 100 TU, what practically
+    // every AP announces, when it was not seen: zero divides.
+    let beacon_int: u16 = if link.beacon_int > 0 { link.beacon_int } else { 100 };
+    // The loss state belongs to the link; the firmware reports anew for
+    // this one (`BCN_FILTER_CONNECTED` / `_BEACON_LOSS`).
+    d.beacon_loss = false;
+    conf_tx(h, caps, link.channel > 14);
+    phy::adaptivity_set_mode(&mut d.dm, regd_dfs_region(e, Some(link)));
+    tx::set_basic_rates(caps.basic_rates);
+    // mac80211.c:401 on `BSS_CHANGED_ASSOC`: with `FW_FEATURE_BCN_FILTER`
+    // the firmware watches the beacons and reports their loss; the driver
+    // skips `rtw_sw_beacon_loss_check`.
+    if fw_feature & FW_FEATURE_BCN_FILTER != 0 {
+        fw::beacon_filter_config(h, h2c, true, &link.bssid, link.si.mac_id,
+                                 beacon_int);
+    }
     // The width the PHY is on goes into the RX status: zero would mean
     // 20 MHz, and every frame with `rxsc == 0` (the full width, the normal
     // case) would be reported as 20 MHz.
@@ -5843,6 +6106,20 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                                 acc.n_tx_rpt += 1;
                             }
                         }
+                    } else if c.id as u32 == C2H_BCN_FILTER_NOTIFY
+                        && c.payload.len() >= 3
+                    {
+                        // fw.c:225-262: type in bits 3:0 of byte 1, the
+                        // threshold direction in bit 4, the signal in byte 2
+                        // offset by 100.
+                        acc.bcn_notify = Some((c.payload[1] & 0x0f,
+                                               c.payload[1] & 0x10 != 0,
+                                               c.payload[2] as i32 - 100));
+                    } else if c.id as u32 == C2H_SCAN_RESULT
+                        && !c.payload.is_empty()
+                    {
+                        // fw.c:265-274 `rtw_fw_scan_result`.
+                        acc.scan_density = Some(c.payload[0]);
                     } else if acc.n_c2h_seen < acc.c2h_seen.len() {
                         // Count whatever else arrives, so a missing report
                         // shows up with the IDs that came instead.
@@ -5860,6 +6137,14 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 && f[1] & DOT11_FC_PROTECTED != 0 && (!st.decrypted || st.icv_err)
             {
                 ls.rx_undecrypted += 1;
+                return;
+            }
+            // Control subtype 8: a Block Ack Request, addressed to us
+            // by our AP.
+            if f.len() >= 20 && f[0] == 0x84 && f[4..10] == mac[..]
+                && f[10..16] == bssid
+            {
+                rx_bar(ls, f);
                 return;
             }
             // mlme.c:131-145: every frame from the AP resets the watchdog,
@@ -5983,85 +6268,12 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
                 return;
             }
-            // Drop duplicate 802.11 retransmissions:
-            // `ieee80211_rx_h_check_dup` (rx.c:1438-1490), 802.11-2012
-            // §9.3.2.10 "Duplicate detection and recovery".
-            //
-            // The AP retransmits at MAC level when our ACK is missing or
-            // late; the retransmission carries the same sequence control
-            // field and the retry bit. Not dropping it delivers the same
-            // bytes to TCP twice.
-            //
-            // The whole field is compared, not only the sequence number: the
-            // lower four bits are the fragment number, and two fragments of
-            // the same frame are not duplicates.
-            // `ieee80211_rx_h_check` (rx.c:1500-1542): a data frame is
-            // class 3 and taken only from the station we are associated
-            // with. Without its own BSSID filter the hardware passes group
-            // data of every cell on the channel; such a frame must not reach
-            // the duplicate cache or the reorder window below, whose state
-            // belongs to our AP alone.
-            if f.len() >= 24 && f[0] & 0x0c == DOT11_FC_TYPE_DATA
-                && f[10..16] != bssid
-            {
-                ls.rx_foreign += 1;
-                return;
-            }
-            let mut ro_tid = RO_TIDS;
-            let mut ro_sn = 0u16;
-            let mut ro_have = false;
-            // rx.c:1374-1376 and 1468: a group-addressed frame is neither
-            // reordered nor checked against the unicast duplicate cache; the
-            // AP numbers group frames with a counter of their own.
-            let group_addr = f.len() >= 24 && f[4] & 0x01 != 0;
-            if f.len() >= 24 && !group_addr {
-                let fc = u16::from_le_bytes([f[0], f[1]]);
-                if fc & 0x000c == 0x0008 {
-                    let is_qos = fc & 0x0080 != 0;
-                    let idx = if is_qos && f.len() >= 26 {
-                        (f[24] & 0x0f) as usize
-                    } else {
-                        16
-                    };
-                    let sc = u16::from_le_bytes([f[22], f[23]]) as u32;
-                    if fc & 0x0800 != 0 {
-                        ls.retry_rx += 1;
-                    }
-                    if fc & 0x0800 != 0 && ls.last_seq_ctrl[idx] == sc {
-                        ls.dup_rx += 1;
-                        return;
-                    }
-                    ls.last_seq_ctrl[idx] = sc;
-                    // Only whole frames are reordered. The lower four bits
-                    // are the fragment number; a fragment belongs to
-                    // defragmentation, which mac80211 runs separately and
-                    // before the buffer (`ieee80211_rx_h_defragment`).
-                    // rx.c:1406: a frame sent with No Ack policy is not
-                    // part of a block ack session.
-                    let no_ack = is_qos && (f[24] >> 5) & 0x03 == 1;
-                    if is_qos && idx < RO_TIDS && sc & 0x000f == 0 && !no_ack {
-                        ro_tid = idx;
-                        ro_sn = (sc >> 4) as u16;
-                        ro_have = true;
-                    }
-                }
-            }
-            // Only data frames with a body continue, the same first check as
-            // in `rx_to_8023`. Conversion happens on delivery
-            // (`deliver_mpdu`), after reordering.
-            if f.len() < 24 || f[0] & 0x0c != DOT11_FC_TYPE_DATA
-                || f[0] & DOT11_STYPE_NODATA != 0
-            {
-                return;
-            }
-            ls.data_rx += 1;
             // rx.c:14-32 `rtw_rx_stats`: only unicast counts, and the length
             // of the 802.11 frame is counted.
-            if f[4] & 0x01 == 0 {
+            if rx_data(ls, &bssid, f) == Some(true) {
                 acc.rx_unicast += f.len() as u64;
                 acc.rx_cnt += 1;
             }
-            deliver_or_reorder(ls, ro_tid, ro_sn, ro_have, f);
         });
 
         // A hole open too long would stall the whole stream. Once per round
@@ -6222,6 +6434,45 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         // ── Allow aggregation ────────────────────────────────────
         // The AP asks with an ADDBA request and repeats it until answered;
         // it cannot aggregate until then.
+        // fw.c:225-252 `rtw_fw_bcn_filter_notify_vif_iter`. A connection
+        // loss is `ieee80211_connection_loss`: mac80211 drops the link
+        // without probing (`ieee80211_sta_connection_lost`). The signal
+        // change is a CQM event for userspace; it is counted only.
+        if let Some(den) = acc.scan_density.take() {
+            d.dm.scan_density = den;
+        }
+        let notify = acc.bcn_notify.take()
+            .or_else(|| OFFCH_BCN_NOTIFY.with(|n| n.take()));
+        if let Some((typ, _high, sig)) = notify {
+            match typ {
+                BCN_FILTER_NOTIFY_SIGNAL_CHANGE => {
+                    ls.cqm_events += 1;
+                    ls.cqm_last_dbm = sig;
+                }
+                BCN_FILTER_CONNECTED => d.beacon_loss = false,
+                BCN_FILTER_NOTIFY_BEACON_LOSS => {
+                    d.beacon_loss = true;
+                    ls.fw_beacon_loss += 1;
+                }
+                BCN_FILTER_CONNECTION_LOSS => {
+                    ls.fw_conn_loss += 1;
+                    host::loud_begin();
+                    host::print("[rtl8822ce] Firmware meldet: Verbindung zum AP verloren\n");
+                    host::loud_end();
+                    if ls.authorized || ls.link_up_sent {
+                        host::netdev_set_link(false);
+                        let down = [EV_LINK_DOWN, LINK_DOWN_DEAUTH];
+                        host::wifi_send_event(&down);
+                    }
+                    ls.authorized = false;
+                    ls.link_up_sent = false;
+                    if frist_us == 0 {
+                        return PumpEnd::LinkLost;
+                    }
+                }
+                _ => {}
+            }
+        }
         // ht.c:485-506 `ieee80211_process_delba`: the AP as originator ends
         // our receive session, as recipient our transmit session. Both
         // before the ADDBA requests of this pass, which may open a new one.
@@ -6561,13 +6812,32 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     if cmd.len() >= 5 + key_len + 6 {
                         let key = &cmd[5..5 + key_len];
                         let group = key_type == 1;
-                        // Pairwise key in slot 0, group key at its index, as
-                        // mac80211 does.
-                        let slot = if group { key_idx.min(3) } else { 0 };
+                        // mac80211.c:594-599: a group key at its index;
+                        // a pairwise key in the first free slot from
+                        // `RTW_SEC_DEFAULT_KEY_NUM` on, since default key
+                        // search maps slots 0..3 to the group key indices
+                        // (sec.c:9-20).
+                        //
+                        // A rekey is key.c:503-508 `ieee80211_key_replace`:
+                        // the old key is disabled first, and rtw88 flushes
+                        // the queues before clearing it (mac80211.c:613-616),
+                        // so whatever is queued under it, msg 4 of the
+                        // handshake among them, goes out first. The new key
+                        // then takes the freed slot.
+                        if !group {
+                            if let Some(old) = link.ptk_slot.take() {
+                                flush_tx(h, trx, ls);
+                                sec::clear_cam(h, &mut link.cam[old as usize], old);
+                            }
+                        }
+                        let slot = if group { key_idx.min(3) } else { PTK_SLOT_FIRST };
                         let addr = if group { [0xffu8; 6] } else { link.bssid };
                         sec::write_cam(h, &mut link.cam[slot as usize], slot,
                                        RTW_CAM_AES as u8, key_idx, group,
                                        &addr, key);
+                        if !group {
+                            link.ptk_slot = Some(slot);
+                        }
                         ls.keys_set += 1;
                         // A new key starts its own packet numbers: the
                         // pairwise key from zero, the group key from the
@@ -6781,9 +7051,9 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                     host::loud_end();
 
                     let mut kand: Vec<Bss> = Vec::new();
-                    let ms = roam_scan(h, hal, trx, mgmt_buf, e, t_pwr, link,
-                                       rxbuf, &mut d.dm, &mut d.path_div,
-                                       &mut kand);
+                    let ms = roam_scan(h, hal, trx, mgmt_buf, h2c, fw_feature,
+                                       e, t_pwr, link, ls, rxbuf, &mut d.dm,
+                                       &mut d.path_div, &mut kand);
                     let n_kand = kand.len();
                     let max_bw = max_bw_for(e);
                     let mut best: Option<Bss> = None;
@@ -6936,8 +7206,8 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             publish_report(link, ls, d, e, caps);
             report_signal(link);
         }
-        bg_scan_step(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, &mut d.dm,
-                     &mut d.path_div, now);
+        bg_scan_step(h, hal, trx, mgmt_buf, h2c, fw_feature, e, t_pwr, link,
+                     ls, rxbuf, &mut d.dm, &mut d.path_div, now);
 
         // ── RX silence as a watchdog ─────────────────────────────
         // A live cell always sends something, beacons alone are ten per
@@ -7109,6 +7379,8 @@ fn reconnect(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     }
     let andere = link.bssid != bss.bssid;
     link.bssid = bss.bssid;
+    link.country = bss.country;
+    link.beacon_int = bss.beacon_int;
     link.channel = bss.channel;
     link.ssid = bss.ssid;
     link.ssid_len = bss.ssid_len;
@@ -7191,6 +7463,7 @@ fn drop_session(h: i32, link: &mut Link, ls: &mut LinkStats) {
         sec::clear_cam(h, &mut link.cam[slot], slot as u8);
     }
     link.ptk_installed = false;
+    link.ptk_slot = None;
     link.tx_pn = 1;
     link.seq = 0;
     // Block ack sessions belong to the association, not the driver. Left as
@@ -7329,13 +7602,16 @@ fn find_cell(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 /// this network answers, not just one.
 #[allow(clippy::too_many_arguments)]
 fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+             h2c: &mut fw::H2cState, fw_feature: u32,
              e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
+             ls: &mut LinkStats,
              rxbuf: &mut [u8], dm: &mut dm::DmInfo,
              path_div: &mut dm::PathDiv,
              found: &mut Vec<Bss>) -> u32 {
     found.clear();
     let (chs, n_ch) = ROAM_CHANNELS.get();
-    offchannel(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, dm, path_div,
+    offchannel(h, hal, trx, mgmt_buf, h2c, fw_feature, e, t_pwr, link, ls,
+               rxbuf, dm, path_div,
                &chs[..n_ch], &link.ssid[..link.ssid_len as usize], false,
                ROAM_DWELL_MS, found)
 }
@@ -7346,16 +7622,30 @@ fn roam_scan(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 /// away in ms.
 #[allow(clippy::too_many_arguments)]
 fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+              h2c: &mut fw::H2cState, fw_feature: u32,
               e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
+              ls: &mut LinkStats,
               rxbuf: &mut [u8], dm: &mut dm::DmInfo,
               path_div: &mut dm::PathDiv, chans: &[u8], ssid: &[u8],
               passive_5g: bool, dwell_ms: u32,
               found: &mut Vec<Bss>) -> u32 {
     let mac = link.mac;
+    // main.c:1461-1486 `rtw_core_scan_start` (`drv_sw_scan_start`, first in
+    // scan.c:572): the firmware learns that we leave the channel. Here per
+    // slice; between slices we are back home and the link runs normally.
+    let notify = fw_feature & FW_FEATURE_NOTIFY_SCAN != 0;
+    if notify {
+        fw::scan_notify(h, h2c, true);
+    }
     // A scan listens to every cell (`FIF_BCN_PRBRESP_PROMISC`).
     host::clr32(h, REG_RCR, BIT_CBSSID_BCN);
 
-    // (1) doze
+    // (1) doze. offchannel.c:96-101: whatever is queued goes out first,
+    // then the null with the power management bit, and scan.c:581 flushes
+    // again so the null is on air before the channel changes. Frames left in
+    // the ring would otherwise go out after it with PM=0, or on the scan
+    // channel.
+    flush_tx(h, trx, ls);
     let mut nf = [0u8; 32];
     let n = build_nullfunc(&mut nf, &mac, &link.bssid, true);
     let mut info = tx::pkt_info_update(&nf[..n], 0, tx::band_of(link.channel));
@@ -7363,9 +7653,7 @@ fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     if pci::tx_write(h, trx, mgmt_buf, q, &mut info, &nf[..n]) {
         pci::tx_kick_off_queue(h, trx, q);
     }
-    // Give the frame time to go out; otherwise we switch channel before the
-    // AP learns we are gone.
-    host::sleep_ms(2);
+    flush_tx(h, trx, ls);
 
     let t0 = host::now_us();
     for &ch in chans {
@@ -7383,15 +7671,46 @@ fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         while host::now_us() - t_ch < dwell_ms as u64 * 1000 {
             let got = pci::rx_poll(h, trx, 64, rxbuf, dm, path_div,
                                    hal.rf_path_num, 0, ch, |st, pkt| {
-                if st.crc_err || st.is_c2h {
+                if st.crc_err {
+                    return;
+                }
+                // A beacon filter notice that arrives during the dwell is
+                // kept for the link pump; dropping a `CONNECTED` would leave
+                // the link marked as losing beacons.
+                if st.is_c2h {
+                    let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
+                        + st.shift as usize;
+                    if let Some(c) = pkt.get(off..).and_then(fw::c2h_parse) {
+                        if c.id as u32 == C2H_BCN_FILTER_NOTIFY && c.payload.len() >= 3 {
+                            OFFCH_BCN_NOTIFY.with(|n| *n = Some((c.payload[1] & 0x0f,
+                                c.payload[1] & 0x10 != 0, c.payload[2] as i32 - 100)));
+                        }
+                    }
                     return;
                 }
                 let off = RX_PKT_DESC_SZ as usize + st.drv_info_sz as usize
                     + st.shift as usize;
-                if off + 36 > pkt.len() {
+                if off >= pkt.len() {
                     return;
                 }
                 let f = &pkt[off..];
+                // Data of our AP still in the ring from before the switch
+                // takes the normal path; mac80211 keeps receiving during a
+                // software scan (only `ieee80211_scan_rx` takes the beacons
+                // and probe responses on the side).
+                if f.len() >= 24 && f[0] & 0x0c == DOT11_FC_TYPE_DATA {
+                    if f[1] & DOT11_FC_PROTECTED != 0
+                        && (!st.decrypted || st.icv_err)
+                    {
+                        ls.rx_undecrypted += 1;
+                        return;
+                    }
+                    let _ = rx_data(ls, &link.bssid, f);
+                    return;
+                }
+                if f.len() < 36 {
+                    return;
+                }
                 let fc = f[0];
                 if fc & 0xfc != 0x80 && fc & 0xfc != 0x50 {
                     return;
@@ -7421,7 +7740,25 @@ fn offchannel(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
         pci::tx_kick_off_queue(h, trx, q);
     }
     host::set32(h, REG_RCR, BIT_CBSSID_BCN);
+    // main.c:1488-1510 `rtw_core_scan_complete`. Linux waits up to 10 ms
+    // for `C2H_SCAN_RESULT`; here the link pump takes it with the next
+    // ring pass and stores the density for the next adaptivity tick.
+    if notify {
+        fw::scan_notify(h, h2c, false);
+    }
     ((host::now_us() - t0) / 1000) as u32
+}
+
+/// A `C2H_BCN_FILTER_NOTIFY` received during an off-channel dwell.
+static OFFCH_BCN_NOTIFY: Single<Option<(u8, bool, i32)>> = Single::new(None);
+
+/// `ieee80211_flush_queues` → rtw88 `rtw_ops_flush` (mac80211.c:734-746):
+/// the PCI rings, then the chip's priority queues.
+fn flush_tx(h: i32, trx: &mut pci::Trx, ls: &mut LinkStats) {
+    pci::flush_queues(h, trx);
+    if mac::flush_queues(h) < 4 {
+        ls.flush_timeout += 1;
+    }
 }
 
 /// A full scan while linked, as mac80211 does it associated: a few
@@ -7458,7 +7795,9 @@ fn bg_scan_start(now: u64) {
 /// Run the next slice when it is due; at the end report the list.
 #[allow(clippy::too_many_arguments)]
 fn bg_scan_step(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
+                h2c: &mut fw::H2cState, fw_feature: u32,
                 e: &efuse::Efuse, t_pwr: &txpower::TxPower, link: &Link,
+                ls: &mut LinkStats,
                 rxbuf: &mut [u8], dm: &mut dm::DmInfo,
                 path_div: &mut dm::PathDiv, now: u64) {
     BG_SCAN.with(|b| {
@@ -7477,8 +7816,8 @@ fn bg_scan_step(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             b.next += 1;
             k += 1;
         }
-        let _ = offchannel(h, hal, trx, mgmt_buf, e, t_pwr, link, rxbuf, dm,
-                           path_div, &chans[..k], &[], true, BG_DWELL_MS,
+        let _ = offchannel(h, hal, trx, mgmt_buf, h2c, fw_feature, e, t_pwr,
+                           link, ls, rxbuf, dm, path_div, &chans[..k], &[], true, BG_DWELL_MS,
                            &mut b.found);
         b.due_ms = host::now_ms() + BG_HOME_MS;
         if b.next >= all {
@@ -8196,8 +8535,37 @@ fn publish_report(link: &Link, ls: &LinkStats, d: &Dev,
     num(ls.rx_pn_replay, &mut b, &mut n);
     put("  delba ", &mut b, &mut n);
     num(ls.delba_rx, &mut b, &mut n);
+    put("  ds ", &mut b, &mut n);
+    num(ls.rx_ds_drop, &mut b, &mut n);
+    put("  bar ", &mut b, &mut n);
+    num(ls.bar_rx, &mut b, &mut n);
     put("  senden ring voll ", &mut b, &mut n);
     num(ls.tx_ring_full, &mut b, &mut n);
+    put("\nfirmware: baken weg ", &mut b, &mut n);
+    num(ls.fw_beacon_loss, &mut b, &mut n);
+    put("  verbindung weg ", &mut b, &mut n);
+    num(ls.fw_conn_loss, &mut b, &mut n);
+    put("  signalwechsel ", &mut b, &mut n);
+    num(ls.cqm_events, &mut b, &mut n);
+    if ls.cqm_events > 0 {
+        put(" (zuletzt ", &mut b, &mut n);
+        if ls.cqm_last_dbm < 0 {
+            put("-", &mut b, &mut n);
+        }
+        num(ls.cqm_last_dbm.unsigned_abs(), &mut b, &mut n);
+        put(" dBm)", &mut b, &mut n);
+    }
+    put("  flush zu lang ", &mut b, &mut n);
+    num(ls.flush_timeout, &mut b, &mut n);
+    put("  dichte ", &mut b, &mut n);
+    num(d.dm.scan_density as u32, &mut b, &mut n);
+    put("  edcca ", &mut b, &mut n);
+    put(if d.dm.edcca_mode == 1 { "adaptiv" } else { "normal" }, &mut b, &mut n);
+    if link.country != [0; 2] && link.country.iter().all(|c| c.is_ascii_alphanumeric()) {
+        put(" (land ", &mut b, &mut n);
+        put(core::str::from_utf8(&link.country).unwrap_or("?"), &mut b, &mut n);
+        put(")", &mut b, &mut n);
+    }
     // Link watchdog and roaming: a probe followed by a recovery is a case in
     // which the link would otherwise have been dropped.
     if link.roam.scans > 0 || link.roam.roams > 0 {

@@ -80,6 +80,68 @@ pub struct PeerCaps {
     /// at minimum to join this BSS.
     pub vht_op_basic_mcs: u16,
     pub vht_op_seen: bool,
+    /// The basic rates (high bit set in the rate elements), in the bit order
+    /// of `supp_rates`: `bss_conf.basic_rates`.
+    pub basic_rates: u16,
+    /// Capability field bit 10 (`WLAN_CAPABILITY_SHORT_SLOT_TIME`).
+    pub short_slot_cap: bool,
+    /// The WMM parameter element (`_ieee80211_sta_wmm_params` in mac80211
+    /// mlme.c), per mac80211 AC order VO, VI, BE, BK:
+    /// (AIFSN, CWmin, CWmax, TXOP in 32 us). `None` when the AP sent none
+    /// or an invalid one; the defaults then stay.
+    pub wmm: Option<[WmmAc; 4]>,
+}
+
+/// One access category of the WMM parameter element.
+#[derive(Default, Clone, Copy)]
+pub struct WmmAc {
+    pub aifs: u8,
+    pub cw_min: u16,
+    pub cw_max: u16,
+    pub txop: u16,
+}
+
+/// mac80211 `_ieee80211_sta_wmm_params` (mlme.c:3644-3778). `b` is the vendor element
+/// body: OUI, type, subtype, version, QoS info, reserved, then one record
+/// of four bytes per AC.
+fn parse_wmm_params(b: &[u8]) -> Option<[WmmAc; 4]> {
+    if b.len() < 8 || b[5] != 1 {
+        return None;
+    }
+    // `ecw2cw`: 2^ecw - 1.
+    let ecw2cw = |ecw: u8| (1u16 << ecw) - 1;
+    let mut p = [WmmAc::default(); 4];
+    let mut pos = 8;
+    while pos + 4 <= b.len() {
+        let r = &b[pos..pos + 4];
+        // ACI 1 = BK, 2 = VI, 3 = VO, else BE; mac80211 AC order VO, VI, BE, BK.
+        let ac = match (r[0] >> 5) & 0x03 {
+            1 => 3,
+            2 => 1,
+            3 => 0,
+            _ => 2,
+        };
+        let mut aifs = r[0] & 0x0f;
+        if aifs < 2 {
+            // "AP has invalid WMM params (AIFSN=%d for ACI %d), will use 2"
+            aifs = 2;
+        }
+        p[ac] = WmmAc {
+            aifs,
+            cw_max: ecw2cw((r[1] & 0xf0) >> 4),
+            cw_min: ecw2cw(r[1] & 0x0f),
+            txop: u16::from_le_bytes([r[2], r[3]]),
+        };
+        if p[ac].cw_min == 0 || p[ac].cw_min > p[ac].cw_max {
+            return None;
+        }
+        pos += 4;
+    }
+    // "WMM specification requires all 4 ACIs."
+    if p.iter().any(|a| a.cw_min == 0) {
+        return None;
+    }
+    Some(p)
 }
 
 /// Parse the elements of an association response.
@@ -88,6 +150,9 @@ pub struct PeerCaps {
 /// Linux); it lives here because `rtw_update_sta_info` needs these values.
 pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
     let mut c = PeerCaps::default();
+    if f.len() >= 26 {
+        c.short_slot_cap = u16::from_le_bytes([f[24], f[25]]) & (1 << 10) != 0;
+    }
     // 24 header + capabilities(2) + status(2) + AID(2) = 30, then elements.
     let mut i = 30usize;
     while i + 2 <= f.len() {
@@ -101,6 +166,9 @@ pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
             for &r in b {
                 // The high bit marks a basic rate and is not part of the value.
                 c.supp_rates |= rate_bit(r & 0x7f);
+                if r & 0x80 != 0 {
+                    c.basic_rates |= rate_bit(r & 0x7f);
+                }
             }
         } else if id == WLAN_EID_HT_CAPABILITY && len >= 26 {
             c.ht_supported = true;
@@ -125,6 +193,12 @@ pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
             c.vht_op_cch1 = b[2];
             c.vht_op_basic_mcs = u16::from_le_bytes([b[3], b[4]]);
             c.vht_op_seen = true;
+        } else if id == 221 && len >= 5 && b[..3] == [0x00, 0x50, 0xf2]
+            && b[3] == 2 && b[4] == 1
+        {
+            // WLAN_EID_VENDOR_SPECIFIC, Microsoft OUI, WMM type 2,
+            // parameter element subtype 1.
+            c.wmm = parse_wmm_params(b);
         } else if id == WLAN_EID_VHT_CAPABILITY && len >= 12 {
             c.vht_supported = true;
             c.vht_cap = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
