@@ -771,6 +771,16 @@ impl Mgr {
             log("[wifid] EAPOL_RX but no supplicant (missed READY)\n");
             return;
         };
+        // A handshake that installed its key is done with its SNonce; the
+        // next msg 1 gets a fresh one (wpa_supplicant `renew_snonce`).
+        if s.needs_snonce() {
+            let mut snonce = [0u8; 32];
+            if npk_sys::random_bytes(&mut snonce) != 32 {
+                log("[wifid] no entropy for the SNonce — refusing the handshake\n");
+                return;
+            }
+            s.set_snonce(snonce);
+        }
         let out = &mut self.out;
         match s.on_eapol(frame, out) {
             Step::Reply(m) => {
@@ -783,8 +793,10 @@ impl Mgr {
                 if let Some(ptk) = s.ptk() {
                     send_set_key(false, 0, &ptk.tk, &[0u8; 6]);
                 }
-                if let Some((gtk, id)) = s.gtk() {
-                    send_set_key(true, id, gtk, &s.gtk_rsc());
+                if s.gtk_fresh() {
+                    if let Some((gtk, id)) = s.gtk() {
+                        send_set_key(true, id, gtk, &s.gtk_rsc());
+                    }
                 }
                 send_cmd(&[CMD_AUTHORIZED]);
                 log("[wifid] *** 4-way complete — AUTHORIZED ***\n");

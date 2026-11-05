@@ -274,7 +274,49 @@ fn four_way_roundtrip() -> bool {
         && sup.gtk_rsc()[0] == 0x42;
     println!("[{}] forged msg1 keeps the live PTK; next rekey verifies, RSC taken", if fok { "PASS" } else { "FAIL" });
 
-    ok && gok && rok && fok
+    // PTK rekey: the next 4-way handshake answers with a fresh SNonce, and
+    // msg 3 carrying the GTK in use does not ask for it to be installed
+    // again (that would reset its replay counter).
+    let mut pok = sup.needs_snonce();
+    let snonce2 = [0x53u8; 32];
+    sup.set_snonce(snonce2);
+    pok &= !sup.needs_snonce();
+    let anonce2 = [0xa2u8; 32];
+    let mut r1 = msg1.clone();
+    r1[9 + 7] = 7;
+    r1[17..49].copy_from_slice(&anonce2);
+    match sup.on_eapol(&r1, &mut out) {
+        Step::Reply(_) => pok &= out[17..49] == snonce2[..],
+        _ => pok = false,
+    }
+    let ptk2 = wpa2_ptk(&pmk, &aa, &sa, &anonce2, &snonce2);
+    let kck2: [u8; 16] = ptk2[0..16].try_into().unwrap();
+    let kek2: [u8; 16] = ptk2[16..32].try_into().unwrap();
+    let mut kde_r = vec![0xdd, (6 + gtk3.len()) as u8, 0x00, 0x0f, 0xac, 0x01, 0x01, 0x00];
+    kde_r.extend_from_slice(&gtk3);
+    let mut wrapped_r = vec![0u8; kde_r.len() + 8];
+    aes_wrap(&kek2, &kde_r, &mut wrapped_r);
+    let mut r3 = vec![0u8; 99 + wrapped_r.len()];
+    r3[..99].copy_from_slice(&msg3[..99]);
+    put_be16(&mut r3, 2, (95 + wrapped_r.len()) as u16);
+    r3[9 + 7] = 8;
+    r3[17..49].copy_from_slice(&anonce2);
+    for b in &mut r3[81..97] { *b = 0; }
+    put_be16(&mut r3, 97, wrapped_r.len() as u16);
+    r3[99..].copy_from_slice(&wrapped_r);
+    let r3mic = hmac_sha1(&kck2, &r3)[..16].to_vec();
+    r3[81..97].copy_from_slice(&r3mic);
+    match sup.on_eapol(&r3, &mut out) {
+        Step::Done(_) => {
+            pok &= !sup.gtk_fresh();
+            pok &= sup.ptk().map(|p| p.tk == ptk2[32..48]).unwrap_or(false);
+            pok &= sup.needs_snonce();
+        }
+        _ => pok = false,
+    }
+    println!("[{}] PTK rekey: fresh SNonce, GTK in use not reinstalled", if pok { "PASS" } else { "FAIL" });
+
+    ok && gok && rok && fok && pok
 }
 
 /// The hardening rules, each against its own frame.

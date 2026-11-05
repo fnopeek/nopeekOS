@@ -92,6 +92,11 @@ pub struct Supplicant {
     aa: [u8; 6], // AP (authenticator) MAC
     sa: [u8; 6], // our (supplicant) MAC
     snonce: [u8; 32],
+    /// wpa_supplicant's `renew_snonce`: set once a handshake installed its
+    /// key, so the next msg 1 is answered with a fresh SNonce.
+    renew_snonce: bool,
+    /// Whether the last `Done` carried a GTK other than the one installed.
+    gtk_fresh: bool,
     rsn_ie: [u8; 64],
     rsn_len: usize,
     /// The pairwise key in use: set when msg3 verifies.
@@ -132,6 +137,8 @@ impl Supplicant {
             aa,
             sa,
             snonce,
+            renew_snonce: false,
+            gtk_fresh: false,
             rsn_ie: [0; 64],
             rsn_len: rsn_ie.len().min(64),
             ptk: Ptk::default(),
@@ -153,6 +160,26 @@ impl Supplicant {
         };
         s.rsn_ie[..s.rsn_len].copy_from_slice(&rsn_ie[..s.rsn_len]);
         s
+    }
+
+    /// A new SNonce is due before the next frame is handed in.
+    pub fn needs_snonce(&self) -> bool {
+        self.renew_snonce
+    }
+
+    /// The SNonce for the next 4-way handshake: 32 random bytes from the
+    /// caller, which has the entropy source.
+    pub fn set_snonce(&mut self, snonce: [u8; 32]) {
+        self.snonce = snonce;
+        self.renew_snonce = false;
+    }
+
+    /// Whether the GTK of the last completed 4-way handshake is to be
+    /// installed. A PTK rekey carries the GTK in use again; installing it
+    /// a second time would reset its replay counter to the RSC in msg 3
+    /// (wpa_supplicant `wpa_supplicant_gtk_in_use` / `install_gtk`).
+    pub fn gtk_fresh(&self) -> bool {
+        self.gtk_fresh
     }
 
     pub fn ptk(&self) -> Option<&Ptk> {
@@ -313,7 +340,9 @@ impl Supplicant {
                 return Step::ReplyOnly(len);
             }
             self.installed_tk = Some(self.ptk.tk);
-            if self.gtk_len > 0 {
+            self.renew_snonce = true;
+            self.gtk_fresh = self.gtk_len > 0 && !self.gtk_is_installed();
+            if self.gtk_fresh {
                 self.take_gtk_rsc(frame);
                 self.mark_gtk_installed();
             }
