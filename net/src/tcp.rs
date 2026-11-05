@@ -3036,6 +3036,8 @@ pub enum TcpError {
     Unreachable,
     /// The port is taken (EADDRINUSE).
     AddrInUse,
+    /// The caller gave up waiting (Ctrl+C on a foreground intent).
+    Cancelled,
 }
 
 impl core::fmt::Display for TcpError {
@@ -3049,6 +3051,7 @@ impl core::fmt::Display for TcpError {
             TcpError::Timeout => write!(f, "connection timed out"),
             TcpError::Unreachable => write!(f, "network unreachable"),
             TcpError::AddrInUse => write!(f, "address in use"),
+            TcpError::Cancelled => write!(f, "cancelled"),
         }
     }
 }

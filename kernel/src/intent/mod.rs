@@ -485,6 +485,23 @@ static INTENT_RUNNING: [AtomicBool; MAX_TERMS] = {
 /// Global vault reference (set once in run_loop, used by workers).
 static VAULT_REF: AtomicPtr<Mutex<Vault>> = AtomicPtr::new(core::ptr::null_mut());
 
+/// Terminals whose window is to close once their intent returns.
+static CLOSE_PENDING: [AtomicBool; MAX_TERMS] = [const { AtomicBool::new(false) }; MAX_TERMS];
+
+/// Close terminal `terminal_idx`'s window as soon as its intent has
+/// returned; at once if it already has.
+pub fn close_when_done(terminal_idx: u8) {
+    let idx = terminal_idx as usize;
+    if idx >= MAX_TERMS { return; }
+    CLOSE_PENDING[idx].store(true, AtOrd::Release);
+    // The worker may have finished between the caller's check and the
+    // store above; then it saw no pending close.
+    if !has_running_intent(terminal_idx) && CLOSE_PENDING[idx].swap(false, AtOrd::AcqRel) {
+        crate::shade::input::push_action_direct(
+            crate::shade::input::ShadeAction::CloseTerminal(terminal_idx));
+    }
+}
+
 /// Check if a terminal has an intent running on a worker.
 pub fn has_running_intent(terminal_idx: u8) -> bool {
     let idx = terminal_idx as usize;
@@ -542,6 +559,10 @@ fn intent_worker_task(arg: u64) {
     // Clear redirect + mark done (Core 0 prints the prompt when it detects completion)
     crate::shade::terminal::clear_output_redirect();
     INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
+    if CLOSE_PENDING[job.terminal_idx as usize].swap(false, AtOrd::AcqRel) {
+        crate::shade::input::push_action_direct(
+            crate::shade::input::ShadeAction::CloseTerminal(job.terminal_idx));
+    }
             wake_shell();
     crate::shade::terminal::mark_dirty();
 }
@@ -1583,17 +1604,12 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 // Typed keys are dropped, except while the intent asks for
                 // one (`confirm`, `read_secret`): it reads the same buffer.
                 // Window keybinds still reach shade, so a busy terminal does
-                // not hold the desktop. Mod+Q is not one of them: closing
-                // frees the terminal the worker is still writing to.
-                // Ctrl+C was already turned into a cancel by the interrupt.
+                // not hold the desktop; closing it asks the intent to stop
+                // first (`request_close_window`). Ctrl+C was already turned
+                // into a cancel by the interrupt.
                 if PROMPTS_WAITING.load(core::sync::atomic::Ordering::Acquire) == 0 {
                     while let Some(event) = crate::keyboard::read_event() {
-                        let close = event.modifiers.super_key && matches!(
-                            event.key,
-                            crate::input::KeyCode::Char(b'q') | crate::input::KeyCode::Char(b'Q'));
-                        if !close {
-                            crate::shade::input::try_keybind_event(&event);
-                        }
+                        crate::shade::input::try_keybind_event(&event);
                     }
                 }
 

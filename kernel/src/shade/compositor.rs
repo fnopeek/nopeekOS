@@ -1054,6 +1054,20 @@ impl Compositor {
     /// round of politeness, not a veto. Everything else closes at once,
     /// round of politeness, not a veto. Everything else closes at once.
     pub fn request_close_window(&mut self, id: WindowId) {
+        // A terminal whose intent still runs on a worker is not freed under
+        // it: the worker writes to that terminal until it returns. The close
+        // gesture asks the intent to stop (Ctrl+C), and the window closes
+        // once it has returned.
+        let busy_term = self.windows.iter().find(|w| w.id == id).and_then(|w| {
+            (w.kind == crate::shade::window::WindowKind::Terminal
+                && crate::intent::has_running_intent(w.terminal_idx))
+                .then_some(w.terminal_idx)
+        });
+        if let Some(idx) = busy_term {
+            crate::intent::request_cancel();
+            crate::intent::close_when_done(idx);
+            return;
+        }
         if crate::shade::widgets::is_close_guarded(id.0) {
             let now = crate::interrupts::ticks();
             if crate::shade::widgets::begin_close_request(id.0, now) {
@@ -1107,6 +1121,14 @@ impl Compositor {
             self.close_window(WindowId(id));
         }
         true
+    }
+
+    /// The terminal window showing terminal `idx`.
+    pub fn terminal_window(&self, idx: u8) -> Option<WindowId> {
+        self.windows.iter()
+            .find(|w| w.kind == crate::shade::window::WindowKind::Terminal
+                && w.terminal_idx == idx)
+            .map(|w| w.id)
     }
 
     /// Close a window by ID.

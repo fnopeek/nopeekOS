@@ -291,7 +291,7 @@ fn do_http_request(args: &str, use_tls: bool) {
         kprintln!("[npk] Connecting to {}.{}.{}.{}:{}...", ip[0], ip[1], ip[2], ip[3], port);
     }
 
-    let handle = match crate::net::tcp::connect(ip, port) {
+    let handle = match crate::net::tcp::connect_cancellable(ip, port) {
         Ok(h) => h,
         Err(e) => { kprintln!("[npk] TCP error: {}", e); return; }
     };
@@ -1368,7 +1368,7 @@ fn open_tls(host: &str, addr: Option<[u8; 4]>) -> Result<crate::tls::TlsSession,
     let _ = crate::net::arp::resolve(gw, 100); // 1 s at 100 Hz
     let t_tcp = crate::interrupts::ticks();
 
-    let handle = crate::net::tcp::connect(ip, port).map_err(|_| "TCP connect failed")?;
+    let handle = crate::net::tcp::connect_cancellable(ip, port).map_err(|_| "TCP connect failed")?;
     let t_tls = crate::interrupts::ticks();
     let out = match crate::tls::tls_connect(handle, bare) {
         Ok(s) => Ok(s),
@@ -2628,7 +2628,7 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     // Name the failure. ConnectionRefused means the peer answered with a RST
     // (nothing listening); Timeout means nobody answered at all (ARP,
     // routing, link). They call for different investigations.
-    let handle = crate::net::tcp::connect(ip, port).map_err(|e| {
+    let handle = crate::net::tcp::connect_cancellable(ip, port).map_err(|e| {
         kprintln!("[netbench] connect to {}.{}.{}.{}:{} failed: {}",
                   ip[0], ip[1], ip[2], ip[3], port, e);
         "TCP connect failed"
@@ -2906,7 +2906,7 @@ fn http_get_once(
     let _ = crate::net::arp::resolve(gw, 100); // see open_tls: not a blind spin
 
     if chatty() { kprintln!("[npk]   TCP connect {}:{} ...", bare, port); }
-    let handle = crate::net::tcp::connect(ip, port).map_err(|_| "TCP connect failed")?;
+    let handle = crate::net::tcp::connect_cancellable(ip, port).map_err(|_| "TCP connect failed")?;
     match http_exchange(handle, host, path, &key, max_size, on_chunk) {
         Ok(r) => Ok(r),
         Err(ExchangeErr::Retry) => Err("connection reset after connect"),

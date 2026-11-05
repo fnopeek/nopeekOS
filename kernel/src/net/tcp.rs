@@ -115,8 +115,19 @@ pub fn connect(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> 
     connect_as(KERNEL, remote_ip, remote_port)
 }
 
+/// `connect` for an intent in the foreground: Ctrl+C ends the wait.
+pub fn connect_cancellable(remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
+    connect_with(KERNEL, remote_ip, remote_port, true)
+}
+
 /// `connect` on behalf of `owner` (see `connect_start_as`).
 pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<usize, TcpError> {
+    connect_with(owner, remote_ip, remote_port, false)
+}
+
+fn connect_with(owner: Owner, remote_ip: [u8; 4], remote_port: u16, cancellable: bool)
+    -> Result<usize, TcpError>
+{
     let handle = connect_start_as(owner, remote_ip, remote_port)?;
 
     // Wait for ESTABLISHED (blocking poll)
@@ -155,6 +166,11 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
             _ => {}
         }
 
+        if cancellable && crate::intent::cancel_requested() {
+            stack().remove(&mut KernelEnv, handle);
+            return Err(TcpError::Cancelled);
+        }
+
         if crate::interrupts::ticks() - t0 > 1000 { // 10s timeout
             // Say how far it got: SYN never answered (`retries` climbing),
             // or the state machine stuck somewhere else.
@@ -166,7 +182,9 @@ pub fn connect_as(owner: Owner, remote_ip: [u8; 4], remote_port: u16) -> Result<
             stack().remove(&mut KernelEnv, handle);
             return Err(TcpError::Timeout);
         }
-        core::hint::spin_loop();
+        // Halt until the next poll period instead of spinning through up to
+        // ten seconds of handshake.
+        crate::interrupts::worker_idle_hlt();
     }
 
     Ok(handle)

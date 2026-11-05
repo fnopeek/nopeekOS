@@ -53,6 +53,9 @@ pub enum ShadeAction {
     NewWindow,
     /// Mod+Q: close focused window
     CloseWindow,
+    /// Close the terminal window with this index: its intent was asked to
+    /// stop by a close gesture and has now returned.
+    CloseTerminal(u8),
     /// Mod+F: toggle fullscreen
     ToggleFullscreen,
     /// Mod+V: toggle floating

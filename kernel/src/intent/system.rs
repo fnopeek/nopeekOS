@@ -1114,7 +1114,7 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16, extra: &[u64]) {
     kprintln!("[npk] dsdt send → {}.{}.{}.{}:{} (DSDT + {} SSDT, {} bytes)",
         ip[0], ip[1], ip[2], ip[3], port, n - 1, total);
 
-    let handle = match crate::net::tcp::connect(ip, port) {
+    let handle = match crate::net::tcp::connect_cancellable(ip, port) {
         Ok(h) => h,
         Err(_) => { kprintln!("[npk] connect failed (is `nc -l {}` running?)", port); return; }
     };

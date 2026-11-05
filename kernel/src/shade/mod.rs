@@ -904,6 +904,7 @@ pub fn handle_action(action: input::ShadeAction) {
     if modal_open {
         match action {
             ShadeAction::CloseWindow
+            | ShadeAction::CloseTerminal(_)
             | ShadeAction::SpawnLauncher
             | ShadeAction::Lock
             | ShadeAction::Copy
@@ -923,6 +924,14 @@ pub fn handle_action(action: input::ShadeAction) {
                 render_frame();
             }
             // If not created: no free terminals, silently ignore
+        }
+        ShadeAction::CloseTerminal(idx) => {
+            with_compositor(|comp| {
+                if let Some(id) = comp.terminal_window(idx) {
+                    comp.close_window(id);
+                }
+            });
+            render_frame();
         }
         ShadeAction::CloseWindow => {
             // compositor::close_window handles widget-scene cleanup
