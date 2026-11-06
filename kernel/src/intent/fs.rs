@@ -709,9 +709,9 @@ pub fn intent_disk_write(args: &str) {
     }
 }
 
-/// External disks (USB mass storage): list, dump a block, measure, eject.
+/// External disks (USB mass storage, SD cards): list, dump a block, measure, eject.
 pub fn intent_drives(args: &str) {
-    use crate::drivers::usb_storage as us;
+    use crate::storage::disk as us;
     let mut it = args.split_whitespace();
     let cmd = it.next().unwrap_or("");
     let id: Option<u32> = it.next().and_then(|s| s.parse().ok());

@@ -9,3 +9,5 @@ pub mod fat32;
 pub mod gpt;
 /// External volumes: the `ext/` namespace.
 pub mod ext;
+/// Removable disks of every transport.
+pub mod disk;

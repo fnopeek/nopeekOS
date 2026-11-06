@@ -21,7 +21,7 @@ use spin::Mutex;
 use crate::kprintln;
 use crate::security::capability::{self, CapId, Rights};
 use crate::smp::fiber::{self, Waker, NO_WAKER, SIG_EXT};
-use crate::usb_storage;
+use crate::storage::disk;
 
 /// The namespace's root segment.
 pub const ROOT: &str = "ext";
@@ -202,7 +202,7 @@ pub fn disk_added(disk: u32) {
         WAITING.lock().push(disk);
         return;
     }
-    let Some(d) = usb_storage::disks().into_iter().find(|d| d.id == disk) else { return };
+    let Some(d) = disk::info(disk) else { return };
     spawn(disk, ROLE_PROBE, 0, d.blocks, d.block_size, d.read_only);
 }
 
@@ -302,30 +302,30 @@ fn blk_target(cap: &CapId, lba: u64, len: usize, write: bool) -> Result<(u32, u6
     Ok((disk, abs))
 }
 
-fn blk_err(e: usb_storage::Error) -> BlkError {
+fn blk_err(e: disk::Error) -> BlkError {
     match e {
-        usb_storage::Error::Gone => BlkError::Gone,
-        usb_storage::Error::ReadOnly => BlkError::ReadOnly,
-        usb_storage::Error::Range => BlkError::Range,
+        disk::Error::Gone => BlkError::Gone,
+        disk::Error::ReadOnly => BlkError::ReadOnly,
+        disk::Error::Range => BlkError::Range,
         _ => BlkError::Io,
     }
 }
 
 pub fn blk_read(cap: &CapId, lba: u64, out: &mut [u8]) -> Result<(), BlkError> {
     let (disk, abs) = blk_target(cap, lba, out.len(), false)?;
-    usb_storage::read(disk, abs, out).map_err(blk_err)
+    disk::read(disk, abs, out).map_err(blk_err)
 }
 
 pub fn blk_write(cap: &CapId, lba: u64, data: &[u8]) -> Result<(), BlkError> {
     let (disk, abs) = blk_target(cap, lba, data.len(), true)?;
-    usb_storage::write(disk, abs, data).map_err(blk_err)
+    disk::write(disk, abs, data).map_err(blk_err)
 }
 
 pub fn blk_flush(cap: &CapId) -> Result<(), BlkError> {
     let (disk, ro) = with_inst(cap, |i| (i.disk, i.read_only || i.role != ROLE_VOLUME))
         .ok_or(BlkError::Gone)?;
     if ro { return Ok(()); }
-    usb_storage::flush(disk).map_err(blk_err)
+    disk::flush(disk).map_err(blk_err)
 }
 
 // === Bring-up (`npk_ext_parts`, `npk_ext_mount`) ===
@@ -698,7 +698,7 @@ const EJECT_WAIT_MS: u64 = 30_000;
 
 /// Eject the drive volume `label` is on: its volumes take no new request,
 /// the running ones finish, then the drive is flushed, stopped and gone
-/// from the list (`usb_storage::eject`).
+/// from the list (`disk::eject`).
 pub fn eject(label: &str) -> Result<(), Error> {
     let disk = INSTS.lock().iter()
         .find(|i| i.label.as_deref() == Some(label) && !i.gone && !i.failed && !i.closing)
@@ -712,5 +712,5 @@ pub fn eject(label: &str) -> Result<(), Error> {
         if !busy || now() >= deadline { break; }
         if !fiber::yield_sleep(10) { fiber::spin_or_yield(); }
     }
-    usb_storage::eject(disk).map_err(|_| Error::Io)
+    disk::eject(disk).map_err(|_| Error::Io)
 }
