@@ -331,6 +331,12 @@ pub fn is_window_fullscreen(window_id: u32) -> bool {
 /// guest scales a slot onto that output, so host-side tile scaling never
 /// desyncs the guest cursor.
 /// Additive to `handle_mouse` (which still draws the host cursor).
+///
+/// The guest gets the pointer only where it sees its own content, as a
+/// Wayland pointer focus: on top at the cursor, not under the window's
+/// controls, without Mod held (a host gesture). A button pressed there
+/// holds the pointer in the guest until its release (implicit grab), so a
+/// drag may leave the window; a press anywhere else never reaches it.
 pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     use crate::microvm::devices::virtio_input_pci::{push_input_event, ABS_MAX};
     const EV_SYN: u16 = 0x00;
@@ -348,24 +354,36 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
 
     use crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS;
 
-    // Content rect of the focused Surface window, and its guest output.
+    // Content rect of the focused Surface window, its guest output, and
+    // whether the cursor is on content the guest owns.
+    let (mx, my) = cursor::atomic_pos();
     let rect = with_compositor(|comp| {
         let fid = comp.focused?;
         let win = comp.windows.iter().find(|w| w.id == fid)?;
         if win.kind != window::WindowKind::Surface { return None; }
         let border = comp.effective_border(win);
-        Some((fid.0, win.content_x(border), win.content_y(border),
-              win.content_w(border), win.content_h(border)))
+        let (cx, cy, cw, ch) = (win.content_x(border), win.content_y(border),
+                                win.content_w(border), win.content_h(border));
+        let on_content = mx >= cx as i32 && mx < (cx + cw) as i32 && my >= cy as i32 && my < (cy + ch) as i32
+            && comp.window_at(mx, my) == Some(fid)
+            && comp.controls_at(mx, my).is_none()
+            && comp.controls.menu.is_none();
+        Some((fid.0, cx, cy, cw, ch, on_content))
     }).flatten();
-    let (wid, cx, cy, cw, ch) = match rect {
+    let host_prev = LAST_HOST_BTN.swap(evt.buttons, Ordering::Relaxed);
+    let (wid, cx, cy, cw, ch, on_content) = match rect {
         Some(r) if r.3 > 0 && r.4 > 0 => r,
         _ => return, // no Surface focused → no-op (called on every move)
     };
     let Some(out) = crate::microvm::output_of_window(wid) else { return };
+    let owns = on_content && !crate::keyboard::is_super_held();
+    let held = LAST_BTN.load(Ordering::Relaxed);
+    if !owns && held == 0 {
+        return;
+    }
 
     // x: one slot of `0..ABS_MAX` per guest output (see above).
     let slot = (ABS_MAX + 1) / MAX_OUTPUTS as u32;
-    let (mx, my) = cursor::atomic_pos();
     let rx = (mx - cx as i32).clamp(0, cw as i32 - 1) as u32;
     let ry = (my - cy as i32).clamp(0, ch as i32 - 1) as u32;
     let ax = out as u32 * slot + (rx as u64 * (slot - 1) as u64 / (cw as u64 - 1).max(1)) as u32;
@@ -383,11 +401,14 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
         any = true;
     }
 
-    // Buttons — emit only on transition (bit 0=L 1=R 2=M).
-    let prev = LAST_BTN.swap(evt.buttons, Ordering::Relaxed);
-    if (prev ^ evt.buttons) != 0 {
+    // Buttons — emit only on transition (bit 0=L 1=R 2=M): a release of
+    // what the guest holds, a press only on its content.
+    let pressed = if owns { evt.buttons & !host_prev } else { 0 };
+    let now_held = (held & evt.buttons) | pressed;
+    let prev = LAST_BTN.swap(now_held, Ordering::Relaxed);
+    if (prev ^ now_held) != 0 {
         for (bit, code) in [(0u8, BTN_LEFT), (1, BTN_RIGHT), (2, BTN_MIDDLE)] {
-            let now = (evt.buttons >> bit) & 1;
+            let now = (now_held >> bit) & 1;
             if now != ((prev >> bit) & 1) {
                 push_input_event(EV_KEY, code, now as u32);
                 any = true;
@@ -396,11 +417,11 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     }
 
     // Wheel — Linux reads `value` as __s32; pass the signed delta.
-    if evt.scroll != 0 {
+    if evt.scroll != 0 && owns {
         push_input_event(EV_REL, REL_WHEEL, evt.scroll as i32 as u32);
         any = true;
     }
-    if evt.hscroll != 0 {
+    if evt.hscroll != 0 && owns {
         push_input_event(EV_REL, REL_HWHEEL, evt.hscroll as i32 as u32);
         any = true;
     }
@@ -412,7 +433,11 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
 
 static LAST_ABS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(u64::MAX);
+/// The buttons the guest holds down.
 static LAST_BTN: core::sync::atomic::AtomicU8 =
+    core::sync::atomic::AtomicU8::new(0);
+/// The host's buttons at the last event, to tell a press from a hold.
+static LAST_HOST_BTN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 
 /// A full redraw asked for from another core, waiting for Core 0.
