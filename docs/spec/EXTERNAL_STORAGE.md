@@ -1,8 +1,8 @@
 # External storage
 
-USB sticks and disks appear under `ext/<label>/`. The kernel moves blocks;
-partition tables and file systems are read by `extfs`, a module that runs
-once per partition in its own sandbox. A drive is crafted input in full, so
+USB sticks, USB disks and SD cards appear under `ext/<label>/`. The kernel
+moves blocks; partition tables and file systems are read by `extfs`, a
+module that runs once per partition in its own sandbox. A drive is crafted input in full, so
 none of its structures is parsed in the kernel.
 
 ## Layers
@@ -10,6 +10,8 @@ none of its structures is parsed in the kernel.
 | Layer | Where | Does |
 |---|---|---|
 | usb-storage | `kernel/src/drivers/usb_storage.rs` | Bulk-Only Transport and the SCSI commands of Linux `sd.c`; one disk per LUN |
+| SD cards | `kernel/src/drivers/sdhci.rs`, `mmc_sd.rs` | the PCI SD host (Linux `sdhci.c`, `sdhci-pci-o2micro.c`) and SD card init and block I/O (Linux `mmc/core`), UHS-I with high speed as fallback; one disk per card |
+| disks | `kernel/src/storage/disk.rs` | one id space for both transports |
 | volumes | `kernel/src/storage/ext.rs` | starts `extfs` instances, binds each to a block range, routes `ext/` calls, checks every answer |
 | file system | `tools/wasm/extfs` | partition tables (Linux `efi.c`, `msdos.c`); FAT12/16/32 with long names (Linux `fs/fat`) and exFAT (Linux `fs/exfat`), read and write |
 

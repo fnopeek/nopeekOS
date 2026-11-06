@@ -767,6 +767,18 @@ run_qemu_generic() {
         log "QEMU_QMP=$QEMU_QMP: QMP socket"
     fi
 
+    # QEMU_SD=<raw image> puts that image in as an SD card behind QEMU's
+    # sdhci-pci (spec 3.00), for the SD host driver.
+    local -a sd_args=()
+    if [ -n "${QEMU_SD:-}" ]; then
+        sd_args=(
+            -device sdhci-pci,sd-spec-version=3
+            -drive file="$QEMU_SD",format=raw,if=none,id=sdcard
+            -device sd-card,drive=sdcard
+        )
+        log "QEMU_SD=$QEMU_SD: SD card on sdhci-pci"
+    fi
+
     local audiodev="${QEMU_AUDIODEV:-}"
     if [ -z "$audiodev" ]; then
         local have
@@ -794,6 +806,7 @@ run_qemu_generic() {
         -device nvme,drive=drive0,serial=nopeekos-test \
         "${usb_args[@]}" \
         "${qmp_args[@]}" \
+        "${sd_args[@]}" \
         -device intel-hda \
         -device hda-output,audiodev=snd0 \
         -audiodev "$audiodev" \

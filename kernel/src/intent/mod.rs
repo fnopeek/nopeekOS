@@ -1290,6 +1290,7 @@ fn core0_wait() {
     // A USB device plugged in or out: enumerated or torn down here, outside
     // the interrupt that noticed it.
     crate::xhci::hotplug();
+    crate::drivers::mmc_sd::poll();
     let busy = crate::shade::needs_tick()
         || crate::net::needs_tick()
         || crate::xhci::repeat_active()

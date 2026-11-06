@@ -12,6 +12,8 @@ pub mod rtl8153;
 pub mod xhci;
 pub mod usb_desc;
 pub mod usb_storage;
+pub mod sdhci;
+pub mod mmc_sd;
 pub mod keyboard;
 pub mod framebuffer;
 pub mod serial;

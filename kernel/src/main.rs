@@ -177,6 +177,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
     if nvme::init() {
         vga::show_status(b"NVMe online");
     }
+    drivers::mmc_sd::init();
     if !virtio_blk::is_available() && !nvme::is_available() {
         kprintln!("[npk] No block device found.");
     }

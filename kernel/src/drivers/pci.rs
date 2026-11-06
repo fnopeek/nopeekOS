@@ -107,6 +107,19 @@ pub fn write16(addr: PciAddr, offset: u8, value: u16) {
     })
 }
 
+/// An 8-bit config write through the data port's byte lanes (Linux
+/// `pci_conf1_write` with len 1).
+pub fn write8(addr: PciAddr, offset: u8, value: u8) {
+    crate::interrupts::without_interrupts(|| {
+        let _g = CONFIG_LOCK.lock();
+        CONFIG_ADDR.outl(addr.address(offset));
+        // SAFETY: 0xCFC + 0..3, a lane of the config data port owned by
+        // this module; the access is serialised by CONFIG_LOCK.
+        let lane = unsafe { Port::new(0xCFC + (offset & 3) as u16) };
+        lane.outb(value);
+    })
+}
+
 /// The ECAM window for segment 0 from the MCFG table: `(base, first bus,
 /// last bus)`, read once.
 static ECAM: spin::Once<Option<(u64, u8, u8)>> = spin::Once::new();
@@ -150,6 +163,14 @@ pub fn write32_ext(addr: PciAddr, offset: u16, value: u32) -> bool {
     if offset >= 0x1000 || offset & 3 != 0 { return false; }
     let Some(page) = ecam_page(addr) else { return false };
     page.w32(offset as u64, value);
+    true
+}
+
+/// A byte of extended config space through ECAM (`pci_mmcfg_write`, len 1).
+pub fn write8_ext(addr: PciAddr, offset: u16, value: u8) -> bool {
+    if offset >= 0x1000 { return false; }
+    let Some(page) = ecam_page(addr) else { return false };
+    page.w8(offset as u64, value);
     true
 }
 

@@ -77,6 +77,18 @@ impl Mmio {
         // makes mapped device memory.
         unsafe { core::ptr::read_volatile(self.at(off, 1) as *const u8) }
     }
+    pub fn w8(&self, off: impl Off, v: u8) {
+        // SAFETY: as in `r8`.
+        unsafe { core::ptr::write_volatile(self.at(off, 1) as *mut u8, v) }
+    }
+    pub fn r16(&self, off: impl Off) -> u16 {
+        // SAFETY: as in `r8`.
+        unsafe { core::ptr::read_volatile(self.at(off, 2) as *const u16) }
+    }
+    pub fn w16(&self, off: impl Off, v: u16) {
+        // SAFETY: as in `r8`.
+        unsafe { core::ptr::write_volatile(self.at(off, 2) as *mut u16, v) }
+    }
     pub fn r32(&self, off: impl Off) -> u32 {
         // SAFETY: as in `r8`.
         unsafe { core::ptr::read_volatile(self.at(off, 4) as *const u32) }
