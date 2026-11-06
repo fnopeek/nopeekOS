@@ -1,4 +1,4 @@
-issued=1793957991
+issued=1793972617
 
 [acpi]
 version=0.9.0
@@ -65,6 +65,11 @@ firmware=amdgpu/renoir_vcn.bin 405952 3d9ad3edc096e025ff9e1261faa4bff76147874d60
 version=0.37.0
 size=1388942
 sha384=dffbc2650f78b144b11f52946d02d5ad8c00422cfd56607ea57fd11e0cdaf53e39f2a954dd2a84a5f227d66c63cf6d8f
+
+[helm]
+version=0.1.0
+size=111180
+sha384=0a671bd7cbe100319d2853f7249a033384065a2d72a769662fa9aca2dfd4b0f1b7c83a60c050b1172eef299b3ec54e97
 
 [i2c_hid]
 version=0.31.1
