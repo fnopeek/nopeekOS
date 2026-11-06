@@ -1461,7 +1461,20 @@ pub fn backlight(level: Option<u32>) -> Option<u32> {
     };
     wake_module();
     let r = wait_seq_yield(seq, deadline());
+    if r >= 0 { BACKLIGHT_LEVEL.store(r as u32 + 1, Ordering::Relaxed); }
     (r >= 0).then_some(r as u32)
+}
+
+/// The backlight level last read or set, plus one; 0 = not known yet.
+static BACKLIGHT_LEVEL: AtomicU32 = AtomicU32::new(0);
+
+/// The backlight level last read or set on `BACKLIGHT_SCALE`, without
+/// waiting on the module. None until one call to `backlight` returned.
+pub fn backlight_cached() -> Option<u32> {
+    match BACKLIGHT_LEVEL.load(Ordering::Relaxed) {
+        0 => None,
+        n => Some(n - 1),
+    }
 }
 
 /// Hand the module the cursor image: `pixels` premultiplied ARGB8888,

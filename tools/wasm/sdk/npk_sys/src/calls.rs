@@ -48,6 +48,8 @@ unsafe extern "C" {
     fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
     fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
     fn npk_config_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_setting_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    fn npk_setting_set(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
     fn npk_fs_delete(name_ptr: i32, name_len: i32) -> i32;
     fn npk_fs_mkdir(name_ptr: i32, name_len: i32) -> i32;
     fn npk_fs_rename(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
@@ -580,6 +582,21 @@ pub fn fs_copy(old: &[u8], new: &[u8]) -> i32 {
 pub fn config_get(key: &[u8], buf: &mut [u8]) -> i32 {
     // SAFETY: FFI; both ranges are borrowed for the call.
     unsafe { npk_config_get(key.as_ptr() as i32, key.len() as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+/// A system setting into `buf` (docs/spec/SETTINGS.md): its length, 0 when
+/// it has no value, `-(needed + 2)` for a short buffer, -1 for a key apps
+/// cannot read.
+pub fn setting_get(key: &[u8], buf: &mut [u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_setting_get(key.as_ptr() as i32, key.len() as i32, buf.as_mut_ptr() as i32, buf.len() as i32) }
+}
+
+/// Change a system setting: 0, -1 without SETTINGS or for a key apps
+/// cannot write, -2 for a refused value.
+pub fn setting_set(key: &[u8], value: &[u8]) -> i32 {
+    // SAFETY: FFI; both ranges are borrowed for the call.
+    unsafe { npk_setting_set(key.as_ptr() as i32, key.len() as i32, value.as_ptr() as i32, value.len() as i32) }
 }
 
 /// Size (8 bytes LE), directory flag (1), mtime (8 bytes LE) into `out`.

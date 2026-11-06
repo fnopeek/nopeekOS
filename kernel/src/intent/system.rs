@@ -1966,57 +1966,43 @@ pub fn intent_think(args: &str) {
 
 pub fn intent_set(args: &str) {
     let args = args.trim();
-    if let Some((key, value)) = args.split_once(' ') {
-        let key = key.trim();
-        let value = value.trim();
-        if key.is_empty() || value.is_empty() {
-            kprintln!("[npk] Usage: set <key> <value>");
-            return;
-        }
-        if key == "shade.scale" && crate::shade::widgets::scale::parse(value).is_none() {
-            kprintln!("[npk] shade.scale takes 1.0 to 3.0, e.g. 1.25");
-            return;
-        }
-        // `code.scheme` is a closed set — a typo would otherwise store
-        // silently and fall back to auto, which looks like the key did
-        // nothing at all.
-        if key == "code.scheme" {
-            use crate::shade::widgets::palette as pal;
-            if !pal::code_scheme_exists(value) {
-                kprintln!("[npk] unknown code scheme '{}'", value);
-                kprint!("[npk] known: auto");
-                for n in pal::code_scheme_names() { kprint!(", {}", n); }
-                kprintln!();
-                return;
-            }
-            // Honour an explicit mismatch, but say it out loud — a light
-            // scheme on a dark canvas is legible-ish, the other way round
-            // is not.
-            if let (Some(scheme_light), theme_light) =
-                (pal::code_scheme_is_light(value), pal::is_light_theme())
-            {
-                if scheme_light != theme_light {
-                    kprintln!("[npk] note: '{}' is a {} scheme, theme is {}",
-                        value,
-                        if scheme_light { "light" } else { "dark" },
-                        if theme_light { "light" } else { "dark" });
-                }
-            }
-        }
-        crate::config::set(key, value);
-        kprintln!("[npk] {} = {}", key, value);
-        // The shared panel knob is the master: it drops the panel's own
-        // override so it always moves the panel.
-        if key == "shade.chrome_opacity"
-            && crate::shade::widgets::palette::clear_panel_opacity_override()
-        {
-            kprintln!("[npk] cleared shade.bar_opacity");
-        }
-        apply_config_change(key);
-    } else {
+    let Some((key, value)) = args.split_once(' ') else {
         kprintln!("[npk] Usage: set <key> <value>");
         kprintln!("[npk] Keys: timezone, keyboard, lang");
         kprintln!("[npk] Example: set timezone Europe/Zurich");
+        return;
+    };
+    let (key, value) = (key.trim(), value.trim());
+    if key.is_empty() || value.is_empty() {
+        kprintln!("[npk] Usage: set <key> <value>");
+        return;
+    }
+    let had_panel_override = key == "shade.chrome_opacity"
+        && crate::config::get("shade.bar_opacity").is_some();
+    match crate::settings::set(key, value, crate::settings::Origin::Loop) {
+        Ok(v) => {
+            kprintln!("[npk] {} = {}", key, v);
+            if had_panel_override { kprintln!("[npk] cleared shade.bar_opacity"); }
+            if key == "code.scheme" { note_code_scheme_mismatch(&v); }
+        }
+        Err(crate::settings::Error::Invalid(why)) => kprintln!("[npk] {}", why),
+        Err(crate::settings::Error::NotWritable) => kprintln!("[npk] Usage: set <key> <value>"),
+    }
+}
+
+/// Honour an explicit mismatch, but say it out loud: a light scheme on a
+/// dark canvas is legible-ish, the other way round is not.
+fn note_code_scheme_mismatch(value: &str) {
+    use crate::shade::widgets::palette as pal;
+    if let (Some(scheme_light), theme_light) =
+        (pal::code_scheme_is_light(value), pal::is_light_theme())
+    {
+        if scheme_light != theme_light {
+            kprintln!("[npk] note: '{}' is a {} scheme, theme is {}",
+                value,
+                if scheme_light { "light" } else { "dark" },
+                if theme_light { "light" } else { "dark" });
+        }
     }
 }
 
@@ -2030,24 +2016,9 @@ pub fn intent_unset(args: &str) {
     }
     if crate::config::unset(key) {
         kprintln!("[npk] {} unset", key);
-        apply_config_change(key);
+        crate::settings::apply(key);
     } else {
         kprintln!("[npk] '{}' was not set", key);
-    }
-}
-
-/// Make a changed rendering key visible at once, not on the next incidental
-/// redraw. Panel translucency is baked into the panel's pixel buffer at
-/// rasterize time, so a recomposite alone would show the old value until the
-/// app next commits (up to a minute for the panel) — the cached scenes are
-/// re-rasterized first, the same step the `theme` intent takes.
-fn apply_config_change(key: &str) {
-    if key.starts_with("shade.") || key.starts_with("code.")
-        || key == "theme" || key == "accent" {
-        if key == "shade.blur" { crate::gui::background::reblur(); }
-        if key == "shade.scale" { crate::shade::rescale(); }
-        crate::shade::widgets::refresh_all_scenes();
-        crate::shade::force_redraw();
     }
 }
 
@@ -2181,35 +2152,27 @@ pub fn intent_lspci(args: &str) {
 /// cursor size (50..=300 %). Persisted to `mouse_speed` / `mouse_size` config.
 pub fn intent_mouse(args: &str) {
     let a = args.trim();
-    if let Some(v) = a.strip_prefix("speed") {
-        let v = v.trim();
-        if v.is_empty() {
-            kprintln!("  mouse speed: {}%", crate::shade::cursor::speed());
-        } else if let Ok(n) = v.parse::<i32>() {
-            crate::shade::cursor::set_speed(n);
-            let now = crate::shade::cursor::speed();
-            crate::config::set("mouse_speed", &alloc::format!("{}", now));
-            kprintln!("  mouse speed set to {}%", now);
-        } else {
-            kprintln!("  usage: mouse speed <25-600>");
-        }
+    let (what, key, range) = if let Some(v) = a.strip_prefix("speed") {
+        (v.trim(), "mouse_speed", "25-600")
     } else if let Some(v) = a.strip_prefix("size") {
-        let v = v.trim();
-        if v.is_empty() {
-            kprintln!("  mouse size: {}%", crate::shade::cursor::size());
-        } else if let Ok(n) = v.parse::<i32>() {
-            crate::shade::cursor::set_size(n);
-            let now = crate::shade::cursor::size();
-            crate::config::set("mouse_size", &alloc::format!("{}", now));
-            kprintln!("  mouse size set to {}%", now);
-        } else {
-            kprintln!("  usage: mouse size <50-300>");
-        }
+        (v.trim(), "mouse_size", "50-300")
     } else if a.is_empty() {
         kprintln!("  mouse speed {}%  size {}%", crate::shade::cursor::speed(), crate::shade::cursor::size());
         kprintln!("  set: mouse speed <25-600> | mouse size <50-300>");
+        return;
     } else {
         kprintln!("  usage: mouse [speed <25-600>] [size <50-300>]");
+        return;
+    };
+    let name = if key == "mouse_speed" { "speed" } else { "size" };
+    if what.is_empty() {
+        let now = if key == "mouse_speed" { crate::shade::cursor::speed() } else { crate::shade::cursor::size() };
+        kprintln!("  mouse {}: {}%", name, now);
+        return;
+    }
+    match crate::settings::set(key, what, crate::settings::Origin::Loop) {
+        Ok(v) => kprintln!("  mouse {} set to {}%", name, v),
+        Err(_) => kprintln!("  usage: mouse {} <{}>", name, range),
     }
 }
 

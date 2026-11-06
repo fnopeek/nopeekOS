@@ -131,6 +131,9 @@ pub mod caps {
         pub const CAMERA: u8 = 0x08;
         /// A microphone (`npk_usb_*` on class audio, audio capture).
         pub const MIC: u8 = 0x10;
+        /// `npk_setting_set`: change system settings (the settings app).
+        /// See docs/spec/SETTINGS.md.
+        pub const SETTINGS: u8 = 0x20;
     }
 }
 

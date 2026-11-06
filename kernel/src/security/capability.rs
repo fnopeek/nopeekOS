@@ -62,7 +62,10 @@ bitflags! {
         const CAMERA    = 0b100_0000_0000_0000;
         /// `npk_usb_*` on an audio interface, and audio capture.
         const MIC       = 0b1000_0000_0000_0000;
-        const ALL       = 0b1111_1111_1111_1111;
+        /// `npk_setting_set`: change the system settings the settings
+        /// table opens to apps (docs/spec/SETTINGS.md); the settings app.
+        const SETTINGS  = 0b1_0000_0000_0000_0000;
+        const ALL       = 0b1_1111_1111_1111_1111;
     }
 }
 
@@ -408,6 +411,7 @@ const CAP2_BIT_SHELL: u8 = 0x02; // system UI roles (panel, launcher, picker)
 const CAP2_BIT_EXTERNAL: u8 = 0x04; // files on external drives (`ext/`)
 const CAP2_BIT_CAMERA: u8 = 0x08; // a camera's USB interfaces
 const CAP2_BIT_MIC: u8 = 0x10; // a microphone
+const CAP2_BIT_SETTINGS: u8 = 0x20; // writing system settings
 
 fn rights_from_caps_byte2(b: u8) -> Rights {
     let mut r = Rights::empty();
@@ -416,6 +420,7 @@ fn rights_from_caps_byte2(b: u8) -> Rights {
     if b & CAP2_BIT_EXTERNAL != 0 { r |= Rights::EXTERNAL; }
     if b & CAP2_BIT_CAMERA != 0 { r |= Rights::CAMERA; }
     if b & CAP2_BIT_MIC != 0 { r |= Rights::MIC; }
+    if b & CAP2_BIT_SETTINGS != 0 { r |= Rights::SETTINGS; }
     r
 }
 

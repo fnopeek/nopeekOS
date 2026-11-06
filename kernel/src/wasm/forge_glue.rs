@@ -1451,4 +1451,12 @@ host_imports! {
     ctx fn npk_camera_open(width: i32, height: i32) -> i32;
     mem fn npk_camera_read(reader: i32, buf_ptr: i32, buf_max: i32, info_ptr: i32) -> i32;
     ctx fn npk_camera_close(reader: i32) -> i32;
+
+    // System settings (docs/spec/SETTINGS.md).
+    // npk_setting_get(key_ptr, key_len, buf_ptr, buf_max) -> len, 0 (no
+    // value), -(needed + 2), or -1 (no RENDER, or a key apps cannot read).
+    // npk_setting_set(key_ptr, key_len, val_ptr, val_len) -> 0, -1 (no
+    // SETTINGS, or a key apps cannot write), -2 (value refused).
+    mem fn npk_setting_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
+    mem fn npk_setting_set(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
 }

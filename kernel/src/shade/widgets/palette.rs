@@ -360,6 +360,14 @@ pub fn is_light_theme() -> bool {
     }
 }
 
+/// Whether `v` is a value `accent` takes: auto, a preset, or `#RRGGBB`.
+pub fn accent_is_valid(v: &str) -> bool {
+    if v.eq_ignore_ascii_case("auto") || ACCENT_PRESETS.iter().any(|(n, _)| v.eq_ignore_ascii_case(n)) {
+        return true;
+    }
+    v.strip_prefix('#').is_some_and(|h| h.len() == 6 && u32::from_str_radix(h, 16).is_ok())
+}
+
 /// The user's accent choice. `auto` (default) keeps deriving it from the
 /// wallpaper; a preset name or a `#RRGGBB` literal pins it. Set live with
 /// `set accent <rose|sage|blue|amber|auto|#RRGGBB>`.

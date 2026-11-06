@@ -51,6 +51,7 @@ mod camfeed;
 mod devices;
 mod intent;
 mod config;
+mod settings;
 mod time;
 mod shutdown;
 mod vga;

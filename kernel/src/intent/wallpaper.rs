@@ -151,6 +151,31 @@ fn set_wallpaper(name: &str) {
     apply_wallpaper_data(&final_path, &data);
 }
 
+/// The file in the wallpapers folder that `name` names, with or without
+/// its extension.
+pub(crate) fn find_in_dir(name: &str) -> Option<String> {
+    let dir = wallpaper_dir();
+    let mut candidates: Vec<String> = alloc::vec![alloc::format!("{}/{}", dir, name)];
+    if !name.contains('.') {
+        for ext in &["png", "jpg", "jpeg", "bmp", "webp"] {
+            candidates.push(alloc::format!("{}/{}.{}", dir, name, ext));
+        }
+    }
+    candidates.into_iter().find(|c| matches!(crate::npkfs::fs::stat(c), Ok(Some(_))))
+}
+
+/// Set the wallpaper named by a file of the wallpapers folder.
+pub(crate) fn set_by_name(name: &str) {
+    let Some(path) = find_in_dir(name) else {
+        kprintln!("[npk] Wallpaper '{}' not found.", name);
+        return;
+    };
+    match crate::npkfs::fetch(&path) {
+        Ok((data, _)) => apply_wallpaper_data(&path, &data),
+        Err(_) => kprintln!("[npk] Wallpaper '{}' not readable.", name),
+    }
+}
+
 /// Apply raw image data as wallpaper.
 /// Tries WASM PNG decoder first, falls back to raw BGRA.
 fn apply_wallpaper_data(name: &str, data: &[u8]) {

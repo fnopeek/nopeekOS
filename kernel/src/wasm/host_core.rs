@@ -4026,6 +4026,36 @@ pub(crate) fn npk_config_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, 
     write_whole(mem, buf_ptr, buf_max, value.as_bytes())
 }
 
+/// `npk_setting_get(key, buf)`: a system setting the settings table lets
+/// apps read (docs/spec/SETTINGS.md); RENDER.
+pub(crate) fn npk_setting_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+        return -1;
+    }
+    if glen(key_len).is_none_or(|n| n > crate::settings::MAX_KEY) { return -1; }
+    let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
+    if !crate::settings::app_reads(&key) { return -1; }
+    let Some(value) = crate::settings::get_for_app(&key) else { return 0 };
+    write_whole(mem, buf_ptr, buf_max, value.as_bytes())
+}
+
+/// `npk_setting_set(key, value)`: change a system setting the settings
+/// table lets apps write, through the loop's `set` path; SETTINGS.
+pub(crate) fn npk_setting_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32 {
+    if capability::check_global(&ctx.cap_id, capability::Rights::SETTINGS).is_err() {
+        return -1;
+    }
+    if glen(key_len).is_none_or(|n| n > crate::settings::MAX_KEY) { return -1; }
+    if glen(val_len).is_none_or(|n| n > crate::settings::MAX_VALUE) { return -2; }
+    let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
+    let Some(value) = read_str(mem, val_ptr, val_len) else { return -2 };
+    match crate::settings::set(&key, &value, crate::settings::Origin::App) {
+        Ok(_) => 0,
+        Err(crate::settings::Error::NotWritable) => -1,
+        Err(crate::settings::Error::Invalid(_)) => -2,
+    }
+}
+
 pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, out_ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if capability::check_global(&cap_id, capability::Rights::READ).is_err() {

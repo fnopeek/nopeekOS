@@ -19,7 +19,7 @@ pub mod system;
 mod update;
 pub mod install;
 mod python;
-mod wallpaper;
+pub(crate) mod wallpaper;
 mod wasm;
 
 use crate::capability::{CapId, Vault, Rights};
@@ -3059,13 +3059,7 @@ fn intent_theme(args: &str) {
             kprintln!("[npk] Usage: theme <dark|light|auto>");
         }
         "dark" | "light" | "auto" => {
-            crate::config::set("theme", mode);
-            crate::shade::widgets::refresh_all_scenes();
-            // Full redraw (not just request_render) so terminal windows
-            // repaint with the new Surface/OnSurface colors too — they
-            // resolve the theme at render time and the input-line cache
-            // must be invalidated.
-            crate::shade::force_redraw();
+            let _ = crate::settings::set("theme", mode, crate::settings::Origin::Loop);
             kprintln!("[npk] theme: {}", mode);
         }
         _ => {
