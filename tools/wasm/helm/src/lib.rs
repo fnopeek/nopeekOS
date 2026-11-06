@@ -594,7 +594,6 @@ fn render_appearance(h: &Helm) -> Vec<Widget> {
         setting(s().theme, choices(&theme_labels, theme, ACT_THEME_BASE)),
         setting(s().accent, choices(&accent_labels, accent, ACT_ACCENT_BASE)),
         setting(s().wallpaper, walls),
-        setting(s().scale, choices(&SCALES, scale_index(&st.scale), ACT_SCALE_BASE)),
     ]
 }
 
