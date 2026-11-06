@@ -248,6 +248,16 @@ pub fn audio_volume() -> Option<u32> { u32::try_from(sys::audio_get_volume()).ok
 /// Set the master volume in percent. False if refused.
 pub fn audio_set_volume(pct: u32) -> bool { sys::audio_set_volume(pct.min(100) as i32) >= 0 }
 
+/// A system setting (docs/spec/SETTINGS.md); `None` when it has no value
+/// or apps may not read it.
+pub fn setting_get(key: &str) -> Option<String> {
+    read_all(|b| sys::setting_get(key.as_bytes(), b)).and_then(text).filter(|v| !v.is_empty())
+}
+
+/// Change a system setting: 0, -1 when refused (no SETTINGS, or a key
+/// apps cannot write), -2 for a value the key does not take.
+pub fn setting_set(key: &str, value: &str) -> i32 { sys::setting_set(key.as_bytes(), value.as_bytes()) }
+
 /// One entry of the device register (`docs/spec/DEVICES.md`).
 pub struct Device {
     pub handle: i32,

@@ -220,6 +220,12 @@ icon_ids! {
     DotsThree             = 66,
     Eject                 = 67,
     Microphone            = 68,
+    Keyboard              = 69,
+    Mouse                 = 70,
+    Palette               = 71,
+    Gauge                 = 72,
+    Sun                   = 73,
+    Moon                  = 74,
 }
 
 // ── Accessibility roles ───────────────────────────────────────────────

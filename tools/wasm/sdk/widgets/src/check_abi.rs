@@ -117,6 +117,12 @@ const _: () = {
     assert!(IconId::DotsThree.0           == 66);
     assert!(IconId::Eject.0               == 67);
     assert!(IconId::Microphone.0          == 68);
+    assert!(IconId::Keyboard.0          == 69);
+    assert!(IconId::Mouse.0             == 70);
+    assert!(IconId::Palette.0           == 71);
+    assert!(IconId::Gauge.0             == 72);
+    assert!(IconId::Sun.0               == 73);
+    assert!(IconId::Moon.0              == 74);
 
     // Align / Axis
     assert!(Align::Start   as u8 == 0);
