@@ -540,9 +540,9 @@ fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i3
         None => import_pages(adev, pages)?,
     };
     b.handle = Some(h);
-    let tiled = match own {
+    let (tiled, card) = match own {
         Some(_) => guest_frame(adev, &b, h),
-        None => None,
+        None => (None, false),
     };
     let c = svc.composer.as_mut().ok_or(-EINVAL)?;
     let mapped = match tiled {
@@ -554,9 +554,9 @@ fn bo_add(adev: &mut amdgpu_device, svc: &mut service, id: u32) -> Result<(), i3
         obj::amdgpu_bo_unref(adev, h);
         return Err(e);
     }
-    // A frame imported through the texture unit is tiled where it lies:
-    // the kernel must not compose it from its pages on the CPU.
-    if b.import.is_some() {
+    // A tiled frame, imported through the texture unit or not: the kernel
+    // must not compose it from its pages on the CPU.
+    if card {
         npk_sys::gpudev_bo_gpu_only(id as i32);
     }
     npk_sys::gpudev_bo_bound(id as i32, b.va as i64);
@@ -617,12 +617,12 @@ fn log_guest_pixels(adev: &amdgpu_device, svc: &service) {
 /// The layout of guest object `h` as radeonsi imports it, when it is tiled
 /// and the texture unit may read it: the frame starts the object, and the
 /// image and its DCC lie inside it. A linear frame, or one refused, is
-/// read as it lies.
-fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::radeon_surf> {
+/// read as it lies. Second: the frame is tiled.
+fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> (Option<crate::import::radeon_surf>, bool) {
     let ob = obj::bo(adev, h);
     let (swizzle, _) = crate::import::ac_surface_apply_bo_metadata(ob.tiling_flags);
     if swizzle == crate::import::ADDR_SW_LINEAR {
-        return None;
+        return (None, false);
     }
     let md: Vec<u32> = ob.metadata.chunks_exact(4).map(|w| u32::from_le_bytes(w.try_into().unwrap())).collect();
     let r = if b.offset != 0 {
@@ -642,7 +642,7 @@ fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::
                     .dec(s.pipe_aligned as u64).s(")");
             }
             l.s(": through the texture unit into a linear buffer").dbg();
-            Some(s)
+            (Some(s), true)
         }
         Err(e) => {
             l.s(" tiled, swizzle ").dec(swizzle as u64).s(", read as it lies: ").s(match e {
@@ -654,8 +654,8 @@ fn guest_frame(adev: &amdgpu_device, b: &bo, h: usize) -> Option<crate::import::
             if let crate::import::refusal::bounds(_) = e {
                 l.s(" past the object");
             }
-            l.dbg();
-            None
+            l.say();
+            (None, true)
         }
     }
 }

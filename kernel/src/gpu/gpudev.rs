@@ -560,7 +560,9 @@ pub fn bo_pages(dev: PciAddr, id: i32, first: u32, out: &mut [u8]) -> i32 {
     n as i32
 }
 
-/// `npk_gpudev_bo_bound`: where the first pixel of buffer `id` lies.
+/// `npk_gpudev_bo_bound`: where the first pixel of buffer `id` lies. Pages
+/// in foreign memory the module did not mark `bo_gpu_only` before are a
+/// linear picture.
 pub fn bo_bound(dev: PciAddr, id: i32, gpu_addr: i64) -> i32 {
     let mut st = STATE.lock();
     if st.owner != Some(dev) || gpu_addr < 0 {
@@ -570,6 +572,9 @@ pub fn bo_bound(dev: PciAddr, id: i32, gpu_addr: i64) -> i32 {
         Some(bo) => {
             bo.gpu_addr = Some(gpu_addr as u64);
             bo.state = BoState::Bound;
+            if let Some((list, _)) = st.page_lists.get(&(id as u32)) {
+                list.set_linear();
+            }
             0
         }
         _ => -1,
@@ -2084,7 +2089,7 @@ pub fn blob(client: u32, blob_id: u32, res_id: u32) -> Option<(Arc<ForeignPixels
                 list.extend((0..len / PAGE).map(|p| bar0 + off + p * PAGE));
             }
             VRAM_BLOBS.fetch_add(1, Ordering::AcqRel);
-            Some((Arc::new(ForeignPixels::new(list)), map_info))
+            Some((Arc::new(ForeignPixels::new_laid_out_by_guest(list)), map_info))
         }
         _ => None,
     }

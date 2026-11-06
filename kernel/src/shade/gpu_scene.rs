@@ -69,6 +69,8 @@ enum Pending {
         pages: usize,
         cpu: u64,
         t0: u64,
+        /// Where the CPU drew no source (a guest frame it may not copy).
+        left_out: Vec<Rect>,
     },
 }
 
@@ -233,10 +235,10 @@ fn settle(p: Pending) -> Option<Redo> {
             failed(Ok(status));
             Some(Redo { scene, target, info, damage })
         }
-        Pending::Verify { seq, scene, target, info, copy, pages, cpu, t0 } => {
+        Pending::Verify { seq, scene, target, info, copy, pages, cpu, t0, left_out } => {
             let ok = seq.map(|s| gpudev::wait_scene_bound(s) == 0);
             let gpu = crate::interrupts::rdtsc() - t0;
-            judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu);
+            judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu, &left_out);
             if gpudev::release(copy, copy, pages) {
                 crate::memory::deallocate_contiguous(copy, pages);
             }
@@ -251,14 +253,21 @@ fn settle(p: Pending) -> Option<Redo> {
 struct Recorder<'a> {
     inner: &'a dyn Sources,
     seen: core::cell::RefCell<Vec<(Source, usize, u32, u32)>>,
+    /// Sources asked for that gave no pixels.
+    blank: core::cell::RefCell<Vec<Source>>,
 }
 
 impl Sources for Recorder<'_> {
     fn with_source(&self, src: Source, f: &mut dyn FnMut(&[u32], u32, u32)) {
+        let mut drawn = false;
         self.inner.with_source_keyed(src, &mut |px, w, h, key| {
+            drawn = true;
             self.seen.borrow_mut().push((src, key as usize, w, h));
             f(px, w, h);
         });
+        if !drawn {
+            self.blank.borrow_mut().push(src);
+        }
     }
 
     fn in_place(&self, src: Source) -> Option<InPlace> {
@@ -293,8 +302,8 @@ fn source_key(s: Source) -> (u8, u32, u32) {
 /// frame.
 fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) {
     let planes_before = plane_ptrs();
-    let gpu_rec = Recorder { inner: sources, seen: Default::default() };
-    let cpu_rec = Recorder { inner: sources, seen: Default::default() };
+    let gpu_rec = Recorder { inner: sources, seen: Default::default(), blank: Default::default() };
+    let cpu_rec = Recorder { inner: sources, seen: Default::default(), blank: Default::default() };
     let bytes = info.pitch as usize * info.height as usize;
     let pages = bytes.div_ceil(4096);
     let Some(copy) = crate::memory::allocate_contiguous(pages) else {
@@ -318,6 +327,13 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     scene::execute(frame, &cpu_rec, target, info, damage);
     let cpu = crate::interrupts::rdtsc() - t1;
 
+    // A guest frame the CPU may not copy (`ForeignPixels::cpu_readable`) is
+    // drawn by the GPU alone: its rectangles are not compared.
+    let blank = cpu_rec.blank.take();
+    let left_out: Vec<Rect> = frame.items.iter().filter_map(|i| match *i {
+        Item::Content { src: src @ Source::Surface(_), dst, .. } if blank.contains(&src) => Some(dst),
+        _ => None,
+    }).collect();
     // The GPU run asks every source, the CPU only those its damage reaches.
     let gpu_seen = gpu_rec.seen();
     let changed = cpu_rec.seen().iter().any(|s| !gpu_seen.contains(s)) || plane_ptrs() != planes_before;
@@ -334,19 +350,27 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     }
     *PENDING.lock() = Some(Pending::Verify {
         seq, scene: Scene { items: frame.items.clone() }, target: target as usize, info: *info, copy, pages, cpu, t0,
+        left_out,
     });
 }
 
 /// Compare the verification copy with the CPU's frame and switch.
-fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bool>, gpu: u64, cpu: u64) {
+#[allow(clippy::too_many_arguments)]
+fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bool>, gpu: u64, cpu: u64,
+         left_out: &[Rect]) {
     let us = |c: u64| c * 1000 / (crate::interrupts::tsc_freq() / 1000).max(1);
     match ok {
         Some(true) => {
             let mut diffs = 0u64;
+            let mut skipped = 0u64;
             let mut shown = Vec::new();
             for y in 0..info.height {
                 let row = y as usize * info.pitch as usize;
                 for x in 0..info.width {
+                    if left_out.iter().any(|r| x >= r.x && x < r.x + r.w && y >= r.y && y < r.y + r.h) {
+                        skipped += 1;
+                        continue;
+                    }
                     let off = row + x as usize * 4;
                     // SAFETY: both buffers hold pitch * height bytes; x < width
                     // keeps `off + 4` within the row.
@@ -366,6 +390,9 @@ fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bo
                 FAILURES_IN_ROW.store(0, Ordering::Relaxed);
                 crate::kprintln!("[npk] gpu: scene verified ({} items), GPU {} us incl. binding vs CPU {} us — composing on the GPU",
                     frame.items.len(), us(gpu), us(cpu));
+                if skipped != 0 {
+                    crate::kprintln!("[npk] gpu: {} pixels of guest frames only the GPU reads were not compared", skipped);
+                }
             } else {
                 MODE.store(MODE_OFF, Ordering::Release);
                 crate::kprintln!("[npk] gpu: scene differs in {} of {} pixels, composing on the CPU",

@@ -1461,7 +1461,7 @@ impl VirtioGpu {
         if wid != 0 {
             gb::note(gb::STAT_BLOB, 1);
             self.present_when_done(k, wid, view, dmg, native);
-        } else if !crate::microvm::vm_has_window() {
+        } else if !crate::microvm::vm_has_window() && view.pixels.cpu_readable() {
             let mut copy = crate::shade::buffers::PixelBuffer::new(view.width, view.height);
             view.copy_into(&mut copy, (0, 0, view.width, view.height));
             let px: &[u32] = &copy;

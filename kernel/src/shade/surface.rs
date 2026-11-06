@@ -13,8 +13,9 @@
 //! there (`front_in_place`), and only a CPU composite copies what it needs.
 //! Before the guest may write or free such a frame again, `detach_blob`
 //! turns every picture still shown from it into a copy. A frame laid out
-//! for the card (`ForeignPixels::gpu_only`) is never copied: the CPU shows
-//! nothing of it rather than its tiles.
+//! for the card, or one whose layout the GPU module has not told yet
+//! (`ForeignPixels::cpu_readable`), is never copied: the CPU shows nothing
+//! of it rather than its tiles.
 //!
 //! Concurrency: the producer (virtio-gpu FLUSH on a vCPU core) and the
 //! consumer (Shade render on Core 0) run on different cores. Three
@@ -107,9 +108,9 @@ impl Frame {
     /// what all surfaces hold.
     fn materialize(&mut self, history: &[(u64, u32, u32, (u32, u32, u32, u32)); HISTORY], held: usize) -> bool {
         let Some((view, n)) = self.blob.as_ref() else { return true };
-        if view.pixels.gpu_only() {
+        if !view.pixels.cpu_readable() {
             if !GPU_ONLY_SAID.swap(true, Ordering::Relaxed) {
-                crate::kprintln!("[gpu] a guest frame laid out for the card is not composed on the CPU");
+                crate::kprintln!("[gpu] a guest frame not known to be linear is not composed on the CPU");
             }
             return false;
         }

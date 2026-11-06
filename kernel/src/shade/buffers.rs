@@ -126,10 +126,18 @@ pub struct ForeignPixels {
     /// The pages are guest pages pinned for this object
     /// (`GuestMem::pin_page`); the pins go with it.
     pinned: bool,
-    /// The picture in them is laid out for the card (tiled, compressed):
-    /// only the GPU module reads it, a CPU copy would be scrambled.
-    gpu_only: core::sync::atomic::AtomicBool,
+    /// How the picture in them is laid out (`LAYOUT_*`): only a linear one
+    /// may be copied by the CPU, a tiled or compressed one would come out
+    /// scrambled.
+    layout: core::sync::atomic::AtomicU8,
 }
+
+/// The CPU reads the picture row by row.
+const LAYOUT_LINEAR: u8 = 0;
+/// Laid out by the guest's GPU driver, not told yet: the CPU keeps off it.
+const LAYOUT_UNKNOWN: u8 = 1;
+/// Laid out for the card (tiled, compressed): only the GPU module reads it.
+const LAYOUT_CARD: u8 = 2;
 
 static FOREIGN_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
@@ -142,7 +150,7 @@ impl ForeignPixels {
             pages,
             readers: core::sync::atomic::AtomicU32::new(0),
             pinned: false,
-            gpu_only: core::sync::atomic::AtomicBool::new(false),
+            layout: core::sync::atomic::AtomicU8::new(LAYOUT_LINEAR),
         }
     }
 
@@ -172,14 +180,35 @@ impl ForeignPixels {
         self.readers.fetch_sub(1, core::sync::atomic::Ordering::AcqRel);
     }
 
+    /// `new` for pages a guest's GPU driver drew into: the layout is the
+    /// driver's choice, and the CPU keeps off them until the GPU module
+    /// told it (`set_gpu_only` or `set_linear`).
+    pub fn new_laid_out_by_guest(pages: alloc::vec::Vec<u64>) -> Self {
+        let f = Self::new(pages);
+        f.layout.store(LAYOUT_UNKNOWN, core::sync::atomic::Ordering::Relaxed);
+        f
+    }
+
     /// The GPU module reads the picture through its layout
     /// (`npk_gpudev_bo_gpu_only`); the CPU must not copy it.
     pub fn set_gpu_only(&self) {
-        self.gpu_only.store(true, core::sync::atomic::Ordering::Release);
+        self.layout.store(LAYOUT_CARD, core::sync::atomic::Ordering::Release);
     }
 
+    /// The GPU module bound the pages as a linear picture.
+    pub fn set_linear(&self) {
+        let _ = self.layout.compare_exchange(LAYOUT_UNKNOWN, LAYOUT_LINEAR, core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire);
+    }
+
+    /// Known to be laid out for the card.
     pub fn gpu_only(&self) -> bool {
-        self.gpu_only.load(core::sync::atomic::Ordering::Acquire)
+        self.layout.load(core::sync::atomic::Ordering::Acquire) == LAYOUT_CARD
+    }
+
+    /// Known to be linear: the only picture the CPU may copy.
+    pub fn cpu_readable(&self) -> bool {
+        self.layout.load(core::sync::atomic::Ordering::Acquire) == LAYOUT_LINEAR
     }
 }
 
