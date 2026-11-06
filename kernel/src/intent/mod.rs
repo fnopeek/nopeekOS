@@ -32,23 +32,29 @@ use spin::Mutex;
 /// First size of the input line; it grows with what is typed or pasted.
 const INPUT_BUF_SIZE: usize = 512;
 
-/// Cooperative cancel for long-running foreground intents (downloads, OTA).
-/// Set from the keyboard IRQ on Ctrl+C (terminal SIGINT semantics — the loop
-/// has no copy concept; widget-app copy, when it exists, gates by focus first),
-/// polled by the recv busy-loops. Cleared at the start of each cancellable op.
-static CANCEL_REQUESTED: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
-/// IRQ-safe: request cancellation of the running foreground intent.
+/// Cooperative cancel for long-running foreground intents (downloads, OTA),
+/// one per terminal. Set from the keyboard IRQ on Ctrl+C for the active
+/// terminal (terminal SIGINT semantics) and by closing a busy terminal for
+/// that one; polled by the recv busy-loops and foreground modules for the
+/// terminal they run on. Cleared at the start of each cancellable op.
+static CANCEL_REQUESTED: [core::sync::atomic::AtomicBool; MAX_TERMS] =
+    [const { core::sync::atomic::AtomicBool::new(false) }; MAX_TERMS];
+/// IRQ-safe: Ctrl+C, cancel the active terminal's foreground intent.
 pub fn request_cancel() {
-    CANCEL_REQUESTED.store(true, core::sync::atomic::Ordering::Release);
+    request_cancel_for(crate::shade::terminal::active_idx());
 }
-/// Has the user pressed Ctrl+C since the last `clear_cancel`?
+/// IRQ-safe: cancel the foreground intent of terminal `idx`.
+pub fn request_cancel_for(idx: u8) {
+    CANCEL_REQUESTED[idx as usize].store(true, core::sync::atomic::Ordering::Release);
+}
+/// Was the caller's terminal cancelled since its last `clear_cancel`?
 pub fn cancel_requested() -> bool {
-    CANCEL_REQUESTED.load(core::sync::atomic::Ordering::Acquire)
+    CANCEL_REQUESTED[current_terminal() as usize].load(core::sync::atomic::Ordering::Acquire)
 }
-/// Arm cancellation afresh — call before a cancellable operation.
+/// Arm cancellation afresh for the caller's terminal — call before a
+/// cancellable operation.
 pub fn clear_cancel() {
-    CANCEL_REQUESTED.store(false, core::sync::atomic::Ordering::Release);
+    CANCEL_REQUESTED[current_terminal() as usize].store(false, core::sync::atomic::Ordering::Release);
 }
 
 /// Give up waiting after this long and answer "no", so a prompt can never

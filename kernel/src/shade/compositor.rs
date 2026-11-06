@@ -1064,7 +1064,7 @@ impl Compositor {
                 .then_some(w.terminal_idx)
         });
         if let Some(idx) = busy_term {
-            crate::intent::request_cancel();
+            crate::intent::request_cancel_for(idx);
             crate::intent::close_when_done(idx);
             return;
         }
