@@ -23,6 +23,7 @@ no legacy. The vision and architecture are in [README.md](README.md).
 |---|---|
 | `kernel/` | the kernel (`no_std` Rust) |
 | `forge/` | WASM to x86-64 compiler, host-testable |
+| `net/`, `hid/` | host-testable cores: network protocol state machines, HID report parser |
 | `tools/wasm/` | WASM modules: drivers, apps, the `beak` browser, the SDK |
 | `tools/` | build, staging, codegen and test scripts |
 | `targets/` | `x86_64-nopeek.json`, the kernel's own target |

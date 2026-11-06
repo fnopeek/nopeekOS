@@ -12,6 +12,12 @@ purchase is listed here.
 | Lenovo IdeaPad Flex 5 14ALC7 (AMD Ryzen 5 5500U, Lucienne) | amdgpu driver, RTL8822CE WiFi, I2C-HID touchpad, battery, AMD-V microVM |
 | QEMU | the easiest way to try it |
 
+## Planned
+
+| Device | What it covers |
+|---|---|
+| Raspberry Pi 5 (BCM2712, 4x Cortex-A76) | the second platform: AArch64, device tree, RP1 I/O, VideoCore VII |
+
 ## Bought with sponsor money
 
 | Date | Device | Price | Sponsored by | Status |

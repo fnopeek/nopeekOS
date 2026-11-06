@@ -36,8 +36,9 @@ start over today?**
 - **Intents** instead of commands: express what you want, not the protocol
 - **Encrypted by default:** every object on disk is AES-256-GCM at rest
 
-The kernel is written in Rust (`no_std`, nightly, x86_64) and boots
-straight from UEFI. Everything above it (the panels, the file browser,
+The kernel is written in Rust (`no_std`, nightly) and boots straight
+from UEFI on x86_64; a second platform, AArch64 on the Raspberry Pi 5,
+is in planning (see [Platforms](#platforms)). Everything above it (the panels, the file browser,
 the text editor, the password manager, the WiFi and GPU drivers, the web
 browser) is a signed, capability-gated WASM module. And where the legacy
 world is still needed, it gets a cage of its own: a full Linux with
@@ -48,7 +49,8 @@ Firefox runs in a microVM, as one tiled window.
 ## What It Can Do Today
 
 A tiling desktop with real apps, networking, encrypted storage, GPU
-drivers of its own, and a native web browser, running on bare metal
+drivers of its own, USB drives, camera and microphone, video calls in
+Firefox, and a native web browser, running on bare metal
 (the machines in [HARDWARE.md](HARDWARE.md): an Intel Tiger Lake NUC and
 an AMD Ryzen 5 5500U laptop) and in QEMU.
 
@@ -61,10 +63,13 @@ spell                    # Text editor: tabs, syntax highlight, markdown preview
 iris                     # Image viewer (PNG)
 tune                     # Player: MP3 and WAV (folder as playlist), MP4 video
 snap                     # Screenshot to npkFS
+cam                      # Camera viewer (USB video class)
 vault                    # Password manager on the kernel's keyvault
 link                     # Network card: address, networks, connect/forget
+helm                     # Settings
+top                      # System monitor
 beak [url]               # Native web browser (from scratch, no Linux, own JS)
-firefox                  # Firefox in a Linux microVM
+firefox                  # Firefox in a Linux microVM (camera, mic, screen share)
 
 # The intent loop (terminal)
 npk> status              # System overview (memory, capabilities, disk, net)
@@ -83,6 +88,7 @@ npk> python fib.py       # CPython 3.15 as a WASM module (WASI)
 npk> forge <module>      # Translate a module with forge and report the cost
 npk> cores               # Per-core CPU and per-engine GPU load
 npk> usb                 # What the USB driver enumerated, with descriptors
+npk> drives              # USB drives (FAT32, exFAT) under ext/: list, eject
 ```
 
 Intents that read, write or run something check the session's
@@ -97,10 +103,11 @@ Everything npkFS stores is encrypted at rest.
  ┌────────────────────────────────────────────────────────────┐
  │  WASM apps & drivers (sandboxed, capability-gated)         │
  │  deck: the panel, status items, popup cards                │
- │  loft / spell / iris / tune / snap / vault / link          │
+ │  loft / spell / iris / tune / snap / cam / vault / helm    │
  │  beak: from-scratch web browser (HTML/CSS/JS engine)       │
  │  gpu_intel_tgl / gpu_amd_renoir: GPU drivers (from Linux)  │
  │  wifi_rtl8822ce / wifid / acpi / i2c_hid / audio_hda       │
+ │  audio_acp / uvc / extfs (FAT32, exFAT)                    │
  ├────────────────────────────────────────────────────────────┤
  │  MicroVM (compatibility layer)                             │
  │  VT-x / AMD-V hypervisor · custom Linux 6.18 · virtio      │
@@ -118,9 +125,9 @@ Everything npkFS stores is encrypted at rest.
  │  npkFS v4 (content-addressed, CoW, encrypted) · keyvault   │
  │  Crypto (AES-256-GCM · BLAKE3 · TLS 1.3 · ECDSA P-384)     │
  │  Shade compositor · network stack · IOMMU (VT-d/AMD-Vi)    │
- │  Capability vault · NVMe / xHCI / NIC drivers · GOP        │
+ │  Capability vault · NVMe / xHCI / NIC / SD drivers · GOP   │
  ├────────────────────────────────────────────────────────────┤
- │  Hardware: x86_64, UEFI                                    │
+ │  Hardware: x86_64, UEFI · planned: AArch64, Raspberry Pi 5 │
  └────────────────────────────────────────────────────────────┘
 ```
 
@@ -176,7 +183,8 @@ git log and in `release/manifest`.
 **Kernel & SMP:** a UEFI PE32+ application, no bootloader; 4-level
 paging with NX and write-combining; a heap with segregated free lists
 and boundary tags (O(1) allocation and free) that grows in 64 MB steps
-up to 2 GB. All cores boot (ACPI MADT, INIT-SIPI-SIPI). New work waits in
+with no ceiling but RAM, stopping at the reserve the rest of the kernel
+needs. All cores boot (ACPI MADT, INIT-SIPI-SIPI). New work waits in
 one shared inbox; each core runs its own queue of stackful fibers, so a
 blocking host call yields instead of pinning a core, and an idle core
 takes over a runnable fiber from a busy one. Idle cores sleep in
@@ -192,9 +200,11 @@ time zone.
 transitive revocation, audit ring). AES-256-GCM at rest via AES-NI +
 PCLMULQDQ; BLAKE3 with AVX2. TLS 1.3 (RFC 8446: X25519 and P-384 key
 exchange, the three TLS 1.3 cipher suites, CertificateVerify and SAN
-checks, X.509 chain validation and expiry against 30 root CAs compiled
-into the kernel, extendable at runtime through a `sys/certs` store) on
-RustCrypto primitives. The CSPRNG is ChaCha20, seeded through BLAKE3 from
+checks, X.509 chain validation and expiry) on RustCrypto primitives.
+The root store is Mozilla's list, delivered as signed assets into
+`sys/certs` and withdrawn again by `update` when Mozilla drops a CA;
+`cert add` keeps local roots apart from it. Only the update host's four
+roots are compiled into the kernel, as a floor nothing can remove. The CSPRNG is ChaCha20, seeded through BLAKE3 from
 RDSEED/RDRAND, TSC jitter and the RTC. The passphrase unlocks a random
 disk key through an Argon2id keyslot; no accounts. OTA manifests are
 signed as a whole with ECDSA P-384, carry a monotonic `issued=` against
@@ -220,14 +230,18 @@ content hash, and resume a broken download with a range request.
 **Drivers:** the kernel itself has NVMe, xHCI USB (HID ported from Linux
 `hid-core.c` and `usbhid`, hubs and hotplug), Intel Ethernet (e1000 /
 e1000e / I219, and I225/I226 through a port of Linux `igc`), RTL8153 USB
-Ethernet, virtio-blk and virtio-net, a PS/2 keyboard, the ACPI embedded
-controller and SCI, a Smart Battery reader over the i801 SMBus, the UEFI
-GOP framebuffer, and the IOMMU (Intel VT-d, AMD-Vi), which can confine a
-device to its own page table. As **WASM modules** on a shared host-ABI
-crate (`npk_sys`): both GPU drivers, Intel HDA audio (including sound to
-a DisplayPort monitor), an I2C-HID touchpad, the `acpi` AML interpreter
-(battery `_BST`/`_BIF`, EC events, processor idle states), and WiFi for
-Realtek RTL8822CE. Hardware drivers are ported from Linux and kept as
+Ethernet, virtio-blk and virtio-net, USB mass storage, an SD card reader
+(SDHCI), a PS/2 keyboard, the ACPI embedded controller and SCI, a Smart
+Battery reader over the i801 SMBus, the UEFI GOP framebuffer, and the
+IOMMU (Intel VT-d, AMD-Vi), which can confine a device to its own page
+table. As **WASM modules** on a shared host-ABI crate (`npk_sys`): both
+GPU drivers, Intel HDA audio (including sound to a DisplayPort monitor),
+the digital microphone on AMD's audio coprocessor (`audio_acp`), USB
+cameras (`uvc`, after Linux `uvcvideo`), I2C-HID touchpad and touchscreen,
+the `acpi` AML interpreter (battery `_BST`/`_BIF`, EC events, processor
+idle states), WiFi for Realtek RTL8822CE, and `extfs`, which mounts FAT32
+and exFAT drives under `ext/`, one instance per drive
+(`docs/spec/EXTERNAL_STORAGE.md`). Hardware drivers are ported from Linux and kept as
 close to it as possible, with Linux as the reference.
 
 **GPU:** the kernel drives no GPU itself. It boots on GOP and the CPU; a
@@ -302,7 +316,9 @@ syntax highlight, markdown preview), `iris` (PNG viewer), `tune`
 (player: MP3 + WAV with the folder as playlist, MP4 with H.264 video and
 AAC audio, seek), `snap` (screenshot), `vault` (password manager:
 entries, generator), `link` (network card), `volume` (volume card),
-`pick` (the file dialog, as a portal), `top` (system monitor).
+`pick` (the file dialog, as a portal), `top` (system monitor), `helm`
+(settings, `docs/spec/SETTINGS.md`), `cam` (camera viewer,
+`docs/spec/CAMERA.md`).
 
 **Keyvault:** a secret is not a file. Secrets live in one encrypted
 vault object with two tiers and two data keys: a **system tier** (WiFi
@@ -321,7 +337,9 @@ guest SMP (vCPUs on the host's free worker cores), and speculation
 mitigations between guest and host chosen per CPU as Linux `bugs.c`
 chooses them. Its app is **Firefox** as a tiled window, with WebGL and
 hardware video decode through VA-API (Intel's iHD, AMD's radeonsi) over
-the native context. Each Linux app is a squashfs plus a home image,
+the native context. The host's camera, microphone and a shared screen
+reach the guest (a camera device, virtio-snd capture and a screen-cast
+portal), so a video call in Firefox works end to end. Each Linux app is a squashfs plus a home image,
 delivered over OTA.
 
 ---
@@ -367,6 +385,7 @@ model and every host function beak uses, is `docs/spec/BROWSER.md`.
 |------|--------|-----|
 | Language | Rust (`no_std`, nightly, edition 2024) | Memory safety, no GC |
 | Target | `x86_64-nopeek` (own spec) | Bare metal *with* SSE/AVX2/AES-NI |
+| Next platform | AArch64, Raspberry Pi 5 (planned) | One fixed board, a large community |
 | Boot | UEFI (PE32+ direct) | Modern firmware, no GRUB |
 | WASM engine | forge, our own WASM to x86-64 compiler | Native code, W^X, no bounds checks |
 | Second engine | wasmi (interpreter) | Same binary on two engines |
@@ -447,49 +466,91 @@ nopeekOS/
 ├── targets/                  # x86_64-nopeek.json: the kernel's own target
 ├── forge/                    # core/ = WASM to x86-64 compiler, harness/ = host runner
 ├── hid/                      # hid_core: HID report parser (from Linux hid-core.c)
-├── kernel/src/
-│   ├── main.rs               # Entry, boot sequence
-│   ├── boot.s / boot_uefi.rs # UEFI _start, ExitBootServices, GDT
-│   ├── hw.rs                 # Typed MMIO, ports, DMA, firmware tables, MSRs
-│   ├── fatal.rs              # Panic path: stop all cores, lock-free output
-│   ├── drivers/              # PCI, NVMe, xHCI, NICs, IOMMU, ACPI, EC, RTC, ...
-│   ├── mm/                   # Frame allocator, heap, paging
-│   ├── security/             # Capability vault, audit log, CSPRNG, keyvault
-│   ├── crypto/               # AES-GCM, keyslots, TLS 1.3, OTA key
-│   ├── storage/npkfs/        # Content-addressed filesystem
-│   ├── net/                  # Ethernet, ARP, IPv4, TCP/UDP, DNS/DHCP/NTP, fq_codel
-│   ├── smp/                  # MADT, SIPI, task inbox, fibers
-│   ├── time/                 # Wall clock, time zones
-│   ├── gpu/                  # GOP + gpudev (the GPU-module service)
-│   ├── gui/                  # Login screen, fonts, theme
-│   ├── shade/                # Compositor: tiling, widgets, panels
-│   ├── intent/               # The intent loop (dispatch, fs, net, http, update, ...)
-│   ├── microvm/              # VT-x / AMD-V hypervisor + virtio + Linux loader
-│   ├── forge_rt.rs           # forge address space, W^X mapping, host trap
-│   ├── wasi.rs + wasi/       # wasi_snapshot_preview1 against npkFS
-│   ├── wasm.rs               # Module lifecycle, engine glue
-│   └── wasm/                 # host_core.rs (npk_* calls), forge_glue.rs (import list)
+├── net/                      # net_core: protocol state machines (TCP, IP, DHCP, DNS), host-testable
+├── assets/wallpapers/        # Wallpapers shipped as signed assets
+├── sys/fonts/                # Inter and IBM Plex Mono, with their licenses
+├── kernel/
+│   ├── certs/                # The four compiled-in update-host roots
+│   └── src/
+│       ├── main.rs           # Entry, boot sequence
+│       ├── boot.s / boot_uefi.rs  # UEFI _start, ExitBootServices, GDT
+│       ├── hw.rs             # Typed MMIO, ports, DMA, firmware tables, MSRs
+│       ├── fatal.rs          # Panic path: stop all cores, lock-free output
+│       ├── interrupts.rs, ioapic.rs, irq.rs, tss.rs  # IDT, APIC, IRQ routing
+│       ├── cpu_vulns*.rs, spec_mitigations.rs  # Speculation mitigations per CPU
+│       ├── drivers/          # PCI, NVMe, xHCI, NICs, SDHCI, USB storage, IOMMU, ACPI, EC, ...
+│       ├── mm/               # Frame allocator, heap, paging
+│       ├── smp/              # MADT, SIPI, task inbox, per-core fibers
+│       ├── security/         # Capability vault, audit log, CSPRNG, keyvault
+│       ├── crypto/           # AES-GCM, keyslots, TLS 1.3 + root store, OTA key
+│       ├── storage/          # npkfs/ (content-addressed store), GPT, ext/ drives
+│       ├── net/              # Ethernet, ARP, IPv4, TCP/UDP, DNS/DHCP/NTP, fq_codel
+│       ├── time/             # Wall clock, time zones
+│       ├── audio.rs, capture.rs, camfeed.rs  # Audio out, audio in, camera feed
+│       ├── gpu/              # GOP + gpudev (the GPU-module service)
+│       ├── gui/              # Login screen, fonts, icons, theme
+│       ├── shade/            # Compositor: tiling, widgets, panels, terminal
+│       ├── intent/           # The intent loop (dispatch, fs, net, http, update, ...)
+│       ├── microvm/          # cpu/{svm,vmx} hypervisor, devices/ (virtio), linux/ loader
+│       ├── forge_rt.rs       # forge address space, W^X mapping, host trap
+│       ├── wasi.rs + wasi/   # wasi_snapshot_preview1 against npkFS
+│       ├── wasm.rs           # Module lifecycle, engine glue
+│       └── wasm/             # host_core.rs (npk_* calls), forge_glue.rs (import list)
 ├── microvm/linux/            # Guest init, Mesa, compositor and iHD builds
 ├── microvm-linux/            # Guest kernel build (Linux 6.18 + config)
 ├── microvm-userspace/        # Guest userspace bundle (Arch Linux + Firefox)
-├── release/                  # Signed OTA tree that devices update from
+├── release/                  # Signed OTA tree: kernel, modules/, assets/, apps/, blobs/
+├── tools/                    # stage-module.sh, comments.py, forge-gate.py, certs/, stack/, ...
 └── tools/wasm/               # WASM apps & drivers
     ├── beak/ + beak-engine/  #   Native browser + portable engine
     ├── loft/ spell/ iris/    #   File browser, editor, image viewer
-    ├── tune/                 #   Audio and video player
-    ├── snap/ top/            #   Screenshot, monitor
+    ├── tune/ cam/            #   Audio and video player, camera viewer
+    ├── snap/ top/ helm/      #   Screenshot, monitor, settings
     ├── vault/ link/          #   Password manager, network card
     ├── deck/ volume/         #   Panel + volume card
     ├── pick/ wallpaper/      #   File-dialog portal, wallpaper decoder
     ├── gpu_intel_tgl/ gpu_amd_renoir/  # GPU drivers (i915, amdgpu)
     ├── gpu_scene/ gpu_shaders/  #   Shared scene compositor + shaders
-    ├── wifi_rtl8822ce/       #   WiFi driver (rtw88)
-    ├── wifid/ acpi/ i2c_hid/ #   WPA supplicant, ACPI AML, touchpad
-    ├── audio_hda/            #   Intel HDA driver
-    ├── debug/ testdisk/      #   Reverse debug shell, npkFS benchmark
+    ├── wifi_rtl8822ce/ wifid/   #   WiFi driver (rtw88), supplicant + network manager
+    ├── acpi/ i2c_hid/        #   ACPI AML, touchpad + touchscreen
+    ├── audio_hda/ audio_acp/ #   Intel HDA, AMD digital microphone
+    ├── uvc/ extfs/           #   USB camera, FAT32/exFAT drives (core/ host-testable)
+    ├── debug/ testdisk/ fbench/  # Reverse debug shell, npkFS and forge benchmarks
     ├── vendor/               #   Vendored H.264 and AAC decoders (for tune)
     └── sdk/                  #   npk_sys (host ABI) + widgets (declarative UI SDK)
 ```
+
+Today all architecture-specific code (paging, interrupts, SMP bring-up,
+the hypervisors) sits next to the generic code under `kernel/src/`.
+Separating it into an architecture layer is the first step of the
+second platform below.
+
+---
+
+## Platforms
+
+| Platform | State |
+|---|---|
+| x86_64 with UEFI (Intel and AMD) | runs, see [HARDWARE.md](HARDWARE.md) |
+| AArch64, Raspberry Pi 5 | in planning |
+
+WASM modules are architecture-neutral: forge translates them on the
+device, so one signed module runs on every platform once forge has a
+backend for it. What a new platform needs:
+
+1. **An architecture layer in the kernel,** first carved out on x86_64
+   without changing behaviour: paging, exception vectors and the
+   interrupt controller, timer, SMP bring-up, context switch, early
+   serial, cache maintenance for DMA.
+2. **An AArch64 backend for forge,** tested on the host like the x86-64
+   one.
+3. **Board support** from the device tree instead of ACPI, and the
+   board's drivers, ported from Linux as always.
+4. **A hypervisor at EL2** next to VT-x and AMD-V; the virtio devices
+   stay as they are.
+
+The first three steps can be built and tested in QEMU's `virt` machine
+before anything runs on the board.
 
 ---
 
