@@ -214,7 +214,7 @@ pub fn init() {
     for o in &overrides {
         crate::kdebug!("[npk] ioapic: ISA IRQ {} -> GSI {} (flags {:#x})", o.bus_irq, o.gsi, o.flags);
     }
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let mut st = LOCK.lock();
         st.apics = apics;
         st.overrides = overrides;
@@ -225,7 +225,7 @@ pub fn init() {
 /// `mp_override_legacy_irq`: an override wins; ISA conforms to edge/high;
 /// a level override on IRQ 0 is a known firmware bug and taken as edge.
 pub fn isa_irq(irq: u8) -> (u32, bool, bool) {
-    let o = crate::interrupts::without_interrupts(|| {
+    let o = crate::arch::without_interrupts(|| {
         LOCK.lock().overrides.iter().find(|o| o.bus_irq == irq).copied()
     });
     match o {
@@ -242,7 +242,7 @@ pub fn isa_irq(irq: u8) -> (u32, bool, bool) {
 }
 
 fn with_pin<R>(gsi: u32, f: impl FnOnce(&IoApic, u32) -> R) -> Option<R> {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let st = LOCK.lock();
         let a = st.apics.iter().find(|a| gsi >= a.gsi_base && gsi < a.gsi_base + a.pins)?;
         Some(f(a, gsi - a.gsi_base))
@@ -253,7 +253,7 @@ fn with_pin<R>(gsi: u32, f: impl FnOnce(&IoApic, u32) -> R) -> Option<R> {
 /// physical destination), left masked — `unmask` when the driver is ready.
 /// False if no I/O APIC serves this GSI.
 pub fn route(gsi: u32, vector: u8, dest_apic: u32, level: bool, active_low: bool) -> bool {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let mut st = LOCK.lock();
         if st.routed.contains(&gsi) {
             return false; // one owner per line
@@ -274,14 +274,14 @@ pub fn route(gsi: u32, vector: u8, dest_apic: u32, level: bool, active_low: bool
 /// Mask `gsi` and give the line up, so the next driver can route it.
 pub fn release(gsi: u32) {
     mask(gsi);
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         LOCK.lock().routed.retain(|&g| g != gsi);
     });
 }
 
 /// Is `gsi` served by an I/O APIC and still without an owner?
 pub fn is_free(gsi: u32) -> bool {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let st = LOCK.lock();
         !st.routed.contains(&gsi)
             && st.apics.iter().any(|a| gsi >= a.gsi_base && gsi < a.gsi_base + a.pins)

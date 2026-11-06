@@ -2369,7 +2369,7 @@ pub fn intent_halt() -> ! {
         core::arch::asm!("lidt [{}]", in(reg) &null_idt);
         core::arch::asm!("int3");
 
-        loop { core::arch::asm!("cli; hlt"); }
+        crate::arch::halt_forever()
     }
 }
 

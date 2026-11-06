@@ -181,7 +181,7 @@ static TERMS: [Mutex<Option<Box<TerminalBuffer>>>; MAX_SLOTS] =
 /// A locked, occupied terminal slot. Restores IF after unlocking.
 struct TermGuard {
     guard: Option<spin::MutexGuard<'static, Option<Box<TerminalBuffer>>>>,
-    flags: u64,
+    flags: crate::arch::IrqState,
 }
 
 impl core::ops::Deref for TermGuard {
@@ -206,25 +206,25 @@ impl core::ops::DerefMut for TermGuard {
 impl Drop for TermGuard {
     fn drop(&mut self) {
         drop(self.guard.take());
-        crate::interrupts::irq_restore(self.flags);
+        crate::arch::irq_restore(self.flags);
     }
 }
 
 /// Lock terminal `idx` (None if the slot is empty or out of range).
 fn term(idx: usize) -> Option<TermGuard> {
     if idx >= MAX_SLOTS { return None; }
-    let flags = crate::interrupts::irq_save();
+    let flags = crate::arch::irq_save();
     let guard = TERMS[idx].lock();
     if guard.is_none() {
         drop(guard);
-        crate::interrupts::irq_restore(flags);
+        crate::arch::irq_restore(flags);
         return None;
     }
     Some(TermGuard { guard: Some(guard), flags })
 }
 
 fn slot_in_use(idx: usize) -> bool {
-    crate::interrupts::without_interrupts(|| TERMS[idx].lock().is_some())
+    crate::arch::without_interrupts(|| TERMS[idx].lock().is_some())
 }
 
 /// Currently active (focused) terminal index — drives rendering + is the
@@ -346,7 +346,7 @@ pub fn allocate() -> Option<u8> {
             if ptr.is_null() { return None; }
             Box::from_raw(ptr)
         };
-        let placed = crate::interrupts::without_interrupts(|| {
+        let placed = crate::arch::without_interrupts(|| {
             let mut slot = TERMS[i].lock();
             if slot.is_some() { return Some(buf); }
             *slot = Some(buf);
@@ -373,7 +373,7 @@ pub fn free(idx: u8) {
     for c in CORE_OUTPUT.iter() {
         let _ = c.compare_exchange(idx, 255, Ordering::AcqRel, Ordering::Relaxed);
     }
-    let buf = crate::interrupts::without_interrupts(|| TERMS[idx as usize].lock().take());
+    let buf = crate::arch::without_interrupts(|| TERMS[idx as usize].lock().take());
     drop(buf);
     // If the primary just closed, hand primary to the lowest surviving loop
     // (the next-oldest by index), or 255 when none remain.

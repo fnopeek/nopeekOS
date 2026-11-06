@@ -162,7 +162,7 @@ fn log_tsc_sync(online: usize) {
     // The offset was taken against the midpoint of the round trip, so it
     // carries ±rt/2; the smallest round trip is the best estimate.
     let _ = rt;
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let now = crate::interrupts::rdtsc().wrapping_add(off as u64);
         // SAFETY: IA32_TSC (MSR 0x10) is architectural on x86_64 and
         // writable at CPL 0; it moves only this core's (core 0's) counter.
@@ -367,7 +367,7 @@ pub fn send_freq_sample_ipi(apic_id: u32) {
 /// its own IPI in between would overwrite ICR-high, and the second write
 /// here would then deliver to the ISR's target.
 fn send_ipi(lapic: Mmio, target_apic_id: u32, icr_low: u32) {
-    crate::interrupts::without_interrupts(|| send_ipi_masked(lapic, target_apic_id, icr_low))
+    crate::arch::without_interrupts(|| send_ipi_masked(lapic, target_apic_id, icr_low))
 }
 
 fn send_ipi_masked(lapic: Mmio, target_apic_id: u32, icr_low: u32) {

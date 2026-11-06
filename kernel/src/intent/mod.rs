@@ -1285,7 +1285,7 @@ fn core0_wait() {
     crate::keyboard::apply_deferred();
     // Input that no interrupt reports is drained here.
     if crate::xhci::needs_poll() || crate::xhci::take_missed_drain() {
-        crate::interrupts::without_interrupts(crate::xhci::poll_events_irq);
+        crate::arch::without_interrupts(crate::xhci::poll_events_irq);
     }
     // A USB device plugged in or out: enumerated or torn down here, outside
     // the interrupt that noticed it.

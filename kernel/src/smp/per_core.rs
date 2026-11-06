@@ -1013,7 +1013,7 @@ pub fn core0_loop() -> ! {
         // IF=0 from the last look to the halt: an ISR here that signals a
         // fiber on this core sends no IPI (`wake_core`), so it must stay
         // pending and end the halt rather than run before it.
-        let flags = crate::interrupts::irq_save();
+        let flags = crate::arch::irq_save();
         IDLE[0].store(true, Ordering::SeqCst);
         let now = crate::interrupts::rdtsc();
         match super::fiber::earliest_deadline(0) {
@@ -1021,7 +1021,7 @@ pub fn core0_loop() -> ! {
             wake => crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK),
         }
         IDLE[0].store(false, Ordering::Relaxed);
-        crate::interrupts::irq_restore(flags);
+        crate::arch::irq_restore(flags);
     }
 }
 
@@ -1352,19 +1352,19 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // seen by this re-check; one that saw IDLE sends the IPI, which
         // stays pending (IF=0) and ends the halt below at once. The same
         // holds for an ISR on this core that signals one of its fibers.
-        let flags = crate::interrupts::irq_save();
+        let flags = crate::arch::irq_save();
         IDLE[cid].store(true, Ordering::SeqCst);
         let now = crate::interrupts::rdtsc();
         let mut wake = super::fiber::earliest_deadline(cid);
         if matches!(wake, Some(d) if d <= now) {
             IDLE[cid].store(false, Ordering::Relaxed);
-            crate::interrupts::irq_restore(flags);
+            crate::arch::irq_restore(flags);
             continue; // became runnable — round again
         }
         if super::scheduler::has_work() {
             if take && super::scheduler::head_acceptable(|fiber, shared, waited| accepts(cid, fiber, shared, waited)) {
                 IDLE[cid].store(false, Ordering::Relaxed);
-                crate::interrupts::irq_restore(flags);
+                crate::arch::irq_restore(flags);
                 continue;
             }
             // Work waits that this core declines — for another core. If
@@ -1376,7 +1376,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         }
         crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK);
         IDLE[cid].store(false, Ordering::Relaxed);
-        crate::interrupts::irq_restore(flags);
+        crate::arch::irq_restore(flags);
     }
 }
 

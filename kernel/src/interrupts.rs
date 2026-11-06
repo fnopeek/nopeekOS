@@ -948,15 +948,10 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     let cid = crate::smp::per_core::current_core_id();
     let own_timer = cid < 256
         && (cid != 0 || CORE0_TICKLESS.load(Ordering::Relaxed));
-    let rflags: u64;
-    // SAFETY: save RFLAGS and clear IF; restored below exactly as found.
-    unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
+    let irq = crate::arch::irq_save();
     if let Some(d) = deadline {
         if rdtsc() >= d {
-            if rflags & (1 << 9) != 0 {
-                // SAFETY: IF was set on entry.
-                unsafe { core::arch::asm!("sti") };
-            }
+            crate::arch::irq_restore(irq);
             return;
         }
         if own_timer { arm_at(d); }
@@ -1020,10 +1015,7 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     }
     // Woken by something else: the one-shot is still pending — drop it.
     if own_timer && deadline.is_some() { disarm(); }
-    if rflags & (1 << 9) != 0 {
-        // SAFETY: IF was set on entry.
-        unsafe { core::arch::asm!("sti") };
-    }
+    crate::arch::irq_restore(irq);
 }
 
 /// How often `worker_idle_hlt` wakes on the calling worker: `hz` per second.
@@ -1081,41 +1073,6 @@ extern "x86-interrupt" fn xhci_irq_handler(_frame: InterruptStackFrame) {
     crate::xhci::msi_irq();
     crate::intent::wake_shell();
     lapic_eoi();
-}
-
-/// Clear IF and return RFLAGS as it was, for `irq_restore`. For a critical
-/// section that does not fit a closure (`without_interrupts`).
-pub fn irq_save() -> u64 {
-    let rflags: u64;
-    // SAFETY: save RFLAGS and clear IF; the caller restores via `irq_restore`.
-    unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
-    rflags
-}
-
-/// Set IF again if it was set in `rflags` (from `irq_save`).
-pub fn irq_restore(rflags: u64) {
-    if rflags & (1 << 9) != 0 {
-        // SAFETY: IF was set when `irq_save` ran.
-        unsafe { core::arch::asm!("sti") };
-    }
-}
-
-/// Run `f` with this core's interrupts masked, restoring the previous IF.
-///
-/// For a spin lock that an ISR on the same core may also take: held with
-/// IF=1, the timer IRQ lands inside the critical section and spins on the
-/// lock its own core holds, deadlocking the core. Cheap (pushfq/cli/popfq), so
-/// keep `f` short; it cannot be interrupted.
-pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
-    let rflags: u64;
-    // SAFETY: save RFLAGS and clear IF; restored below exactly as found.
-    unsafe { core::arch::asm!("pushfq; pop {}; cli", out(reg) rflags) };
-    let r = f();
-    if rflags & (1 << 9) != 0 {
-        // SAFETY: IF was set on entry; set it again.
-        unsafe { core::arch::asm!("sti") };
-    }
-    r
 }
 
 // ── Device interrupts (MSI-X → LAPIC vector → fiber wake) ───────────

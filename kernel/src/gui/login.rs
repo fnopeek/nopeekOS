@@ -392,9 +392,7 @@ pub fn run() {
                                         Theme::ACCENT_RED);
                                     crate::framebuffer::blit_rect(fb, 0, 0, info.width, info.height);
                                 });
-                                // SAFETY: cli; hlt stops this core with
-                                // interrupts off and touches no memory.
-                                loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                                crate::arch::halt_forever()
                             }
 
                             let delay_secs = 1u64 << attempts.min(5);

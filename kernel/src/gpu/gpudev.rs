@@ -1122,11 +1122,9 @@ fn wake_waiters() {
 /// instead of spinning, and no other fiber runs meanwhile, so a caller that
 /// holds a lock keeps it safely. With interrupts off it only spins.
 fn halt_for(seq: u32, deadline: u64) {
-    let rflags: u64;
-    // SAFETY: reads RFLAGS, no other effect.
-    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(preserves_flags)) };
+    let irqs_on = crate::arch::irqs_enabled();
     let cid = crate::smp::per_core::current_core_id();
-    if rflags & (1 << 9) == 0 || cid >= 64 {
+    if !irqs_on || cid >= 64 {
         core::hint::spin_loop();
         return;
     }
@@ -1134,7 +1132,7 @@ fn halt_for(seq: u32, deadline: u64) {
     WAITING_CORES.fetch_or(bit, Ordering::SeqCst);
     // The look and the halt with IF off: a completion after the look leaves
     // its IPI pending, and that ends the halt.
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         if !is_done(seq) && READY.load(Ordering::Acquire) {
             // In short steps: the halt re-arms the core's one-shot timer, and
             // a deadline someone else armed earlier is late by one step at most.

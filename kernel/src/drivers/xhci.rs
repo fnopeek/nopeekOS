@@ -281,7 +281,7 @@ fn push_mouse_locked(evt: MouseEvent) {
 /// `cheap` picks the repaint path: a USB mouse only moves the cursor, a PS/2
 /// or driver event requests a full frame. Both run outside the lock.
 fn inject_pointer(evt: MouseEvent, cheap: bool) {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let _g = POINTER_LOCK.lock();
         MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
         crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
@@ -298,7 +298,7 @@ fn inject_pointer(evt: MouseEvent, cheap: bool) {
 /// screen) with these buttons. Same ring and lock as `inject_pointer`; the
 /// event itself carries no motion, the position is in the cursor state.
 pub fn inject_pointer_abs(x: u16, y: u16, buttons: u8) {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let _g = POINTER_LOCK.lock();
         MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
         crate::shade::cursor::set_atomic_abs(x, y, buttons);
@@ -321,7 +321,7 @@ pub fn poll_keyboard() -> Option<u8> {
     if !AVAILABLE.load(Ordering::Relaxed) { return None; }
 
     // The rest of a repeated escape sequence goes before anything newer.
-    if let Some(b) = crate::interrupts::without_interrupts(|| REPEAT_SEQ.lock().pop()) {
+    if let Some(b) = crate::arch::without_interrupts(|| REPEAT_SEQ.lock().pop()) {
         return Some(b);
     }
 
@@ -352,7 +352,7 @@ pub fn poll_keyboard() -> Option<u8> {
             // Navigation keys are escape sequences, not characters: ESC
             // now, the rest from REPEAT_SEQ on the next calls.
             if let Some(last) = nav_seq_final(rk) {
-                crate::interrupts::without_interrupts(|| {
+                crate::arch::without_interrupts(|| {
                     *REPEAT_SEQ.lock() = RepeatSeq { bytes: [b'[', last], next: 0 };
                 });
                 return Some(0x1B);
@@ -4739,7 +4739,7 @@ static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
 /// the non-ISR side must mask interrupts, or a tick inside the lock spins
 /// forever on it.
 fn take_tail() -> Option<u8> {
-    crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().take())
+    crate::arch::without_interrupts(|| UTF8_TAIL.lock().take())
 }
 
 /// HID code to the first byte of the character; the rest goes to
@@ -4747,7 +4747,7 @@ fn take_tail() -> Option<u8> {
 fn hid_to_char(key: u8, shift: bool, alt_gr: bool, is_de: bool) -> u8 {
     let c = hid_to_char_ch(key, shift, alt_gr, is_de);
     if c == '\0' { return 0 }
-    crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().split(c))
+    crate::arch::without_interrupts(|| UTF8_TAIL.lock().split(c))
 }
 
 /// Convert HID keycode to a character. `'\0'` for unhandled keys.

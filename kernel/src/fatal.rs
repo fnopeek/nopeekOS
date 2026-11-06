@@ -38,17 +38,13 @@ pub fn is_panicking() -> bool {
 
 /// Stop this core for good.
 pub fn halt() -> ! {
-    loop {
-        // SAFETY: interrupts off, then wait; nothing resumes this core.
-        unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
-    }
+    crate::arch::halt_forever()
 }
 
 /// Start dying: interrupts off, other cores stopped. `None` if another
 /// fault got here first; the caller then just halts.
 pub fn begin() -> Option<Writer> {
-    // SAFETY: masking interrupts on the way down.
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+    crate::arch::irq_disable();
     if PANICKING.swap(true, Ordering::AcqRel) {
         return None;
     }

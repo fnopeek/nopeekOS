@@ -26,7 +26,7 @@ const REG_STATUS_B: u8 = 0x0B;
 static CMOS_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 fn read_cmos(reg: u8) -> u8 {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let _g = CMOS_LOCK.lock();
         CMOS_ADDR.outb(reg | 0x80); // bit 7 = disable NMI
         CMOS_DATA.inb()
@@ -34,7 +34,7 @@ fn read_cmos(reg: u8) -> u8 {
 }
 
 fn write_cmos(reg: u8, val: u8) {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let _g = CMOS_LOCK.lock();
         CMOS_ADDR.outb(reg | 0x80);
         CMOS_DATA.outb(val);

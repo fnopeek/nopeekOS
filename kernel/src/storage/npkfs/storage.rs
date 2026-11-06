@@ -81,9 +81,7 @@ fn halt_for_legacy_disk(version: u8) -> ! {
     kprintln!("[npk] │ older kernels can still read it.                         │");
     kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
     kprintln!("");
-    // SAFETY: cli; hlt stops this core with interrupts off and touches no
-    // memory.
-    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+    crate::arch::halt_forever()
 }
 
 /// Halt when the disk holds an npkFS that would not mount. Nothing has been
@@ -111,9 +109,7 @@ pub fn halt_for_unmountable_disk(p: &sb_io::SbProbe) -> ! {
     kprintln!("[npk] │ the installer USB.                                       │");
     kprintln!("[npk] └──────────────────────────────────────────────────────────┘");
     kprintln!("");
-    // SAFETY: cli; hlt stops this core with interrupts off and touches no
-    // memory.
-    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+    crate::arch::halt_forever()
 }
 
 /// Format the entire disk to npkFS v4. Destructive: any pre-v4

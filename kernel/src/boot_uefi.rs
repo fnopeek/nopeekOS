@@ -596,10 +596,10 @@ pub unsafe extern "efiapi" fn efi_main(
     // are allocated first, since allocating changes the map.
     // SAFETY: bs is still valid before ExitBootServices.
     if !unsafe { alloc_memory_map(bs) } {
-        // SAFETY: com1_print only writes the UART data port; cli/hlt stops.
+        // SAFETY: com1_print only writes the UART data port.
         unsafe {
             com1_print(b"[uefi] no memory map, halting.\n");
-            loop { core::arch::asm!("cli; hlt") }
+            crate::arch::halt_forever()
         }
     }
     // SAFETY: bs is still valid, and nothing allocates between this snapshot
@@ -639,7 +639,7 @@ pub unsafe extern "efiapi" fn efi_main(
                 com1_print(b"[uefi] ExitBootServices retry failed: 0x");
                 com1_hex64(status2 as u64);
                 com1_print(b"\n[uefi] giving up, halting.\n");
-                loop { core::arch::asm!("cli; hlt") }
+                crate::arch::halt_forever()
             }
         }
     }

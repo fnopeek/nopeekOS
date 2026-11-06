@@ -17,6 +17,7 @@ pub mod boot_info;
 mod boot_uefi;
 
 // ── Module groups ──────────────────────────────────────────────
+mod arch;
 mod drivers;
 pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
 pub use drivers::{xhci, usb_storage, keyboard, framebuffer, rtc, blkdev, netdev, acpi, smbus, battery, ec, sci};
@@ -271,9 +272,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
                 Err(e) => {
                     kprintln!("[npk] Installation failed: {}", e);
                     kprintln!("[npk] System halted.");
-                    // SAFETY: cli; hlt stops this core with interrupts off and
-                    // touches no memory.
-                    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                    crate::arch::halt_forever()
                 }
             }
         } else {
@@ -356,9 +355,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         // === First boot: Setup Wizard (identity, settings) ===
         if !setup::run_fresh_install() {
             kprintln!("[npk] Setup failed. System halted.");
-            // SAFETY: cli; hlt stops this core with interrupts off and touches
-            // no memory.
-            loop { unsafe { core::arch::asm!("cli; hlt"); } }
+            crate::arch::halt_forever()
         }
         vga::show_status(b"Setup complete");
 
@@ -521,9 +518,7 @@ fn text_mode_auth() {
                         Err(e) => {
                             kprintln!("[npk] Installation failed: {}", e);
                             kprintln!("[npk] System halted.");
-                            // SAFETY: cli; hlt stops this core with interrupts
-                            // off and touches no memory.
-                            loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                            crate::arch::halt_forever()
                         }
                     }
                 } else {
@@ -534,9 +529,7 @@ fn text_mode_auth() {
                 kprintln!();
                 if !setup::run_fresh_install() {
                     kprintln!("[npk] Setup failed. System halted.");
-                    // SAFETY: cli; hlt stops this core with interrupts off and
-                    // touches no memory.
-                    loop { unsafe { core::arch::asm!("cli; hlt"); } }
+                    crate::arch::halt_forever()
                 }
                 return;
             } else {
@@ -563,9 +556,7 @@ fn text_mode_auth() {
 
         if attempts >= 10 {
             kprintln!("[npk] Too many failed attempts. System halted.");
-            // SAFETY: cli; hlt stops this core with interrupts off and touches
-            // no memory.
-            loop { unsafe { core::arch::asm!("cli; hlt"); } }
+            crate::arch::halt_forever()
         }
     }
 }

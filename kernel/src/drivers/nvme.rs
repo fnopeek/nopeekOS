@@ -323,15 +323,13 @@ impl NvmeState {
     /// the caller keeps holding the controller's lock safely. With
     /// interrupts off it returns at once and the caller spins.
     fn halt_for_completion(&self, deadline: u64) {
-        let rflags: u64;
-        // SAFETY: reads RFLAGS, no other effect.
-        unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(preserves_flags)) };
-        if rflags & (1 << 9) == 0 {
+        let irqs_on = crate::arch::irqs_enabled();
+        if !irqs_on {
             return;
         }
         // The look and the halt with IF off: a completion after the look
         // leaves its interrupt pending, and that ends the halt.
-        crate::interrupts::without_interrupts(|| {
+        crate::arch::without_interrupts(|| {
             let entry = cq_read(&self.io_cq, self.io_cq_head);
             if ((entry.status & 1) != 0) != self.io_phase {
                 let step = crate::interrupts::rdtsc()

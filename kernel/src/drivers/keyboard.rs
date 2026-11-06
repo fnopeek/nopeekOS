@@ -61,7 +61,7 @@ static KEY_RING: spin::Mutex<KeyRing> =
     spin::Mutex::new(KeyRing { buf: [0; BUF_SIZE], head: 0, tail: 0 });
 
 fn push_seq(seq: &[u8]) {
-    crate::interrupts::without_interrupts(|| KEY_RING.lock().push_seq(seq));
+    crate::arch::without_interrupts(|| KEY_RING.lock().push_seq(seq));
 }
 
 // Modifier state (shared across all keyboard drivers)
@@ -336,7 +336,7 @@ fn feed_mouse(byte: u8) {
 #[allow(dead_code)]
 /// Check if a key is available (IRQ buffer or polled port 0x60).
 pub fn has_key() -> bool {
-    if !crate::interrupts::without_interrupts(|| KEY_RING.lock().is_empty()) {
+    if !crate::arch::without_interrupts(|| KEY_RING.lock().is_empty()) {
         return true;
     }
     // PS/2 byte waiting in the i8042 output buffer (keyboard, not aux)?
@@ -349,7 +349,7 @@ pub fn has_key() -> bool {
 /// Read next raw key byte from buffer. Falls back to PS/2 polling, then
 /// xHCI USB keyboard. Prefer `read_event()` for typed KeyEvent w/ modifiers.
 pub fn read_key() -> Option<u8> {
-    if let Some(key) = crate::interrupts::without_interrupts(|| KEY_RING.lock().pop()) {
+    if let Some(key) = crate::arch::without_interrupts(|| KEY_RING.lock().pop()) {
         return Some(key);
     }
     if let Some(key) = PASTE.lock().pop_front() {
@@ -478,7 +478,7 @@ pub fn enable_irq() {
     } else {
         None
     };
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         // Nothing else touches the i8042 yet.
         for _ in 0..16 {
             if STATUS_PORT.inb() & 0x01 == 0 { break; }
@@ -735,14 +735,14 @@ static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
 /// the non-ISR side must mask interrupts, or a tick inside the lock spins
 /// forever on it.
 fn take_tail() -> Option<u8> {
-    crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().take())
+    crate::arch::without_interrupts(|| UTF8_TAIL.lock().take())
 }
 
 /// Decode a raw scancode (modifiers + extended) to the first byte of its
 /// character; the rest goes to `UTF8_TAIL`.
 fn decode_scancode(scancode: u8) -> Option<u8> {
     let c = decode_scancode_char(scancode)?;
-    Some(crate::interrupts::without_interrupts(|| UTF8_TAIL.lock().split(c)))
+    Some(crate::arch::without_interrupts(|| UTF8_TAIL.lock().split(c)))
 }
 
 fn decode_scancode_char(scancode: u8) -> Option<char> {

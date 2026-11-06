@@ -132,7 +132,7 @@ pub fn push_workspace_key(n: u8, shift: bool) {
 
 /// Push a pending action.
 fn push_action(action: ShadeAction) {
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let mut q = PENDING.lock();
         q.push(action);
         HAS_ACTION.store(true, Ordering::Release);
@@ -142,7 +142,7 @@ fn push_action(action: ShadeAction) {
 /// Poll for a pending action (called from intent loop).
 pub fn poll_action() -> Option<ShadeAction> {
     if !HAS_ACTION.load(Ordering::Acquire) { return None; }
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         let mut q = PENDING.lock();
         let a = q.pop();
         HAS_ACTION.store(q.len != 0, Ordering::Release);

@@ -218,11 +218,9 @@ fn rx_wake() {
 pub fn rx_wait(since: u64) {
     poll_rx_only();
     let cid = crate::smp::per_core::current_core_id();
-    let rflags: u64;
-    // SAFETY: reads RFLAGS, no other effect.
-    unsafe { core::arch::asm!("pushfq; pop {}", out(reg) rflags, options(preserves_flags)) };
+    let irqs_on = crate::arch::irqs_enabled();
     // With interrupts off no IPI ends a halt.
-    if !napi::active() || cid == 0 || cid >= 64 || rflags & (1 << 9) == 0 {
+    if !napi::active() || cid == 0 || cid >= 64 || !irqs_on {
         core::hint::spin_loop();
         return;
     }
@@ -230,7 +228,7 @@ pub fn rx_wait(since: u64) {
     RX_WAITERS.fetch_or(bit, Ordering::SeqCst);
     // The look and the halt with IF off: frames after the look leave their
     // wake IPI pending, and that ends the halt.
-    crate::interrupts::without_interrupts(|| {
+    crate::arch::without_interrupts(|| {
         if RX_GEN.load(Ordering::SeqCst) == since {
             let tick = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
             crate::interrupts::halt_until(Some(tick), crate::smp::per_core::WAKE_HLT_FALLBACK);
