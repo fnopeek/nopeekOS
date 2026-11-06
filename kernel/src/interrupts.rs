@@ -10,205 +10,8 @@ use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 /// second statistics in the tick handler.
 static TICKS: AtomicU64 = AtomicU64::new(0);
 
-/// TSC value at boot — the zero point of every clock below.
-static BOOT_TSC: AtomicU64 = AtomicU64::new(0);
-
-/// Call once at boot after calibrate_tsc().
-pub fn init_tsc_ticks() {
-    BOOT_TSC.store(rdtsc(), Ordering::Relaxed);
-}
-
-/// 100 Hz ticks since boot, derived from the TSC.
-///
-/// The clock is the TSC on every machine. An interrupt count would stop while
-/// Core 0 runs with IF=0 and could not survive the tick going away.
-/// The unit is 10 ms.
-pub fn ticks() -> u64 {
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
-    let period = freq / 100; // TSC cycles per 10ms tick
-    let boot = BOOT_TSC.load(Ordering::Relaxed);
-    if period == 0 || boot == 0 { return 0; }
-    rdtsc().saturating_sub(boot) / period
-}
-
-/// Seconds since boot (approximate)
-pub fn uptime_secs() -> u64 {
-    ticks() / 100
-}
-
-/// Microseconds since boot, from the TSC.
-///
-/// `ticks()` is 100 Hz, too coarse for a receive-side RTT. Linux' DRS
-/// (`tcp_rcv_space_adjust`) compares an elapsed time against
-/// `rcv_rtt_est.rtt_us`, in microseconds; this is that clock.
-pub fn uptime_us() -> u64 {
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
-    let per_us = (freq / 1_000_000).max(1);
-    let boot = BOOT_TSC.load(Ordering::Relaxed);
-    rdtsc().saturating_sub(boot) / per_us
-}
-
-/// Nanoseconds since boot, from the TSC (Linux `CLOCK_MONOTONIC`).
-pub fn uptime_ns() -> u64 {
-    let freq = TSC_FREQ.load(Ordering::Relaxed).max(1);
-    let boot = BOOT_TSC.load(Ordering::Relaxed);
-    let cycles = rdtsc().saturating_sub(boot) as u128;
-    (cycles * 1_000_000_000 / freq as u128) as u64
-}
-
-/// TSC cycles converted to nanoseconds, for measurements below a microsecond.
-pub fn tsc_to_ns(cycles: u64) -> u64 {
-    let freq = TSC_FREQ.load(Ordering::Relaxed).max(1);
-    cycles.saturating_mul(1_000_000_000) / freq
-}
-
-/// Read CPU Time Stamp Counter (works on all x86_64, no PIC needed).
-pub fn rdtsc() -> u64 {
-    let lo: u32;
-    let hi: u32;
-    // SAFETY: rdtsc is allowed in ring 0 and only writes eax and edx.
-    unsafe { core::arch::asm!("rdtsc", out("eax") lo, out("edx") hi); }
-    ((hi as u64) << 32) | lo as u64
-}
-
-/// Estimate TSC frequency by calibrating against PIT (called once at boot).
-static TSC_FREQ: AtomicU64 = AtomicU64::new(2_000_000_000); // default 2GHz
-
-/// Raw CPUID 0x15 values for diagnostics (stored at boot)
-static CPUID15_EAX: AtomicU64 = AtomicU64::new(0);
-static CPUID15_EBX: AtomicU64 = AtomicU64::new(0);
-static CPUID15_ECX: AtomicU64 = AtomicU64::new(0);
-
-/// Get raw CPUID 0x15 values: (eax, ebx, ecx)
-pub fn cpuid15() -> (u32, u32, u32) {
-    (CPUID15_EAX.load(Ordering::Relaxed) as u32,
-     CPUID15_EBX.load(Ordering::Relaxed) as u32,
-     CPUID15_ECX.load(Ordering::Relaxed) as u32)
-}
-
-pub fn calibrate_tsc() {
-    // CPUID leaf 0x15: TSC frequency = ECX * EBX / EAX
-    // EAX = denominator, EBX = numerator, ECX = crystal clock (Hz)
-    let eax: u32;
-    let ebx: u32;
-    let ecx: u32;
-    // SAFETY: CPUID exists on every x86_64 CPU and only writes registers; rbx,
-    // which LLVM reserves, is saved and restored around it.
-    unsafe {
-        // rbx is reserved by LLVM, so save/restore manually
-        let ebx_out: u64;
-        let ecx_out: u64;
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0x15",
-            "xor ecx, ecx",
-            "cpuid",
-            "mov {0}, rbx",
-            "mov {1}, rcx",
-            "pop rbx",
-            out(reg) ebx_out,
-            out(reg) ecx_out,
-            out("eax") eax,
-            out("edx") _,
-        );
-        ebx = ebx_out as u32;
-        ecx = ecx_out as u32;
-    }
-    CPUID15_EAX.store(eax as u64, Ordering::Relaxed);
-    CPUID15_EBX.store(ebx as u64, Ordering::Relaxed);
-    CPUID15_ECX.store(ecx as u64, Ordering::Relaxed);
-
-    if eax > 0 && ebx > 0 && ecx > 0 {
-        let freq = (ecx as u64 * ebx as u64) / eax as u64;
-        if freq > 100_000_000 {
-            TSC_FREQ.store(freq, Ordering::Relaxed);
-            crate::kdebug!("[npk] TSC: {} MHz (CPUID 0x15: crystal={}Hz ratio={}/{})",
-                freq / 1_000_000, ecx, ebx, eax);
-            return;
-        }
-    }
-    // CPUID 0x15 absent (always on AMD, it is an Intel-only leaf). Calibrate
-    // against PIT channel 2 (vendor-independent; Linux's quick_pit_calibrate
-    // approach). Every TSC-derived time depends on this, including delay_ms,
-    // run_slice's SLICE_MS and the guest's `tsc_early_khz=` cmdline.
-    if let Some(freq) = pit_calibrate_tsc() {
-        TSC_FREQ.store(freq, Ordering::Relaxed);
-        crate::kdebug!("[npk] TSC: {} MHz (PIT ch2 calibration)", freq / 1_000_000);
-        return;
-    }
-
-    // Last resort: 2 GHz default (PIT also unavailable).
-    TSC_FREQ.store(2_000_000_000, Ordering::Relaxed);
-    kprintln!("[npk] TSC: 2000 MHz (default — CPUID 0x15 + PIT both unavailable)");
-}
-
-/// Measure TSC over a fixed PIT channel-2 window (no IRQs needed —
-/// polled via the timer-2 output bit in port 0x61). Channel 2 is the
-/// "speaker" timer; gating it via 0x61 starts a one-shot countdown we
-/// can poll, so this works before any IRQ/timer setup and on both
-/// bare-metal AMD and QEMU/KVM. Returns the TSC frequency in Hz, or
-/// None if the PIT isn't counting / the result is implausible.
-fn pit_calibrate_tsc() -> Option<u64> {
-    // Single-threaded boot context.
-    // Gate2 on, speaker off (preserve the other bits to restore).
-    let p61 = SYSTEM_CONTROL_B.inb();
-    SYSTEM_CONTROL_B.outb((p61 & 0xFC) | 0x01);
-    // Channel 2, access lobyte+hibyte, mode 0 (terminal count),
-    // binary. Mode 0: OUT (0x61 bit 5) is low while counting,
-    // goes high at terminal count.
-    PIT_COMMAND.outb(0xB0);
-    // Initial count 0xFFFF → 0x10000 input clocks @ 1.193182 MHz
-    // ≈ 54.9 ms calibration window.
-    PIT_CHANNEL2.outb(0xFF);
-    PIT_CHANNEL2.outb(0xFF);
-
-    let t0 = rdtsc();
-    let mut spins: u64 = 0;
-    while SYSTEM_CONTROL_B.inb() & 0x20 == 0 {
-        spins += 1;
-        if spins > 2_000_000_000 {
-            SYSTEM_CONTROL_B.outb(p61 & 0xFC); // gate off, restore
-            return None; // PIT not advancing
-        }
-    }
-    let t1 = rdtsc();
-    SYSTEM_CONTROL_B.outb(p61 & 0xFC); // gate off, restore original bits
-
-    let cycles = t1.wrapping_sub(t0);
-    // 0x10000 PIT clocks at PIT_BASE_FREQ Hz.
-    let freq = cycles.saturating_mul(PIT_BASE_FREQ as u64) / 0x10000;
-    if (500_000_000..=10_000_000_000).contains(&freq) {
-        Some(freq)
-    } else {
-        None
-    }
-}
-
-/// Get TSC frequency in Hz.
-pub fn tsc_freq() -> u64 {
-    TSC_FREQ.load(Ordering::Relaxed)
-}
-
-/// Busy-wait for approximately `ms` milliseconds using TSC.
-pub fn delay_ms(ms: u64) {
-    let ticks_per_ms = TSC_FREQ.load(Ordering::Relaxed) / 1000;
-    let target = rdtsc() + ms * ticks_per_ms;
-    while rdtsc() < target {
-        core::hint::spin_loop();
-    }
-}
-
-// Kept next to the ports we do drive: a register map with holes in it is
-// worse than one unused constant.
-// SAFETY (all port constants in this file): the legacy PIT, system control
-// port B (speaker gate, PIT channel 2 output) and the 8259 PIC pair; this
-// module is their only driver.
-#[allow(dead_code)]
-const PIT_CHANNEL0: Port = unsafe { Port::new(0x40) };
-const PIT_CHANNEL2: Port = unsafe { Port::new(0x42) };
-const PIT_COMMAND: Port = unsafe { Port::new(0x43) };
-const SYSTEM_CONTROL_B: Port = unsafe { Port::new(0x61) };
-const PIT_BASE_FREQ: u32 = 1_193_182;
+// SAFETY (all port constants in this file): the 8259 PIC pair; this
+// module is its only driver.
 const TARGET_FREQ: u32 = 100; // 100 Hz = 10ms per tick
 
 // IDT entry: 64-bit interrupt gate descriptor (16 bytes)
@@ -645,7 +448,7 @@ pub fn set_deep_idle(port: u16, min_us: u64) -> Result<(), &'static str> {
     if port < base || port >= base.saturating_add(8) {
         return Err("port outside CStateBaseAddr..+8");
     }
-    let tsc_per_us = (tsc_freq() / 1_000_000).max(1);
+    let tsc_per_us = (crate::time::counter_hz() / 1_000_000).max(1);
     DEEP_IDLE_MIN_TSC.store(min_us.saturating_mul(tsc_per_us), Ordering::Relaxed);
     DEEP_IDLE_PORT.store(port, Ordering::Relaxed);
     Ok(())
@@ -674,7 +477,7 @@ static MONITOR_LINE: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 /// it (ARAT): Linux would fall back to a broadcast timer, which we do not
 /// have, so without ARAT only C1 is taken.
 pub fn set_mwait_states(states: &[(u32, u64)]) -> usize {
-    let tsc_per_us = (tsc_freq() / 1_000_000).max(1);
+    let tsc_per_us = (crate::time::counter_hz() / 1_000_000).max(1);
     let arat = has_arat();
     MWAIT_ON.store(false, Ordering::Release);
     let mut n = 0;
@@ -844,11 +647,11 @@ pub fn init_worker_timer() {
         // clock is the same on every core. Periodic mode for the
         // measurement only; the counter just has to run down.
         lapic.w32(LAPIC_LVT_TIMER, (1 << 16) | WORKER_TIMER_VECTOR as u32);
-        let freq = TSC_FREQ.load(Ordering::Relaxed);
+        let freq = crate::time::counter_hz();
         lapic.w32(LAPIC_TIMER_INIT, 0xFFFF_FFFF);
-        let start = rdtsc();
+        let start = crate::time::counter();
         let tsc_10ms = if freq > 0 { freq / 100 } else { 20_000_000 };
-        while rdtsc() - start < tsc_10ms { core::hint::spin_loop(); }
+        while crate::time::counter() - start < tsc_10ms { core::hint::spin_loop(); }
         let n = 0xFFFF_FFFFu32
             .wrapping_sub(lapic.r32(LAPIC_TIMER_CUR))
             .max(1);
@@ -897,10 +700,10 @@ fn arm_at(deadline: u64) {
     }
     let lapic = worker_lapic();
     let per_10ms = WORKER_TIMER_INITIAL.load(Ordering::Relaxed) as u64;
-    let tsc_10ms = (TSC_FREQ.load(Ordering::Relaxed) / 100).max(1);
+    let tsc_10ms = (crate::time::counter_hz() / 100).max(1);
     let Some(lapic) = lapic else { return };
     if per_10ms == 0 { return; }
-    let delta = deadline.saturating_sub(rdtsc());
+    let delta = deadline.saturating_sub(crate::time::counter());
     let count = ((delta as u128 * per_10ms as u128) / tsc_10ms as u128)
         .clamp(1, u32::MAX as u128) as u32;
     // Writing the initial count starts the one-shot countdown.
@@ -950,13 +753,13 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
         && (cid != 0 || CORE0_TICKLESS.load(Ordering::Relaxed));
     let irq = crate::arch::irq_save();
     if let Some(d) = deadline {
-        if rdtsc() >= d {
+        if crate::time::counter() >= d {
             crate::arch::irq_restore(irq);
             return;
         }
         if own_timer { arm_at(d); }
     }
-    let t0 = rdtsc();
+    let t0 = crate::time::counter();
     crate::smp::per_core::halt_begin(cid, t0);
     let mwait = mwait_pick(t0, deadline);
     let port = DEEP_IDLE_PORT.load(Ordering::Relaxed);
@@ -1004,7 +807,7 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
         unsafe { core::arch::asm!("sti; hlt; cli") };
     }
     crate::smp::per_core::note_woke(cid);
-    let t1 = rdtsc();
+    let t1 = crate::time::counter();
     crate::smp::per_core::record_halt(cid, t1.saturating_sub(t0));
     if let Some(d) = deadline {
         crate::smp::per_core::note_deadline_late(cid, t1.saturating_sub(d));
@@ -1024,7 +827,7 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
 pub fn set_worker_poll_hz(hz: u32) {
     let cid = crate::smp::per_core::current_core_id();
     if cid == 0 || cid >= 256 { return; }
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    let freq = crate::time::counter_hz();
     let period = if hz <= 100 { 0 } else { freq / hz as u64 };
     POLL_PERIOD[cid].store(period, Ordering::Relaxed);
 }
@@ -1036,12 +839,12 @@ pub fn set_worker_poll_hz(hz: u32) {
 pub fn worker_idle_hlt() {
     let cid = crate::smp::per_core::current_core_id();
     if cid == 0 || cid >= 256 { core::hint::spin_loop(); return; }
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    let freq = crate::time::counter_hz();
     let p = match POLL_PERIOD[cid].load(Ordering::Relaxed) {
         0 => freq / 100,
         p => p,
     };
-    halt_until(Some(rdtsc() + p), crate::smp::per_core::WAKE_HLT_FALLBACK);
+    halt_until(Some(crate::time::counter() + p), crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
 // ── Input interrupts ────────────────────────────────────────────────
@@ -1156,10 +959,10 @@ pub fn init_apic_timer() {
     // Check if PIT timer is already working (TICKS > 0 after a short delay)
     let t0 = TICKS.load(Ordering::Relaxed);
     // Wait ~50ms using TSC
-    let freq = TSC_FREQ.load(Ordering::Relaxed);
+    let freq = crate::time::counter_hz();
     let wait_cycles = freq / 20; // 50ms
-    let start = rdtsc();
-    while rdtsc() - start < wait_cycles {
+    let start = crate::time::counter();
+    while crate::time::counter() - start < wait_cycles {
         core::hint::spin_loop();
     }
     if TICKS.load(Ordering::Relaxed) > t0 {
@@ -1190,9 +993,9 @@ pub fn init_apic_timer() {
 
     // Calibrate: measure APIC ticks per 10ms using TSC
     lapic.w32(LAPIC_TIMER_INIT, 0xFFFF_FFFF); // max initial count
-    let tsc_start = rdtsc();
+    let tsc_start = crate::time::counter();
     let tsc_10ms = freq / 100;
-    while rdtsc() - tsc_start < tsc_10ms { core::hint::spin_loop(); }
+    while crate::time::counter() - tsc_start < tsc_10ms { core::hint::spin_loop(); }
     let elapsed = 0xFFFF_FFFFu32 - lapic.r32(LAPIC_TIMER_CUR);
 
     // LVT timer: bit 17 = periodic, bits 0-7 = vector.

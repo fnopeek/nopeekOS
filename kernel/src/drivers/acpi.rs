@@ -114,15 +114,15 @@ pub fn enable_acpi_mode() {
     }
     // SAFETY: SMI_CMD is the FADT's I/O port for exactly this command.
     unsafe { Port::new(smi_cmd as u16) }.outb(acpi_enable);
-    let tsc_100us = (crate::interrupts::tsc_freq() / 10_000).max(1);
+    let tsc_100us = (crate::time::counter_hz() / 10_000).max(1);
     for retry in 0..30_000u32 {
         if sci_en() {
             crate::kprintln!("[npk] ACPI: legacy -> ACPI mode ({:#x} to SMI_CMD {:#x}, {} us)",
                 acpi_enable, smi_cmd, retry * 100);
             return;
         }
-        let t = crate::interrupts::rdtsc();
-        while crate::interrupts::rdtsc().wrapping_sub(t) < tsc_100us {
+        let t = crate::time::counter();
+        while crate::time::counter().wrapping_sub(t) < tsc_100us {
             core::hint::spin_loop();
         }
     }

@@ -92,7 +92,7 @@ fn spawn_inner(name: &'static str, func: fn(u64), arg: u64, is_fiber: bool, shar
         func(arg);
         return;
     }
-    let queued = crate::interrupts::rdtsc();
+    let queued = crate::time::counter();
     {
         let mut inbox = INBOX.lock();
         inbox.push_back(Task { name, func, arg, is_fiber, shared, queued, dropped });
@@ -112,7 +112,7 @@ pub fn has_work() -> bool {
 /// it is a fiber, whether it is a shared background app and how many TSC
 /// cycles it has waited. For the idle re-check.
 pub fn head_acceptable(accept: impl Fn(bool, bool, u64) -> bool) -> bool {
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     INBOX.lock().front().is_some_and(|t| accept(t.is_fiber, t.shared, now.saturating_sub(t.queued)))
 }
 
@@ -134,7 +134,7 @@ pub fn next_fiber_task(accept: impl Fn(bool, bool, u64) -> bool) -> Option<Task>
 }
 
 fn take_head(fiber_only: bool, accept: impl Fn(bool, bool, u64) -> bool) -> Option<Task> {
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     let mut inbox = INBOX.lock();
     if !inbox.front().is_some_and(|t| {
         (!fiber_only || t.is_fiber) && accept(t.is_fiber, t.shared, now.saturating_sub(t.queued))

@@ -95,10 +95,10 @@ pub fn calibrate() -> Params {
         mib *= 2;
     }
     let one = Params { m_kib: (mib * 1024) as u32, t: 1, p: LANES };
-    let freq = crate::interrupts::tsc_freq().max(1);
-    let t0 = crate::interrupts::rdtsc();
+    let freq = crate::time::counter_hz().max(1);
+    let t0 = crate::time::counter();
     let _ = argon2id(b"calibration", &[0u8; 16], one);
-    let ms = (crate::interrupts::rdtsc().saturating_sub(t0) * 1000 / freq).max(1);
+    let ms = (crate::time::counter().saturating_sub(t0) * 1000 / freq).max(1);
     let t = ((TARGET_MS + ms / 2) / ms).clamp(1, MAX_PASSES as u64) as u32;
     Params { t, ..one }
 }

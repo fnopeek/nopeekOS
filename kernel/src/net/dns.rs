@@ -33,7 +33,7 @@ const RECENT_MAX: usize = 64;
 /// How long a held result waits for its retry.
 const RECENT_USEC: u64 = 10_000_000;
 
-fn now() -> u64 { crate::interrupts::uptime_us() }
+fn now() -> u64 { crate::time::uptime_us() }
 
 fn with<R>(f: impl FnOnce(&mut Resolver) -> R) -> R {
     let mut g = RESOLVER.lock();

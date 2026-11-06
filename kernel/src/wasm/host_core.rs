@@ -202,13 +202,13 @@ fn phys(v: i32) -> i32 { crate::shade::widgets::scale::len_i(v) }
 fn logical(v: u32) -> u32 { crate::shade::widgets::scale::logical(v) }
 
 pub(crate) fn npk_ticks(_ctx: &mut HostState) -> i64 {
-    (crate::interrupts::ticks() as i64).saturating_mul(10)
+    (crate::time::ticks() as i64).saturating_mul(10)
 }
 
 pub(crate) fn npk_now_us(_ctx: &mut HostState) -> i64 {
-    let f = crate::interrupts::tsc_freq();
+    let f = crate::time::counter_hz();
     if f == 0 { return 0; }
-    ((crate::interrupts::rdtsc() as u128 * 1_000_000) / f as u128) as i64
+    ((crate::time::counter() as u128 * 1_000_000) / f as u128) as i64
 }
 
 pub(crate) fn npk_unix_time(_ctx: &mut HostState) -> i64 {
@@ -760,7 +760,7 @@ pub(crate) fn npk_get_fb_size(ctx: &mut HostState) -> i64 {
 pub(crate) fn npk_sys_info(ctx: &mut HostState, key: i32) -> i64 {
     match key & 0xFF {
         0 => crate::smp::per_core::core_count() as i64,
-        1 => crate::interrupts::uptime_secs() as i64,
+        1 => crate::time::uptime_secs() as i64,
         2 => { let (_, mb) = crate::memory::stats(); mb as i64 },
         3 => { let (used, _) = crate::heap::stats(); used as i64 },
         4 => { let (_, total) = crate::heap::stats(); total as i64 },
@@ -769,7 +769,7 @@ pub(crate) fn npk_sys_info(ctx: &mut HostState, key: i32) -> i64 {
         7 => { let (_, _, st, _) = crate::smp::scheduler::stats(); st as i64 },
         8 => { let (_, _, _, w) = crate::smp::scheduler::stats(); w as i64 },
         9 => if crate::smp::per_core::has_mwait() { 1 } else { 0 },
-        10 => (crate::interrupts::tsc_freq() / 1_000_000) as i64,
+        10 => (crate::time::counter_hz() / 1_000_000) as i64,
         11 => {
             let core = (key >> 8) as usize;
             crate::smp::scheduler::queue_len(core) as i64
@@ -787,9 +787,9 @@ pub(crate) fn npk_sys_info(ctx: &mut HostState, key: i32) -> i64 {
             crate::smp::per_core::core_usage(core) as i64
         },
         // CPUID 0x15 raw values for diagnostics
-        16 => { let (eax, _, _) = crate::interrupts::cpuid15(); eax as i64 },
-        17 => { let (_, ebx, _) = crate::interrupts::cpuid15(); ebx as i64 },
-        18 => { let (_, _, ecx) = crate::interrupts::cpuid15(); ecx as i64 },
+        16 => { let (eax, _, _) = crate::arch::x86_64::time::cpuid15(); eax as i64 },
+        17 => { let (_, ebx, _) = crate::arch::x86_64::time::cpuid15(); ebx as i64 },
+        18 => { let (_, _, ecx) = crate::arch::x86_64::time::cpuid15(); ecx as i64 },
 
         // 19 → raw TSC reading; combine with key 10 (TSC MHz) to convert
         // to time. The sign bit stays clear for ~150 years at 2 GHz.
@@ -850,9 +850,9 @@ pub(crate) fn npk_sleep(ctx: &mut HostState, ms: i32) -> i32 {
     // Fallback: not inside a fiber (degenerate no-worker host, or a
     // one-shot wasm on Core 0) → HLT-idle until the deadline. No
     // core-stealing helper: that would risk nesting.
-    let freq = crate::interrupts::tsc_freq();
-    let target = crate::interrupts::rdtsc() + (ms as u64) * (freq / 1000);
-    while crate::interrupts::rdtsc() < target {
+    let freq = crate::time::counter_hz();
+    let target = crate::time::counter() + (ms as u64) * (freq / 1000);
+    while crate::time::counter() < target {
         crate::interrupts::halt_until(Some(target), crate::smp::per_core::WAKE_NPK_SLEEP);
     }
 
@@ -956,11 +956,11 @@ fn input_ready(ctx: &HostState) -> bool {
 /// same rights the matching `npk_*_poll` calls check. It parks only the
 /// caller's own fiber.
 pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
-    let freq = crate::interrupts::tsc_freq();
+    let freq = crate::time::counter_hz();
     let deadline = if timeout_ms < 0 {
         crate::smp::fiber::NO_DEADLINE
     } else {
-        crate::interrupts::rdtsc() + (timeout_ms as u64) * (freq / 1000)
+        crate::time::counter() + (timeout_ms as u64) * (freq / 1000)
     };
     // Register where the app's input will be pushed. The widget window is
     // created lazily by the app's first scene commit, so do it here, every
@@ -1015,12 +1015,12 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
         if r != 0 {
             break r;
         }
-        if crate::interrupts::rdtsc() >= deadline {
+        if crate::time::counter() >= deadline {
             break 0;
         }
         if crate::smp::fiber::wait(sig, deadline).is_none() {
             // Not in a fiber: halt in place, looking again every 10 ms.
-            let recheck = crate::interrupts::rdtsc() + freq / 100;
+            let recheck = crate::time::counter() + freq / 100;
             crate::interrupts::halt_until(
                 Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
         }
@@ -1054,9 +1054,9 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
     crate::smp::per_core::set_active(core_id, false);
 
     let ms = (timeout_ms as u64).min(60_000);
-    let freq = crate::interrupts::tsc_freq();
+    let freq = crate::time::counter_hz();
     let ticks_per_ms = freq / 1000;
-    let deadline = crate::interrupts::rdtsc() + ms * ticks_per_ms;
+    let deadline = crate::time::counter() + ms * ticks_per_ms;
 
     if let Some(w) = crate::smp::fiber::current_waker() {
         crate::wasm::set_key_waker(term_idx, w);
@@ -1065,7 +1065,7 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
         if let Some(k) = pop_app_key(term_idx) {
             break k as i32;
         }
-        if crate::interrupts::rdtsc() >= deadline {
+        if crate::time::counter() >= deadline {
             break -1;
         }
         // Park until a key is pushed (it signals this fiber) or the
@@ -1073,7 +1073,7 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
         // fibers on it.
         if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, deadline).is_none() {
             // Not in a fiber (a one-shot on Core 0): halt in place.
-            let recheck = crate::interrupts::rdtsc() + freq / 100;
+            let recheck = crate::time::counter() + freq / 100;
             crate::interrupts::halt_until(
                 Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
         }
@@ -3874,7 +3874,7 @@ pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: 
         3 => st::bench_drop_caches(),
         4 => st::bench_read_objects(a).map(|(n, bytes, t)| v.extend([n, bytes, t])).is_some(),
         5 => {
-            v.push(crate::interrupts::tsc_freq());
+            v.push(crate::time::counter_hz());
             bench::GET.snapshot(&mut v);
             bench::PUT.snapshot(&mut v);
             v.push(crate::nvme::max_blocks_per_cmd() as u64);
@@ -4875,7 +4875,7 @@ const ANCHOR_TICKS: u64 = 500;
 const LAUNCH_GAP: i32 = 8;
 
 fn take_launch_anchor(module: &str) -> Option<(i32, i32, u32, u32)> {
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let mut v = LAUNCH_ANCHORS.lock();
     v.retain(|e| now.saturating_sub(e.2) <= ANCHOR_TICKS);
     let i = v.iter().position(|e| e.0 == module)?;
@@ -4894,7 +4894,7 @@ pub(crate) fn npk_launch_at(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, a
         if let Some(rect) = rect {
             let mut v = LAUNCH_ANCHORS.lock();
             v.retain(|e| e.0 != app);
-            v.push((app, rect, crate::interrupts::ticks()));
+            v.push((app, rect, crate::time::ticks()));
         }
     }
     r

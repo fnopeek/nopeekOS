@@ -187,14 +187,14 @@ pub fn aperf_mperf_now(out: &mut [(u64, u64)]) {
             super::send_freq_sample_ipi(CORE_APIC[c].load(Ordering::Relaxed));
         }
     }
-    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
+    let deadline = crate::time::counter() + crate::time::counter_hz() / 1000;
     for c in 0..n {
         if c == me {
             out[c] = read_aperf_mperf();
             continue;
         }
         while RUN_SAMPLES[c].load(Ordering::Acquire) == before[c]
-            && crate::interrupts::rdtsc() < deadline
+            && crate::time::counter() < deadline
         {
             core::hint::spin_loop();
         }
@@ -223,7 +223,7 @@ fn halted_tsc(core_id: usize) -> u64 {
     if since == 0 {
         acc
     } else {
-        acc + crate::interrupts::rdtsc().saturating_sub(since)
+        acc + crate::time::counter().saturating_sub(since)
     }
 }
 
@@ -671,7 +671,7 @@ pub fn update_core_freq(core_id: usize) {
     // accumulating.
     let prev = LAST_TSC_CORE[core_id].load(Ordering::Relaxed);
     if prev != 0
-        && crate::interrupts::rdtsc().wrapping_sub(prev) < crate::interrupts::tsc_freq() / 10
+        && crate::time::counter().wrapping_sub(prev) < crate::time::counter_hz() / 10
     {
         return;
     }
@@ -687,7 +687,7 @@ pub fn update_core_freq(core_id: usize) {
     } else {
         (RUN_APERF[core_id].load(Ordering::Relaxed), RUN_MPERF[core_id].load(Ordering::Relaxed))
     };
-    let tsc = crate::interrupts::rdtsc();
+    let tsc = crate::time::counter();
 
     let halted = halted_tsc(core_id);
     let prev_halted = LAST_HALT[core_id].swap(halted, Ordering::Relaxed);
@@ -716,7 +716,7 @@ pub fn update_core_freq(core_id: usize) {
     if delta_mperf == 0 {
         CORE_MHZ[core_id].store(0, Ordering::Relaxed);
     } else {
-        let nominal_mhz = (crate::interrupts::tsc_freq() / 1_000_000) as u64;
+        let nominal_mhz = (crate::time::counter_hz() / 1_000_000) as u64;
         // Guard against overflow: cap aperf delta ratio implicitly via u128.
         let eff_mhz = ((delta_aperf as u128) * (nominal_mhz as u128)
                        / (delta_mperf as u128)) as u64;
@@ -727,7 +727,7 @@ pub fn update_core_freq(core_id: usize) {
 /// Start tracking work time for a core (called when task begins or resumes).
 pub fn start_work(core_id: usize) {
     if core_id >= 256 { return; }
-    WORK_START_TSC[core_id].store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+    WORK_START_TSC[core_id].store(crate::time::counter(), Ordering::Relaxed);
 }
 
 /// Flush accumulated work time since last start_work (called before wait/idle).
@@ -736,7 +736,7 @@ pub fn flush_busy(core_id: usize) -> u64 {
     if core_id >= 256 { return 0; }
     let start = WORK_START_TSC[core_id].swap(0, Ordering::Relaxed);
     if start == 0 { return 0; }
-    let elapsed = crate::interrupts::rdtsc().saturating_sub(start);
+    let elapsed = crate::time::counter().saturating_sub(start);
     CORE_BUSY_TSC[core_id].fetch_add(elapsed, Ordering::Relaxed);
     elapsed
 }
@@ -908,7 +908,7 @@ static WOKE_TSC: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 pub fn note_woke(c: usize) {
     if c < 256 {
-        WOKE_TSC[c].store(crate::interrupts::rdtsc(), Ordering::Release);
+        WOKE_TSC[c].store(crate::time::counter(), Ordering::Release);
     }
 }
 
@@ -922,12 +922,12 @@ pub fn tsc_offset(c: usize) -> Option<(i64, u64)> {
         return None;
     }
     let before = WOKE_TSC[c].load(Ordering::Acquire);
-    let t_send = crate::interrupts::rdtsc();
+    let t_send = crate::time::counter();
     super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
     for _ in 0..10_000_000u32 {
         let w = WOKE_TSC[c].load(Ordering::Acquire);
         if w != before {
-            let t_recv = crate::interrupts::rdtsc();
+            let t_recv = crate::time::counter();
             let mid = t_send / 2 + t_recv / 2;
             return Some((w as i64 - mid as i64, t_recv.wrapping_sub(t_send)));
         }
@@ -1015,7 +1015,7 @@ pub fn core0_loop() -> ! {
         // pending and end the halt rather than run before it.
         let flags = crate::arch::irq_save();
         IDLE[0].store(true, Ordering::SeqCst);
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         match super::fiber::earliest_deadline(0) {
             Some(d) if d <= now => {}
             wake => crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK),
@@ -1158,9 +1158,9 @@ pub fn invite_stealer(victim: usize) {
     if victim >= 256 {
         return;
     }
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     let last = INVITED_TSC[victim].load(Ordering::Relaxed);
-    if now.wrapping_sub(last) < crate::interrupts::tsc_freq() / 20_000 {
+    if now.wrapping_sub(last) < crate::time::counter_hz() / 20_000 {
         return;
     }
     INVITED_TSC[victim].store(now, Ordering::Relaxed);
@@ -1209,7 +1209,7 @@ fn accepts(cid: usize, fiber: bool, shared: bool, waited: u64) -> bool {
     // Placement is a preference, not a reason to strand work: a core whose
     // fibers never all park (a busy-polling worker) never gets back to the
     // inbox, yet still counts as less loaded.
-    if waited >= crate::interrupts::tsc_freq() / 1000 * INBOX_STARVE_MS {
+    if waited >= crate::time::counter_hz() / 1000 * INBOX_STARVE_MS {
         return true;
     }
     if shared {
@@ -1296,7 +1296,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             update_core_freq(cid);
             // Re-check for a pending launch every 10 ms.
-            let d = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+            let d = crate::time::counter() + crate::time::counter_hz() / 100;
             crate::interrupts::halt_until(Some(d), WAKE_HLT_FALLBACK);
             continue;
         }
@@ -1354,7 +1354,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // holds for an ISR on this core that signals one of its fibers.
         let flags = crate::arch::irq_save();
         IDLE[cid].store(true, Ordering::SeqCst);
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         let mut wake = super::fiber::earliest_deadline(cid);
         if matches!(wake, Some(d) if d <= now) {
             IDLE[cid].store(false, Ordering::Relaxed);
@@ -1371,7 +1371,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             // that one is busy inside its fibers it takes the work only
             // when it gets back to the top of its loop; look again in
             // 10 ms so the work cannot be stranded behind a changed load.
-            let recheck = now + crate::interrupts::tsc_freq() / 100;
+            let recheck = now + crate::time::counter_hz() / 100;
             wake = Some(wake.map_or(recheck, |d| d.min(recheck)));
         }
         crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK);

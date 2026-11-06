@@ -13,7 +13,7 @@
 //! lock-free descriptor and the target folds it into IRR before each entry
 //! (`sync_pir_to_irr`, KVM's posted-interrupt model).
 
-use crate::interrupts::rdtsc;
+use crate::time::counter;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 pub const LAPIC_BASE: u64 = 0xFEE0_0000;
@@ -198,7 +198,7 @@ pub fn post(apic_id: u8, vector: u8) -> bool {
     // "not in guest" posted before the target's post-entry sync looks.
     let edge = ctl.fetch_or(PI_ON, Ordering::SeqCst) & PI_ON == 0;
     if edge {
-        let _ = POST_TSC[t].compare_exchange(0, rdtsc().max(1), Ordering::AcqRel, Ordering::Relaxed);
+        let _ = POST_TSC[t].compare_exchange(0, counter().max(1), Ordering::AcqRel, Ordering::Relaxed);
     }
     edge
 }
@@ -291,7 +291,7 @@ pub fn phase(apic_id: u8, p: u8) {
     let i = apic_id as usize;
     if i < MAX_VCPUS {
         TRACE[i].phase.store(p, Ordering::Relaxed);
-        TRACE[i].phase_tsc.store(rdtsc(), Ordering::Relaxed);
+        TRACE[i].phase_tsc.store(counter(), Ordering::Relaxed);
     }
 }
 
@@ -320,7 +320,7 @@ pub fn set_host_core(apic_id: u8, core: usize) {
 
 pub fn note_exit(apic_id: u8) {
     if (apic_id as usize) < MAX_VCPUS {
-        TRACE[apic_id as usize].last_active.store(rdtsc(), Ordering::Relaxed);
+        TRACE[apic_id as usize].last_active.store(counter(), Ordering::Relaxed);
     }
 }
 
@@ -354,7 +354,7 @@ fn kick(target: u8, self_core: usize) {
 fn preempted(target: u8) -> bool {
     let Some(slot) = TRACE.get(target as usize).map(|t| &t.last_active) else { return false };
     let last = slot.load(Ordering::Relaxed);
-    last == 0 || rdtsc().wrapping_sub(last) > (crate::interrupts::tsc_freq() / 1000) * 2
+    last == 0 || counter().wrapping_sub(last) > (crate::time::counter_hz() / 1000) * 2
 }
 
 /// `kvm_irq_delivery_to_apic` for an ICR write: FIXED/LOWEST are posted to
@@ -645,7 +645,7 @@ impl LocalApic {
     /// TSC-deadline expiry (`start_sw_tscdeadline` → `apic_timer_expired`):
     /// the deadline is consumed; a masked LVTT delivers nothing.
     fn tscdeadline_poll(&mut self) {
-        if self.tsc_deadline == 0 || rdtsc() < self.tsc_deadline { return; }
+        if self.tsc_deadline == 0 || counter() < self.tsc_deadline { return; }
         self.tsc_deadline = 0;
         let lvtt = self.r(APIC_LVTT);
         if self.sw_enabled() && lvtt & LVT_MASKED == 0 {
@@ -663,7 +663,7 @@ impl LocalApic {
             return;
         }
         let Some(period) = self.period() else { return };
-        let now = rdtsc();
+        let now = counter();
         let elapsed = now.saturating_sub(self.timer_start_tsc);
         let periods = elapsed / period;
         if periods > 0 {
@@ -703,7 +703,7 @@ impl LocalApic {
         if self.tscdeadline_mode() { return 0; }
         let tmict = self.r(APIC_TMICT);
         if tmict == 0 { return 0; }
-        let elapsed_ticks = rdtsc().saturating_sub(self.timer_start_tsc) / self.divide_count();
+        let elapsed_ticks = counter().saturating_sub(self.timer_start_tsc) / self.divide_count();
         if self.periodic() {
             (tmict as u64 - (elapsed_ticks % tmict as u64)) as u32
         } else if elapsed_ticks >= tmict as u64 {
@@ -894,7 +894,7 @@ impl LocalApic {
             APIC_TMICT if self.tscdeadline_mode() => {}
             APIC_TMICT => {
                 self.w(APIC_TMICT, val);
-                self.timer_start_tsc = rdtsc();
+                self.timer_start_tsc = counter();
                 self.timer_fired = false;
                 self.timer_owed = 0;
             }

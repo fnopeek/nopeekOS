@@ -290,16 +290,16 @@ pub fn mouse_active_within(ms: u64) -> bool {
     if last == 0 {
         return false;
     }
-    let freq = crate::interrupts::tsc_freq();
+    let freq = crate::time::counter_hz();
     if freq == 0 {
         return false;
     }
-    crate::interrupts::rdtsc().saturating_sub(last) < freq / 1000 * ms
+    crate::time::counter().saturating_sub(last) < freq / 1000 * ms
 }
 
 /// Assemble a 3-byte PS/2 mouse packet and inject it as a pointer event.
 fn feed_mouse(byte: u8) {
-    LAST_MOUSE_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+    LAST_MOUSE_TSC.store(crate::time::counter(), Ordering::Relaxed);
     match PM_IDX.load(Ordering::Relaxed) {
         0 => {
             if byte & 0x08 == 0 { return; }   // bit3 sync must be set, else resync
@@ -386,7 +386,7 @@ fn poll_ps2() -> Option<u8> {
     // finish the packet in one poll — full sample rate, ≤10 ms latency. The
     // wait only happens during active movement (PM_IDX != 0) and a byte
     // budget caps total work per call.
-    let tsc_2ms = crate::interrupts::tsc_freq() / 500;
+    let tsc_2ms = crate::time::counter_hz() / 500;
     let mut budget = 48u32;
     loop {
         let status = STATUS_PORT.inb();
@@ -399,8 +399,8 @@ fn poll_ps2() -> Option<u8> {
                 && tsc_2ms > 0
                 && budget > 0
             {
-                let deadline = crate::interrupts::rdtsc() + tsc_2ms;
-                while crate::interrupts::rdtsc() < deadline {
+                let deadline = crate::time::counter() + tsc_2ms;
+                while crate::time::counter() < deadline {
                     if STATUS_PORT.inb() & 0x01 != 0 { break; }
                     core::hint::spin_loop();
                 }

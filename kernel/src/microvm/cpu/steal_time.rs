@@ -83,7 +83,7 @@ impl StealTime {
     /// `vcpu->preempted`).
     pub fn leave(&mut self, mem: &GuestMem) {
         let Some(gpa) = self.gpa() else { return };
-        self.out_since = crate::interrupts::rdtsc();
+        self.out_since = crate::time::counter();
         if !self.preempted && mem.write_u8(gpa + OFF_PREEMPTED, KVM_VCPU_PREEMPTED) {
             self.preempted = true;
         }
@@ -94,7 +94,7 @@ impl StealTime {
         if self.out_since == 0 {
             return;
         }
-        self.owed_tsc += crate::interrupts::rdtsc().wrapping_sub(self.out_since);
+        self.owed_tsc += crate::time::counter().wrapping_sub(self.out_since);
         self.out_since = 0;
         self.update = true;
     }
@@ -119,7 +119,7 @@ impl StealTime {
         version = version.wrapping_add(1);
         mem.write_u32(gpa + OFF_VERSION, version);
         fence(Ordering::Release);
-        let hz = crate::interrupts::tsc_freq().max(1) as u128;
+        let hz = crate::time::counter_hz().max(1) as u128;
         let ns = (core::mem::take(&mut self.owed_tsc) as u128 * 1_000_000_000 / hz) as u64;
         let steal = mem.read_u64(gpa + OFF_STEAL).unwrap_or(0).wrapping_add(ns);
         mem.write_bytes(gpa + OFF_STEAL, &steal.to_le_bytes());

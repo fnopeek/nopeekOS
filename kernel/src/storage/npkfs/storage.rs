@@ -45,11 +45,11 @@ fn fs_lock() -> spin::MutexGuard<'static, Option<State>> {
     if let Some(g) = FS.try_lock() {
         return g;
     }
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     loop {
         crate::smp::fiber::spin_or_yield();
         if let Some(g) = FS.try_lock() {
-            let waited = crate::interrupts::rdtsc().saturating_sub(t0);
+            let waited = crate::time::counter().saturating_sub(t0);
             LONGEST_WAIT_TSC.fetch_max(waited, core::sync::atomic::Ordering::Relaxed);
             return g;
         }
@@ -59,7 +59,7 @@ fn fs_lock() -> spin::MutexGuard<'static, Option<State>> {
 /// The longest wait for `FS` since the last call, in microseconds.
 pub fn take_longest_wait_us() -> u64 {
     let t = LONGEST_WAIT_TSC.swap(0, core::sync::atomic::Ordering::Relaxed);
-    t / (crate::interrupts::tsc_freq() / 1_000_000).max(1)
+    t / (crate::time::counter_hz() / 1_000_000).max(1)
 }
 
 static LONGEST_WAIT_TSC: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -329,11 +329,11 @@ pub fn install_salt() -> Option<[u8; 16]> {
 /// Returns `(write_mbs, read_mbs)` or `None` if the FS isn't mounted
 /// or the bench-region allocation fails.
 pub fn raw_blk_bench() -> Option<(u64, u64)> {
-    use crate::interrupts::{rdtsc, tsc_freq};
+    use crate::time::{counter, counter_hz};
     const BLOCKS: u64 = 256; // 1 MB
     const ITERS: u64 = 4;
 
-    let hz = tsc_freq();
+    let hz = counter_hz();
     if hz == 0 { return None; }
 
     let mut lock = fs_lock();
@@ -346,7 +346,7 @@ pub fn raw_blk_bench() -> Option<(u64, u64)> {
 
     let bytes = BLOCKS * BLOCK_SIZE as u64 * ITERS;
 
-    let t0 = rdtsc();
+    let t0 = counter();
     let mut write_ok = true;
     for _ in 0..ITERS {
         if crate::blkdev::write_extent(start, BLOCKS, &buf).is_err() {
@@ -354,10 +354,10 @@ pub fn raw_blk_bench() -> Option<(u64, u64)> {
             break;
         }
     }
-    let dt = rdtsc().saturating_sub(t0).max(1);
+    let dt = counter().saturating_sub(t0).max(1);
     let write_mbs = if write_ok { (bytes * hz) / (dt * 1024 * 1024) } else { 0 };
 
-    let t0 = rdtsc();
+    let t0 = counter();
     let mut read_ok = true;
     for _ in 0..ITERS {
         if crate::blkdev::read_extent(start, BLOCKS, &mut read_buf).is_err() {
@@ -365,7 +365,7 @@ pub fn raw_blk_bench() -> Option<(u64, u64)> {
             break;
         }
     }
-    let dt = rdtsc().saturating_sub(t0).max(1);
+    let dt = counter().saturating_sub(t0).max(1);
     let read_mbs = if read_ok { (bytes * hz) / (dt * 1024 * 1024) } else { 0 };
 
     // Free; TRIM is deferred (gc / idle drain) so the bench cost stays
@@ -420,7 +420,7 @@ pub fn bench_raw_read_seq(windows: &[u64], window: u64, cmd: u64) -> Option<(u64
     let mut buf: Vec<u8> = Vec::new();
     buf.try_reserve_exact(cmd as usize * BLOCK_SIZE).ok()?;
     buf.resize(cmd as usize * BLOCK_SIZE, 0);
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let mut bytes = 0u64;
     for &w in windows {
         let mut off = 0;
@@ -431,7 +431,7 @@ pub fn bench_raw_read_seq(windows: &[u64], window: u64, cmd: u64) -> Option<(u64
             off += n;
         }
     }
-    Some((bytes, crate::interrupts::rdtsc().saturating_sub(t0)))
+    Some((bytes, crate::time::counter().saturating_sub(t0)))
 }
 
 /// `ops` single blocks at random allocated places, in batches of `batch`
@@ -460,7 +460,7 @@ pub fn bench_raw_read_random(ops: u64, batch: usize) -> Option<(u64, u64)> {
     let mut buf: Vec<u8> = Vec::new();
     buf.try_reserve_exact(batch * BLOCK_SIZE).ok()?;
     buf.resize(batch * BLOCK_SIZE, 0);
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     for chunk in blocks.chunks(batch) {
         if chunk.len() == 1 {
             let one: &mut [u8; BLOCK_SIZE] = (&mut buf[..BLOCK_SIZE]).try_into().ok()?;
@@ -469,7 +469,7 @@ pub fn bench_raw_read_random(ops: u64, batch: usize) -> Option<(u64, u64)> {
             crate::blkdev::read_blocks_batch(chunk, &mut buf[..chunk.len() * BLOCK_SIZE]).ok()?;
         }
     }
-    Some((ops, crate::interrupts::rdtsc().saturating_sub(t0)))
+    Some((ops, crate::time::counter().saturating_sub(t0)))
 }
 
 /// Write `total` blocks of fresh content to a free area, in calls of `cmd`
@@ -508,7 +508,7 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64, u64, u64)>
         // filling stays out of the measured time.
         super::bench::Fill::new(crate::csprng::random_u64()).bytes(&mut buf);
         let mut stamp = 0u64;
-        let t0 = crate::interrupts::rdtsc();
+        let t0 = crate::time::counter();
         let mut bytes = 0u64;
         let mut failed = false;
         'areas: for &(start, count) in &areas {
@@ -528,9 +528,9 @@ pub fn bench_raw_write_seq(total: u64, cmd: u64) -> Option<(u64, u64, u64, u64)>
                 off += n;
             }
         }
-        let t1 = crate::interrupts::rdtsc();
+        let t1 = crate::time::counter();
         if !failed && crate::blkdev::flush().is_ok() {
-            let t2 = crate::interrupts::rdtsc();
+            let t2 = crate::time::counter();
             result = Some((bytes, t2.saturating_sub(t0), t2.saturating_sub(t1), areas.len() as u64));
         }
     }
@@ -580,13 +580,13 @@ pub fn bench_read_objects(total: u64) -> Option<(u64, u64, u64)> {
         pick.push(h);
     }
     if !bench_drop_caches() { return None; }
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let mut bytes = 0u64;
     for h in &pick {
         let data = get(h).ok()??;
         bytes += data.len() as u64;
     }
-    Some((pick.len() as u64, bytes, crate::interrupts::rdtsc().saturating_sub(t0)))
+    Some((pick.len() as u64, bytes, crate::time::counter().saturating_sub(t0)))
 }
 
 // ── fsck: read-only integrity self-check ──────────────────────────────
@@ -857,28 +857,28 @@ pub fn put_addressed(hash: &[u8; 32], payload: &[u8]) -> Result<(), FsError> {
 }
 
 fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsError> {
-    use crate::interrupts::{rdtsc, tsc_freq};
-    let t0 = rdtsc();
+    use crate::time::{counter, counter_hz};
+    let t0 = counter();
 
     // Cheap dedup check first. Content addressing means equal payload
     // ⇒ equal hash; if `hash` is already in the btree, the integrity hash
     // and encryption below would be wasted work.
     {
         let mut lock = fs_lock();
-        let t_locked = rdtsc();
+        let t_locked = counter();
         let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
         let found = btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)?.is_some();
-        super::bench::LOOKUP.add(0, &[t0, t_locked, rdtsc()]);
+        super::bench::LOOKUP.add(0, &[t0, t_locked, counter()]);
         if found {
             return Ok(());
         }
     }
-    let t_dedup = rdtsc();
+    let t_dedup = counter();
 
     if verify && crypto::object_address(payload).ok_or(FsError::Locked)? != *hash {
         return Err(FsError::InvalidName);
     }
-    let t_hash = rdtsc();
+    let t_hash = counter();
 
     // AES-256-GCM via the aes-gcm crate, which detects AES-NI at runtime
     // and uses the hardware path (AESENC + PCLMULQDQ for GHASH). The
@@ -887,7 +887,7 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
     let (obj_key, nonce) = crypto::object_key(hash).ok_or(FsError::Locked)?;
     let encrypted = crypto::aead_encrypt_aes(&obj_key, &nonce, payload);
     let write_data: &[u8] = &encrypted;
-    let t_enc = rdtsc();
+    let t_enc = counter();
 
     let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
@@ -930,7 +930,7 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
             fs.cache.invalidate(ext.start_block + b);
         }
     }
-    let t_alloc = rdtsc();
+    let t_alloc = counter();
 
     // The blocks are ours, so the device write needs no lock: other puts
     // allocate, write and insert meanwhile, as `get` reads unlocked.
@@ -964,7 +964,7 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
         rollback_alloc(fs, &all_extents, 0);
         return Err(e.into());
     }
-    let t_dma = rdtsc();
+    let t_dma = counter();
 
     // Pack into BTreeEntryRaw: first DIRECT_EXTENTS inline, rest in
     // an indirect chain.
@@ -1019,11 +1019,11 @@ fn put_inner(hash: &[u8; 32], payload: &[u8], verify: bool) -> Result<(), FsErro
     fs.sb.object_count += 1;
     fs.sb.free_blocks = fs.bitmap.free_count();
     fs.pending_old_blocks.extend(old_blocks);
-    let t_btree = rdtsc();
+    let t_btree = counter();
     super::bench::PUT.add(write_data.len() as u64, &[t0, t_dedup, t_hash, t_enc, t_alloc, t_dma, t_btree]);
 
     if super::FS_PERF_LOG && write_data.len() >= 256 * 1024 {
-        let mhz = tsc_freq().max(1) / 1_000_000;
+        let mhz = counter_hz().max(1) / 1_000_000;
         kprintln!("[put] {}KB dedup={} hash={} enc={} alloc={} dma={} btree={} (us)",
             write_data.len() / 1024,
             (t_dedup.saturating_sub(t0)) / mhz,
@@ -1063,18 +1063,18 @@ fn extent_in_data_area(ext: &Extent, data_start: u64, disk_blocks: u64) -> bool 
 }
 
 pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
-    use crate::interrupts::{rdtsc, tsc_freq};
-    let t0 = rdtsc();
+    use crate::time::{counter, counter_hz};
+    let t0 = counter();
 
     let mut lock = fs_lock();
     let fs = lock.as_mut().ok_or(FsError::NotMounted)?;
-    let t_lock = rdtsc();
+    let t_lock = counter();
 
     let entry = match btree::lookup(&mut fs.cache, fs.sb.btree_root, hash)? {
         Some(e) => e,
         None => return Ok(None),
     };
-    let t_btree = rdtsc();
+    let t_btree = counter();
 
     let direct_count = (entry.extent_count as usize).min(DIRECT_EXTENTS);
     let mut all_extents: Vec<Extent> = entry.extents[..direct_count].to_vec();
@@ -1121,12 +1121,12 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     // written by `read_multi_extent` before any is read, and on its error
     // the Vec is dropped unread.
     unsafe { staging.set_len(total_bytes); }
-    let t_alloc = rdtsc();
+    let t_alloc = counter();
 
     // Submit all extents through the multi-extent path so the SSD can
     // pipeline them in parallel; this matters for fragmented blobs.
     crate::blkdev::read_multi_extent(&extent_list, &mut staging[..total_bytes])?;
-    let t_dma = rdtsc();
+    let t_dma = counter();
 
     staging.truncate(disk_size as usize);
 
@@ -1144,7 +1144,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
             hash[0], hash[1]);
         return Err(FsError::Corrupt);
     }
-    let t_dec = rdtsc();
+    let t_dec = counter();
     let plaintext = staging;
     super::bench::GET.add(total_bytes as u64, &[t0, t_lock, t_btree, t_alloc, t_dma, t_dec]);
 
@@ -1157,7 +1157,7 @@ pub fn get(hash: &[u8; 32]) -> Result<Option<Vec<u8>>, FsError> {
     // tag (or BLAKE3 collisions).
 
     if super::FS_PERF_LOG && total_bytes >= 256 * 1024 {
-        let mhz = tsc_freq().max(1) / 1_000_000;
+        let mhz = counter_hz().max(1) / 1_000_000;
         kprintln!("[get] {}KB lock={} btree={} alloc={} dma={} dec={} (us)",
             total_bytes / 1024,
             (t_lock.saturating_sub(t0)) / mhz,
@@ -1309,11 +1309,11 @@ fn rollback_alloc(fs: &mut State, extents: &[Extent], indirect_block: u64) {
 // ── 4-phase commit (journal → bitmap+sb → finalize → free) ────────────
 
 fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
-    use crate::interrupts::rdtsc;
-    let t0 = rdtsc();
+    use crate::time::counter;
+    let t0 = counter();
     // Phase 1: write journal entries with committed=0 (safe to crash).
     fs.journal.prepare(&mut fs.cache)?;
-    let t_journal = rdtsc();
+    let t_journal = counter();
     // Snapshot head+seq after prepare advanced them: prepare wrote this
     // commit's entries at [old_head, head) and bumped `head` past them.
     // The SB must record the post-prepare head so `replay` scans backwards
@@ -1331,16 +1331,16 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     // stale/garbage blocks — or blocks the bitmap still calls free — i.e.
     // block double-alloc on remount. `blkdev::flush()` forces the order.
     fs.bitmap.sync(&mut fs.cache)?;
-    let t_bitmap = rdtsc();
+    let t_bitmap = counter();
     fs.cache.flush()?;        // journal(committed=0) + bitmap + new btree → controller
-    let t_meta = rdtsc();
+    let t_meta = counter();
     crate::blkdev::flush()?;  // ▷ BARRIER: those + data extents now on stable media
-    let t_flush = rdtsc();
+    let t_flush = counter();
     // SB written durably (FUA, straight to disk, bypassing the cache) so it
     // lands strictly after the barrier. One FLUSH + one FUA per commit — the
     // minimum that preserves the ordering invariant.
     sb_io::write_next_durable(&mut fs.cache, &mut fs.sb)?;
-    let t_sb = rdtsc();
+    let t_sb = counter();
 
     // Phase 3: mark journal committed. The SB is durable now, so committed=1
     // can never reach media before it. We deliberately do not force a barrier
@@ -1349,7 +1349,7 @@ fn commit(fs: &mut State, old_blocks: &[u64]) -> Result<(), FsError> {
     // gc-reclaimable space leak, never corruption.
     fs.journal.finalize(&mut fs.cache)?;
     fs.cache.flush()?;
-    super::bench::COMMIT.add(0, &[t0, t_journal, t_bitmap, t_meta, t_flush, t_sb, rdtsc()]);
+    super::bench::COMMIT.add(0, &[t0, t_journal, t_bitmap, t_meta, t_flush, t_sb, counter()]);
 
     // Phase 4: actually free the old B-tree blocks (data extents are
     // freed by the caller — they have scope to invalidate cache too).

@@ -12,7 +12,6 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use alloc::vec::Vec;
 use spin::Mutex;
-use crate::interrupts;
 use crate::capability::CapId;
 
 const MAX_ENTRIES: usize = 1024;
@@ -74,7 +73,7 @@ impl AuditLog {
 
     fn record(&mut self, op: AuditOp) {
         self.ensure_init();
-        let entry = AuditEntry { tick: interrupts::ticks(), op };
+        let entry = AuditEntry { tick: crate::time::ticks(), op };
         if let Some(entries) = &mut self.entries {
             entries[self.write_pos] = entry;
             self.write_pos = (self.write_pos + 1) % MAX_ENTRIES;

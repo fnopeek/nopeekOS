@@ -19,7 +19,7 @@ pub enum Kind {
 
 struct Pending {
     kind: Kind,
-    /// When the windows were asked (`interrupts::ticks`).
+    /// When the windows were asked (`crate::time::ticks`).
     since: u64,
 }
 
@@ -41,7 +41,7 @@ pub fn request(kind: Kind) {
         if p.is_some() {
             return;
         }
-        *p = Some(Pending { kind, since: crate::interrupts::ticks() });
+        *p = Some(Pending { kind, since: crate::time::ticks() });
     }
     // A cancel left over from an earlier close must not stop this one.
     let _ = crate::shade::widgets::take_close_cancelled();
@@ -67,7 +67,7 @@ pub fn tick() {
         return;
     }
     let guest = crate::microvm::vm_busy();
-    if guest && crate::interrupts::ticks().saturating_sub(since) < GUEST_GRACE_TICKS {
+    if guest && crate::time::ticks().saturating_sub(since) < GUEST_GRACE_TICKS {
         return;
     }
     if guest {

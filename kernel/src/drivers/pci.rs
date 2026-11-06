@@ -345,9 +345,9 @@ pub fn enable_device_mem(addr: PciAddr) -> (u8, u16) {
         state = (csr & 3) as u8;
         if state != 0 {
             write16(addr, pm + 4, csr & !3);
-            let t0 = crate::interrupts::rdtsc();
-            let wait = crate::interrupts::tsc_freq() / 100;
-            while crate::interrupts::rdtsc().saturating_sub(t0) < wait { core::hint::spin_loop(); }
+            let t0 = crate::time::counter();
+            let wait = crate::time::counter_hz() / 100;
+            while crate::time::counter().saturating_sub(t0) < wait { core::hint::spin_loop(); }
         }
     }
     let cmd = read16(addr, 0x04);

@@ -91,7 +91,7 @@ enum Act {
     Conflict([u8; 4]),
 }
 
-fn now() -> u64 { crate::interrupts::uptime_us() }
+fn now() -> u64 { crate::time::uptime_us() }
 
 fn rnd() -> impl FnMut() -> u64 { crate::csprng::random_u64 }
 

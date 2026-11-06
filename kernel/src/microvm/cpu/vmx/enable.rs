@@ -883,7 +883,7 @@ impl VmContext {
         }
         // A playing sound stream is serviced every millisecond.
         if sh.pci.virtio_snd.playing() {
-            let t = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
+            let t = crate::time::counter() + crate::time::counter_hz() / 1000;
             dev = Some(dev.map_or(t, |d| d.min(t)));
         }
         LAST_DEV_DEADLINE.store(dev.unwrap_or(0), Ordering::Relaxed);
@@ -902,7 +902,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     }
     if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE); }
     // vblank: a paused controlq runs its next frame.
-    if crate::microvm::devices::gpu_backend::vblank(crate::interrupts::rdtsc(), gm) {
+    if crate::microvm::devices::gpu_backend::vblank(crate::time::counter(), gm) {
         sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     }
     if sh.pci.virtio_snd.pump(gm) {
@@ -922,7 +922,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     }
     sh.pit.poll(&mut sh.pic);
 
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     if crate::microvm::devices::gpu_backend::display_tick_intx() {
         sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     }
@@ -1067,10 +1067,10 @@ impl VmContext {
         let cid = crate::smp::per_core::current_core_id();
         let kick_gen = crate::smp::fiber::net_kick_gen(cid);
         let deadline = self.next_timer_deadline_tsc();
-        let start = crate::interrupts::rdtsc();
-        let budget = (crate::interrupts::tsc_freq() / 1_000_000) * self.vcpu.halt_poll_us;
+        let start = crate::time::counter();
+        let budget = (crate::time::counter_hz() / 1_000_000) * self.vcpu.halt_poll_us;
         loop {
-            let now = crate::interrupts::rdtsc();
+            let now = crate::time::counter();
             let hit = crate::smp::fiber::net_kick_gen(cid) != kick_gen
                 || lapic::posted_pending(self.vcpu.apic_id)
                 || (self.vcpu.apic_id == 0 && crate::microvm::devices::net_backend::irq_pending())
@@ -1471,8 +1471,8 @@ impl VmContext {
     // Wall-clock slice cap: return to the fiber scheduler every few ms so the
     // core's other fibers run; the exit budget bounds boot bursts.
     const SLICE_MS: u64 = 3;
-    let slice_deadline = crate::interrupts::rdtsc()
-        + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
+    let slice_deadline = crate::time::counter()
+        + (crate::time::counter_hz() / 1000) * SLICE_MS;
 
     // Host-time profiler: `prof_post` = TSC right after the previous VMRESUME,
     // `prof_bucket` = that exit's bucket; the gap to the next VMRESUME is the
@@ -1493,13 +1493,13 @@ impl VmContext {
     let mut segs = [0u64; crate::microvm::cpu::SEG_N];
     let mut seg_match: u64 = 0;
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_has_window() {
-        let seg_top = if seg_on { crate::interrupts::rdtsc() } else { 0 };
+        let seg_top = if seg_on { crate::time::counter() } else { 0 };
         if seg_match != 0 {
             segs[5] = seg_top.wrapping_sub(seg_match);
             crate::microvm::cpu::bench_segs(self.vcpu.apic_id, &segs);
             seg_match = 0;
         }
-        if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline
+        if slice_n >= budget || crate::time::counter() >= slice_deadline
             || crate::smp::per_core::take_peer_wake(host_core)
         {
             return Ok(SliceOutcome::StillRunning);
@@ -1514,7 +1514,7 @@ impl VmContext {
         let kick_gen = crate::smp::fiber::net_kick_gen(host_core);
         lapic::phase(self.vcpu.apic_id, lapic::PH_INJECT);
         self.inject_pending_event()?;
-        let seg_inj = if seg_on { crate::interrupts::rdtsc() } else { 0 };
+        let seg_inj = if seg_on { crate::time::counter() } else { 0 };
         self.vcpu.lapic.pv_eoi_sync_to(self.shared.guest_mem);
         if self.vcpu.lapic.steal.record(self.shared.guest_mem) {
             vmcs::flush_guest_tlb();
@@ -1524,7 +1524,7 @@ impl VmContext {
         // core: its fire is the exit that delivers the tick on time.
         let entry_deadline =
             self.next_timer_deadline_tsc().map_or(slice_deadline, |d| d.min(slice_deadline));
-        let seg_pre = if seg_on { crate::interrupts::rdtsc() } else { 0 };
+        let seg_pre = if seg_on { crate::time::counter() } else { 0 };
         // IF stays 0 into VMRESUME (external-interrupt exiting exits on a
         // pending interrupt regardless); the asm sets it again after the exit.
         if !crate::microvm::cpu::entry_irqs_off(kick_gen, host_core, entry_deadline) {
@@ -1554,7 +1554,7 @@ impl VmContext {
         // host's via XSETBV pass-through).
         // Profiler: charge the time since the last exit to that exit's
         // handler bucket, then time the VMRESUME itself as guest cycles.
-        let prof_pre = crate::interrupts::rdtsc();
+        let prof_pre = crate::time::counter();
         if prof_post != 0 {
             crate::microvm::cpu::record_exit_cycles(self.vcpu.apic_id, prof_bucket, prof_pre.wrapping_sub(prof_post));
         }
@@ -1577,7 +1577,7 @@ impl VmContext {
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         super::msr::spec_ctrl_exit(core::mem::replace(
             &mut self.vcpu.regs.spec_ctrl_host, super::msr::SPEC_CTRL_KEEP));
-        prof_post = crate::interrupts::rdtsc();
+        prof_post = crate::time::counter();
         crate::microvm::cpu::record_guest_cycles(self.vcpu.apic_id, prof_post.wrapping_sub(prof_pre));
         let outcome = result?;
         self.vcpu.launched = true;
@@ -1653,7 +1653,7 @@ impl VmContext {
         }
 
         if seg_on {
-            let now = crate::interrupts::rdtsc();
+            let now = crate::time::counter();
             segs[0] = seg_inj.wrapping_sub(seg_top);
             segs[1] = seg_pre.wrapping_sub(seg_inj);
             segs[2] = prof_pre.wrapping_sub(seg_pre);

@@ -383,7 +383,7 @@ pub fn set_popup_parent(popup: u32, parent: Option<u32>) {
 }
 
 /// The window that got the last press or key (a popup counts as its
-/// parent) and when, in `interrupts::ticks`. A popup may take the keyboard
+/// parent) and when, in `crate::time::ticks`. A popup may take the keyboard
 /// only in answer to such input, as `xdg_popup.grab` needs the serial of one.
 static LAST_INPUT_WINDOW: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static LAST_INPUT_TICK: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
@@ -396,7 +396,7 @@ const POPUP_INPUT_TICKS: u64 = 100;
 pub fn had_recent_input(window_id: u32) -> bool {
     use core::sync::atomic::Ordering;
     LAST_INPUT_WINDOW.load(Ordering::Acquire) == window_id
-        && crate::interrupts::ticks()
+        && crate::time::ticks()
             .saturating_sub(LAST_INPUT_TICK.load(Ordering::Acquire)) <= POPUP_INPUT_TICKS
 }
 
@@ -411,7 +411,7 @@ pub fn push_event(window_id: u32, event: abi::Event) {
     use core::sync::atomic::Ordering;
     let window_id = POPUP_PARENT.lock().get(&window_id).copied().unwrap_or(window_id);
     if matches!(event, abi::Event::Key(_) | abi::Event::MouseButton { down: true, .. } | abi::Event::Summon) {
-        LAST_INPUT_TICK.store(crate::interrupts::ticks(), Ordering::Release);
+        LAST_INPUT_TICK.store(crate::time::ticks(), Ordering::Release);
         LAST_INPUT_WINDOW.store(window_id, Ordering::Release);
     }
     {
@@ -1253,7 +1253,7 @@ fn motion_pulse(window_id: u32, x: i32, y: i32, target: Option<abi::ActionId>) {
         Some(id) => id,
         None => { LAST_MOTION.lock().remove(&window_id); return; }
     };
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let interval = (abi::MOTION_INTERVAL_MS / 10) as u64;
     {
         let mut last = LAST_MOTION.lock();
@@ -2401,7 +2401,7 @@ static TEXT_DRAG: AtomicU32 = AtomicU32::new(0);
 /// The last click into a text field: `(tick, x, y, window, count)`.
 ///
 /// Double and triple click derive from it. The clock is
-/// `interrupts::ticks()` at 100 Hz — 10 ms per step, and a double click is
+/// `crate::time::ticks()` at 100 Hz — 10 ms per step, and a double click is
 /// measured in tenths of a second, not milliseconds.
 static LAST_CLICK: Mutex<Option<(u64, i32, i32, u32, u8)>> = Mutex::new(None);
 
@@ -2420,7 +2420,7 @@ fn multi_click_slop() -> i32 { scale::len_i(4) }
 pub fn click_run_at(window_id: u32, x: i32, y: i32) -> u8 { click_run(window_id, x, y) }
 
 fn click_run(window_id: u32, x: i32, y: i32) -> u8 {
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let mut last = LAST_CLICK.lock();
     let n = match *last {
         Some((t, lx, ly, w, n))

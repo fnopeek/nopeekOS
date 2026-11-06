@@ -134,12 +134,12 @@ fn enable_deep_idle() {
 /// writing IA32_TSC on core 0. Linux instead marks the TSC unstable without
 /// TSC_ADJUST (AMD) — not an option for a tickless kernel built on the TSC.
 fn log_tsc_sync(online: usize) {
-    let t0 = crate::interrupts::rdtsc();
-    let settle = crate::interrupts::tsc_freq() / 20; // 50 ms for the APs to park
-    while crate::interrupts::rdtsc().wrapping_sub(t0) < settle {
+    let t0 = crate::time::counter();
+    let settle = crate::time::counter_hz() / 20; // 50 ms for the APs to park
+    while crate::time::counter().wrapping_sub(t0) < settle {
         core::hint::spin_loop();
     }
-    let per_us = (crate::interrupts::tsc_freq() / 1_000_000).max(1) as i64;
+    let per_us = (crate::time::counter_hz() / 1_000_000).max(1) as i64;
     let (lo, hi, n, best) = measure_offsets(online);
     if n == 0 {
         kprintln!("[npk] tsc: sync not measured (no AP answered)");
@@ -163,7 +163,7 @@ fn log_tsc_sync(online: usize) {
     // carries ±rt/2; the smallest round trip is the best estimate.
     let _ = rt;
     crate::arch::without_interrupts(|| {
-        let now = crate::interrupts::rdtsc().wrapping_add(off as u64);
+        let now = crate::time::counter().wrapping_add(off as u64);
         // SAFETY: IA32_TSC (MSR 0x10) is architectural on x86_64 and
         // writable at CPL 0; it moves only this core's (core 0's) counter.
         // Interrupts are off, so nothing on this core sees the jump halfway.
@@ -283,11 +283,11 @@ fn boot_ap(lapic: Mmio, target_apic_id: u32, core_id: u32) -> bool {
 
     // INIT IPI
     send_ipi(lapic, target_apic_id, 0x0000_4500);
-    crate::interrupts::delay_ms(10);
+    crate::time::delay_ms(10);
 
     // SIPI #1
     send_ipi(lapic, target_apic_id, 0x0000_4600 | vector);
-    crate::interrupts::delay_ms(1);
+    crate::time::delay_ms(1);
 
     // Check if AP started
     if AP_STARTED.load(Ordering::Acquire) > started_before {
@@ -298,9 +298,9 @@ fn boot_ap(lapic: Mmio, target_apic_id: u32, core_id: u32) -> bool {
     send_ipi(lapic, target_apic_id, 0x0000_4600 | vector);
 
     // Wait up to 100ms
-    let timeout = crate::interrupts::tsc_freq() / 10;
-    let t0 = crate::interrupts::rdtsc();
-    while crate::interrupts::rdtsc() - t0 < timeout {
+    let timeout = crate::time::counter_hz() / 10;
+    let t0 = crate::time::counter();
+    while crate::time::counter() - t0 < timeout {
         if AP_STARTED.load(Ordering::Acquire) > started_before {
             return true;
         }

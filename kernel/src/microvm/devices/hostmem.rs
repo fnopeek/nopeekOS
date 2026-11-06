@@ -181,14 +181,14 @@ pub fn flush_guest_translations() {
 /// meanwhile.
 fn flush_all_vcpus(yielding: bool) {
     let generation = GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    let hz = crate::interrupts::tsc_freq();
-    let dl_warn = crate::interrupts::rdtsc() + hz;
+    let hz = crate::time::counter_hz();
+    let dl_warn = crate::time::counter() + hz;
     let mut warned = false;
     // A core is kicked once per millisecond it stays in the guest.
     let mut kicked = [0u64; CORES];
     loop {
         let mut pending = false;
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         for c in 0..CORES {
             if crate::microvm::cpu::in_guest(c) && SEEN[c].load(Ordering::SeqCst) < generation {
                 pending = true;
@@ -201,7 +201,7 @@ fn flush_all_vcpus(yielding: bool) {
         if !pending {
             return;
         }
-        if !warned && crate::interrupts::rdtsc() > dl_warn {
+        if !warned && crate::time::counter() > dl_warn {
             warned = true;
             crate::kprintln!("[microvm] hostmem: a vCPU has not left the guest for 1 s after an unmap");
         }

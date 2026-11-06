@@ -169,7 +169,7 @@ fn xsaveopt_pair_ns() -> u64 {
     let mut area = FpuArea::boxed();
     let p = area.0.as_mut_ptr();
     const N: u64 = 2000;
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     for _ in 0..N {
         // SAFETY: as in `xsave_pair_ns`; only used where CPUID reports XSAVEOPT.
         unsafe {
@@ -177,8 +177,8 @@ fn xsaveopt_pair_ns() -> u64 {
                 in("eax") 0xFFFF_FFFFu32, in("edx") 0xFFFF_FFFFu32, options(nostack));
         }
     }
-    let cyc = crate::interrupts::rdtsc().wrapping_sub(t0);
-    cyc * 1000 / (crate::interrupts::tsc_freq() / 1_000_000).max(1) / N
+    let cyc = crate::time::counter().wrapping_sub(t0);
+    cyc * 1000 / (crate::time::counter_hz() / 1_000_000).max(1) / N
 }
 
 /// One XSAVE64 + XRSTOR64 of every XCR0 component, in ns: the exit asm
@@ -187,7 +187,7 @@ fn xsave_pair_ns() -> u64 {
     let mut area = FpuArea::boxed();
     let p = area.0.as_mut_ptr();
     const N: u64 = 2000;
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     for _ in 0..N {
         // SAFETY: `p` is a 64-byte aligned 4 KiB save area owned here; the
         // XRSTOR loads back exactly the state the XSAVE just stored.
@@ -196,8 +196,8 @@ fn xsave_pair_ns() -> u64 {
                 in("eax") 0xFFFF_FFFFu32, in("edx") 0xFFFF_FFFFu32, options(nostack));
         }
     }
-    let cyc = crate::interrupts::rdtsc().wrapping_sub(t0);
-    cyc * 1000 / (crate::interrupts::tsc_freq() / 1_000_000).max(1) / N
+    let cyc = crate::time::counter().wrapping_sub(t0);
+    cyc * 1000 / (crate::time::counter_hz() / 1_000_000).max(1) / N
 }
 
 static BENCH_XSAVE_SHOWN: AtomicBool = AtomicBool::new(false);
@@ -212,7 +212,7 @@ pub fn bench_mark(vcpu: u8) {
             crate::kprintln!("[vmbench-host] host xsaveopt64+xrstor64: {} ns per pair (in use)", xsaveopt_pair_ns());
         }
     }
-    let us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let us = (crate::time::counter_hz() / 1_000_000).max(1);
     let mut prev = BENCH_PREV.lock();
     let n = (guest_vcpus() as usize).min(MAX_VCPUS_CAP);
     for (i, c) in COUNTERS.iter().enumerate().take(n) {
@@ -257,7 +257,7 @@ static WAKE_SUM: AtomicU64 = AtomicU64::new(0);
 static WAKE_MAX: AtomicU64 = AtomicU64::new(0);
 
 pub fn record_wake(cycles: u64) {
-    let us = cycles / (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let us = cycles / (crate::time::counter_hz() / 1_000_000).max(1);
     let b = WAKE_BOUNDS_US.iter().position(|&lim| us < lim).unwrap_or(4);
     WAKE_HIST[b].fetch_add(1, Ordering::Relaxed);
     WAKE_SUM.fetch_add(cycles, Ordering::Relaxed);
@@ -570,14 +570,14 @@ fn close_requested() -> bool {
         return true;
     }
     let term_at = TERM_AT.load(Ordering::Acquire);
-    if term_at != 0 && crate::interrupts::rdtsc() >= term_at {
+    if term_at != 0 && crate::time::counter() >= term_at {
         TERM_AT.store(0, Ordering::Release);
         crate::kprintln!("[microvm] app still running after {} s — asking the guest to end it", TERM_AFTER_MS / 1000);
         let _ = crate::microvm::devices::virtio_console_pci::send(
             crate::microvm::devices::virtio_console_pci::MSG_QUIT, &[]);
     }
     let deadline = QUIT_DEADLINE.load(Ordering::Acquire);
-    if deadline != 0 && crate::interrupts::rdtsc() >= deadline {
+    if deadline != 0 && crate::time::counter() >= deadline {
         QUIT_DEADLINE.store(0, Ordering::Release);
         crate::kprintln!("[microvm] guest did not quit within {} s — stopping it", QUIT_GRACE_MS / 1000);
         VM_CLOSE_REQUESTED.store(true, Ordering::Release);
@@ -943,9 +943,9 @@ const AP_STOP_TIMEOUT_MS: u64 = 5000;
 /// Wait for every AP to stop, bounded. False: one did not, and the VM is
 /// left in place (memory not freed under a running vCPU).
 fn wait_aps_down() -> bool {
-    let start = crate::interrupts::ticks();
+    let start = crate::time::ticks();
     while VCPU_COUNT.load(Ordering::Acquire) > 1 {
-        if crate::interrupts::ticks().wrapping_sub(start) * 10 >= AP_STOP_TIMEOUT_MS {
+        if crate::time::ticks().wrapping_sub(start) * 10 >= AP_STOP_TIMEOUT_MS {
             VM_WEDGED.store(true, Ordering::Release);
             crate::kprintln!("[microvm] a vCPU did not stop within {} ms — its core and the guest memory are kept; restart to start a VM again",
                 AP_STOP_TIMEOUT_MS);
@@ -1244,8 +1244,8 @@ pub fn vm_close_for_window(window_id: u32) {
     }
     let quitting = QUIT_DEADLINE.load(Ordering::Acquire) != 0;
     if !quitting && console::control_ready() {
-        let ms = crate::interrupts::tsc_freq() / 1000;
-        let now = crate::interrupts::rdtsc();
+        let ms = crate::time::counter_hz() / 1000;
+        let now = crate::time::counter();
         QUIT_DEADLINE.store(now + ms * QUIT_GRACE_MS, Ordering::Release);
         if console::send_windows(console::WIN_CLOSE, &[k as u8]) {
             TERM_AT.store(now + ms * TERM_AFTER_MS, Ordering::Release);
@@ -1367,10 +1367,10 @@ const PEER_SLICE_US: u64 = 200;
 /// the fibers made runnable before this slice are accounted for here.
 pub fn slice_deadline_with_peers(host_core: usize, slice_deadline: u64) -> u64 {
     crate::smp::per_core::take_peer_wake(host_core);
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     match crate::smp::fiber::earliest_deadline(host_core) {
         Some(d) if d <= now => slice_deadline
-            .min(now + PEER_SLICE_US * (crate::interrupts::tsc_freq() / 1_000_000)),
+            .min(now + PEER_SLICE_US * (crate::time::counter_hz() / 1_000_000)),
         Some(d) => slice_deadline.min(d),
         None => slice_deadline,
     }
@@ -1438,10 +1438,10 @@ impl DevPoll {
         self.dirty || self.pic
             || DEVPOLL_ALWAYS.load(Ordering::Relaxed)
             || DEVICE_WORK.load(Ordering::Acquire) != self.work
-            || crate::interrupts::ticks() != self.tick
+            || crate::time::ticks() != self.tick
             || crate::microvm::devices::net_backend::irq_pending()
             || crate::microvm::devices::gpu_backend::irq_pending()
-            || (deadline != 0 && crate::interrupts::rdtsc() >= deadline)
+            || (deadline != 0 && crate::time::counter() >= deadline)
     }
 
     /// The work generation before collecting: work noted while collecting
@@ -1452,7 +1452,7 @@ impl DevPoll {
 
     pub fn done(&mut self, snapshot: u64, pic_output: bool) {
         self.work = snapshot;
-        self.tick = crate::interrupts::ticks();
+        self.tick = crate::time::ticks();
         self.pic = pic_output;
         self.dirty = false;
     }
@@ -1571,7 +1571,7 @@ pub fn vm_poll_slice() {
         // a burst of guest requests before the window exists would start
         // several instances. One launch per interval; requests in between
         // are dropped.
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         let last = LOFT_LAUNCH_TICK.load(Ordering::Acquire);
         if last == 0 || now.wrapping_sub(last) >= LOFT_LAUNCH_INTERVAL_TICKS {
             LOFT_LAUNCH_TICK.store(now.max(1), Ordering::Release);
@@ -1869,8 +1869,8 @@ fn vcpu_wake_pending(apic_id: u8) -> bool {
 /// [now, safety]. A past deadline re-enters at once; a far or absent one
 /// re-checks no later than the safety cap.
 fn vcpu_block_deadline(next_timer_tsc: Option<u64>) -> u64 {
-    let now = crate::interrupts::rdtsc();
-    let safety = now + PARK_SAFETY_MS.saturating_mul(crate::interrupts::tsc_freq() / 1000);
+    let now = crate::time::counter();
+    let safety = now + PARK_SAFETY_MS.saturating_mul(crate::time::counter_hz() / 1000);
     next_timer_tsc.map(|d| d.clamp(now, safety)).unwrap_or(safety)
 }
 
@@ -1886,8 +1886,8 @@ fn vcpu_block_deadline(next_timer_tsc: Option<u64>) -> u64 {
 /// The wake must be event-driven; spinning while active pegs a worker core
 /// and starves the compositor.
 fn park_vcpu_idle(next_timer_tsc: Option<u64>) {
-    let now = crate::interrupts::rdtsc();
-    let freq = crate::interrupts::tsc_freq();
+    let now = crate::time::counter();
+    let freq = crate::time::counter_hz();
     let deadline = vcpu_block_deadline(next_timer_tsc);
 
     // When the off-vCPU RX backend (or producer) owns the NIC drain, RX wakes us

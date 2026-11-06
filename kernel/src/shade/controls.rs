@@ -952,7 +952,7 @@ impl Compositor {
     /// then maximizes or restores a floating window, or toggles fullscreen
     /// on a tile.
     pub(super) fn bar_double_click(&mut self, id: WindowId, x: i32, y: i32) -> bool {
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         let near = scale::len(6) as i32;
         let double = self.controls_last_press(id, x, y, now, near);
         if !double {

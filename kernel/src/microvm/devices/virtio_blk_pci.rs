@@ -257,7 +257,7 @@ impl VirtioBlk {
         {
             return false;
         }
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         if self.grown_at.is_some_and(|t| now.wrapping_sub(t) < GROW_INTERVAL_TICKS) {
             return false;
         }

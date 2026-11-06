@@ -382,7 +382,7 @@ pub struct Host {
 }
 
 fn now_us() -> u64 {
-    crate::interrupts::rdtsc() / (crate::interrupts::tsc_freq() / 1_000_000).max(1)
+    crate::time::counter() / (crate::time::counter_hz() / 1_000_000).max(1)
 }
 
 pub fn udelay(us: u64) {
@@ -395,7 +395,7 @@ pub fn udelay(us: u64) {
 /// `mmc_delay` / `usleep_range`: yields the core when it can.
 pub fn mdelay(ms: u64) {
     if !crate::smp::fiber::yield_sleep(ms) {
-        crate::interrupts::delay_ms(ms);
+        crate::time::delay_ms(ms);
     }
 }
 

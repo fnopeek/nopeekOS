@@ -150,7 +150,7 @@ pub fn service_blk_queue(
     }
 
     let mut serviced_any = false;
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     BLK_KICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 
     for _ in 0..pending {
@@ -187,7 +187,7 @@ pub fn service_blk_queue(
         mem.write_u16(used + 2, *used_idx);
     }
     BLK_CYCLES.fetch_add(
-        crate::interrupts::rdtsc().wrapping_sub(t0), core::sync::atomic::Ordering::Relaxed);
+        crate::time::counter().wrapping_sub(t0), core::sync::atomic::Ordering::Relaxed);
 
     serviced_any
 }

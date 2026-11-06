@@ -50,7 +50,7 @@ pub fn note_manager_core() {
     crate::smp::fiber::pin_current();
     MGR_CORE.store(
         crate::smp::per_core::current_core_id() as u32 + 1, Ordering::Relaxed);
-    MGR_SEEN.store(crate::interrupts::ticks(), Ordering::Relaxed);
+    MGR_SEEN.store(crate::time::ticks(), Ordering::Relaxed);
 }
 
 /// The manager's core, if one has polled recently. Self-healing rather than
@@ -62,7 +62,7 @@ pub fn manager_core() -> Option<usize> {
     const STALE_TICKS: u64 = 200;
     let c = MGR_CORE.load(Ordering::Relaxed);
     if c <= 1 { return None; }
-    let age = crate::interrupts::ticks()
+    let age = crate::time::ticks()
         .wrapping_sub(MGR_SEEN.load(Ordering::Relaxed));
     if age >= STALE_TICKS { return None; }
     Some(c as usize - 1)

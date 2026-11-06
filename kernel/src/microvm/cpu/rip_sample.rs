@@ -135,9 +135,9 @@ pub fn maybe_dump() {
     if !enabled() {
         return;
     }
-    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let mhz = (crate::time::counter_hz() / 1_000_000).max(1);
     let window = WINDOW_SECS * 1_000_000 * mhz;
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     let last = LAST_DUMP_TSC.load(Ordering::Relaxed);
     if last == 0 {
         // First call this run: arm the window, don't dump an empty table.
@@ -240,7 +240,7 @@ pub fn begin_window() {
         return;
     }
     H.lock().clear();
-    LAST_DUMP_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+    LAST_DUMP_TSC.store(crate::time::counter(), Ordering::Relaxed);
 }
 
 /// Dump and reset the current window now (window up).
@@ -248,8 +248,8 @@ pub fn dump_now() {
     if !enabled() {
         return;
     }
-    let now = crate::interrupts::rdtsc();
-    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let now = crate::time::counter();
+    let mhz = (crate::time::counter_hz() / 1_000_000).max(1);
     let last = LAST_DUMP_TSC.swap(now, Ordering::Relaxed);
     dump_and_reset(now.wrapping_sub(last) / mhz);
 }

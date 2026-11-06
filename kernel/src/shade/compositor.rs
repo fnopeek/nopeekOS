@@ -312,7 +312,7 @@ impl Compositor {
         if !win.focused { return Glow { band, alpha: 0, color: 0 } }
         let alpha = match self.focus_glow {
             Some((id, start)) if id == win.id => {
-                let t = crate::interrupts::ticks().saturating_sub(start)
+                let t = crate::time::ticks().saturating_sub(start)
                     .min(GLOW_FLASH_TICKS) as u32;
                 GLOW_FLASH_ALPHA
                     - (GLOW_FLASH_ALPHA - GLOW_STEADY_ALPHA) * t / GLOW_FLASH_TICKS as u32
@@ -330,7 +330,7 @@ impl Compositor {
             self.focus_glow = None;
             return false;
         }
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         // At most one repaint per timer tick. The callers are not a frame
         // clock: `poll_render` runs from a download's recv loop thousands of
         // times a second, and repainting the band that often would burn the
@@ -1069,7 +1069,7 @@ impl Compositor {
             return;
         }
         if crate::shade::widgets::is_close_guarded(id.0) {
-            let now = crate::interrupts::ticks();
+            let now = crate::time::ticks();
             if crate::shade::widgets::begin_close_request(id.0, now) {
                 crate::shade::widgets::push_event(
                     id.0, crate::shade::widgets::abi::Event::CloseRequest);
@@ -1113,7 +1113,7 @@ impl Compositor {
     /// Close guarded windows that never answered their `CloseRequest`, so
     /// a hung app can't leave an immortal window behind.
     pub fn tick_close_requests(&mut self) -> bool {
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         let expired = crate::shade::widgets::expired_close_requests(now);
         if expired.is_empty() { return false; }
         for id in expired {
@@ -2050,7 +2050,7 @@ impl Compositor {
         // Flash only on a real change of focus — every path routes through
         // here, and several of them re-assert the focus that is already set.
         if gained {
-            self.focus_glow = Some((focused_id, crate::interrupts::ticks()));
+            self.focus_glow = Some((focused_id, crate::time::ticks()));
         }
     }
 
@@ -2648,7 +2648,7 @@ impl Compositor {
             self.animation = Some(SwapAnimation {
                 win_a: a, win_b: b,
                 a_from, b_from, a_to, b_to,
-                start_tick: crate::interrupts::ticks(),
+                start_tick: crate::time::ticks(),
                 duration: 15, // 150ms at 100Hz
             });
         }
@@ -2658,7 +2658,7 @@ impl Compositor {
     /// Advance swap animation. Returns true if a frame was updated.
     pub fn tick_animation(&mut self) -> bool {
         let anim = match self.animation { Some(a) => a, None => return false };
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         let elapsed = now.saturating_sub(anim.start_tick);
 
         if elapsed >= anim.duration {
@@ -2720,7 +2720,7 @@ impl Compositor {
     /// opacity 0, so the capture costs no extra frames at all.
     pub fn start_flash(&mut self) {
         if Self::flash_peak() == 0 { return; }
-        self.flash = Some(crate::interrupts::ticks());
+        self.flash = Some(crate::time::ticks());
         self.needs_full_redraw = true;
     }
 
@@ -2729,7 +2729,7 @@ impl Compositor {
     /// on screen until something else happened to repaint.
     pub fn flash_tick(&mut self) -> bool {
         let start = match self.flash { Some(s) => s, None => return false };
-        let elapsed = crate::interrupts::ticks().saturating_sub(start);
+        let elapsed = crate::time::ticks().saturating_sub(start);
         self.needs_full_redraw = true;
         if elapsed >= Self::FLASH_TICKS {
             self.flash = None;
@@ -2741,7 +2741,7 @@ impl Compositor {
     /// and drains away.
     fn flash_alpha(&self) -> u32 {
         let start = match self.flash { Some(s) => s, None => return 0 };
-        let elapsed = crate::interrupts::ticks().saturating_sub(start);
+        let elapsed = crate::time::ticks().saturating_sub(start);
         if elapsed >= Self::FLASH_TICKS { return 0; }
         let remaining = Self::FLASH_TICKS - elapsed;      // 1..=FLASH_TICKS
         // Quadratic falloff: brightest on the first frame, then a quick

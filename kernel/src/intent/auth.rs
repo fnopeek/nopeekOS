@@ -16,9 +16,9 @@ pub fn intent_lock() {
             if attempts > 0 {
                 let delay_secs = 1u64 << attempts.min(5);
                 kprintln!("[npk] Wait {} seconds...", delay_secs);
-                let start = crate::interrupts::ticks();
+                let start = crate::time::ticks();
                 let delay_ticks = delay_secs * 100;
-                while crate::interrupts::ticks() - start < delay_ticks {
+                while crate::time::ticks() - start < delay_ticks {
                     core::hint::spin_loop();
                 }
             }

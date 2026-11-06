@@ -4,13 +4,16 @@
 //! the RTC in UTC after each sync (`hwclock --systohc`). Local time goes
 //! through [`zone`].
 
+pub mod clock;
 pub mod zone;
+
+pub use clock::{counter, counter_hz, counter_to_ns, delay_ms, init_clock, ticks, uptime_ns, uptime_secs, uptime_us};
 
 use alloc::string::String;
 use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
-/// UTC seconds and the `interrupts::uptime_ns` they were taken at.
+/// UTC seconds and the `time::uptime_ns` they were taken at.
 static WALL: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 /// True once NTP has set the clock in this boot.
@@ -42,7 +45,7 @@ pub fn init_from_rtc() -> Option<u64> {
 }
 
 fn set(unix: u64) {
-    *WALL.lock() = Some((unix, crate::interrupts::uptime_ns()));
+    *WALL.lock() = Some((unix, crate::time::uptime_ns()));
 }
 
 /// Current UTC seconds, or `None` before any source set the clock.
@@ -53,7 +56,7 @@ pub fn now() -> Option<u64> {
 /// Current UTC in nanoseconds, or `None` before any source set the clock.
 pub fn now_ns() -> Option<u64> {
     let (base, at) = (*WALL.lock())?;
-    let since = crate::interrupts::uptime_ns().saturating_sub(at);
+    let since = crate::time::uptime_ns().saturating_sub(at);
     Some(base.saturating_mul(1_000_000_000).saturating_add(since))
 }
 
@@ -91,7 +94,7 @@ fn step(unix: u64) {
 /// `AGREE_SECS` of the median), and the clock never goes back before a time
 /// a signed release has proved.
 pub fn sync_now() -> bool {
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
     let mut asked: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
     let mut answers: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
     for host in NTP_HOSTS {
@@ -100,7 +103,7 @@ pub fn sync_now() -> bool {
         asked.push(ip);
         if let Some(t) = crate::net::ntp::query(ip) {
             // Back to the moment the sync began, so slow answers compare.
-            answers.push(t.saturating_sub(crate::interrupts::ticks().saturating_sub(t0) / 100));
+            answers.push(t.saturating_sub(crate::time::ticks().saturating_sub(t0) / 100));
         }
     }
     answers.sort_unstable();
@@ -119,7 +122,7 @@ pub fn sync_now() -> bool {
             format(floor));
         return false;
     }
-    step(median.saturating_add(crate::interrupts::ticks().saturating_sub(t0) / 100));
+    step(median.saturating_add(crate::time::ticks().saturating_sub(t0) / 100));
     true
 }
 
@@ -159,7 +162,7 @@ fn sync_task(_: u64) {
         RETRY_TICKS.store(r, Ordering::Relaxed);
         r
     };
-    NEXT_SYNC.store(crate::interrupts::ticks() + wait, Ordering::Relaxed);
+    NEXT_SYNC.store(crate::time::ticks() + wait, Ordering::Relaxed);
     SYNC_RUNNING.store(false, Ordering::Release);
 }
 
@@ -167,7 +170,7 @@ fn sync_task(_: u64) {
 /// second.
 pub fn tick() {
     let due = NEXT_SYNC.load(Ordering::Relaxed);
-    if due != 0 && crate::interrupts::ticks() >= due && crate::net::arp::our_ip() != [0; 4] {
+    if due != 0 && crate::time::ticks() >= due && crate::net::arp::our_ip() != [0; 4] {
         NEXT_SYNC.store(0, Ordering::Relaxed);
         request_sync();
     }

@@ -52,10 +52,10 @@ fn bcd_to_bin(val: u8) -> u8 {
 /// Wait until the RTC update-in-progress bit clears. An update takes under
 /// 2 ms; false after 10 ms, which is what a missing RTC reading 0xFF gives.
 fn wait_ready() -> bool {
-    let freq = crate::interrupts::tsc_freq();
-    let deadline = crate::interrupts::rdtsc() + (freq / 100).max(1);
+    let freq = crate::time::counter_hz();
+    let deadline = crate::time::counter() + (freq / 100).max(1);
     while read_cmos(REG_STATUS_A) & 0x80 != 0 {
-        if crate::interrupts::rdtsc() >= deadline {
+        if crate::time::counter() >= deadline {
             return false;
         }
         core::hint::spin_loop();

@@ -6,7 +6,7 @@ use crate::capability::{self, Vault};
 pub fn intent_status(vault: &Vault) {
     let (active_caps, max_caps) = vault.stats();
     let (free_frames, free_mb) = crate::memory::stats();
-    let uptime = crate::interrupts::uptime_secs();
+    let uptime = crate::time::uptime_secs();
     let audit_count = crate::audit::total_count();
     let checks_passed = crate::audit::checks_passed();
 
@@ -76,9 +76,9 @@ pub fn intent_status(vault: &Vault) {
 /// microVM's included, for the whole wait. Now the fiber parks in frame-sized
 /// steps and composites between them. Outside a fiber, halt as before.
 fn idle_until(deadline: u64) {
-    let step = crate::interrupts::tsc_freq() / 60;
+    let step = crate::time::counter_hz() / 60;
     loop {
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         if now >= deadline {
             return;
         }
@@ -92,7 +92,7 @@ fn idle_until(deadline: u64) {
 
 pub fn intent_cores() {
     let cores = crate::smp::per_core::core_count().min(256);
-    let tsc_hz = crate::interrupts::tsc_freq().max(1);
+    let tsc_hz = crate::time::counter_hz().max(1);
     let tsc_per_us = (tsc_hz / 1_000_000).max(1);
 
     // Snapshot 1
@@ -128,7 +128,7 @@ pub fn intent_cores() {
     let (cy0, gcy0) = crate::microvm::cpu::vm_cycle_snapshot();
     let mut ap0 = [(0u64, 0u64); 256];
     crate::smp::per_core::aperf_mperf_now(&mut ap0[..cores]);
-    let wall0 = crate::interrupts::rdtsc();
+    let wall0 = crate::time::counter();
 
     // Sample window. The shell's fiber parks instead of busy-waiting, so
     // Core 0 halts when nothing else there runs, its halt counter advances
@@ -136,12 +136,12 @@ pub fn intent_cores() {
     // drawing.
     let window_ms: u64 = 500;
     let deadline = wall0 + window_ms * (tsc_hz / 1000);
-    while crate::interrupts::rdtsc() < deadline {
+    while crate::time::counter() < deadline {
         idle_until(deadline);
     }
 
     // Snapshot 2
-    let wall1 = crate::interrupts::rdtsc();
+    let wall1 = crate::time::counter();
     let mut ap1 = [(0u64, 0u64); 256];
     crate::smp::per_core::aperf_mperf_now(&mut ap1[..cores]);
     let nominal_mhz = tsc_hz / 1_000_000;
@@ -512,7 +512,7 @@ pub fn intent_cores() {
     // happened in the window, which is exactly the hang case.
     {
         let labels = crate::microvm::cpu::svm::lapic::PHASE_LABELS;
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         for i in 0..8usize {
             if let Some((ph, t, core)) = crate::microvm::cpu::svm::lapic::phase_snapshot(i) {
                 kprintln!("    vcpu{} (core {}): {} since {} us",
@@ -585,10 +585,10 @@ pub fn intent_power(args: &str) {
     let cores = crate::smp::per_core::core_count().min(256);
     let deep0: u64 = (0..cores).map(|c| crate::interrupts::DEEP_IDLE_COUNT[c]
         .load(core::sync::atomic::Ordering::Relaxed)).sum();
-    let tsc_hz = crate::interrupts::tsc_freq().max(1);
+    let tsc_hz = crate::time::counter_hz().max(1);
 
     let res0 = crate::smp::per_core::residency();
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let pkg0 = crate::smp::per_core::rapl_pkg_raw();
     let core0_e0 = crate::smp::per_core::rapl_core_raw();
     let (halt0, _) = crate::smp::per_core::halt_snapshot(0);
@@ -602,21 +602,21 @@ pub fn intent_power(args: &str) {
     // at the edges of a fixed window it is not.
     let mut first: Option<(u64, u32)> = None;
     let mut latest: Option<(u64, u32)> = None;
-    while crate::interrupts::rdtsc() < deadline {
+    while crate::time::counter() < deadline {
         // Core 0 has no periodic tick: check every 20 ms.
-        let d = (crate::interrupts::rdtsc() + tsc_hz / 50).min(deadline);
+        let d = (crate::time::counter() + tsc_hz / 50).min(deadline);
         idle_until(d);
         let e = crate::smp::per_core::rapl_pkg_raw();
         if e != last {
             jumps += 1;
             last = e;
-            let now = crate::interrupts::rdtsc();
+            let now = crate::time::counter();
             if first.is_none() { first = Some((now, e)); }
             latest = Some((now, e));
         }
     }
 
-    let t1 = crate::interrupts::rdtsc();
+    let t1 = crate::time::counter();
     let res1 = crate::smp::per_core::residency();
     let pkg1 = crate::smp::per_core::rapl_pkg_raw();
     let core0_e1 = crate::smp::per_core::rapl_core_raw();
@@ -702,7 +702,7 @@ fn power_cstate(arg: &str) {
     kprintln!();
     // Intel: the MWAIT states the firmware's _CST gave (via `acpi`).
     if crate::smp::per_core::intel_model().is_some() {
-        let tsc_per_us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+        let tsc_per_us = (crate::time::counter_hz() / 1_000_000).max(1);
         match arg {
             "on" => {
                 if crate::interrupts::set_mwait_idle(true) {
@@ -1197,8 +1197,8 @@ pub fn intent_ec_watch(args: &str) {
     kprintln!();
     kprintln!("  {} s: jetzt die Helligkeitstasten druecken. Jede Aenderung erscheint.", secs);
 
-    let tsc_hz = crate::interrupts::tsc_freq().max(1);
-    let t0 = crate::interrupts::rdtsc();
+    let tsc_hz = crate::time::counter_hz().max(1);
+    let t0 = crate::time::counter();
     let end = t0 + secs * tsc_hz;
     // SAFETY: PM1a_EVT is an I/O port named by the FADT, read only.
     let pm1_sts = (pm1a_evt != 0 && pm1a_evt <= 0xFFFF)
@@ -1207,10 +1207,10 @@ pub fn intent_ec_watch(args: &str) {
     let mut last_gpe = read_gpe(0);
     let mut last_pm1 = pm1_sts.map_or(0, |p| p.inw());
     let mut changes = 0u32;
-    while crate::interrupts::rdtsc() < end && changes < 60 {
-        let now = crate::interrupts::rdtsc();
+    while crate::time::counter() < end && changes < 60 {
+        let now = crate::time::counter();
         idle_until(now + tsc_hz / 200);
-        let ms = (crate::interrupts::rdtsc() - t0) / (tsc_hz / 1000).max(1);
+        let ms = (crate::time::counter() - t0) / (tsc_hz / 1000).max(1);
         let ec = EC_SC.inb();
         if (ec ^ last_ec) & 0x20 != 0 {
             kprintln!("  {:>6} ms  EC SCI_EVT {} (Status 0x{:02x})", ms, (ec >> 5) & 1, ec);
@@ -1255,7 +1255,7 @@ pub fn intent_ec_watch(args: &str) {
 }
 
 pub fn intent_uptime() {
-    let secs = crate::interrupts::uptime_secs();
+    let secs = crate::time::uptime_secs();
     let days = secs / 86400;
     let hours = (secs % 86400) / 3600;
     let mins = (secs % 3600) / 60;

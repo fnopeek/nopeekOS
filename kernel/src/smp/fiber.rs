@@ -445,7 +445,7 @@ pub fn run_core_fibers(cid: usize) {
     }
     loop {
         crate::mm::paging::sync_tlb();
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         // Check out the next runnable fiber (FIFO). Lock dropped before the
         // switch — the fiber's Box is owned by this stack frame meanwhile.
         let (mut fiber, left_behind) = {
@@ -480,7 +480,7 @@ pub fn run_core_fibers(cid: usize) {
         let waker = fiber.waker;
         RUN_WAKER[cid].store(waker, Ordering::Relaxed);
         RUN_PID[cid].store(fiber.pid, Ordering::Relaxed);
-        RUN_START[cid].store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+        RUN_START[cid].store(crate::time::counter(), Ordering::Relaxed);
         // SAFETY: fptr is stable across the switch (the Box is this frame's
         // local). Save the loop ctx into SCHED_CTX[cid], switch into the
         // fiber; control returns here when it yields (npk_sleep) or finishes
@@ -490,7 +490,7 @@ pub fn run_core_fibers(cid: usize) {
             switch(&raw mut SCHED_CTX[cid], &raw const (*fptr).ctx);
             CURRENT_FIBER[cid] = core::ptr::null_mut();
         }
-        let ran = crate::interrupts::rdtsc().saturating_sub(RUN_START[cid].swap(0, Ordering::Relaxed));
+        let ran = crate::time::counter().saturating_sub(RUN_START[cid].swap(0, Ordering::Relaxed));
         if ran > LONGEST_RUN[cid].load(Ordering::Relaxed) {
             LONGEST_RUN[cid].store(ran, Ordering::Relaxed);
             LONGEST_RUN_WAKER[cid].store(waker, Ordering::Relaxed);
@@ -616,7 +616,7 @@ pub fn steal_for(thief: usize, preemptible_only: bool) -> bool {
         return false;
     }
     let n = crate::smp::per_core::core_count().min(MAX_CORES);
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     for victim in 1..n {
         if victim == thief
             || FIBER_COUNT[victim].load(Ordering::Relaxed) < 2
@@ -662,7 +662,7 @@ pub fn yield_if_contended() {
     if unsafe { CURRENT_FIBER[cid].is_null() } {
         return;
     }
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     let others = FIBER_QUEUES[cid].lock().iter().any(|f| runnable(f, now));
     if others {
         PREEMPTS.fetch_add(1, Ordering::Relaxed);
@@ -716,8 +716,8 @@ pub fn earliest_deadline(cid: usize) -> Option<u64> {
 /// Returns `false` if not running inside a fiber (caller falls back to an
 /// in-place wait). Called by `npk_sleep`: a wait with an empty mask.
 pub fn yield_sleep(ms: u64) -> bool {
-    let freq = crate::interrupts::tsc_freq();
-    let deadline = crate::interrupts::rdtsc() + ms.saturating_mul(freq / 1000);
+    let freq = crate::time::counter_hz();
+    let deadline = crate::time::counter() + ms.saturating_mul(freq / 1000);
     wait(0, deadline).is_some()
 }
 
@@ -752,8 +752,8 @@ pub fn yield_ready() -> bool {
 /// waiter (`irq::set_waiter`), which ends the park.
 pub fn irq_wait(vector: crate::irq::Irq, since: u64, timeout_ms: u64) -> bool {
     let Some(w) = current_waker() else { return false };
-    let freq = crate::interrupts::tsc_freq();
-    let deadline = crate::interrupts::rdtsc() + timeout_ms.saturating_mul(freq / 1000);
+    let freq = crate::time::counter_hz();
+    let deadline = crate::time::counter() + timeout_ms.saturating_mul(freq / 1000);
     // Register before looking at the count: an IRQ after the look then
     // signals us, and `wait` returns at once.
     crate::irq::set_waiter(vector, w);
@@ -761,7 +761,7 @@ pub fn irq_wait(vector: crate::irq::Irq, since: u64, timeout_ms: u64) -> bool {
         if crate::irq::fired_count(vector) != since {
             return true;
         }
-        if crate::interrupts::rdtsc() >= deadline {
+        if crate::time::counter() >= deadline {
             return false;
         }
         if wait(SIG_IRQ, deadline).is_none() {
@@ -790,7 +790,7 @@ pub fn net_kick_bump(cid: usize) {
         // probe: stamp the first kick after a park began (CAS 0→now); cleared at
         // park start in kick_wait_until_unless, read on resume → kick→resume latency.
         let _ = KICK_SENT_TSC[cid].compare_exchange(
-            0, crate::interrupts::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
+            0, crate::time::counter(), Ordering::Relaxed, Ordering::Relaxed);
         let w = KICK_WAITER[cid].load(Ordering::Acquire);
         if w != NO_WAKER {
             signal(w, SIG_KICK);
@@ -872,7 +872,7 @@ pub fn kick_wait_until_unless(deadline: u64, ready: impl Fn() -> bool) -> bool {
         let _ = KICK_WAITER[cid].compare_exchange(me, NO_WAKER, Ordering::AcqRel, Ordering::Relaxed);
         return true;
     }
-    while net_kick_gen(cid) == kgen && crate::interrupts::rdtsc() < deadline {
+    while net_kick_gen(cid) == kgen && crate::time::counter() < deadline {
         if wait(SIG_KICK, deadline).is_none() {
             break;
         }
@@ -885,7 +885,7 @@ pub fn kick_wait_until_unless(deadline: u64, ready: impl Fn() -> bool) -> bool {
         KICK_WOKE.fetch_add(1, Ordering::Relaxed);
         let sent = KICK_SENT_TSC[cid].swap(0, Ordering::Relaxed);
         if sent != 0 {
-            let d = crate::interrupts::rdtsc().wrapping_sub(sent);
+            let d = crate::time::counter().wrapping_sub(sent);
             KICK_LAT_SUM.fetch_add(d, Ordering::Relaxed);
             KICK_LAT_N.fetch_add(1, Ordering::Relaxed);
             if d > KICK_LAT_MAX.load(Ordering::Relaxed) {

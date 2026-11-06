@@ -794,13 +794,13 @@ impl Http2 {
     /// than iterations so it means the same on any machine.
     fn fill_to(&mut self, n: usize) -> Result<bool, Http2Error> {
         let mut buf = vec![0u8; READ_BUF];
-        let start = crate::interrupts::ticks();
+        let start = crate::time::ticks();
         while self.rx.len() < n {
             crate::net::poll_rx_only();
             // The outer budget is checked on every turn, not only after an
             // empty read: one `tls_recv_patient` call can itself wait far
             // longer than the whole budget.
-            let spent = crate::interrupts::ticks().wrapping_sub(start);
+            let spent = crate::time::ticks().wrapping_sub(start);
             let left = FILL_BUDGET.saturating_sub(spent);
             if left == 0 {
                 return Err(Http2Error::Tls("timed out waiting for data"));
@@ -903,9 +903,9 @@ pub fn connect(host: &str, ip: [u8; 4], port: u16) -> Result<Http2, Http2Error> 
             host, ip[0], ip[1], ip[2], ip[3], port
         );
     }
-    let t_tcp = crate::interrupts::ticks();
+    let t_tcp = crate::time::ticks();
     let handle = crate::net::tcp::connect_cancellable(ip, port).map_err(|_| Http2Error::Tls("TCP connect failed"))?;
-    let t_tls = crate::interrupts::ticks();
+    let t_tls = crate::time::ticks();
     let tls = match crate::tls::tls_connect_alpn(handle, host, &["h2", "http/1.1"]) {
         Ok(s) => s,
         Err(_) => {
@@ -915,12 +915,12 @@ pub fn connect(host: &str, ip: [u8; 4], port: u16) -> Result<Http2, Http2Error> 
     };
     // Log each leg (tcp, tls, preface) so a slow connect names its cause; the
     // preface is the first application write after the handshake.
-    let t_start = crate::interrupts::ticks();
+    let t_start = crate::time::ticks();
     let legs = |t_start: u64| {
         kprintln!("[npk]   h2 tcp {} ms + tls {} ms + preface {} ms",
             t_tls.wrapping_sub(t_tcp) * 10,
             t_start.wrapping_sub(t_tls) * 10,
-            crate::interrupts::ticks().wrapping_sub(t_start) * 10);
+            crate::time::ticks().wrapping_sub(t_start) * 10);
     };
     match tls.alpn() {
         Some("h2") => {

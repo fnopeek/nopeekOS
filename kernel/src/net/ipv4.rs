@@ -59,12 +59,12 @@ static PMTU: Mutex<net_core::ip::Pmtu> = Mutex::new(net_core::ip::Pmtu::new());
 
 /// The path MTU to `dst`.
 pub fn path_mtu(dst: [u8; 4]) -> u32 {
-    PMTU.lock().get(dst, mtu(), crate::interrupts::ticks())
+    PMTU.lock().get(dst, mtu(), crate::time::ticks())
 }
 
 /// A router said the path to `dst` carries only `mtu`.
 pub fn update_pmtu(dst: [u8; 4], mtu: u32) {
-    PMTU.lock().update(dst, mtu, self::mtu(), crate::interrupts::ticks());
+    PMTU.lock().update(dst, mtu, self::mtu(), crate::time::ticks());
 }
 
 /// Forget the learned path MTUs: they belong to the network we left.
@@ -85,7 +85,7 @@ pub fn icmp_limited() -> u64 {
 pub fn icmp_send(orig: &[u8], kind: u8, code: u8, info: u32) {
     let Some(msg) = net_core::ip::icmp_error_message(orig, kind, code, info) else { return };
     let dst: [u8; 4] = orig[12..16].try_into().unwrap();
-    let allowed = ICMP_LIMIT.lock().allow(dst, kind, code, crate::interrupts::ticks(),
+    let allowed = ICMP_LIMIT.lock().allow(dst, kind, code, crate::time::ticks(),
         || (crate::csprng::random_u64() % 3) as i64);
     if !allowed {
         mib::inc(Mib::IcmpOutRateLimitHost);
@@ -110,7 +110,7 @@ fn select_ident(dst: [u8; 4], src: [u8; 4], proto: u8) -> u16 {
     let idents = IDENTS.call_once(|| Mutex::new(net_core::ip::Idents::new(
         crate::csprng::random_256(), crate::memory::usable_bytes(),
         || crate::csprng::random_u64() as u32)));
-    idents.lock().select(dst, src, proto, crate::interrupts::ticks() as u32,
+    idents.lock().select(dst, src, proto, crate::time::ticks() as u32,
         |range| if range == 0 { 0 } else { (crate::csprng::random_u64() % range as u64) as u32 })
 }
 
@@ -138,7 +138,7 @@ pub fn reasm_stats() -> (u64, u64, u64) {
 /// `ip_expire`: incomplete datagrams past 30 s go, and whoever sent one to
 /// our address whose fragment 0 came learns so (RFC 1122 §3.3.2 MUST).
 pub fn tick() {
-    let firsts = DEFRAG.lock().expire(crate::interrupts::ticks());
+    let firsts = DEFRAG.lock().expire(crate::time::ticks());
     let our = arp::our_ip();
     for f in firsts {
         if f[16..20] == our {
@@ -219,7 +219,7 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     // the rest, and the whole datagram goes on from here.
     if u16::from_be_bytes([data[6], data[7]]) & 0x3FFF != 0 {
         mib::inc(Mib::IpReasmReqds);
-        let r = DEFRAG.lock().input(&data[..total_len], crate::interrupts::ticks());
+        let r = DEFRAG.lock().input(&data[..total_len], crate::time::ticks());
         if let net_core::frag::Defragged::Complete(whole) = r {
             handle_ipv4(&whole, false, l2);
         }

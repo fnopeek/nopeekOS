@@ -113,7 +113,7 @@ fn efer_allowed() -> u64 {
 pub fn read(st: &GuestMsrs, vmcb: &vmcb::Vmcb, apic_id: u8, msr: u32) -> MsrResult<u64> {
     Ok(match msr {
         MSR_TSC => {
-            crate::interrupts::rdtsc().wrapping_add(vmcb.read_u64(vmcb::OFF_TSC_OFFSET))
+            crate::time::counter().wrapping_add(vmcb.read_u64(vmcb::OFF_TSC_OFFSET))
         }
         // SAFETY: PATCH_LEVEL is architectural on AMD (the SVM path).
         MSR_PATCH_LEVEL => unsafe { host_rdmsr(MSR_PATCH_LEVEL) },

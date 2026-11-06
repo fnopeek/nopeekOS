@@ -99,10 +99,10 @@ pub fn confirm(question: &str) -> bool {
         && crate::smp::per_core::current_core_id() == 0;
     if on_screen { crate::shade::render_frame(); }
 
-    let started = crate::interrupts::ticks();
+    let started = crate::time::ticks();
     let answer = loop {
         if cancel_requested() { kprint!("^C"); break false; }
-        if crate::interrupts::ticks().wrapping_sub(started) > CONFIRM_TIMEOUT_TICKS {
+        if crate::time::ticks().wrapping_sub(started) > CONFIRM_TIMEOUT_TICKS {
             kprint!("(timeout)");
             break false;
         }
@@ -168,10 +168,10 @@ pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
     if on_screen { crate::shade::render_frame(); }
 
     let mut len = 0usize;
-    let started = crate::interrupts::ticks();
+    let started = crate::time::ticks();
     let result = loop {
         if cancel_requested() { kprint!("^C"); break None; }
-        if crate::interrupts::ticks().wrapping_sub(started) > CONFIRM_TIMEOUT_TICKS {
+        if crate::time::ticks().wrapping_sub(started) > CONFIRM_TIMEOUT_TICKS {
             kprint!("(timeout)");
             break None;
         }
@@ -540,7 +540,7 @@ fn intent_worker_task(arg: u64) {
     // Register in process table
     let pid = crate::process::spawn(verb, crate::process::KIND_INTENT,
                                      job.terminal_idx, core_id as u8);
-    let start_tsc = crate::interrupts::rdtsc();
+    let start_tsc = crate::time::counter();
 
     // Redirect kprint output to this terminal
     crate::shade::terminal::set_output_redirect(job.terminal_idx);
@@ -558,7 +558,7 @@ fn intent_worker_task(arg: u64) {
     }
 
     // Track CPU time + deregister process
-    let elapsed = crate::interrupts::rdtsc().saturating_sub(start_tsc);
+    let elapsed = crate::time::counter().saturating_sub(start_tsc);
     crate::process::add_busy_tsc(pid, elapsed);
     crate::process::exit(pid);
 
@@ -1218,7 +1218,7 @@ fn maybe_idle_gc() {
     static LAST_CHECK: AtomicU64 = AtomicU64::new(0);
     const CHECK_INTERVAL_TICKS: u64 = 300; // ~3 s @ 100 Hz
 
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     if now.wrapping_sub(LAST_CHECK.load(Ordering::Relaxed)) < CHECK_INTERVAL_TICKS {
         return;
     }
@@ -1280,7 +1280,7 @@ pub fn wake_shell() {
 /// a finished intent, a microVM request. A dependency missed here shows as
 /// up to a second of lag, not as a hang.
 fn core0_wait() {
-    let freq = crate::interrupts::tsc_freq();
+    let freq = crate::time::counter_hz();
     // Media keys and unmapped-key reports the PS/2 ISR deferred to here.
     crate::keyboard::apply_deferred();
     // Input that no interrupt reports is drained here.
@@ -1298,9 +1298,9 @@ fn core0_wait() {
         || crate::keyboard::needs_poll()
         || !crate::shade::is_active()
         || crate::microvm::vm_active();
-    let mut d = crate::interrupts::rdtsc() + if busy { freq / 100 } else { freq };
+    let mut d = crate::time::counter() + if busy { freq / 100 } else { freq };
     // A TCP timer due before the second is up is served on time.
-    d = d.min(crate::interrupts::rdtsc() + crate::net::timer_park_ms(1000) * (freq / 1000));
+    d = d.min(crate::time::counter() + crate::net::timer_park_ms(1000) * (freq / 1000));
     if let Some(due) = crate::shade::surface_due_tsc() {
         d = d.min(due);
     }
@@ -1945,13 +1945,13 @@ fn intent_mic(args: &str) {
     let want = (crate::audio::DEFAULT_FORMAT.rate * secs) as usize * crate::audio::BYTES_PER_FRAME;
     let mut pcm = alloc::vec![0u8; want];
     let mut got = 0;
-    let t0 = crate::interrupts::ticks();
-    while got < want && crate::interrupts::ticks() - t0 < (secs as u64 + 2) * 100 {
+    let t0 = crate::time::ticks();
+    while got < want && crate::time::ticks() - t0 < (secs as u64 + 2) * 100 {
         got += crate::capture::read(s, None, &mut pcm[got..]).unwrap_or(0);
         // Outside a fiber the wait is a spin, as the prompt's.
         if !crate::smp::fiber::yield_sleep(20) {
-            let end = crate::interrupts::rdtsc() + 20 * (crate::interrupts::tsc_freq() / 1000);
-            while crate::interrupts::rdtsc() < end {
+            let end = crate::time::counter() + 20 * (crate::time::counter_hz() / 1000);
+            while crate::time::counter() < end {
                 core::hint::spin_loop();
             }
         }
@@ -2857,7 +2857,7 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     let ripsample =
         crate::config::get("microvm_ripsample").is_some_and(|v| v.trim().eq_ignore_ascii_case("on"));
     crate::microvm::cpu::rip_sample::set_enabled(ripsample);
-    let tsc_khz = crate::interrupts::tsc_freq() / 1000;
+    let tsc_khz = crate::time::counter_hz() / 1000;
     let mut s = String::new();
     // `loglevel=5` keeps warnings, errors and panics on the host console and
     // drops the informational boot log: every console byte is a VM exit, and

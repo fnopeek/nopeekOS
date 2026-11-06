@@ -392,7 +392,7 @@ pub struct SubmitJob {
 /// exits. Returns the fence started after it on the job's ring.
 pub fn run_submit(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64, ()> {
     use super::gpu_backend::{note, us_since, STAT_SUBMIT, STAT_SUBMIT_US};
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let r = run_submit_inner(job, stream, deadline);
     note(STAT_SUBMIT, 1);
     note(STAT_SUBMIT_US, us_since(t0));

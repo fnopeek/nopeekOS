@@ -101,9 +101,9 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
 
     interrupts::init();
 
-    interrupts::calibrate_tsc();
-    interrupts::init_tsc_ticks();
-    kprintln!("[npk] TSC: {} MHz", interrupts::tsc_freq() / 1_000_000);
+    arch::calibrate_counter();
+    crate::time::init_clock();
+    kprintln!("[npk] TSC: {} MHz", crate::time::counter_hz() / 1_000_000);
     keyboard::init();
 
     memory::init(boot_info);
@@ -487,9 +487,9 @@ fn text_mode_auth() {
         if attempts > 0 {
             let delay_secs = 1u64 << attempts.min(5);
             kprintln!("[npk] Wait {} seconds...", delay_secs);
-            let start = interrupts::ticks();
+            let start = crate::time::ticks();
             let delay_ticks = delay_secs * 100;
-            while interrupts::ticks() - start < delay_ticks {
+            while crate::time::ticks() - start < delay_ticks {
                 core::hint::spin_loop();
             }
         }

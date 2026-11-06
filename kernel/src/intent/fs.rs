@@ -529,35 +529,35 @@ pub fn intent_disk_info() {
 /// HW backends (AVX2 / AES-NI) fire at runtime. Returns
 /// `(blake3_mbs, aes_enc_mbs, aes_dec_mbs)`.
 pub fn crypto_bench() -> (u64, u64, u64) {
-    use crate::interrupts::{rdtsc, tsc_freq};
+    use crate::time::{counter, counter_hz};
 
     const SIZE: usize = 1024 * 1024;
     const ITERS: usize = 4;
 
     let buf = alloc::vec![0xA5u8; SIZE];
-    let hz = tsc_freq();
+    let hz = counter_hz();
     if hz == 0 { return (0, 0, 0); }
     let bytes = (SIZE * ITERS) as u64;
 
-    let t0 = rdtsc();
+    let t0 = counter();
     let mut acc = [0u8; 32];
     for _ in 0..ITERS {
         let h = *blake3::hash(&buf).as_bytes();
         for i in 0..32 { acc[i] ^= h[i]; }
     }
-    let dt = rdtsc().saturating_sub(t0).max(1);
+    let dt = counter().saturating_sub(t0).max(1);
     let blake3_mbs = (bytes * hz) / (dt * 1024 * 1024);
     let _ = acc;
 
     let key = [0x42u8; 32];
     let nonce = [0x17u8; 12];
-    let t0 = rdtsc();
+    let t0 = counter();
     let mut total = 0usize;
     for _ in 0..ITERS {
         let ct = crate::crypto::aead_encrypt_aes(&key, &nonce, &buf);
         total = total.wrapping_add(ct.len());
     }
-    let dt = rdtsc().saturating_sub(t0).max(1);
+    let dt = counter().saturating_sub(t0).max(1);
     let aes_enc_mbs = (bytes * hz) / (dt * 1024 * 1024);
 
     let template = crate::crypto::aead_encrypt_aes(&key, &nonce, &buf);
@@ -565,14 +565,14 @@ pub fn crypto_bench() -> (u64, u64, u64) {
         alloc::vec::Vec::with_capacity(ITERS);
     for _ in 0..ITERS { clones.push(template.clone()); }
 
-    let t0 = rdtsc();
+    let t0 = counter();
     let mut ok = 0usize;
     for c in clones.iter_mut() {
         if crate::crypto::aead_decrypt_aes_in_place(&key, &nonce, c).is_some() {
             ok = ok.wrapping_add(1);
         }
     }
-    let dt = rdtsc().saturating_sub(t0).max(1);
+    let dt = counter().saturating_sub(t0).max(1);
     let aes_dec_mbs = (bytes * hz) / (dt * 1024 * 1024);
     let _ = (total, ok);
 
@@ -586,13 +586,13 @@ pub fn crypto_bench() -> (u64, u64, u64) {
     }
 
     // HW encrypt bench
-    let t0 = rdtsc();
+    let t0 = counter();
     let mut total_hw = 0usize;
     for _ in 0..ITERS {
         let ct = crate::crypto::aead_encrypt_aes_hw(&key, &nonce, &buf);
         total_hw = total_hw.wrapping_add(ct.len());
     }
-    let dt = rdtsc().saturating_sub(t0).max(1);
+    let dt = counter().saturating_sub(t0).max(1);
     let hw_enc_mbs = (bytes * hz) / (dt * 1024 * 1024);
 
     // HW decrypt-in-place bench
@@ -601,14 +601,14 @@ pub fn crypto_bench() -> (u64, u64, u64) {
         alloc::vec::Vec::with_capacity(ITERS);
     for _ in 0..ITERS { clones_hw.push(template_hw.clone()); }
 
-    let t0 = rdtsc();
+    let t0 = counter();
     let mut ok_hw = 0usize;
     for c in clones_hw.iter_mut() {
         if crate::crypto::aead_decrypt_aes_hw_in_place(&key, &nonce, c).is_some() {
             ok_hw = ok_hw.wrapping_add(1);
         }
     }
-    let dt = rdtsc().saturating_sub(t0).max(1);
+    let dt = counter().saturating_sub(t0).max(1);
     let hw_dec_mbs = (bytes * hz) / (dt * 1024 * 1024);
     let _ = (total_hw, ok_hw);
 
@@ -777,7 +777,7 @@ pub fn intent_drives(args: &str) {
             if total == 0 { kprintln!("  drive too small"); return; }
             let mut buf = alloc::vec![0u8; chunk];
             let per = (chunk / d.block_size as usize) as u64;
-            let t0 = crate::interrupts::rdtsc();
+            let t0 = crate::time::counter();
             let mut at = 0u64;
             for _ in 0..total / chunk {
                 if let Err(e) = us::read(d.id, at, &mut buf) {
@@ -795,7 +795,7 @@ pub fn intent_drives(args: &str) {
             if rewrite {
                 if let Err(e) = us::flush(d.id) { kprintln!("  flush failed: {:?}", e); return; }
             }
-            let us_ = (crate::interrupts::rdtsc() - t0) / (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+            let us_ = (crate::time::counter() - t0) / (crate::time::counter_hz() / 1_000_000).max(1);
             kprintln!("  {} {} MiB in {} ms: {} MB/s", if rewrite { "read+wrote" } else { "read" },
                 total >> 20, us_ / 1000,
                 (total as u64).saturating_mul(1_000_000) / us_.max(1) / 1_000_000);

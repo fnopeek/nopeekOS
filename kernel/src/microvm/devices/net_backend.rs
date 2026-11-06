@@ -44,7 +44,7 @@ pub fn worker_core() -> Option<usize> {
 pub fn note_tx_kick() {
     // When the guest asked first, for the pickup time (`net_dataplane`).
     let _ = TX_KICK_TSC.compare_exchange(
-        0, crate::interrupts::rdtsc(), Ordering::Relaxed, Ordering::Relaxed);
+        0, crate::time::counter(), Ordering::Relaxed, Ordering::Relaxed);
     if !TX_KICK.swap(true, Ordering::AcqRel) {
         NET_BELL.ring();
     }
@@ -214,9 +214,9 @@ static NET: Mutex<VirtioNet> = Mutex::new(VirtioNet::new());
 #[track_caller]
 pub fn lock() -> NetGuard {
     let at = core::panic::Location::caller();
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let g = NET.lock();
-    let since = crate::interrupts::rdtsc();
+    let since = crate::time::counter();
     super::nat::flight_lock(false, since.wrapping_sub(t0), at);
     NetGuard { g, since, at }
 }
@@ -239,7 +239,7 @@ impl core::ops::DerefMut for NetGuard {
 
 impl Drop for NetGuard {
     fn drop(&mut self) {
-        super::nat::flight_lock(true, crate::interrupts::rdtsc().wrapping_sub(self.since), self.at);
+        super::nat::flight_lock(true, crate::time::counter().wrapping_sub(self.since), self.at);
     }
 }
 

@@ -167,7 +167,7 @@ fn do_http_request(args: &str, use_tls: bool) {
         };
         let mut total: usize = 0;
         let mut first = true;
-        let start_tick = crate::interrupts::ticks();
+        let start_tick = crate::time::ticks();
         let mut last_tick = start_tick;
         let max_size = usize::MAX;
         let stream_result = {
@@ -182,7 +182,7 @@ fn do_http_request(args: &str, use_tls: bool) {
                     }
                 }
                 total = total.saturating_add(chunk.len());
-                let now = crate::interrupts::ticks();
+                let now = crate::time::ticks();
                 if now.wrapping_sub(last_tick) >= 200 {
                     let dt = now.wrapping_sub(start_tick).max(1);
                     let mbps = (total as u64 * 8 * 100) / dt / 1_000_000;
@@ -195,7 +195,7 @@ fn do_http_request(args: &str, use_tls: bool) {
                     let iters = PROF_ITERS.swap(0, Relaxed).max(1);
                     let poll_cyc = PROF_POLL_CYC.swap(0, Relaxed);
                     let recv_cyc = PROF_RECV_CYC.swap(0, Relaxed);
-                    let ghz = (crate::interrupts::tsc_freq() / 1_000_000_000).max(1);
+                    let ghz = (crate::time::counter_hz() / 1_000_000_000).max(1);
                     let budget_drops = crate::net::tcp::take_mem_drops();
                     kprintln!("[npk]   rx {} KiB (~{} Mbit/s)  ooo: a={} d={}  rxbuf={}K  budget-drops={}  tx_acks={}/s  | iters={} poll={}ns recv={}ns",
                         total / 1024, mbps, ooo_ahead, ooo_behind, maxbuf / 1024, budget_drops,
@@ -248,7 +248,7 @@ fn do_http_request(args: &str, use_tls: bool) {
             return;
         }
         // Final throughput summary (the headline number for a speed test).
-        let dt = crate::interrupts::ticks().wrapping_sub(start_tick).max(1);
+        let dt = crate::time::ticks().wrapping_sub(start_tick).max(1);
         let mbps = (total as u64 * 8 * 100) / dt / 1_000_000;
         let mbytes_s = (total as u64 * 100) / dt / 1_000_000;
         let secs10 = dt * 10 / 100;
@@ -354,9 +354,9 @@ fn do_http_request(args: &str, use_tls: bool) {
                     if empty_count > 40 && response.is_empty() { break; } // 200ms
                     if empty_count > 10 && !response.is_empty() { break; } // 50ms
                     crate::net::poll();
-                    let end = crate::interrupts::rdtsc()
-                        + crate::interrupts::tsc_freq() / 200; // 5ms
-                    while crate::interrupts::rdtsc() < end { core::hint::spin_loop(); }
+                    let end = crate::time::counter()
+                        + crate::time::counter_hz() / 200; // 5ms
+                    while crate::time::counter() < end { core::hint::spin_loop(); }
                 }
                 Ok(n) => { response.extend_from_slice(&buf[..n]); empty_count = 0; }
                 Err(_) => break,
@@ -1196,7 +1196,7 @@ fn drain_before_reuse() {
 fn pool_take(host: &str, addr: Option<[u8; 4]>) -> Option<crate::tls::TlsSession> {
     drain_before_reuse();
     let mut pool = CONN_POOL.lock();
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     for slot in pool.iter_mut() {
         if matches!(slot, Some(c) if c.host == host && peer_ok(c.tls.peer().0, addr)) {
             let c = slot.take().unwrap();
@@ -1219,7 +1219,7 @@ fn pool_put(host: &str, tls: crate::tls::TlsSession) {
     let conn = PooledConn {
         host: String::from(host),
         tls,
-        idle_since: crate::interrupts::ticks(),
+        idle_since: crate::time::ticks(),
     };
     for slot in pool.iter_mut() {
         if slot.is_none() {
@@ -1245,7 +1245,7 @@ pub fn reap_pools() {
     }
     fn task(_: u64) {
         drain_before_reuse();
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         let stale = |idle_since: u64| now.wrapping_sub(idle_since) >= POOL_MAX_IDLE_TICKS;
         let tls: alloc::vec::Vec<PooledConn> = take_where(&mut CONN_POOL.lock()[..],
             |c| stale(c.idle_since) || !c.tls.is_healthy());
@@ -1262,7 +1262,7 @@ pub fn reap_pools() {
 }
 
 fn pools_have_stale() -> bool {
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let stale = |idle_since: u64| now.wrapping_sub(idle_since) >= POOL_MAX_IDLE_TICKS;
     CONN_POOL.try_lock().is_some_and(|p| p.iter().flatten()
             .any(|c| stale(c.idle_since) || !c.tls.is_healthy()))
@@ -1357,19 +1357,19 @@ fn open_tls(host: &str, addr: Option<[u8; 4]>) -> Result<crate::tls::TlsSession,
     // The bare name for DNS and SNI; the explicit port if given, else 443.
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(443);
-    let t_dns = crate::interrupts::ticks();
+    let t_dns = crate::time::ticks();
     let ip = connect_addr(bare, addr).ok_or("DNS resolution failed")?;
-    let t_arp = crate::interrupts::ticks();
+    let t_arp = crate::time::ticks();
     // Make sure the gateway's MAC is known before we SYN. `arp::resolve`
     // returns immediately on a cache hit and otherwise polls only until the
     // reply lands; a blind spin over `net::poll()` would also run render
     // passes.
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100); // 1 s at 100 Hz
-    let t_tcp = crate::interrupts::ticks();
+    let t_tcp = crate::time::ticks();
 
     let handle = crate::net::tcp::connect_cancellable(ip, port).map_err(|_| "TCP connect failed")?;
-    let t_tls = crate::interrupts::ticks();
+    let t_tls = crate::time::ticks();
     let out = match crate::tls::tls_connect(handle, bare) {
         Ok(s) => Ok(s),
         Err(e) => {
@@ -1381,7 +1381,7 @@ fn open_tls(host: &str, addr: Option<[u8; 4]>) -> Result<crate::tls::TlsSession,
         }
     };
     // Split so a slow connect names the leg that waits.
-    let done = crate::interrupts::ticks();
+    let done = crate::time::ticks();
     if chatty() {
         kprintln!("[npk]   connect {} -> {}.{}.{}.{}:443 (dns {} + arp {} + tcp {} + tls {} ms)",
             host, ip[0], ip[1], ip[2], ip[3],
@@ -1436,7 +1436,7 @@ fn h2_take(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
 fn h2_take_exact(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
     drain_before_reuse();
     let mut pool = H2_POOL.lock();
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     for slot in pool.iter_mut() {
         if matches!(slot, Some((h, c, _)) if h == host && peer_ok(c.peer().0, addr)) {
             let (_, mut conn, idle_since) = slot.take().unwrap();
@@ -1473,7 +1473,7 @@ fn h2_take_coalesced(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
     let ip = connect_addr(bare, addr)?;
     drain_before_reuse();
     let mut pool = H2_POOL.lock();
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     for slot in pool.iter_mut() {
         // A connection whose TCP slot is gone reports 0.0.0.0:0; never match
         // an unknown peer.
@@ -1497,7 +1497,7 @@ fn h2_take_coalesced(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
 
 fn h2_put(host: &str, conn: Http2) {
     let mut pool = H2_POOL.lock();
-    let entry = (String::from(host), conn, crate::interrupts::ticks());
+    let entry = (String::from(host), conn, crate::time::ticks());
     for slot in pool.iter_mut() {
         if slot.is_none() {
             *slot = Some(entry);
@@ -1521,20 +1521,20 @@ fn h2_open(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
 /// back on HTTP/1.1.
 fn h2_connect(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
     // Timed from entry so no stretch of the connect goes unmeasured.
-    let t_enter = crate::interrupts::ticks();
+    let t_enter = crate::time::ticks();
     if h2_refused(host) {
         return None;
     }
-    let t_dns = crate::interrupts::ticks();
+    let t_dns = crate::time::ticks();
     let (bare, port) = split_host_port(host);
     let port = port.unwrap_or(443);
     let ip = connect_addr(bare, addr)?;
-    let t_arp = crate::interrupts::ticks();
+    let t_arp = crate::time::ticks();
     // Gateway MAC, same as the h1 path (see `open_tls` for why this is a
     // resolve and not a spin).
     let gw = crate::net::ipv4::gateway();
     let _ = crate::net::arp::resolve(gw, 100);
-    let t_conn = crate::interrupts::ticks();
+    let t_conn = crate::time::ticks();
     if chatty() {
         kprintln!("[npk]   h2 pre-connect {} (refused-check {} + dns {} + arp {} ms)",
             host, t_dns.wrapping_sub(t_enter) * 10,
@@ -1542,10 +1542,10 @@ fn h2_connect(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
     }
     // The serial write above is itself unmeasured otherwise, and it sits
     // inside the span the caller reports as "connect".
-    let t_pre = crate::interrupts::ticks();
+    let t_pre = crate::time::ticks();
     let r = http2::connect(bare, ip, port);
     if chatty() {
-        let after = crate::interrupts::ticks();
+        let after = crate::time::ticks();
         kprintln!("[npk]   h2 connect() span {} ms (log {} ms before it)",
             after.wrapping_sub(t_pre) * 10, t_pre.wrapping_sub(t_conn) * 10);
     }
@@ -1613,9 +1613,9 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
         let plain = matches!(parsed.iter().flatten().find(|p| &p.0 == host), Some((_, _, false)));
 
         let mut served = false;
-        let t0 = crate::interrupts::ticks();
+        let t0 = crate::time::ticks();
         if let Some(mut conn) = if plain { None } else { h2_open(host, Some(*ip)) } {
-            let t_conn = crate::interrupts::ticks();
+            let t_conn = crate::time::ticks();
             let paths: alloc::vec::Vec<&str> =
                 idxs.iter().map(|&i| parsed[i].as_ref().unwrap().1.as_str()).collect();
             // Same order as `paths`; both iterate `idxs`.
@@ -1670,7 +1670,7 @@ pub fn https_get_many(urls: &[String], cookies: &[String], max_size: usize,
                     }
                     // Split the time so a slow batch says where it was slow:
                     // a fresh TLS handshake, or the transfer itself.
-                    let now = crate::interrupts::ticks();
+                    let now = crate::time::ticks();
                     kprintln!("[npk]   h2 {}: {}/{} over one connection ({} ms connect + {} ms transfer)",
                         host, ok, idxs.len(),
                         t_conn.wrapping_sub(t0) * 10, now.wrapping_sub(t_conn) * 10);
@@ -1757,7 +1757,7 @@ struct H2Sink<'a> {
 
 impl http2::BodySink for H2Sink<'_> {
     fn head(&mut self, status: u16, headers: &[http2::Header]) -> Result<(), &'static str> {
-        self.t_head = crate::interrupts::ticks();
+        self.t_head = crate::time::ticks();
         self.discard = (300..400).contains(&status);
         // Same link in the chain as HTTP/1.1 puts it: between the transport
         // and the sink, streaming, with the caller's own cap as the budget;
@@ -1863,7 +1863,7 @@ fn h2_exchange(
     on_chunk: &mut dyn FnMut(&[u8]) -> Result<(), &'static str>,
     mut conn: Http2,
 ) -> Result<HttpResponse, ExchangeErr> {
-    let t_send = crate::interrupts::ticks();
+    let t_send = crate::time::ticks();
     let mut sink = H2Sink {
         max_size,
         delivered: 0,
@@ -1894,7 +1894,7 @@ fn h2_exchange(
             let content_type = h2_value(&headers, "content-type").map(String::from);
             let redirect = (300..400).contains(&status);
             if chatty() {
-                let now = crate::interrupts::ticks();
+                let now = crate::time::ticks();
                 let hdr_ms = t_head.wrapping_sub(t_send) * 10;
                 match (&location, redirect) {
                     // Log the source of a redirect too; a target alone
@@ -1999,7 +1999,7 @@ fn https_exchange(
     let mut request = head.into_bytes();
     request.extend_from_slice(req.body);
     // Timestamps for the wait between handshake and response headers.
-    let t_send = crate::interrupts::ticks();
+    let t_send = crate::time::ticks();
     if crate::tls::tls_send(&mut tls, &request).is_err() {
         // Stale pooled socket (or a send error): nothing delivered, retry fresh.
         let _ = crate::tls::tls_close(&mut tls);
@@ -2012,7 +2012,7 @@ fn https_exchange(
     // The loop leaves only two ways: it breaks with the header offset, or it
     // returns. Yielding the offset out of `break` says that in the types, so
     // there is no "we got here without a header" case left to handle.
-    let t_hdr0 = crate::interrupts::ticks();
+    let t_hdr0 = crate::time::ticks();
     let hdr_end = loop {
         match tls_recv_poll(&mut tls, &mut buf) {
             Ok(0) => continue,
@@ -2076,7 +2076,7 @@ fn https_exchange(
     if (300..400).contains(&status) {
         if chatty() {
             let (send_ms, hdr_ms) = (t_hdr0.wrapping_sub(t_send) * 10,
-                                     crate::interrupts::ticks().wrapping_sub(t_hdr0) * 10);
+                                     crate::time::ticks().wrapping_sub(t_hdr0) * 10);
             match &location {
                 Some(l) => kprintln!("[npk]   HTTP {} (send {} + headers {} ms) -> {}", status, send_ms, hdr_ms, l),
                 None => kprintln!("[npk]   HTTP {} (redirect, no Location)", status),
@@ -2086,7 +2086,7 @@ fn https_exchange(
         finish_conn(host, tls, persistent && drained);
         return Ok(HttpResponse { status, location, content_type, headers: reply_headers });
     }
-    let t_body0 = crate::interrupts::ticks();
+    let t_body0 = crate::time::ticks();
     if chatty() {
         kprintln!("[npk]   HTTP {} — send {} ms + headers {} ms, receiving body",
             status,
@@ -2193,7 +2193,7 @@ fn https_exchange(
     }
 
     if chatty() {
-        kprintln!("[npk]   HTTP body {} ms", crate::interrupts::ticks().wrapping_sub(t_body0) * 10);
+        kprintln!("[npk]   HTTP body {} ms", crate::time::ticks().wrapping_sub(t_body0) * 10);
         // Say whether gzip ran; silence would be ambiguous (never asked, or
         // the server answered identity).
         match (gunzip.as_ref(), req.accept_gzip) {
@@ -2428,7 +2428,7 @@ pub(crate) fn split_host_port(host: &str) -> (&str, Option<u16>) {
 
 /// TLS recv with network polling. Retries on Ok(0) up to a hard timeout.
 fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usize, &'static str> {
-    let start = crate::interrupts::ticks();
+    let start = crate::time::ticks();
     loop {
         if super::cancel_requested() { return Err("cancelled"); }
         let since = crate::net::rx_gen();
@@ -2437,7 +2437,7 @@ fn tls_recv_poll(tls: &mut crate::tls::TlsSession, buf: &mut [u8]) -> Result<usi
                 // No app data yet (partial record, or a control
                 // message like NewSessionTicket/CCS). Keep polling
                 // until the hard timeout.
-                if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
+                if crate::time::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout"); // 15 seconds hard timeout
                 }
                 crate::net::rx_wait(since);
@@ -2457,22 +2457,22 @@ static PROF_ITERS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64
 /// Plain-TCP recv with polling (no TLS). Analog of `tls_recv_poll`.
 fn tcp_recv_poll(handle: usize, buf: &mut [u8]) -> Result<usize, &'static str> {
     use core::sync::atomic::Ordering::Relaxed;
-    let start = crate::interrupts::ticks();
+    let start = crate::time::ticks();
     loop {
         if super::cancel_requested() { return Err("cancelled"); }
         let since = crate::net::rx_gen();
-        let t1 = crate::interrupts::rdtsc();
+        let t1 = crate::time::counter();
         let r = crate::net::tcp::recv(handle, buf);
-        let t2 = crate::interrupts::rdtsc();
+        let t2 = crate::time::counter();
         PROF_RECV_CYC.fetch_add(t2.wrapping_sub(t1), Relaxed);
         PROF_ITERS.fetch_add(1, Relaxed);
         match r {
             Ok(0) => {
-                if crate::interrupts::ticks().wrapping_sub(start) > 1500 {
+                if crate::time::ticks().wrapping_sub(start) > 1500 {
                     return Err("recv timeout");
                 }
                 crate::net::rx_wait(since);
-                PROF_POLL_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t2), Relaxed);
+                PROF_POLL_CYC.fetch_add(crate::time::counter().wrapping_sub(t2), Relaxed);
             }
             Ok(n) => return Ok(n),
             Err(_) => return Err("recv error"),
@@ -2561,7 +2561,7 @@ pub fn intent_netbench(args: &str) {
 
 /// Print bytes/elapsed as MB, ms, Mbit/s, MB/s using integer math (no float).
 fn bench_report(label: &str, bytes: usize, cyc: u64) {
-    let freq = crate::interrupts::tsc_freq().max(1) as u128;
+    let freq = crate::time::counter_hz().max(1) as u128;
     let us = (cyc as u128 * 1_000_000 / freq).max(1);
     let ms = (us / 1000) as u64;
     let mbit_s = (bytes as u128 * 8 / us) as u64; // bits/us = Mbit/s
@@ -2574,9 +2574,9 @@ fn bench_get(host: &str, path: &str) {
     kprintln!("[netbench] GET http://{}{}", host, path);
     let mut bytes: usize = 0;
     let mut sink = |c: &[u8]| -> Result<(), &'static str> { bytes += c.len(); Ok(()) };
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let res = http_get_streaming(host, path, usize::MAX, &mut sink);
-    let t1 = crate::interrupts::rdtsc();
+    let t1 = crate::time::counter();
     match res {
         Ok(_) => bench_report("GET", bytes, t1.wrapping_sub(t0)),
         Err(e) => kprintln!("[netbench] GET failed after {} bytes: {}", bytes, e),
@@ -2599,9 +2599,9 @@ fn bench_cores() {
 fn bench_put(host: &str, path: &str, mb: usize) {
     let total = mb * 1024 * 1024;
     kprintln!("[netbench] PUT http://{}{} ({} MB)", host, path, mb);
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let res = http_post_zeros(host, path, total);
-    let t1 = crate::interrupts::rdtsc();
+    let t1 = crate::time::counter();
     match res {
         Ok(reply) => {
             bench_report("PUT(local)", total, t1.wrapping_sub(t0));
@@ -2659,7 +2659,7 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
     // window-limited one.
     crate::net::tcp::send_stats_reset();
     let mut poll_tsc = 0u64;
-    let t_body = crate::interrupts::rdtsc();
+    let t_body = crate::time::counter();
     while sent < total {
         let n = core::cmp::min(chunk.len(), total - sent);
         // Say which failure it was. "send body failed" covers a peer that
@@ -2695,13 +2695,13 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
         sent += n;
         // Drive the stack so ACKs come in and the retransmit buffer is trimmed
         // (send() has no flow control, so without this the send_buf grows).
-        let t_p = crate::interrupts::rdtsc();
+        let t_p = crate::time::counter();
         crate::net::poll();
         poll_tsc = poll_tsc.wrapping_add(
-            crate::interrupts::rdtsc().wrapping_sub(t_p));
+            crate::time::counter().wrapping_sub(t_p));
     }
     {
-        let wall = crate::interrupts::rdtsc().wrapping_sub(t_body);
+        let wall = crate::time::counter().wrapping_sub(t_body);
         let (send_tsc, blocked_tsc, segs, wb, maxbuf) =
             crate::net::tcp::send_stats();
         let pct = |x: u64| if wall == 0 { 0 } else { x * 100 / wall };
@@ -2729,8 +2729,8 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
         if segs > 0 {
             // Per-segment cost: says whether the producer is the limit.
             kprintln!("[netbench] je Segment: {} ns in send, {} ns Wanduhr",
-                crate::interrupts::tsc_to_ns(send_tsc / segs),
-                crate::interrupts::tsc_to_ns(wall / segs));
+                crate::time::counter_to_ns(send_tsc / segs),
+                crate::time::counter_to_ns(wall / segs));
         }
     }
 
@@ -2843,7 +2843,7 @@ static PLAIN_POOL: spin::Mutex<[Option<PlainConn>; CONN_POOL_SIZE]> =
 fn plain_take(key: &str, addr: Option<[u8; 4]>) -> Option<usize> {
     drain_before_reuse();
     let mut pool = PLAIN_POOL.lock();
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     for slot in pool.iter_mut() {
         if matches!(slot, Some(c) if c.key == key
             && crate::net::tcp::peer(c.handle).is_some_and(|p| peer_ok(p.0, addr)))
@@ -2862,7 +2862,7 @@ fn plain_take(key: &str, addr: Option<[u8; 4]>) -> Option<usize> {
 
 fn plain_put(key: &str, handle: usize) {
     let mut pool = PLAIN_POOL.lock();
-    let conn = PlainConn { key: String::from(key), handle, idle_since: crate::interrupts::ticks() };
+    let conn = PlainConn { key: String::from(key), handle, idle_since: crate::time::ticks() };
     for slot in pool.iter_mut() {
         if slot.is_none() {
             *slot = Some(conn);

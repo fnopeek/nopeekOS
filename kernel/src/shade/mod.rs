@@ -551,7 +551,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
 /// no flicker; incl. animations + the microvm tile).
 fn render_frame_full() {
     note_render(0);
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     framebuffer::with_fb(|fb| {
         let screen_w = fb.info().width;
         let screen_h = fb.info().height;
@@ -569,7 +569,7 @@ fn render_frame_full() {
         }
         crate::shade::gpu_scene::finish();
         note_shell_fingerprint(fp);
-        let t_comp = crate::interrupts::rdtsc();
+        let t_comp = crate::time::counter();
 
         fb.swap_buffers();
         fb.commit_front();
@@ -578,7 +578,7 @@ fn render_frame_full() {
         // pixels under it so a later pure move can erase it without a
         // recompose. Carried by the full blit below → atomic, no flicker.
         cursor::save_under_and_bake(fb.front_ptr(), &info);
-        let t_cursor = crate::interrupts::rdtsc();
+        let t_cursor = crate::time::counter();
 
         let gpu_ok = if crate::gpu::supports_blit() {
             try_gpu_blit(fb, pitch, screen_w, screen_h)
@@ -600,7 +600,7 @@ fn render_frame_full() {
 /// would saturate the framebuffer and starve cursor blits.
 fn render_frame_surface() {
     note_render(1);
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
         let (front, _) = fb.shadow_ptr();
@@ -646,10 +646,10 @@ fn render_frame_surface() {
             None => alloc::vec::Vec::new(),
         };
         drop(guard);
-        let t_comp = crate::interrupts::rdtsc();
+        let t_comp = crate::time::counter();
         crate::shade::gpu_scene::finish();
         cursor::save_under_and_bake(front, &info);
-        let t_cursor = crate::interrupts::rdtsc();
+        let t_cursor = crate::time::counter();
 
         // One copy of the bounding box on the GPU when a module serves
         // copies, else the rects and the cursor box on the CPU.
@@ -719,8 +719,8 @@ static GPU_BLIT_TSC_SUM: AtomicU64 = AtomicU64::new(0);
 static GPU_BLIT_TSC_MAX: AtomicU64 = AtomicU64::new(0);
 
 fn record_gpu_blit(t0: u64, ok: bool) {
-    let dt = crate::interrupts::rdtsc().saturating_sub(t0);
-    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let dt = crate::time::counter().saturating_sub(t0);
+    let mhz = (crate::time::counter_hz() / 1_000_000).max(1);
     GPU_BLIT_TSC_SUM.fetch_add(dt, Ordering::Relaxed);
     GPU_BLIT_TSC_MAX.fetch_max(dt, Ordering::Relaxed);
     if ok { GPU_BLIT_OK.fetch_add(1, Ordering::Relaxed); }
@@ -743,9 +743,9 @@ static SURF_COMP_SUM: AtomicU64 = AtomicU64::new(0);
 static SURF_CUR_SUM: AtomicU64 = AtomicU64::new(0);
 
 fn record_surface_render(t0: u64, t_bg: u64, t_comp: u64, t_cursor: u64) {
-    let t_end = crate::interrupts::rdtsc();
+    let t_end = crate::time::counter();
     let dt = t_end.saturating_sub(t0);
-    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let mhz = (crate::time::counter_hz() / 1_000_000).max(1);
     SURF_RENDER_TSC_SUM.fetch_add(dt, Ordering::Relaxed);
     SURF_RENDER_TSC_MAX.fetch_max(dt, Ordering::Relaxed);
     // Sub-phase breakdown: bg memcpy | comp.render | swap+cursor | blit.
@@ -788,7 +788,7 @@ fn try_gpu_blit(fb: &framebuffer::FbConsole, pitch: u32, _w: u32, h: u32) -> boo
     // [gpu-blit] instrument: does the real (full 4K) blit succeed, and how
     // long does submit+poll take? A large blit may time out submit_blit's
     // completion poll → false → CPU fallback.
-    let t = crate::interrupts::rdtsc();
+    let t = crate::time::counter();
     let ok = crate::gpu::gpu_blit_rect(src_gpu, pitch, dst_gpu, pitch, 0, 0, pitch / 4, h);
     record_gpu_blit(t, ok);
     ok
@@ -1374,7 +1374,7 @@ pub fn poll_render() {
     }
 
     // Hint and fullscreen-edge timers of the window controls.
-    if with_compositor(|comp| comp.tick_controls(crate::interrupts::ticks())).unwrap_or(false) {
+    if with_compositor(|comp| comp.tick_controls(crate::time::ticks())).unwrap_or(false) {
         render_damaged();
     }
 
@@ -1406,7 +1406,7 @@ pub fn poll_render() {
         // With the GPU composing, the blit costs Core 0 nothing and the cap
         // is the display's refresh: a frame per refresh period, so 30 and
         // 60 fps land evenly instead of on a 50 Hz grid.
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         let since = now.wrapping_sub(LAST_SURFACE_TSC.load(Ordering::Relaxed));
         if since >= surface_cap() {
             SURFACE_DIRTY.store(false, Ordering::Relaxed);
@@ -1495,7 +1495,7 @@ const SURFACE_REFRESH_SLACK: u64 = 500;
 
 /// TSC cycles a guest frame waits after the last one was shown.
 fn surface_cap() -> u64 {
-    let freq = crate::interrupts::tsc_freq();
+    let freq = crate::time::counter_hz();
     if crate::gpu::gpudev::scenes_offered() {
         freq / SURFACE_REFRESH_HZ - freq / SURFACE_REFRESH_SLACK
     } else if CURSOR_MOVED.load(Ordering::Relaxed) {
@@ -1648,7 +1648,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // app can react even when no buttons changed.
     let (hx, hy) = cursor::atomic_pos();
     let (controls_changed, shape) = with_compositor(|comp| {
-        let changed = comp.drag.is_none() && comp.controls_pointer(hx, hy, crate::interrupts::ticks());
+        let changed = comp.drag.is_none() && comp.controls_pointer(hx, hy, crate::time::ticks());
         (changed, comp.pointer_shape(hx, hy))
     }).unwrap_or((false, cursor::Shape::Arrow));
     if cursor::set_shape(shape) {

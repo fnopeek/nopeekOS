@@ -16,7 +16,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use spin::Mutex;
 
-use crate::interrupts::{rdtsc, tsc_freq};
+use crate::time::{counter, counter_hz};
 use crate::microvm::cpu::{VMEXIT_BUCKETS, VMEXIT_LABELS, VT_BUCKETS};
 use crate::kprintln;
 
@@ -96,11 +96,11 @@ const GUEST_MARKS: &[(&str, &str)] = &[
 const FLUSH_MARKS: &[u32] = &[1, 10, 50, 200];
 
 fn ms_since(t: u64) -> u64 {
-    let hz = tsc_freq();
+    let hz = counter_hz();
     if hz == 0 {
         return 0;
     }
-    rdtsc().saturating_sub(t) * 1000 / hz
+    counter().saturating_sub(t) * 1000 / hz
 }
 
 fn now_ms() -> u64 {
@@ -116,7 +116,7 @@ pub fn start() {
     GUEST_SEEN.store(0, Ordering::Relaxed);
     WIN_STATE.store(WIN_IDLE, Ordering::Relaxed);
     *APP_SNAP.lock() = None;
-    T0.store(rdtsc(), Ordering::Relaxed);
+    T0.store(counter(), Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Release);
     kprintln!("[boottime] +0 ms launch");
 }
@@ -142,7 +142,7 @@ pub fn guest_line(s: &str) {
         kprintln!("[guest] {}", s);
         return;
     }
-    let t = rdtsc();
+    let t = counter();
     let ms = now_ms();
     SERIAL_LINES.fetch_add(1, Ordering::Relaxed);
     kprintln!("[guest +{}] {}", ms, s);
@@ -163,7 +163,7 @@ pub fn guest_line(s: &str) {
             if *label == APP_EXEC_LABEL {
                 let (hist, sum, _) = crate::microvm::cpu::wake_snapshot();
                 *APP_SNAP.lock() = Some((
-                    rdtsc(),
+                    counter(),
                     crate::microvm::cpu::vcpu_time_snapshot(),
                     crate::microvm::cpu::vm_exit_snapshot(),
                     (hist, sum),
@@ -175,7 +175,7 @@ pub fn guest_line(s: &str) {
             }
         }
     }
-    PRINT_TSC.fetch_add(rdtsc().saturating_sub(t), Ordering::Relaxed);
+    PRINT_TSC.fetch_add(counter().saturating_sub(t), Ordering::Relaxed);
 }
 
 /// A virtio-gpu flush that put a new frame on screen.
@@ -220,7 +220,7 @@ pub fn gpu_lit(lit: impl FnOnce() -> usize) {
 /// rest of exit handling; and the exits by kind.
 fn report_app_phase() {
     let Some((t0, vt0, ex0, (wh0, ws0), clk0, io0)) = APP_SNAP.lock().take() else { return };
-    let hz = tsc_freq().max(1);
+    let hz = counter_hz().max(1);
     let ms = |c: u64| c * 1000 / hz;
     let vt = crate::microvm::cpu::vcpu_time_snapshot();
     let ex = crate::microvm::cpu::vm_exit_snapshot();
@@ -240,7 +240,7 @@ fn report_app_phase() {
     kprintln!(
         "[boottime] app phase {} ms, vCPU time: guest {} ms, halted {} ms, \
 device lock {} ms, exit handling {} ms | exits:{}",
-        ms(rdtsc().saturating_sub(t0)), ms(guest), ms(halted), ms(devlock), ms(handling), exits,
+        ms(counter().saturating_sub(t0)), ms(guest), ms(halted), ms(devlock), ms(handling), exits,
     );
     let (wh, ws, wmax) = crate::microvm::cpu::wake_snapshot();
     let n: u64 = (0..5).map(|i| wh[i].saturating_sub(wh0[i])).sum();
@@ -282,7 +282,7 @@ pub fn report() {
         return;
     }
     WIN_STATE.store(WIN_IDLE, Ordering::Relaxed);
-    let hz = tsc_freq().max(1);
+    let hz = counter_hz().max(1);
     kprintln!(
         "[boottime] +{} ms end: {} guest console bytes (= VM exits), {} lines, {} ms host printing them, {} frames",
         now_ms(),

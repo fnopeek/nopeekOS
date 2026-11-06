@@ -61,7 +61,7 @@ pub(crate) fn clock_time_get(mem: &mut [u8], st: &mut HS, id: i32, _p: i64, out:
 let ns = if id == 0 {
     crate::time::now_ns().unwrap_or(0)
 } else {
-    crate::interrupts::uptime_ns()
+    crate::time::uptime_ns()
 };
 let now = ns - ns % CLOCK_RES_NS;
 let _ = wasi_of!(st);

@@ -82,13 +82,13 @@ pub fn base() -> Option<u16> {
 }
 
 fn udelay(us: u64) {
-    let freq = crate::interrupts::tsc_freq();
+    let freq = crate::time::counter_hz();
     if freq == 0 {
         for _ in 0..(us * 100) { core::hint::spin_loop(); }
         return;
     }
-    let deadline = crate::interrupts::rdtsc() + freq / 1_000_000 * us;
-    while crate::interrupts::rdtsc() < deadline { core::hint::spin_loop(); }
+    let deadline = crate::time::counter() + freq / 1_000_000 * us;
+    while crate::time::counter() < deadline { core::hint::spin_loop(); }
 }
 
 /// Poll SMBHSTSTS until the controller is idle with a result — mirrors

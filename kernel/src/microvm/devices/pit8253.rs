@@ -24,7 +24,7 @@
 //! makes the ratio hold regardless of how often the vCPU gets to run — a
 //! backlog. A missed tick is owed, not lost.
 
-use crate::interrupts::rdtsc;
+use crate::time::counter;
 
 /// The i8254 input clock, 1.193182 MHz (`PIT_TICK_RATE`, i8253.h).
 const PIT_HZ: u64 = 1_193_182;
@@ -112,7 +112,7 @@ impl Pit {
 
     fn set_reload(&mut self, r: u16) {
         self.reload = r;
-        self.start_tsc = rdtsc();
+        self.start_tsc = counter();
         self.fired = false;
         self.pending = 0;
     }
@@ -126,7 +126,7 @@ impl Pit {
     /// Period of one full count, in host TSC cycles. `reload == 0` is 65536.
     fn period_tsc(&self) -> u64 {
         let count = if self.reload == 0 { 65536u64 } else { u64::from(self.reload) };
-        count.saturating_mul(crate::interrupts::tsc_freq()) / PIT_HZ
+        count.saturating_mul(crate::time::counter_hz()) / PIT_HZ
     }
 
     /// Accrue owed ticks and feed one to the PIC as an IRQ0 edge when the
@@ -140,7 +140,7 @@ impl Pit {
         if period == 0 {
             return;
         }
-        let now = rdtsc();
+        let now = counter();
         if self.start_tsc == 0 {
             self.start_tsc = now;
         }

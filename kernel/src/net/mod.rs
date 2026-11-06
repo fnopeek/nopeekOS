@@ -123,7 +123,7 @@ static LAST_TCP_TICK: core::sync::atomic::AtomicU64 =
 /// lock) runs at most once per tick instead of at busy-spin rate (~1 M/s).
 pub fn poll_rx_only() {
     use core::sync::atomic::Ordering::Relaxed;
-    let rd = crate::interrupts::rdtsc;
+    let rd = crate::time::counter;
     // `igc_poll` cleans TX before RX: a sender stopped on a full ring goes on.
     crate::microvm::devices::nat::egress_room();
     if POLLING
@@ -162,7 +162,7 @@ pub fn poll_rx_only() {
     // scans 128 slots, which is fine once per tick but not a million times
     // a second.
     {
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         let prev = LAST_TCP_TICK.swap(now, Relaxed);
         if prev != now {
             tcp::tick_connections();
@@ -230,7 +230,7 @@ pub fn rx_wait(since: u64) {
     // wake IPI pending, and that ends the halt.
     crate::arch::without_interrupts(|| {
         if RX_GEN.load(Ordering::SeqCst) == since {
-            let tick = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+            let tick = crate::time::counter() + crate::time::counter_hz() / 100;
             crate::interrupts::halt_until(Some(tick), crate::smp::per_core::WAKE_HLT_FALLBACK);
         }
     });
@@ -315,7 +315,7 @@ pub fn seed_active() {
 /// that drives `tcp::tick_connections` may park.
 pub fn timer_park_ms(cap: u64) -> u64 {
     match tcp::next_deadline() {
-        Some(d) => (d.saturating_sub(crate::interrupts::ticks()) * 10).clamp(10, cap.max(10)),
+        Some(d) => (d.saturating_sub(crate::time::ticks()) * 10).clamp(10, cap.max(10)),
         None => cap,
     }
 }
@@ -345,9 +345,9 @@ pub fn tick_link_and_reconfigure() {
     // Also before the throttle: one queued name per pass — only on a machine
     // without workers. Otherwise `dns::want` hands the queue to a worker task.
     dns::pump_wanted();
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     if now < NEXT_LINK_CHECK.load(Ordering::Relaxed) { return; }
-    NEXT_LINK_CHECK.store(now + crate::interrupts::tsc_freq(), Ordering::Relaxed); // +~1 s
+    NEXT_LINK_CHECK.store(now + crate::time::counter_hz(), Ordering::Relaxed); // +~1 s
     crate::time::tick();
     crate::intent::http::reap_pools();
 
@@ -387,7 +387,7 @@ pub fn tick_link_and_reconfigure() {
             if since == 0 {
                 DOWN_SINCE.store(now, Ordering::Relaxed);
             } else if now.saturating_sub(since)
-                >= crate::interrupts::tsc_freq().saturating_mul(LINK_DOWN_GRACE_S)
+                >= crate::time::counter_hz().saturating_mul(LINK_DOWN_GRACE_S)
             {
                 LAST_ACTIVE.store(state, Ordering::Relaxed);
                 DOWN_SINCE.store(0, Ordering::Relaxed);

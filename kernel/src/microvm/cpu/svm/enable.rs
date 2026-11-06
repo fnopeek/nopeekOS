@@ -1222,7 +1222,7 @@ impl VmContext {
         }
         // A playing sound stream is serviced every millisecond.
         if sh.pci.virtio_snd.playing() {
-            let t = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000;
+            let t = crate::time::counter() + crate::time::counter_hz() / 1000;
             dev = Some(dev.map_or(t, |d| d.min(t)));
         }
         LAST_DEV_DEADLINE.store(dev.unwrap_or(0), Ordering::Relaxed);
@@ -1239,7 +1239,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     }
     if crate::microvm::devices::gpu_backend::take_irq() { sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE); }
     // vblank: a paused controlq runs its next frame.
-    if crate::microvm::devices::gpu_backend::vblank(crate::interrupts::rdtsc(), gm) {
+    if crate::microvm::devices::gpu_backend::vblank(crate::time::counter(), gm) {
         sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     }
     if sh.pci.virtio_snd.pump(gm) {
@@ -1259,7 +1259,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem) {
     }
     sh.pit.poll(&mut sh.pic);
 
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     if crate::microvm::devices::gpu_backend::display_tick_intx() {
         sh.pic.pulse(crate::microvm::devices::virtio_gpu_pci::IRQ_LINE);
     }
@@ -1342,10 +1342,10 @@ impl VmContext {
         let cid = crate::smp::per_core::current_core_id();
         let kick_gen = crate::smp::fiber::net_kick_gen(cid);
         let deadline = self.next_timer_deadline_tsc();
-        let start = crate::interrupts::rdtsc();
-        let budget = (crate::interrupts::tsc_freq() / 1_000_000) * self.vcpu.halt_poll_us;
+        let start = crate::time::counter();
+        let budget = (crate::time::counter_hz() / 1_000_000) * self.vcpu.halt_poll_us;
         loop {
-            let now = crate::interrupts::rdtsc();
+            let now = crate::time::counter();
             let hit = crate::smp::fiber::net_kick_gen(cid) != kick_gen
                 || lapic::posted_pending(self.vcpu.apic_id)
                 || (self.vcpu.apic_id == 0 && crate::microvm::devices::net_backend::irq_pending())
@@ -1559,8 +1559,8 @@ impl VmContext {
     // Wall-clock slice cap: return to the fiber scheduler every few ms so the
     // core's other fibers run; the exit budget bounds boot bursts.
     const SLICE_MS: u64 = 3;
-    let slice_deadline = crate::interrupts::rdtsc()
-        + (crate::interrupts::tsc_freq() / 1000) * SLICE_MS;
+    let slice_deadline = crate::time::counter()
+        + (crate::time::counter_hz() / 1000) * SLICE_MS;
 
     // Publish this vCPU's host core so a sender can kick it.
     let host_core = crate::smp::per_core::current_core_id();
@@ -1570,7 +1570,7 @@ impl VmContext {
     let slice_deadline = crate::microvm::cpu::slice_deadline_with_peers(host_core, slice_deadline);
 
     while self.vcpu.iter < MAX_ITERATIONS || crate::microvm::vm_has_window() {
-        if slice_n >= budget || crate::interrupts::rdtsc() >= slice_deadline
+        if slice_n >= budget || crate::time::counter() >= slice_deadline
             || crate::smp::per_core::take_peer_wake(host_core)
         {
             return Ok(SliceOutcome::StillRunning);
@@ -1601,7 +1601,7 @@ impl VmContext {
 
         // Host↔guest FPU save/restore is embedded in run_guest_once's asm.
         self.vcpu.regs.spec_ctrl_host = super::msr::spec_ctrl_enter(self.vcpu.msrs.spec_ctrl);
-        let t_entry = crate::interrupts::rdtsc();
+        let t_entry = crate::time::counter();
         if let Some(c) = lapic::take_post_latency(self.vcpu.apic_id, t_entry) {
             crate::microvm::cpu::record_wake(c);
         }
@@ -1628,7 +1628,7 @@ impl VmContext {
             &mut self.vcpu.regs.spec_ctrl_host, super::msr::SPEC_CTRL_KEEP));
         crate::microvm::cpu::note_guest_exit(host_core);
         crate::microvm::cpu::entry_irqs_on();
-        let t_exit = crate::interrupts::rdtsc();
+        let t_exit = crate::time::counter();
         crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
             crate::microvm::cpu::VT_GUEST, t_exit.wrapping_sub(t_entry));
         self.vcpu.exit_tsc = t_exit;
@@ -1767,7 +1767,7 @@ impl VmContext {
         // The device model is shared between vCPUs (guest SMP). Released at
         // the end of this iteration, or before the HLT path parks.
         lapic::phase(self.vcpu.apic_id, lapic::PH_BIGLOCK);
-        let t_lock = crate::interrupts::rdtsc();
+        let t_lock = crate::time::counter();
         let mut dev = self.shared.dev.lock();
         // A device access (port I/O, MMIO) on any vCPU can leave work for
         // the BSP's collection; CPUID, HLT and the like cannot.
@@ -1779,7 +1779,7 @@ impl VmContext {
             }
         }
         crate::microvm::cpu::record_vcpu_time(self.vcpu.apic_id,
-            crate::microvm::cpu::VT_DEVLOCK, crate::interrupts::rdtsc().wrapping_sub(t_lock));
+            crate::microvm::cpu::VT_DEVLOCK, crate::time::counter().wrapping_sub(t_lock));
         lapic::phase(self.vcpu.apic_id, lapic::PH_EXIT);
         let sh = &mut *dev;
         let gm = self.shared.guest_mem;
@@ -1811,7 +1811,7 @@ impl VmContext {
                 advance_rip(&mut self.vcpu.vmcb);
                 last_outcome = Some(outcome);
                 drop(dev);
-                self.vcpu.halt_tsc = crate::interrupts::rdtsc();
+                self.vcpu.halt_tsc = crate::time::counter();
                 // `kvm_vcpu_halt`: resume at once if something is deliverable,
                 // else halt-poll, then block (the fiber parks until the next
                 // timer deadline or a kick).

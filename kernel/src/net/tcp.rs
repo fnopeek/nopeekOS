@@ -24,8 +24,8 @@ fn stack() -> MutexGuard<'static, Stack> {
 struct KernelEnv;
 
 impl Env for KernelEnv {
-    fn ticks(&self) -> u64 { crate::interrupts::ticks() }
-    fn uptime_us(&self) -> u64 { crate::interrupts::uptime_us() }
+    fn ticks(&self) -> u64 { crate::time::ticks() }
+    fn uptime_us(&self) -> u64 { crate::time::uptime_us() }
     fn our_ip(&self) -> [u8; 4] { arp::our_ip() }
     fn random_u64(&mut self) -> u64 { crate::csprng::random_u64() }
     fn free_mib(&self) -> usize { crate::memory::stats().1 }
@@ -131,7 +131,7 @@ fn connect_with(owner: Owner, remote_ip: [u8; 4], remote_port: u16, cancellable:
     let handle = connect_start_as(owner, remote_ip, remote_port)?;
 
     // Wait for ESTABLISHED (blocking poll)
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
     loop {
         super::poll();
         tick_connections();
@@ -171,7 +171,7 @@ fn connect_with(owner: Owner, remote_ip: [u8; 4], remote_port: u16, cancellable:
             return Err(TcpError::Cancelled);
         }
 
-        if crate::interrupts::ticks() - t0 > 1000 { // 10s timeout
+        if crate::time::ticks() - t0 > 1000 { // 10s timeout
             // Say how far it got: SYN never answered (`retries` climbing),
             // or the state machine stuck somewhere else.
             if let Some(c) = stack().conn_debug(handle) {
@@ -201,7 +201,7 @@ pub fn listen(port: u16, backlog: u32) -> Result<usize, TcpError> {
 /// Blocking; `timeout_ticks` 0 waits forever.
 #[allow(dead_code)]
 pub fn accept(handle: usize, timeout_ticks: u64) -> Result<usize, TcpError> {
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
     loop {
         super::poll();
         tick_connections();
@@ -210,7 +210,7 @@ pub fn accept(handle: usize, timeout_ticks: u64) -> Result<usize, TcpError> {
             return Ok(child);
         }
 
-        if timeout_ticks > 0 && crate::interrupts::ticks() - t0 > timeout_ticks {
+        if timeout_ticks > 0 && crate::time::ticks() - t0 > timeout_ticks {
             return Err(TcpError::Timeout);
         }
         core::hint::spin_loop();
@@ -223,9 +223,9 @@ pub fn accept(handle: usize, timeout_ticks: u64) -> Result<usize, TcpError> {
 /// them, so `tick_connections` can retransmit. Returns `WouldBlock` when too
 /// much is already unacknowledged — that is real backpressure, not an error.
 pub fn send(handle: usize, data: &[u8]) -> Result<(), TcpError> {
-    let t_enter = crate::interrupts::rdtsc();
+    let t_enter = crate::time::counter();
     let r = stack().send(&mut KernelEnv, handle, data);
-    let dt = crate::interrupts::rdtsc().wrapping_sub(t_enter);
+    let dt = crate::time::counter().wrapping_sub(t_enter);
     if r.is_err() {
         STATS.send_wouldblock.fetch_add(1, Ordering::Relaxed);
         STATS.send_blocked_tsc.fetch_add(dt, Ordering::Relaxed);
@@ -282,7 +282,7 @@ pub fn send_stats() -> (u64, u64, u64, u64, u64) {
 /// `connect`: this polls, which pumps the peer fibers on a worker core. A
 /// module must handle `WouldBlock` itself and sleep between tries.
 pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(), TcpError> {
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
     loop {
         // Read before the attempt, not after: an ACK arriving during `send()`
         // would otherwise be missed, and we would wait for the next one (or
@@ -311,7 +311,7 @@ pub fn send_blocking(handle: usize, data: &[u8], timeout_ticks: u64) -> Result<(
                 continue;
             }
             leer = 0;
-            if crate::interrupts::ticks() - t0 > timeout_ticks {
+            if crate::time::ticks() - t0 > timeout_ticks {
                 return Err(TcpError::Timeout);
             }
             // Drive the stack in case nobody else does — on core 0 there
@@ -338,7 +338,7 @@ pub fn recv(handle: usize, buf: &mut [u8]) -> Result<usize, TcpError> {
 
 /// Receive with blocking wait (polls until data or timeout).
 pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Result<usize, TcpError> {
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
     loop {
         let since = super::rx_gen();
         let n = recv(handle, buf)?;
@@ -347,7 +347,7 @@ pub fn recv_blocking(handle: usize, buf: &mut [u8], timeout_ticks: u64) -> Resul
         // Check if connection closed
         if stack().recv_done(handle)? { return Ok(0); }
 
-        if crate::interrupts::ticks() - t0 > timeout_ticks {
+        if crate::time::ticks() - t0 > timeout_ticks {
             // `Err(Timeout)`, not `Ok(0)`: `Ok(0)` is how a caller learns the
             // peer hung up, and a link that merely went quiet must not read as
             // end-of-file. A caller that can distinguish the two can wait
@@ -393,7 +393,7 @@ pub fn handle_tcp(ip_packet: &[u8], data: &[u8]) {
 /// Run the connections' timers that are due: retransmit, delayed ACKs,
 /// timeouts. Cheap when none is.
 pub fn tick_connections() {
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     if !next_deadline().is_some_and(|d| d <= now) {
         return;
     }
@@ -408,14 +408,14 @@ pub fn tick_connections() {
 
 /// The tick (100 Hz) at which a connection's timer is next due.
 pub fn next_deadline() -> Option<u64> {
-    stack().next_deadline(crate::interrupts::ticks())
+    stack().next_deadline(crate::time::ticks())
 }
 
 /// Is a connection's timer due within the next tick? The loops that drive
 /// `tick_connections` keep a 10 ms cadence while this holds and otherwise
 /// wait until `next_deadline`.
 pub fn has_timers() -> bool {
-    next_deadline().is_some_and(|d| d <= crate::interrupts::ticks() + 1)
+    next_deadline().is_some_and(|d| d <= crate::time::ticks() + 1)
 }
 
 /// Every connection, with `tcp_get_info` for the full ones.

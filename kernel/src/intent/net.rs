@@ -46,11 +46,11 @@ pub fn intent_ping(args: &str) {
     // A fresh identifier for this run: only replies to it count.
     let id = crate::csprng::random_u64() as u16;
     for seq in 1..=count {
-        let t0 = crate::interrupts::ticks();
+        let t0 = crate::time::ticks();
         crate::net::icmp::probe(ip, id, seq, 64);
         kprintln!("[npk] PING {}.{}.{}.{} seq={}", ip[0], ip[1], ip[2], ip[3], seq);
         let mut answer = None;
-        while crate::interrupts::ticks().wrapping_sub(t0) < 100 { // 1 s per probe
+        while crate::time::ticks().wrapping_sub(t0) < 100 { // 1 s per probe
             crate::net::poll();
             answer = crate::net::icmp::answer();
             if answer.is_some() { break; }
@@ -58,7 +58,7 @@ pub fn intent_ping(args: &str) {
         }
         match answer {
             Some(crate::net::icmp::Answer::Echo) => {
-                let ms = crate::interrupts::ticks().wrapping_sub(t0) * 10;
+                let ms = crate::time::ticks().wrapping_sub(t0) * 10;
                 kprintln!("[npk] PONG from {}.{}.{}.{} seq={}", ip[0], ip[1], ip[2], ip[3], seq);
                 got += 1;
                 total += ms;
@@ -77,8 +77,8 @@ pub fn intent_ping(args: &str) {
         }
         // Space the probes out; back to back they share one fate on a bad link.
         if seq < count {
-            let until = crate::interrupts::ticks() + 20;
-            while crate::interrupts::ticks() < until { crate::net::poll(); }
+            let until = crate::time::ticks() + 20;
+            while crate::time::ticks() < until { crate::net::poll(); }
         }
     }
     crate::net::icmp::probe_done();
@@ -122,7 +122,7 @@ pub fn intent_traceroute(args: &str) {
     for ttl in 1..=20u8 {
         crate::net::icmp::probe(ip, id, ttl as u16, ttl);
 
-        let t0 = crate::interrupts::ticks();
+        let t0 = crate::time::ticks();
         loop {
             crate::net::poll();
             match crate::net::icmp::answer() {
@@ -143,7 +143,7 @@ pub fn intent_traceroute(args: &str) {
                 }
                 None => {}
             }
-            if crate::interrupts::ticks() - t0 > 100 { // 1s per hop
+            if crate::time::ticks() - t0 > 100 { // 1s per hop
                 kprintln!("  {:>2}  *", ttl);
                 break;
             }
@@ -652,7 +652,7 @@ pub fn intent_wlan(args: &str) {
     let mut any = false;
     for name in crate::drivers::report::names() {
         if let Some((text, at_ms)) = crate::drivers::report::get(&name) {
-            let now = crate::interrupts::ticks().saturating_mul(10);
+            let now = crate::time::ticks().saturating_mul(10);
             let age = now.saturating_sub(at_ms);
             kprintln!();
             kprintln!("  Driver report — {} ({} ms ago)", name, age);

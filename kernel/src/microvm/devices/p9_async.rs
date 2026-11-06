@@ -123,7 +123,7 @@ const HOT_TICKS: u64 = 30;
 
 fn worker_entry(_: u64) {
     let mut writers: BTreeMap<u64, Stream> = BTreeMap::new();
-    let mut last_work = crate::interrupts::ticks();
+    let mut last_work = crate::time::ticks();
     loop {
         // Check teardown first so close is snappy (abandon any queued writes;
         // dropping `writers` balances the stream gc-guard).
@@ -157,7 +157,7 @@ fn worker_entry(_: u64) {
                     // The BSP posts the reply and raises the IRQ; wake it.
                     crate::microvm::cpu::kick_bsp_net_irq();
                 }
-                last_work = crate::interrupts::ticks();
+                last_work = crate::time::ticks();
                 // Cooperative yield: lets a co-located vCPU (shared core) run,
                 // returns immediately when alone so we grab the next chunk fast.
                 crate::smp::fiber::yield_ready();
@@ -165,7 +165,7 @@ fn worker_entry(_: u64) {
             None => {
                 // Stay hot right after a transfer (low round-trip latency); park
                 // only once genuinely idle so we don't burn the core forever.
-                if crate::interrupts::ticks().wrapping_sub(last_work) < HOT_TICKS {
+                if crate::time::ticks().wrapping_sub(last_work) < HOT_TICKS {
                     crate::smp::fiber::yield_ready();
                 } else {
                     crate::smp::fiber::yield_sleep(5);

@@ -64,7 +64,7 @@ static STAT_HOST_SVC_SUM: AtomicU64 = AtomicU64::new(0);
 static STAT_MSGS: AtomicU64 = AtomicU64::new(0);
 
 fn emit_9p_stat() {
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let last = STAT_LAST_TICK.load(AtO::Relaxed);
     let dt = now.wrapping_sub(last);
     if last != 0 && dt >= 500 {
@@ -88,7 +88,7 @@ fn emit_9p_stat() {
                     w / secs, wb / 1024 / secs, avg, fs / secs, rd / secs, df / secs);
                 // Round-trip decomposition. gap = full per-write round-trip the
                 // guest sees; exits/write + host µs/msg split it host vs guest.
-                let tpus = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+                let tpus = (crate::time::counter_hz() / 1_000_000).max(1);
                 let gap_avg_us = if w > 0 { gap_sum / w / tpus } else { 0 };
                 let gap_max_us = gap_max / tpus;
                 let svc_avg_us = if msgs > 0 { svc_sum / msgs / tpus } else { 0 };
@@ -563,10 +563,10 @@ impl Virtio9p {
                 idx = match chain_next(&d, &mut hops, size) { Some(n) => n, None => break };
             }
 
-            let svc_t0 = crate::interrupts::rdtsc();
+            let svc_t0 = crate::time::counter();
             let resp = self.process_message(&req);
             STAT_HOST_SVC_SUM.fetch_add(
-                crate::interrupts::rdtsc().wrapping_sub(svc_t0), AtO::Relaxed);
+                crate::time::counter().wrapping_sub(svc_t0), AtO::Relaxed);
             STAT_MSGS.fetch_add(1, AtO::Relaxed);
 
             if let Some(kind) = self.pending_defer.take() {
@@ -1054,7 +1054,7 @@ impl Virtio9p {
             f.stream_next += data.len() as u64;
             // Stamp the inter-Twrite gap on the streaming (download) path — the
             // full synchronous round-trip period the guest takes per chunk.
-            let now_tsc = crate::interrupts::rdtsc();
+            let now_tsc = crate::time::counter();
             let prev = STAT_LAST_TWRITE_TSC.swap(now_tsc, AtO::Relaxed);
             if prev != 0 {
                 let gap = now_tsc.wrapping_sub(prev);

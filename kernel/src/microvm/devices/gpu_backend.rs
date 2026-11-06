@@ -254,7 +254,7 @@ pub const STAT_FENCE_US: usize = 16;
 
 /// Microseconds since `t0` (TSC).
 pub fn us_since(t0: u64) -> u64 {
-    crate::interrupts::rdtsc().saturating_sub(t0) * 1_000_000 / crate::interrupts::tsc_freq().max(1)
+    crate::time::counter().saturating_sub(t0) * 1_000_000 / crate::time::counter_hz().max(1)
 }
 static STATS: [core::sync::atomic::AtomicU64; STAT_BUCKETS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; STAT_BUCKETS];
@@ -555,7 +555,7 @@ fn retire_entry(_arg: u64) {
         // While a submit runs and a fence or a held FLUSH is open, every
         // 2 ms (a held FLUSH's deadline is not signaled); otherwise until rung.
         let hz = if waits { 500 } else { 10 };
-        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / hz;
+        let deadline = crate::time::counter() + crate::time::counter_hz() / hz;
         crate::smp::fiber::park_on_bell(deadline, || STOP.load(Ordering::Acquire));
     }
 }
@@ -572,7 +572,7 @@ fn worker_entry(_arg: u64) {
         // this core, off the vCPU, and the completion goes out as a message.
         let mut kicks = GPU_KICK.swap(0, Ordering::AcqRel);
         // The end of a vblank pause, whether or not the vCPU saw it first.
-        if take_resume(crate::interrupts::rdtsc()) {
+        if take_resume(crate::time::counter()) {
             kicks |= 1;
         }
         // SUBMIT_3D completions wait for their fences: look again.
@@ -604,7 +604,7 @@ fn worker_entry(_arg: u64) {
         let resume = resume_tsc();
         let timed = fences || held || resume.is_some();
         let hz = if timed { 500 } else { 10 };
-        let deadline = (crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / hz)
+        let deadline = (crate::time::counter() + crate::time::counter_hz() / hz)
             .min(resume.unwrap_or(u64::MAX));
         crate::smp::fiber::park_on_bell(deadline, || {
             GPU_KICK.load(Ordering::Acquire) != 0 || STOP.load(Ordering::Acquire)

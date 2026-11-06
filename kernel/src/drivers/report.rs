@@ -26,7 +26,7 @@ static SLOTS_TABLE: Mutex<Vec<Slot>> = Mutex::new(Vec::new());
 
 /// Replace `name`'s snapshot. Oldest slot is evicted when the table is full.
 pub fn store(name: &str, text: &str) {
-    let at_ms = crate::interrupts::ticks().saturating_mul(10);
+    let at_ms = crate::time::ticks().saturating_mul(10);
     let mut table = SLOTS_TABLE.lock();
     if let Some(slot) = table.iter_mut().find(|s| s.name == name) {
         slot.text.clear();

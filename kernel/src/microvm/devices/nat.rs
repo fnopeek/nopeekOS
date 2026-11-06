@@ -193,16 +193,16 @@ static DL_LAST_BULK_TSC: AtomicU64 = AtomicU64::new(0);
 pub fn download_active() -> bool {
     let last = DL_LAST_BULK_TSC.load(AtOrd::Relaxed);
     if last == 0 { return false; }
-    let win = (crate::interrupts::tsc_freq() / 1000) * 250; // 250 ms in TSC ticks
-    crate::interrupts::rdtsc().wrapping_sub(last) < win
+    let win = (crate::time::counter_hz() / 1000) * 250; // 250 ms in TSC ticks
+    crate::time::counter().wrapping_sub(last) < win
 }
 
 /// True if RX delivered a packet in the last ~50 ms — i.e. a download is in
 /// flight and the BSP vCPU should wake on the host NIC RX IRQ rather than
 /// deep-parking on the 100 Hz worker timer.
 pub fn recently_active() -> bool {
-    let now = crate::interrupts::rdtsc();
-    let window = crate::interrupts::tsc_freq() / 20; // ~50 ms in TSC
+    let now = crate::time::counter();
+    let window = crate::time::counter_hz() / 20; // ~50 ms in TSC
     now.wrapping_sub(NS_LAST_ACTIVITY.load(AtOrd::Relaxed)) < window
 }
 
@@ -210,7 +210,7 @@ pub fn recently_active() -> bool {
 /// `net_dataplane` worker calls this each pass it does real work, so
 /// `recently_active()` gates its halt-poll.
 pub fn mark_active() {
-    NS_LAST_ACTIVITY.store(crate::interrupts::rdtsc(), AtOrd::Relaxed);
+    NS_LAST_ACTIVITY.store(crate::time::counter(), AtOrd::Relaxed);
 }
 
 /// Masquerade host-port pool. Strictly below the host TCP stack's own
@@ -563,7 +563,7 @@ fn l3_map_out(proto: u8, gport: u16, rip: [u8; 4], rport: u16, tcp_flags: u8,
     // with an O(1) used-test, and give up after a bounded number of attempts
     // (then re-roll once), so a full table cannot cost a linear search per
     // candidate port under the lock.
-    let mut off = (crate::interrupts::rdtsc() as usize) % PORT_RANGE;
+    let mut off = (crate::time::counter() as usize) % PORT_RANGE;
     let mut hp: Option<u16> = None;
     for _round in 0..2 {
         for i in 0..NAT_MAX_ATTEMPTS.min(PORT_RANGE) {
@@ -789,7 +789,7 @@ fn l3_outbound(proto: u8, src_port: u16, dst_ip: [u8; 4],
         NS_TX_REFUSED.fetch_add(1, AtOrd::Relaxed);
         return None;
     }
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let tcp_flags = if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN { l4[13] } else { 0 };
     let hp = match l3_map_out(proto, src_port, dst_ip, dst_port, tcp_flags, now) {
         Some(p) => p,
@@ -974,7 +974,7 @@ pub fn set_flight(on: bool) {
 
 fn flight(dir: u8, hp: u16, l4: &[u8], payload_len: usize) {
     if !FLIGHT_ON.load(AtOrd::Relaxed) { return; }
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     let ev = FlightEv {
         tsc: now,
         seq: u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]),
@@ -996,7 +996,7 @@ fn flight(dir: u8, hp: u16, l4: &[u8], payload_len: usize) {
     let Some(i) = (hp as usize).checked_sub(L3_PORT_LO as usize)
         .filter(|&i| i < PORT_RANGE) else { return };
     let last = FLIGHT_LAST_OUT[i].swap(now, AtOrd::Relaxed);
-    let freq = crate::interrupts::tsc_freq().max(1);
+    let freq = crate::time::counter_hz().max(1);
     if last == 0 || now.wrapping_sub(last) < freq / 1000 * FLIGHT_GAP_MS {
         FLIGHT_SENT[i].fetch_add(payload_len as u64, AtOrd::Relaxed);
         return;
@@ -1019,7 +1019,7 @@ pub fn flight_delivered(frame: &[u8]) {
     if l4.len() < TCP_HDR_LEN { return; }
     let thlen = ((l4[12] >> 4) as usize * 4).clamp(TCP_HDR_LEN, l4.len());
     let ev = FlightEv {
-        tsc: crate::interrupts::rdtsc(),
+        tsc: crate::time::counter(),
         seq: u32::from_be_bytes([l4[4], l4[5], l4[6], l4[7]]),
         ack: u32::from_be_bytes([l4[8], l4[9], l4[10], l4[11]]),
         len: (l4.len() - thlen) as u32,
@@ -1044,9 +1044,9 @@ static FLIGHT_NOBUF_TSC: AtomicU64 = AtomicU64::new(0);
 
 pub fn flight_rx_wait(kind: u8, n: u64) {
     if !FLIGHT_ON.load(AtOrd::Relaxed) || n == 0 { return; }
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     if kind == FLIGHT_NOBUF {
-        let ms = crate::interrupts::tsc_freq() / 1000;
+        let ms = crate::time::counter_hz() / 1000;
         if now.wrapping_sub(FLIGHT_NOBUF_TSC.swap(now, AtOrd::Relaxed)) < ms { return; }
     }
     let ev = FlightEv { tsc: now, seq: 0, ack: 0, len: n as u32, win: 0, hp: 0, dir: kind, flags: 0, sack: false };
@@ -1063,11 +1063,11 @@ pub const FLIGHT_LOCK_HELD: u8 = 6;
 
 pub fn flight_lock(held: bool, tsc: u64, at: &'static core::panic::Location<'static>) {
     if !FLIGHT_ON.load(AtOrd::Relaxed) { return; }
-    let ms = tsc / (crate::interrupts::tsc_freq() / 1000).max(1);
+    let ms = tsc / (crate::time::counter_hz() / 1000).max(1);
     if ms < 2 { return; }
     let p = at as *const core::panic::Location<'static> as u64;
     let ev = FlightEv {
-        tsc: crate::interrupts::rdtsc(), seq: p as u32, ack: (p >> 32) as u32,
+        tsc: crate::time::counter(), seq: p as u32, ack: (p >> 32) as u32,
         len: ms as u32, win: 0, hp: 0,
         dir: if held { FLIGHT_LOCK_HELD } else { FLIGHT_LOCK_WAIT }, flags: 0, sack: false,
     };
@@ -1082,7 +1082,7 @@ pub fn flight_lock(held: bool, tsc: u64, at: &'static core::panic::Location<'sta
 pub fn flight_worker_late(gap_ms: u64, phase: u64, prev_core: u64, core: u64) {
     if !FLIGHT_ON.load(AtOrd::Relaxed) { return; }
     let ev = FlightEv {
-        tsc: crate::interrupts::rdtsc(), seq: phase as u32,
+        tsc: crate::time::counter(), seq: phase as u32,
         ack: ((prev_core as u32 & 0xFFFF) << 16) | (core as u32 & 0xFFFF),
         len: gap_ms as u32, win: 0, hp: 0, dir: FLIGHT_LATE, flags: 0, sack: false,
     };
@@ -1288,7 +1288,7 @@ fn l3_icmp_outbound(dst_ip: [u8; 4], l4: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
     let guest_id = u16::from_be_bytes([l4[4], l4[5]]);
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let hp = l3_map_out(PROTO_ICMP, guest_id, dst_ip, 0, 0, now)?;
     let mut seg = l4.to_vec();
     seg[4..6].copy_from_slice(&hp.to_be_bytes()); // id → masquerade id
@@ -1671,7 +1671,7 @@ pub fn tap_inbound(ip: &[u8], csum_ok: bool) -> bool {
         if l4.len() < 4 { return false; }
         (u16::from_be_bytes([l4[0], l4[1]]), u16::from_be_bytes([l4[2], l4[3]]))
     };
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let tcp_flags = if proto == PROTO_TCP && l4.len() >= TCP_HDR_LEN { l4[13] } else { 0 };
     let gport = match l3_map_in(proto, dst_ip, host_port, src_ip, remote_port, tcp_flags, now) {
         Some(g) => g,
@@ -1872,7 +1872,7 @@ pub fn path_id() -> &'static str { "tap-v1" }
 pub fn housekeep() {
     // Idle limits are 30 s and 2 min: one scan a second is plenty, and the
     // table may hold a flow per host port.
-    let now = crate::interrupts::ticks();
+    let now = crate::time::ticks();
     let last = LAST_REAP.load(AtOrd::Relaxed);
     if now.wrapping_sub(last) < REAP_EVERY_TICKS {
         return;
@@ -2376,9 +2376,9 @@ static RPT_GPUXF: AtomicU64 = AtomicU64::new(0);
 static RPT_TAPDEL: AtomicU64 = AtomicU64::new(0);
 
 pub fn bridge_stats() -> BridgeStats {
-    let now = crate::interrupts::rdtsc();
-    let khz = (crate::interrupts::tsc_freq() / 1000).max(1);
-    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let now = crate::time::counter();
+    let khz = (crate::time::counter_hz() / 1000).max(1);
+    let mhz = (crate::time::counter_hz() / 1_000_000).max(1);
     let rx_pkts = NS_RX_PKTS.load(AtOrd::Relaxed);
     let tx_pkts = NS_TX_PKTS.load(AtOrd::Relaxed);
     let prev_tsc = RPT_TSC.swap(now, AtOrd::Relaxed);
@@ -2402,7 +2402,7 @@ pub fn bridge_stats() -> BridgeStats {
     let prev_deliv = RPT_TAPDEL.swap(delivered, AtOrd::Relaxed);
     BridgeStats {
         active: L3_ACTIVE.load(AtOrd::Acquire),
-        up_s: if start == 0 { 0 } else { crate::interrupts::ticks().wrapping_sub(start) / 100 },
+        up_s: if start == 0 { 0 } else { crate::time::ticks().wrapping_sub(start) / 100 },
         path: path_id(),
         version: env!("CARGO_PKG_VERSION"),
         vendor: match crate::microvm::cpu::current_vendor() {
@@ -2491,6 +2491,6 @@ pub fn reset_counters() {
               &NS_TAP_FULL, &NS_TAP_DELIVERED, &NS_MAP_REHOMED] {
         c.store(0, AtOrd::Relaxed);
     }
-    NS_START_TICK.store(crate::interrupts::ticks().max(1), AtOrd::Relaxed);
+    NS_START_TICK.store(crate::time::ticks().max(1), AtOrd::Relaxed);
     NS_LAST_ACTIVITY.store(0, AtOrd::Relaxed);
 }

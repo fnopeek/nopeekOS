@@ -729,7 +729,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
         JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
     };
 
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
     let m = match forge_core::compile(&job.bytes) {
         Ok(m) => m,
         Err(e) => {
@@ -738,7 +738,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
             return;
         }
     };
-    let compile_ms = crate::interrupts::ticks().saturating_sub(t0) * 10;
+    let compile_ms = crate::time::ticks().saturating_sub(t0) * 10;
 
     let entry = m.plan.exports.iter().find(|(n, _)| n == "_start").map(|(_, i)| *i)
         .and_then(|fidx| m.offset_of(fidx));
@@ -934,11 +934,11 @@ pub fn execute_wasi(
     };
     // Time preparation and run separately, as the forge path does, so the
     // two engines report comparable figures.
-    let t_c = crate::interrupts::ticks();
+    let t_c = crate::time::ticks();
     let module = Module::new(&engine, wasm_bytes)
         .map_err(|_| WasmError::InvalidModule)?;
     kprintln!("[npk]   wasmi: vorbereiten {} ms",
-        crate::interrupts::ticks().saturating_sub(t_c) * 10);
+        crate::time::ticks().saturating_sub(t_c) * 10);
 
     let mut store = Store::new(&engine, HostState {
         limits: guest_limits(),
@@ -974,10 +974,10 @@ pub fn execute_wasi(
     let start = instance.get_typed_func::<(), ()>(&store, "_start")
         .map_err(|_| WasmError::FunctionNotFound)?;
 
-    let t_r = crate::interrupts::ticks();
+    let t_r = crate::time::ticks();
     let r = start.call(&mut store, ());
     crate::kdebug!("[npk]   wasmi: laufen {} ms",
-        crate::interrupts::ticks().saturating_sub(t_r) * 10);
+        crate::time::ticks().saturating_sub(t_r) * 10);
     match r {
         Ok(()) => Ok(0),
         // `proc_exit` leaves through a trap carrying the status. That is
@@ -1076,9 +1076,9 @@ pub fn execute_wasi_forge(
 ) -> Result<i32, WasmError> {
     // Report compile and run time separately: compiling the whole module is
     // paid on every start while no cached code blob exists.
-    let t_c = crate::interrupts::ticks();
+    let t_c = crate::time::ticks();
     let m = forge_core::compile(wasm_bytes).map_err(|_| WasmError::InvalidModule)?;
-    let compile_ms = crate::interrupts::ticks().saturating_sub(t_c) * 10;
+    let compile_ms = crate::time::ticks().saturating_sub(t_c) * 10;
     let entry = m.plan.exports.iter().find(|(n, _)| n == "_start").map(|(_, i)| *i)
         .and_then(|i| m.offset_of(i))
         .ok_or(WasmError::FunctionNotFound)?;
@@ -1118,13 +1118,13 @@ pub fn execute_wasi_forge(
     inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
 
     crate::kdebug!("[npk]   forge: uebersetzen {} ms ({} B x86)", compile_ms, m.code.len());
-    let t_r = crate::interrupts::ticks();
+    let t_r = crate::time::ticks();
     let fg = foreground(fuel);
     let (_ret, trap) = inst.call(entry, 0, 0, 0);
     let cancelled = fg.is_some() && crate::intent::cancel_requested();
     drop(fg);
     crate::kdebug!("[npk]   forge: laufen {} ms",
-        crate::interrupts::ticks().saturating_sub(t_r) * 10);
+        crate::time::ticks().saturating_sub(t_r) * 10);
     match trap {
         // Returning from `_start` is rare for a wasi program but allowed,
         // and means status 0.

@@ -107,7 +107,7 @@ impl LatHist {
         LatHist { b: [const { AtomicU64::new(0) }; 5], sum: AtomicU64::new(0), n: AtomicU64::new(0) }
     }
     fn record(&self, tsc: u64) {
-        let us = tsc / (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+        let us = tsc / (crate::time::counter_hz() / 1_000_000).max(1);
         let i = [50u64, 200, 1000, 5000].iter().position(|&lim| us < lim).unwrap_or(4);
         self.b[i].fetch_add(1, Ordering::Relaxed);
         self.sum.fetch_add(us, Ordering::Relaxed);
@@ -340,7 +340,7 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     }; // device mutex released.
     let (caps, early_raise) = caps;
     if rx_frames > 0 {
-        note_rx_pass(rx_frames, crate::interrupts::rdtsc());
+        note_rx_pass(rx_frames, crate::time::counter());
     }
 
     // ── handle_tx, lock-free: masquerade + segment + hand to the host NIC. On a
@@ -348,7 +348,7 @@ fn service_full(gm: &crate::microvm::devices::guest_mem::GuestMem) {
     //    stall the vCPU's ACK/ISR exits. ──
     let tx_advanced = !tx_payloads.is_empty();
     let early = tx_advanced && TX_EARLY.load(Ordering::Relaxed);
-    let t_taken = crate::interrupts::rdtsc();
+    let t_taken = crate::time::counter();
     if tx_advanced {
         note_tx_taken(&tx_payloads, t_taken);
     }
@@ -419,11 +419,11 @@ fn phase(p: u64) { WORKER_PHASE.store(p, Ordering::Relaxed); }
 
 /// Frames waited for the guest while this worker was away for over 5 ms.
 fn note_rx_wait_gap() {
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     let prev = LAST_PASS_TSC.swap(now, Ordering::Relaxed);
     let core = crate::smp::per_core::current_core_id() as u64;
     let prev_core = LAST_PASS_CORE.swap(core, Ordering::Relaxed);
-    let ms = (crate::interrupts::tsc_freq() / 1000).max(1);
+    let ms = (crate::time::counter_hz() / 1000).max(1);
     let gap = now.wrapping_sub(prev) / ms;
     if prev != 0 && gap > 5 && crate::microvm::devices::nat::tap_len() > 0 {
         crate::microvm::devices::nat::flight_worker_late(
@@ -453,7 +453,7 @@ fn note_tx_taken(payloads: &[alloc::vec::Vec<u8>], now: u64) {
 /// interrupt; else its `used_event` asked for none). With its TX ring now
 /// empty, its next frame measures its reaction.
 fn note_tx_told(raised: bool, taken: u64, gm: &crate::microvm::devices::guest_mem::GuestMem) {
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     if raised {
         TX_IRQ_RAISED.fetch_add(1, Ordering::Relaxed);
         TX_SIGNAL.record(now.wrapping_sub(taken));
@@ -494,7 +494,7 @@ impl TraceMark {
     fn now(start: u64) -> Self {
         let (_, sum, n) = TX_REACT.snapshot();
         TraceMark {
-            tsc: crate::interrupts::rdtsc(),
+            tsc: crate::time::counter(),
             start,
             tx: crate::microvm::devices::nat::tx_stats().1,
             rx: crate::microvm::devices::nat::rx_bytes(),
@@ -516,8 +516,8 @@ impl TraceMark {
 
 fn trace_tick(mark: &mut Option<TraceMark>) {
     if !TRACE.load(Ordering::Relaxed) { return; }
-    let freq = crate::interrupts::tsc_freq().max(1);
-    let now = crate::interrupts::rdtsc();
+    let freq = crate::time::counter_hz().max(1);
+    let now = crate::time::counter();
     let Some(m) = mark else {
         *mark = Some(TraceMark::now(now));
         return;
@@ -598,7 +598,7 @@ fn worker_entry(_arg: u64) {
     crate::microvm::devices::net_backend::set_worker_core(
         crate::smp::per_core::current_core_id());
     crate::microvm::devices::net_backend::set_full_active(true);
-    let mut last_tick = crate::interrupts::ticks();
+    let mut last_tick = crate::time::ticks();
     let mut trace = None;
     let mut poll_us: u64 = 0;
     loop {
@@ -628,7 +628,7 @@ fn worker_entry(_arg: u64) {
         }
 
         // Host-originated TCP timers (OTA/https) at most ~100 Hz — never per-wake.
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         if now != last_tick {
             phase(PH_TICK);
             crate::net::tcp::tick_connections();
@@ -657,14 +657,14 @@ fn worker_entry(_arg: u64) {
                 phase(PH_NOTIFY_OFF_LOCK);
                 crate::microvm::devices::net_backend::lock().tx_set_notify(gm, false);
             }
-            let freq = crate::interrupts::tsc_freq();
-            let deadline = crate::interrupts::rdtsc()
+            let freq = crate::time::counter_hz();
+            let deadline = crate::time::counter()
                 + window.saturating_mul((freq / 1_000_000).max(1));
             let mut got = false;
             loop {
                 if polled { crate::net::poll_rx_only(); }
                 if has_work() { got = true; break; }
-                if crate::interrupts::rdtsc() >= deadline { break; }
+                if crate::time::counter() >= deadline { break; }
                 // Cooperative core: a peer fiber here (the NAPI fiber filling
                 // the tap) runs between two looks instead of after the window.
                 phase(PH_POLL_YIELD);
@@ -706,15 +706,15 @@ fn worker_entry(_arg: u64) {
         } else {
             crate::net::timer_park_ms(PARK_SAFETY_MS).max(PARK_TCP_TIMERS_MS)
         };
-        let freq = crate::interrupts::tsc_freq();
-        let parked_at = crate::interrupts::rdtsc();
+        let freq = crate::time::counter_hz();
+        let parked_at = crate::time::counter();
         let deadline = parked_at + cap_ms.saturating_mul(freq / 1000);
         phase(PH_PARK);
         let woke = crate::smp::fiber::park_on_bell(deadline, has_work);
         crate::microvm::devices::nat::set_worker_parked(false);
         // `kvm_vcpu_halt`'s window update: only a real wake says anything
         // about the gap; a short one grows the window, a long one shrinks it.
-        let parked_us = crate::interrupts::rdtsc().wrapping_sub(parked_at)
+        let parked_us = crate::time::counter().wrapping_sub(parked_at)
             / (freq / 1_000_000).max(1);
         if !woke || parked_us > BUSY_POLL_MAX_US {
             poll_us = poll_shrink(poll_us);

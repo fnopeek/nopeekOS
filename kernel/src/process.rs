@@ -40,7 +40,7 @@ pub fn spawn(name: &str, kind: u8, terminal_idx: u8, core_id: u8) -> u32 {
         kind,
         terminal_idx,
         core_id,
-        start_tsc: crate::interrupts::rdtsc(),
+        start_tsc: crate::time::counter(),
         busy_tsc: 0,
         memory: 0,
         last_busy: 0,
@@ -118,7 +118,7 @@ pub fn set_memory(pid: u32, bytes: u32) {
 
 /// Compute CPU usage % from delta busy/total TSC (on-demand).
 fn update_usage(pid: u32, procs: &mut BTreeMap<u32, Process>) {
-    let tsc = crate::interrupts::rdtsc();
+    let tsc = crate::time::counter();
     if let Some(p) = procs.get_mut(&pid) {
         let prev_busy = p.last_busy;
         let prev_tsc = p.last_tsc;
@@ -197,9 +197,9 @@ pub fn sys_info(key: i32) -> i64 {
         // 27: uptime in seconds for PID
         27 => {
             PROCS.lock().get(&param).map(|p| {
-                let freq = crate::interrupts::tsc_freq();
+                let freq = crate::time::counter_hz();
                 if freq == 0 || p.start_tsc == 0 { return 0i64; }
-                ((crate::interrupts::rdtsc() - p.start_tsc) / freq) as i64
+                ((crate::time::counter() - p.start_tsc) / freq) as i64
             }).unwrap_or(0)
         }
 

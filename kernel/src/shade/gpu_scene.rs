@@ -84,7 +84,7 @@ static PENDING: spin::Mutex<Option<Pending>> = spin::Mutex::new(None);
 /// to the GPU, in which case the caller must call `finish` once it has let
 /// go of the compositor and before it reads `target`.
 pub fn compose(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) {
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let full = covers_screen(damage, info);
     // A scene still in flight is finished first; the caller should have.
     finish_with(sources);
@@ -106,7 +106,7 @@ pub fn compose(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbI
     CPU_SCENES.fetch_add(1, Ordering::Relaxed);
     if full {
         FULL_FRAMES[1].fetch_add(1, Ordering::Relaxed);
-        FULL_CYCLES[1].fetch_add(crate::interrupts::rdtsc() - t0, Ordering::Relaxed);
+        FULL_CYCLES[1].fetch_add(crate::time::counter() - t0, Ordering::Relaxed);
     }
 }
 
@@ -228,7 +228,7 @@ fn settle(p: Pending) -> Option<Redo> {
                 FAILURES_IN_ROW.store(0, Ordering::Relaxed);
                 if full {
                     FULL_FRAMES[0].fetch_add(1, Ordering::Relaxed);
-                    FULL_CYCLES[0].fetch_add(crate::interrupts::rdtsc() - t0, Ordering::Relaxed);
+                    FULL_CYCLES[0].fetch_add(crate::time::counter() - t0, Ordering::Relaxed);
                 }
                 return None;
             }
@@ -237,7 +237,7 @@ fn settle(p: Pending) -> Option<Redo> {
         }
         Pending::Verify { seq, scene, target, info, copy, pages, cpu, t0, left_out } => {
             let ok = seq.map(|s| gpudev::wait_scene_bound(s) == 0);
-            let gpu = crate::interrupts::rdtsc() - t0;
+            let gpu = crate::time::counter() - t0;
             judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu, &left_out);
             if gpudev::release(copy, copy, pages) {
                 crate::memory::deallocate_contiguous(copy, pages);
@@ -315,7 +315,7 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     // SAFETY: `copy` is `pages` fresh identity-mapped frames, `target` a
     // screen-sized buffer of `bytes`; they do not overlap.
     unsafe { core::ptr::copy_nonoverlapping(target, copy as *mut u8, bytes) };
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let seq = {
         let _pin = gpudev::ScenePin::new();
         gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch)
@@ -323,9 +323,9 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
             .and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs))
     };
 
-    let t1 = crate::interrupts::rdtsc();
+    let t1 = crate::time::counter();
     scene::execute(frame, &cpu_rec, target, info, damage);
-    let cpu = crate::interrupts::rdtsc() - t1;
+    let cpu = crate::time::counter() - t1;
 
     // A guest frame the CPU may not copy (`ForeignPixels::cpu_readable`) is
     // drawn by the GPU alone: its rectangles are not compared.
@@ -358,7 +358,7 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
 #[allow(clippy::too_many_arguments)]
 fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bool>, gpu: u64, cpu: u64,
          left_out: &[Rect]) {
-    let us = |c: u64| c * 1000 / (crate::interrupts::tsc_freq() / 1000).max(1);
+    let us = |c: u64| c * 1000 / (crate::time::counter_hz() / 1000).max(1);
     match ok {
         Some(true) => {
             let mut diffs = 0u64;
@@ -600,7 +600,7 @@ pub struct Stats {
 }
 
 pub fn stats() -> Stats {
-    let per_us = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let per_us = (crate::time::counter_hz() / 1_000_000).max(1);
     let avg = |cycles: u64, n: u64| if n == 0 { 0 } else { cycles / n / per_us };
     let full = core::array::from_fn(|i| {
         let n = FULL_FRAMES[i].load(Ordering::Relaxed);

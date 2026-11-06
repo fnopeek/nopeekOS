@@ -645,11 +645,11 @@ fn tx_unused(d: &Igc) -> u16 {
 fn tx_reserve(d: &mut Igc, need: u16) -> Result<(), NetError> {
     tx_clean(d);
     if tx_unused(d) >= need { return Ok(()); }
-    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 5000;
+    let deadline = crate::time::counter() + crate::time::counter_hz() / 5000;
     loop {
         tx_clean(d);
         if tx_unused(d) >= need { return Ok(()); }
-        if crate::interrupts::rdtsc() >= deadline { return Err(NetError::QueueFull); }
+        if crate::time::counter() >= deadline { return Err(NetError::QueueFull); }
         core::hint::spin_loop();
     }
 }

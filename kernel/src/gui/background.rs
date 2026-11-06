@@ -223,7 +223,7 @@ fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) 
         crate::kprintln!("[npk] glass: no memory for the blurred wallpaper ({} pages), glass stays sharp", pages);
         return;
     };
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
 
     // 1. Average BLUR_DOWN² blocks into a small image, one channel per plane.
     let sw = ((w + BLUR_DOWN - 1) / BLUR_DOWN) as usize;
@@ -326,7 +326,7 @@ fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) 
     BLURRED.store(dst, Ordering::Release);
     BLURRED_SET.store(true, Ordering::Release);
     crate::kdebug!("[npk] glass: wallpaper blurred in {} ms (detail {}, blur {})",
-        (crate::interrupts::ticks() - t0) * 10, detail, radius);
+        (crate::time::ticks() - t0) * 10, detail, radius);
 }
 
 /// One box-blur pass along a line direction. `lines` × `len` samples,

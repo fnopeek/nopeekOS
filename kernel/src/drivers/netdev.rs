@@ -160,7 +160,7 @@ pub fn set_wasm_nic_link_state(carrier: bool, dormant: bool) {
         crate::notify::notify(crate::notify::TOPIC_STATUS);
         crate::kprintln!("[npk] wlan: traeger {} -> {}, dormant {} -> {} (takt {}) — sendbar: {}",
             was_c as u8, carrier as u8, was_d as u8, dormant as u8,
-            crate::interrupts::ticks(), (carrier && !dormant) as u8);
+            crate::time::ticks(), (carrier && !dormant) as u8);
     }
 }
 
@@ -426,7 +426,7 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
         let n = TX_REJECT_NO_LINK.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 || n % 1000 == 0 {
             crate::kprintln!("[npk] wlan: SENDETOR ZU — {} Rahmen abgewiesen, aktiv={} (takt {})",
-                n, active_name(), crate::interrupts::ticks());
+                n, active_name(), crate::time::ticks());
         }
         return Err(NetError::NotInitialized);
     }

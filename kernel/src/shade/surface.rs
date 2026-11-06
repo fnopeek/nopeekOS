@@ -476,12 +476,12 @@ pub fn front_in_place(window_id: u32) -> Option<InPlace> {
 /// a picture still shown from them becomes a copy, the others forget them.
 /// False when a reader kept the surfaces past the deadline.
 pub fn detach_blob(serial: u64) -> bool {
-    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 10;
+    let deadline = crate::time::counter() + crate::time::counter_hz() / 10;
     loop {
         let mut map = SURFACES.lock();
         if map.values().any(|s| s.front_out) {
             drop(map);
-            if crate::interrupts::rdtsc() >= deadline {
+            if crate::time::counter() >= deadline {
                 return false;
             }
             crate::smp::fiber::spin_or_yield();

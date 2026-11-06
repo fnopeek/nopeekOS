@@ -179,11 +179,11 @@ pub fn set_acpi_mode(acpi: bool) -> Option<bool> {
     // SAFETY: the FADT's SMI command port and PM1a control port.
     let (smi, cnt) = unsafe { (Port::new(smi), Port::new(cnt)) };
     smi.outb(if acpi { en } else { dis });
-    let tsc_ms = (crate::interrupts::tsc_freq() / 1000).max(1);
-    let t0 = crate::interrupts::rdtsc();
+    let tsc_ms = (crate::time::counter_hz() / 1000).max(1);
+    let t0 = crate::time::counter();
     loop {
         let on = cnt.inw() & 1 != 0;
-        if on == acpi || crate::interrupts::rdtsc() - t0 > 3000 * tsc_ms {
+        if on == acpi || crate::time::counter() - t0 > 3000 * tsc_ms {
             return Some(on);
         }
         core::hint::spin_loop();

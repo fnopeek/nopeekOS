@@ -269,8 +269,8 @@ fn ocp_clr_reg(reg: u16, bits: u16) { let v = ocp_reg_read(reg); ocp_reg_write(r
 
 // ── Polling helpers ──
 
-fn deadline(ms: u64) -> u64 { crate::interrupts::ticks() + (ms / 10).max(1) }
-fn expired(d: u64) -> bool { crate::interrupts::ticks() >= d }
+fn deadline(ms: u64) -> u64 { crate::time::ticks() + (ms / 10).max(1) }
+fn expired(d: u64) -> bool { crate::time::ticks() >= d }
 
 fn nic_reset() {
     ocp_write_byte(MCU_PLA, PLA_CR, CR_RST);
@@ -531,7 +531,7 @@ pub fn init() -> bool {
     let mut up = false;
     for _ in 0..40 {
         if mdio_read(MII_BMSR) & BMSR_LSTATUS != 0 { up = true; break; }
-        crate::interrupts::delay_ms(100);
+        crate::time::delay_ms(100);
     }
     if up {
         // Auto-negotiation settled — program the speed-dependent MAC regs

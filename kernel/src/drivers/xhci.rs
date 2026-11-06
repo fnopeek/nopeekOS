@@ -339,7 +339,7 @@ pub fn poll_keyboard() -> Option<u8> {
     // A pending second half of a character goes first, or it is lost.
     if let Some(b) = take_tail() { return Some(b) }
     if rk != 0 {
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         let start = REPEAT_START.load(Ordering::Relaxed);
         let last = REPEAT_LAST.load(Ordering::Relaxed);
         let held_ms = (now.wrapping_sub(start)) * 10;
@@ -761,7 +761,7 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
     let mut last_change = 0u64;
     let mut connected = 0u32;
     while elapsed < CAP_MS {
-        crate::interrupts::delay_ms(POLL_MS);
+        crate::time::delay_ms(POLL_MS);
         elapsed += POLL_MS;
         let now = (0..max_ports)
             .filter(|&p| oper.r32(portsc_off(p)) & PORTSC_CCS != 0)
@@ -1569,8 +1569,8 @@ fn hub_port_connect(state: &mut XhciState, hub: u8, port1: u8, path: String) {
 /// Wait `ms` while keeping every device on this controller served: the
 /// event ring is drained meanwhile, as an interrupt would.
 fn wait_ms(state: &mut XhciState, ms: u64) {
-    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000 * ms;
-    while crate::interrupts::rdtsc() < deadline {
+    let deadline = crate::time::counter() + crate::time::counter_hz() / 1000 * ms;
+    while crate::time::counter() < deadline {
         drain(state);
         core::hint::spin_loop();
     }
@@ -2317,7 +2317,7 @@ fn hub_port_debounce_root(oper: Mmio, port: u32) -> Option<bool> {
             oper.w32(off, port_neutral(sc) | PORTSC_CSC);
         }
         if total >= HUB_DEBOUNCE_TIMEOUT { return None; }
-        crate::interrupts::delay_ms(HUB_DEBOUNCE_STEP);
+        crate::time::delay_ms(HUB_DEBOUNCE_STEP);
         total += HUB_DEBOUNCE_STEP;
     }
 }
@@ -2687,10 +2687,10 @@ fn alloc_dma(pages: usize, _name: &str) -> Option<DmaRegion> {
 
 fn wait_for(base: Mmio, reg: u32, mask: u32, expected: u32) -> bool {
     // Tick-based timeout (500ms) — CPU-speed independent
-    let deadline = crate::interrupts::ticks() + 50; // 50 ticks = 500ms at 100Hz
+    let deadline = crate::time::ticks() + 50; // 50 ticks = 500ms at 100Hz
     loop {
         if base.r32(reg) & mask == expected { return true; }
-        if crate::interrupts::ticks() >= deadline { return false; }
+        if crate::time::ticks() >= deadline { return false; }
         core::hint::spin_loop();
     }
 }
@@ -2733,9 +2733,9 @@ fn bios_handoff(mmio: Mmio, mut off: u32) {
             // Set OS Owned Semaphore (bit 24)
             mmio.w32(off, cap | (1 << 24));
             // Wait for BIOS Owned Semaphore (bit 16) to clear (1s timeout)
-            let deadline = crate::interrupts::ticks() + 100;
+            let deadline = crate::time::ticks() + 100;
             while mmio.r32(off) & (1 << 16) != 0 {
-                if crate::interrupts::ticks() >= deadline { break; }
+                if crate::time::ticks() >= deadline { break; }
                 core::hint::spin_loop();
             }
             // Disable SMI (clear USBLEGCTLSTS enable bits)
@@ -3261,7 +3261,7 @@ fn msc_skip_td_then(state: &mut XhciState, i: usize, dir_in: bool, stop: bool, a
 pub(crate) fn msc_transfer(id: u32, dir_in: bool, len: usize, timeout_ms: u64) -> Result<usize, MscError> {
     let len = len.min(MSC_MAX_XFER);
     let (first, last) = with_msc(id, |s, i| msc_post(s, i, dir_in, len))?;
-    let deadline = crate::interrupts::ticks() + timeout_ms.div_ceil(10).max(1);
+    let deadline = crate::time::ticks() + timeout_ms.div_ceil(10).max(1);
     loop {
         let r = with_msc(id, |s, i| {
             drain(s);
@@ -3285,7 +3285,7 @@ pub(crate) fn msc_transfer(id: u32, dir_in: bool, len: usize, timeout_ms: u64) -
             })
         })?;
         if let Some(r) = r { return r; }
-        if crate::interrupts::ticks() >= deadline {
+        if crate::time::ticks() >= deadline {
             let _ = with_msc(id, |s, i| {
                 msc_timeout_report(s, i, dir_in, len, first, last, false);
                 msc_skip_td_then(s, i, dir_in, true, |s| msc_timeout_report(s, i, dir_in, len, first, last, true));
@@ -3380,10 +3380,10 @@ fn post_command(state: &mut XhciState, param: u64, status: u32, mut control: u32
 /// arrives meanwhile. Dropping a transfer event would leave its transfer
 /// never re-queued, silencing that device.
 fn wait_command_completion(state: &mut XhciState) -> Option<(u32, u32)> {
-    let deadline = crate::interrupts::ticks() + 100;
+    let deadline = crate::time::ticks() + 100;
     state.last_cc = 0;
     loop {
-        if crate::interrupts::ticks() >= deadline { return None; }
+        if crate::time::ticks() >= deadline { return None; }
         let e = match next_event(state) {
             Some(e) => e,
             None => { core::hint::spin_loop(); continue; }
@@ -3543,10 +3543,10 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
     // Wait for the reply (1 s) and dispatch events of other devices. Our own
     // event points into this TD; one left by an earlier, abandoned TD on
     // the same ring is dropped.
-    let deadline = crate::interrupts::ticks() + 100;
+    let deadline = crate::time::ticks() + 100;
     state.last_cc = 0;
     loop {
-        if crate::interrupts::ticks() >= deadline {
+        if crate::time::ticks() >= deadline {
             ep0_recover(state, slot);
             return false;
         }
@@ -3951,11 +3951,11 @@ fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
         // Issue warm reset: preserve PP, set WPR (RW1S, self-clearing).
         oper.w32(off, port_neutral(before) | PORTSC_PP | PORTSC_WPR);
         // Wait up to ~500ms for the reset to complete (WRC or PRC), polling ticks.
-        let deadline = crate::interrupts::ticks() + 50;
+        let deadline = crate::time::ticks() + 50;
         loop {
             let sc = oper.r32(off);
             if sc & (PORTSC_WRC | PORTSC_PRC) != 0 { break; }
-            if crate::interrupts::ticks() >= deadline { break; }
+            if crate::time::ticks() >= deadline { break; }
             core::hint::spin_loop();
         }
         // Clear all change bits.
@@ -3963,8 +3963,8 @@ fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
         oper.w32(off, port_neutral(sc) | PORTSC_CSC | PORTSC_PEC | PORTSC_WRC
             | PORTSC_PRC | PORTSC_PLC);
         // Settle, then read the resulting state.
-        let s2 = crate::interrupts::ticks() + 10;
-        while crate::interrupts::ticks() < s2 { core::hint::spin_loop(); }
+        let s2 = crate::time::ticks() + 10;
+        while crate::time::ticks() < s2 { core::hint::spin_loop(); }
         let after = oper.r32(off);
         let speed = (after >> 10) & 0xF;
         let sname = match speed {
@@ -4298,14 +4298,14 @@ fn nic_bulk_out_on(state: &mut XhciState, data: &[u8]) -> bool {
     // otherwise we would overwrite live DMA.
     let full = |s: &XhciState| s.nic.as_ref().map(|n| n.tx_inflight >= NIC_TX_BUFS).unwrap_or(true);
     if full(state) {
-        let t0 = crate::interrupts::rdtsc();
-        let deadline = crate::interrupts::ticks() + 100;
+        let t0 = crate::time::counter();
+        let deadline = crate::time::ticks() + 100;
         while full(state) {
-            if crate::interrupts::ticks() >= deadline { return false; }
+            if crate::time::ticks() >= deadline { return false; }
             drain(state);
             core::hint::spin_loop();
         }
-        NIC_TX_CYC.fetch_add(crate::interrupts::rdtsc().wrapping_sub(t0), Relaxed);
+        NIC_TX_CYC.fetch_add(crate::time::counter().wrapping_sub(t0), Relaxed);
     }
 
     let len = data.len().min(NIC_TX_BUF_BYTES);
@@ -4637,7 +4637,7 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
         state.repeat_key = first_key;
         state.repeat_shift = shift;
         state.repeat_altgr = alt_gr;
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         state.repeat_start = now;
         state.repeat_last = now;
         REPEAT_KEY.store(first_key, Ordering::Relaxed);
@@ -4650,7 +4650,7 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
         state.repeat_key = first_key;
         state.repeat_shift = shift;
         state.repeat_altgr = alt_gr;
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         state.repeat_start = now;
         state.repeat_last = now;
         REPEAT_KEY.store(first_key, Ordering::Relaxed);

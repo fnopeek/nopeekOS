@@ -10,7 +10,7 @@ use alloc::format;
 
 /// Milliseconds since boot, from the tick counter.
 fn ms() -> u64 {
-    crate::interrupts::ticks() * 10
+    crate::time::ticks() * 10
 }
 
 /// A 70-byte module that calls one import and then returns 99. The 99 must

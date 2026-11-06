@@ -148,14 +148,14 @@ fn flush_cache(addr: u64, len: u64) {
 }
 
 fn deadline() -> u64 {
-    crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000 * OPERATION_TIMEOUT_MS
+    crate::time::counter() + crate::time::counter_hz() / 1000 * OPERATION_TIMEOUT_MS
 }
 
 /// Wait until `done` holds on the register at `off` (Linux `IOMMU_WAIT_OP`).
 fn wait32(regs: &Mmio, off: u32, done: impl Fn(u32) -> bool) -> Result<(), &'static str> {
     let dl = deadline();
     while !done(regs.r32(off)) {
-        if crate::interrupts::rdtsc() > dl {
+        if crate::time::counter() > dl {
             return Err("remapping unit did not finish an operation");
         }
         core::hint::spin_loop();
@@ -170,7 +170,7 @@ fn wait64(regs: &Mmio, off: u32, done: impl Fn(u64) -> bool) -> Result<u64, &'st
         if done(v) {
             return Ok(v);
         }
-        if crate::interrupts::rdtsc() > dl {
+        if crate::time::counter() > dl {
             return Err("remapping unit did not finish an invalidation");
         }
         core::hint::spin_loop();

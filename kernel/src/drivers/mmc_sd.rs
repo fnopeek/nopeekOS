@@ -195,9 +195,9 @@ pub fn init() -> bool {
 /// once a second, and handled on a worker.
 pub fn poll() {
     if !CONTROLLER.load(Ordering::Acquire) { return; }
-    let now = crate::interrupts::rdtsc();
+    let now = crate::time::counter();
     let last = LAST_POLL.load(Ordering::Relaxed);
-    if now.saturating_sub(last) < crate::interrupts::tsc_freq() { return; }
+    if now.saturating_sub(last) < crate::time::counter_hz() { return; }
     LAST_POLL.store(now, Ordering::Relaxed);
     let changed = {
         let mut g = SLOT.lock();
@@ -476,14 +476,14 @@ fn wait_for_app_cmd(host: &mut Host, rca: Option<u32>, cmd: &mut Command) -> Res
 
 /// `mmc_send_app_op_cond`: ACMD41 until the card leaves busy, at most 2 s.
 fn send_app_op_cond(host: &mut Host, ocr: u32) -> Result<u32, Error> {
-    let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() * 2;
+    let deadline = crate::time::counter() + crate::time::counter_hz() * 2;
     let mut cmd = Command::new(SD_APP_OP_COND, ocr, h::MMC_RSP_R3);
     loop {
         wait_for_app_cmd(host, None, &mut cmd)?;
         if ocr == 0 || cmd.resp[0] & MMC_CARD_BUSY != 0 {
             return Ok(cmd.resp[0]);
         }
-        if crate::interrupts::rdtsc() > deadline {
+        if crate::time::counter() > deadline {
             return Err(Error::Timeout);
         }
         h::mdelay(10);
@@ -949,14 +949,14 @@ fn stop_for(host_flags_auto12: bool, host_auto23: bool, card: &Card, blocks: u32
 
 /// `mmc_blk_card_busy`: CMD13 until the card is ready for data in TRAN.
 fn card_busy_wait(host: &mut Host, card: &Card) -> Result<(), Error> {
-    let deadline = crate::interrupts::rdtsc()
-        + crate::interrupts::tsc_freq() / 1000 * MMC_BLK_TIMEOUT_MS;
+    let deadline = crate::time::counter()
+        + crate::time::counter_hz() / 1000 * MMC_BLK_TIMEOUT_MS;
     loop {
         let st = send_status(host, card)?;
         if st & R1_READY_FOR_DATA != 0 && (st & 0x1E00) >> 9 == R1_STATE_TRAN {
             return Ok(());
         }
-        if crate::interrupts::rdtsc() > deadline {
+        if crate::time::counter() > deadline {
             kprintln!("[npk] sd: card stuck in programming state");
             return Err(Error::Timeout);
         }

@@ -228,7 +228,7 @@ fn idle_halt() {
     // One frame at most. Before boot finishes the periodic tick ends it;
     // after `lock`, Core 0 has no tick any more — a bare `hlt`
     // would sleep until the next key and freeze the screen meanwhile.
-    let d = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 100;
+    let d = crate::time::counter() + crate::time::counter_hz() / 100;
     crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
@@ -282,12 +282,12 @@ pub fn run() {
     let mut pos: usize = 0;
     let mut attempts: u32 = 0;
     let mut cursor_visible = true;
-    let mut last_cursor_toggle = crate::interrupts::ticks();
-    let mut last_clock_update = crate::interrupts::ticks();
+    let mut last_cursor_toggle = crate::time::ticks();
+    let mut last_clock_update = crate::time::ticks();
 
     loop {
         // Update clock every 10s (check if minute changed)
-        let now = crate::interrupts::ticks();
+        let now = crate::time::ticks();
         if now.wrapping_sub(last_clock_update) >= 1000 {
             last_clock_update = now;
             framebuffer::with_fb(|fb| {
@@ -363,8 +363,8 @@ pub fn run() {
                             });
 
                             // Quick flash of welcome message (0.5s)
-                            let start = crate::interrupts::ticks();
-                            while crate::interrupts::ticks().wrapping_sub(start) < 50 {
+                            let start = crate::time::ticks();
+                            while crate::time::ticks().wrapping_sub(start) < 50 {
                                 // SAFETY: ring-0, IRQs enabled, APIC timer ticks us.
                                 idle_halt();
                             }
@@ -422,10 +422,10 @@ pub fn run() {
                             });
 
                             // Wait for backoff
-                            let start = crate::interrupts::ticks();
+                            let start = crate::time::ticks();
                             let delay_ticks = delay_secs * 100;
-                            while crate::interrupts::ticks().wrapping_sub(start) < delay_ticks {
-                                let elapsed = crate::interrupts::ticks().wrapping_sub(start);
+                            while crate::time::ticks().wrapping_sub(start) < delay_ticks {
+                                let elapsed = crate::time::ticks().wrapping_sub(start);
                                 let remaining = (delay_ticks.saturating_sub(elapsed) + 99) / 100;
                                 let cd_msg = format!("Wrong passphrase ({}/10). Wait {}s...", attempts, remaining);
                                 framebuffer::with_fb(|fb| {
@@ -454,7 +454,7 @@ pub fn run() {
                             });
 
                             cursor_visible = true;
-                            last_cursor_toggle = crate::interrupts::ticks();
+                            last_cursor_toggle = crate::time::ticks();
                         }
                     }
                 }
@@ -474,7 +474,7 @@ pub fn run() {
                                 layout.input_w, layout.input_h);
                         });
                         cursor_visible = true;
-                        last_cursor_toggle = crate::interrupts::ticks();
+                        last_cursor_toggle = crate::time::ticks();
                     }
                 }
 
@@ -493,7 +493,7 @@ pub fn run() {
                                 layout.input_w, layout.input_h);
                         });
                         cursor_visible = true;
-                        last_cursor_toggle = crate::interrupts::ticks();
+                        last_cursor_toggle = crate::time::ticks();
                     }
                 }
 

@@ -568,7 +568,7 @@ impl VirtioGpu {
         let mut completed = self.complete_fences(mem);
         // In queue order: FLUSH fences share the guest's global timeline,
         // where a later one completed signals the earlier ones too.
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
         while let Some(h) = self.held.front() {
             let shown = h.latch.is_none_or(|id| self.latch.iter().flatten().all(|l| l.id > id));
             let read = !super::gpu_backend::full_active()
@@ -633,7 +633,7 @@ impl VirtioGpu {
                 if p.flags & VIRTIO_GPU_FLAG_FENCE != 0 && !self.ctxs.fence_done(p.ctx_id, p.ring, fence) {
                     let held = Held {
                         head: p.head, response, resp_descs: p.resp_descs, blob: None, latch: None, deadline: 0,
-                        since: crate::interrupts::rdtsc(), not_before: 0,
+                        since: crate::time::counter(), not_before: 0,
                     };
                     self.fenced.push((held, p.ctx_id, p.ring, fence));
                     false
@@ -711,7 +711,7 @@ impl VirtioGpu {
         let mut last_avail = q.last_avail_idx;
         let mut used_idx = q.used_idx;
 
-        let now = crate::interrupts::rdtsc();
+        let now = crate::time::counter();
 
         let mut any = false;
         while last_avail != avail_top {
@@ -771,20 +771,20 @@ impl VirtioGpu {
             let latch = if flush { self.flush_latch.take() } else { None };
             let blob = shown.filter(|b| latch.is_some() || !blob_unread(b));
             if flush && !(blob_frame && blob.is_none()) {
-                let t = crate::interrupts::rdtsc();
+                let t = crate::time::counter();
                 let not_before = if blob_frame {
                     t
                 } else {
-                    let period = (crate::interrupts::tsc_freq() / VBLANK_HZ).max(1);
+                    let period = (crate::time::counter_hz() / VBLANK_HZ).max(1);
                     let at = (t / period + 1) * period;
                     super::gpu_backend::set_resume_tsc(at);
                     super::gpu_backend::note(super::gpu_backend::STAT_PAUSE_US,
-                        (at - t) * 1_000_000 / crate::interrupts::tsc_freq().max(1));
+                        (at - t) * 1_000_000 / crate::time::counter_hz().max(1));
                     at
                 };
                 self.held.push_back(Held {
                     head, response, resp_descs, blob, latch,
-                    deadline: now + crate::interrupts::tsc_freq() / 1000 * HOLD_MAX_MS,
+                    deadline: now + crate::time::counter_hz() / 1000 * HOLD_MAX_MS,
                     since: now, not_before,
                 });
                 last_avail = last_avail.wrapping_add(1);
@@ -1501,7 +1501,7 @@ impl VirtioGpu {
         } else {
             let id = self.next_latch;
             self.next_latch += 1;
-            q.push_back(Latch { id, wid, view, dmg, work, since: crate::interrupts::rdtsc() });
+            q.push_back(Latch { id, wid, view, dmg, work, since: crate::time::counter() });
             id
         };
         self.present_latched();
@@ -1612,13 +1612,13 @@ impl VirtioGpu {
     /// Wait (yielding, bounded) until no retired blob is read or bound any
     /// more; those still are stay listed. True when none is left.
     fn wait_released(&mut self, ms: u64) -> bool {
-        let deadline = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / 1000 * ms;
+        let deadline = crate::time::counter() + crate::time::counter_hz() / 1000 * ms;
         loop {
             self.reap_released();
             if self.retired.is_empty() && self.dying.is_empty() {
                 return true;
             }
-            if crate::interrupts::rdtsc() >= deadline {
+            if crate::time::counter() >= deadline {
                 return false;
             }
             crate::smp::fiber::spin_or_yield();
@@ -1807,7 +1807,7 @@ impl VirtioGpu {
         // `offset` (relative to the backing). We translate (row, col)
         // → linear offset → page-walk. Each row lands in a scratch row
         // first and is compared with the same row of the picture on screen.
-        let t0 = crate::interrupts::rdtsc();
+        let t0 = crate::time::counter();
         let mut cursor = (0, 0);
         let scratch = &mut self.row_scratch[..row_bytes];
         for row in 0..h as usize {
@@ -1835,7 +1835,7 @@ impl VirtioGpu {
             super::gpu_backend::STAT_XFER_KB, (h as u64) * (row_bytes as u64) / 1024);
         crate::microvm::devices::nat::note_gpu_transfer(
             (h as u64) * (row_bytes as u64),
-            crate::interrupts::rdtsc().wrapping_sub(t0));
+            crate::time::counter().wrapping_sub(t0));
 
         // One-time bring-up confirmation; per-frame logging is noise.
         let n = self.transfer_log_count;

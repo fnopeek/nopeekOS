@@ -160,11 +160,11 @@ static INSTS: Mutex<Vec<Inst>> = Mutex::new(Vec::new());
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 
 fn ms_to_tsc(ms: u64) -> u64 {
-    ms.saturating_mul(crate::interrupts::tsc_freq() / 1000)
+    ms.saturating_mul(crate::time::counter_hz() / 1000)
 }
 
 fn now() -> u64 {
-    crate::interrupts::rdtsc()
+    crate::time::counter()
 }
 
 // === Instances ===

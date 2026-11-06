@@ -96,8 +96,8 @@ pub fn read(path: &str) -> Result<Option<Vec<u8>>, Error> {
 /// callers need not recompute BLAKE3 over every read: `storage::get`
 /// already verifies integrity against the walk hash.
 pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> {
-    use crate::interrupts::{rdtsc, tsc_freq};
-    let t0 = rdtsc();
+    use crate::time::{counter, counter_hz};
+    let t0 = counter();
 
     let root = current_root()?;
     let walk = match paths::walk(&root, path) {
@@ -105,7 +105,7 @@ pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> 
         Err(PathError::NotFound) => return Ok(None),
         Err(e) => return Err(e),
     };
-    let t_walk = rdtsc();
+    let t_walk = counter();
 
     if walk.kind != EntryKind::File {
         return Err(PathError::NotADirectory);
@@ -114,7 +114,7 @@ pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> 
         .map_err(Error::Storage)?
         .ok_or(PathError::Corrupt)?;
     let encoded_len = bytes.len();
-    let t_get = rdtsc();
+    let t_get = counter();
 
     // Fast path: in-place blob decoder, cheaper than a full postcard
     // decode. Falls back to a full decode if the variant tag isn't
@@ -132,10 +132,10 @@ pub fn read_with_hash(path: &str) -> Result<Option<(Vec<u8>, [u8; 32])>, Error> 
             super::object::Object::Tree(_) => return Err(PathError::Corrupt),
         }
     };
-    let t_decode = rdtsc();
+    let t_decode = counter();
 
     if super::FS_PERF_LOG && encoded_len >= 256 * 1024 {
-        let mhz = tsc_freq().max(1) / 1_000_000;
+        let mhz = counter_hz().max(1) / 1_000_000;
         crate::kprintln!("[fs::read] {}KB walk={} get={} decode={} (us)",
             encoded_len / 1024,
             (t_walk.saturating_sub(t0)) / mhz,
@@ -163,22 +163,22 @@ pub fn list(path: &str) -> Result<Option<Vec<TreeEntry>>, Error> {
 /// Write `data` to `path` (creating or overwriting a File). Parent must
 /// exist; if `path` exists as a Dir, errors with AlreadyExists.
 pub fn write(path: &str, data: &[u8]) -> Result<(), Error> {
-    use crate::interrupts::{rdtsc, tsc_freq};
-    let t0 = rdtsc();
+    use crate::time::{counter, counter_hz};
+    let t0 = counter();
     let _g = root_lock();
-    let t_lock = rdtsc();
+    let t_lock = counter();
     let cur = current_root()?;
     let new = paths::store(&cur, path, data)?;
-    let t_store = rdtsc();
+    let t_store = counter();
     let result = commit(new);
-    let t_commit = rdtsc();
+    let t_commit = counter();
     super::bench::WRITE.add(data.len() as u64, &[t0, t_lock, t_store, t_commit]);
     if result.is_ok() {
         crate::notify::path_changed(path);
     }
 
     if super::FS_PERF_LOG && data.len() >= 256 * 1024 {
-        let mhz = tsc_freq().max(1) / 1_000_000;
+        let mhz = counter_hz().max(1) / 1_000_000;
         crate::kprintln!("[fs::write] {}KB lock={} store={} commit={} (us)",
             data.len() / 1024,
             (t_lock.saturating_sub(t0)) / mhz,
@@ -424,7 +424,7 @@ pub fn gc() -> Result<GcStats, Error> {
         return Ok(GcStats { kept: 0, removed: 0, skipped: true });
     }
 
-    let t_mark = crate::interrupts::rdtsc();
+    let t_mark = crate::time::counter();
     let _ = storage::take_longest_wait_us();
     let roots = storage::all_root_hashes().map_err(Error::Storage)?;
     let mut reachable: HashSet<[u8; 32]> = HashSet::new();
@@ -504,7 +504,7 @@ pub fn gc() -> Result<GcStats, Error> {
     }
 
     let orphans: alloc::vec::Vec<[u8; 32]> = all.into_iter().filter(|h| !reachable.contains(h)).collect();
-    let t_sweep = crate::interrupts::rdtsc();
+    let t_sweep = crate::time::counter();
     let (removed, failed) = storage::remove_many(&orphans).map_err(Error::Storage)?;
     super::tree_cache::forget(&orphans);
     if failed > 0 {
@@ -517,14 +517,14 @@ pub fn gc() -> Result<GcStats, Error> {
     // we'd typically be running maintenance anyway. Writers may go on
     // meanwhile: `trim` discards only blocks that are still free.
     drop(guard);
-    let t_trim = crate::interrupts::rdtsc();
+    let t_trim = crate::time::counter();
     storage::trim().map_err(Error::Storage)?;
-    let t_end = crate::interrupts::rdtsc();
+    let t_end = crate::time::counter();
 
     // How long each step took and what a reader waited for the store, to
     // tell which step a missed frame or a slow read falls into (#161).
     if removed > 0 {
-        let ms = |a: u64, b: u64| b.saturating_sub(a) * 1000 / crate::interrupts::tsc_freq().max(1);
+        let ms = |a: u64, b: u64| b.saturating_sub(a) * 1000 / crate::time::counter_hz().max(1);
         crate::kprintln!("[npk] gc: mark {} ms, sweep {} ms, trim {} ms; longest wait for the store {} us, for the disk {} us",
             ms(t_mark, t_sweep), ms(t_sweep, t_trim), ms(t_trim, t_end), storage::take_longest_wait_us(),
             crate::nvme::take_longest_wait_us());

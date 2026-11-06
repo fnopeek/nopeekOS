@@ -119,7 +119,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
 
     let term = crate::shade::terminal::active_idx() as u8;
     crate::heap::reset_counters();
-    let t0 = crate::interrupts::ticks();
+    let t0 = crate::time::ticks();
     let r = if use_forge {
         crate::wasm::execute_wasi_forge(&wasm, cap, crate::wasm::UNTIL_CANCELLED, ctx, term)
     } else {
@@ -127,7 +127,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     };
     // Timed here rather than inside the engine, so both engines are measured
     // the same way.
-    let ms = crate::interrupts::ticks().saturating_sub(t0) * 10;
+    let ms = crate::time::ticks().saturating_sub(t0) * 10;
     let c = crate::heap::counters();
     crate::kdebug!("[python] {} ms ({})", ms, if use_forge { "forge" } else { "wasmi" });
     // Allocator counters for this run. `steps` are free-list nodes visited,

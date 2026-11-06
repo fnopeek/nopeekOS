@@ -400,7 +400,7 @@ pub(crate) fn release_owner(owner: u32) {
 // ── The worker ─────────────────────────────────────────────────────────────
 
 fn worker_entry(_k: u64) {
-    let mut idle_since = crate::interrupts::ticks();
+    let mut idle_since = crate::time::ticks();
     loop {
         let picked = {
             let mut q = Q.lock();
@@ -427,7 +427,7 @@ fn worker_entry(_k: u64) {
                     // The queue check and the worker count leave together, so
                     // a `begin` that lands between them either sees a worker
                     // that is still counted (and queues) or spawns a new one.
-                    if crate::interrupts::ticks().wrapping_sub(idle_since) > IDLE_TICKS {
+                    if crate::time::ticks().wrapping_sub(idle_since) > IDLE_TICKS {
                         q.workers -= 1;
                         return;
                     }
@@ -441,7 +441,7 @@ fn worker_entry(_k: u64) {
         };
         // The exchange itself, with no lock held: it waits for a network.
         let reply = run(slot, work);
-        idle_since = crate::interrupts::ticks();
+        idle_since = crate::time::ticks();
 
         let mut q = Q.lock();
         let still_ours = matches!(&q.slots[slot], Some(j) if j.id == id);

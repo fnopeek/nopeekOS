@@ -53,7 +53,7 @@ pub fn set_ip(ip: [u8; 4]) {
 }
 pub fn our_ip() -> [u8; 4] { *OUR_IP.lock() }
 
-fn ticks() -> u64 { crate::interrupts::ticks() }
+fn ticks() -> u64 { crate::time::ticks() }
 
 /// Do what a call into the table left to do, after its lock is gone.
 fn run(out: Out<Pkt>) -> Option<Result<(), crate::virtio_net::NetError>> {

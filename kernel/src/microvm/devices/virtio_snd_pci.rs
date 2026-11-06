@@ -185,7 +185,7 @@ pub struct VirtioSnd {
     /// the used-ring only *after* it has been played; completing instantly
     /// fast-forwards the guest's ALSA hw_ptr → underrun → cubeb error. We pace
     /// completion off a smooth 192000 B/s clock derived from the TSC, not
-    /// `interrupts::ticks()`, whose 100 Hz counter is incremented by Core 0's
+    /// `crate::time::ticks()`, whose 100 Hz counter is incremented by Core 0's
     /// timer IRQ and runs slow when Core 0 is busy under load (dragging the
     /// guest's audio clock). The TSC advances at a constant rate regardless
     /// of interrupt load. `play_start_tsc` = TSC at PCM_START;
@@ -429,7 +429,7 @@ impl VirtioSnd {
             R_PCM_START => {
                 // Reset the playback clock so completion pacing starts now.
                 self.started = true;
-                self.play_start_tsc = crate::interrupts::rdtsc();
+                self.play_start_tsc = crate::time::counter();
                 self.bytes_completed = 0;
                 self.tx_reset();
                 self.fill_min = u64::MAX;
@@ -650,8 +650,8 @@ impl VirtioSnd {
 
         // The clock: PCM bytes that should have reached the speaker by now,
         // from the TSC (constant rate, immune to interrupt-load jitter).
-        let tsc_now = crate::interrupts::rdtsc();
-        let tsc_hz = crate::interrupts::tsc_freq().max(1);
+        let tsc_now = crate::time::counter();
+        let tsc_hz = crate::time::counter_hz().max(1);
         // Clock drift against the HDA crystal: the mailbox never ran low
         // over the last window, so the TSC clock runs ahead; hold it back.
         self.fill_min = self.fill_min.min(crate::audio::buffered(slot) as u64);

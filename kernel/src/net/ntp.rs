@@ -38,8 +38,8 @@ pub fn query(server_ip: [u8; 4]) -> Option<u64> {
         if !udp::send(server_ip, local_port, NTP_PORT, &req) {
             break;
         }
-        let t0 = crate::interrupts::ticks();
-        while crate::interrupts::ticks() - t0 <= wait {
+        let t0 = crate::time::ticks();
+        while crate::time::ticks() - t0 <= wait {
             super::poll();
             while let Some((src, port, data)) = udp::recv(local_port) {
                 if src == server_ip && port == NTP_PORT {

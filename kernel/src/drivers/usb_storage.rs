@@ -177,7 +177,7 @@ fn scan_task(_: u64) {
 
 fn sleep_ms(ms: u64) {
     if !crate::smp::fiber::yield_sleep(ms) {
-        crate::interrupts::delay_ms(ms);
+        crate::time::delay_ms(ms);
     }
 }
 

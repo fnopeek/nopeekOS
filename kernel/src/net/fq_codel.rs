@@ -13,11 +13,11 @@
 //!    law as Linux). Latency is held near TARGET instead of building bufferbloat.
 //!
 //! Time is measured in TSC ticks (the kernel's only fine clock); TARGET/INTERVAL
-//! are derived from tsc_freq() on first use. Combined with the driver's AQL-style
+//! are derived from counter_hz() on first use. Combined with the driver's AQL-style
 //! in-flight cap (which keeps the hardware queue shallow), this is the full Linux
 //! latency-under-load architecture.
 
-use crate::interrupts::{rdtsc, tsc_freq};
+use crate::time::{counter, counter_hz};
 
 pub const MTU: usize = 1514;
 
@@ -187,7 +187,7 @@ impl FqCodel {
 
     fn lazy_init(&mut self) {
         if self.interval == 0 {
-            let hz = tsc_freq().max(1);
+            let hz = counter_hz().max(1);
             self.target = hz / 200; // 5 ms
             self.interval = hz / 10; // 100 ms
             // Build the free-slot list 0 -> 1 -> ... -> CAP-1 -> EMPTY.
@@ -258,7 +258,7 @@ impl FqCodel {
             return false;
         }
         self.lazy_init();
-        let now = rdtsc();
+        let now = counter();
 
         let slot = match self.alloc_slot() {
             Some(s) => s,
@@ -425,7 +425,7 @@ impl FqCodel {
     /// fq_codel_dequeue: new flows first, deficit round-robin, CoDel per flow.
     pub fn dequeue(&mut self, out: &mut [u8; MTU]) -> Option<usize> {
         self.lazy_init();
-        let now = rdtsc();
+        let now = counter();
         loop {
             // Pick the head flow: new flows take priority over old.
             let (from_new, fi) = match self.new_q.front() {

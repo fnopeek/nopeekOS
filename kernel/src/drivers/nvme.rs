@@ -159,11 +159,11 @@ fn nvme_lock() -> spin::MutexGuard<'static, Option<NvmeState>> {
     if let Some(g) = NVME.try_lock() {
         return g;
     }
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     loop {
         crate::smp::fiber::spin_or_yield();
         if let Some(g) = NVME.try_lock() {
-            LONGEST_WAIT_TSC.fetch_max(crate::interrupts::rdtsc().saturating_sub(t0), Ordering::Relaxed);
+            LONGEST_WAIT_TSC.fetch_max(crate::time::counter().saturating_sub(t0), Ordering::Relaxed);
             return g;
         }
     }
@@ -171,7 +171,7 @@ fn nvme_lock() -> spin::MutexGuard<'static, Option<NvmeState>> {
 
 /// The longest wait for the controller since the last call, in microseconds.
 pub fn take_longest_wait_us() -> u64 {
-    LONGEST_WAIT_TSC.swap(0, Ordering::Relaxed) / (crate::interrupts::tsc_freq() / 1_000_000).max(1)
+    LONGEST_WAIT_TSC.swap(0, Ordering::Relaxed) / (crate::time::counter_hz() / 1_000_000).max(1)
 }
 
 static LONGEST_WAIT_TSC: AtomicU64 = AtomicU64::new(0);
@@ -269,8 +269,8 @@ impl NvmeState {
     /// again. A timeout, or a completion for an id not in flight, closes
     /// the queue (see `io_dead`).
     fn io_reap(&mut self) -> Result<(u16, u16), BlkError> {
-        let t0 = crate::interrupts::rdtsc();
-        let deadline = t0.saturating_add(crate::interrupts::tsc_freq().saturating_mul(IO_TIMEOUT_SECS));
+        let t0 = crate::time::counter();
+        let deadline = t0.saturating_add(crate::time::counter_hz().saturating_mul(IO_TIMEOUT_SECS));
         let halt = self.msix_vector != 0 && MSIX_CONFIRMED.load(Ordering::Relaxed);
         if halt {
             // The completion's MSI-X must wake this core.
@@ -297,7 +297,7 @@ impl NvmeState {
                 self.io_inflight -= 1;
                 return Ok((cid, (entry.status >> 1) & 0x7FF));
             }
-            if crate::interrupts::rdtsc() > deadline {
+            if crate::time::counter() > deadline {
                 kprintln!("[npk] nvme: no completion within {} s, I/O queue closed until reboot",
                     IO_TIMEOUT_SECS);
                 self.io_close();
@@ -332,8 +332,8 @@ impl NvmeState {
         crate::arch::without_interrupts(|| {
             let entry = cq_read(&self.io_cq, self.io_cq_head);
             if ((entry.status & 1) != 0) != self.io_phase {
-                let step = crate::interrupts::rdtsc()
-                    + crate::interrupts::tsc_freq() / (1_000_000 / HALT_STEP_US);
+                let step = crate::time::counter()
+                    + crate::time::counter_hz() / (1_000_000 / HALT_STEP_US);
                 crate::interrupts::halt_until(Some(deadline.min(step)), crate::smp::per_core::WAKE_HLT_FALLBACK);
             }
         });
@@ -903,10 +903,10 @@ pub fn shutdown() {
     }
     let cc = state.regs.r32(REG_CC);
     state.regs.w32(REG_CC, (cc & !CC_SHN_MASK) | CC_SHN_NORMAL);
-    let deadline = crate::interrupts::rdtsc()
-        .saturating_add(crate::interrupts::tsc_freq().saturating_mul(SHUTDOWN_TIMEOUT_SECS));
+    let deadline = crate::time::counter()
+        .saturating_add(crate::time::counter_hz().saturating_mul(SHUTDOWN_TIMEOUT_SECS));
     while state.regs.r32(REG_CSTS) & CSTS_SHST_MASK != CSTS_SHST_DONE {
-        if crate::interrupts::rdtsc() > deadline {
+        if crate::time::counter() > deadline {
             kprintln!("[npk] nvme: shutdown not complete within {} s", SHUTDOWN_TIMEOUT_SECS);
             return;
         }
@@ -1100,8 +1100,8 @@ const NVME_DRAIN_LOG_EVERY: u64 = 512;
 const NVME_SLOW_US: u64 = 200; // a completion that spun > this is "slow"
 
 fn record_drain(t0: u64, vector: crate::irq::Irq) {
-    let dt = crate::interrupts::rdtsc().saturating_sub(t0);
-    let mhz = (crate::interrupts::tsc_freq() / 1_000_000).max(1);
+    let dt = crate::time::counter().saturating_sub(t0);
+    let mhz = (crate::time::counter_hz() / 1_000_000).max(1);
     let us = dt / mhz;
     NVME_DRAIN_TSC_SUM.fetch_add(dt, Ordering::Relaxed);
     NVME_DRAIN_TSC_MAX.fetch_max(dt, Ordering::Relaxed);

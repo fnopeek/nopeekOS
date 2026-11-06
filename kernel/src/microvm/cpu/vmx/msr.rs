@@ -144,7 +144,7 @@ unsafe fn set_intercept(bitmap_phys: u64, msr: u32, read: bool, write: bool) {
 /// Emulated RDMSR.
 pub fn read(st: &GuestMsrs, apic_id: u8, lapic_on: bool, msr: u32) -> MsrResult<u64> {
     Ok(match msr {
-        MSR_TSC => crate::interrupts::rdtsc(),
+        MSR_TSC => crate::time::counter(),
         MSR_PAT => super::vmcs::read_guest_pat().map_err(|_| ())?,
         // Locked, VMX off — the guest has no VMX (KVM without nested).
         MSR_FEATURE_CONTROL => 1,

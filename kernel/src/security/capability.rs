@@ -7,7 +7,6 @@
 use bitflags::bitflags;
 use spin::Mutex;
 use crate::audit::{self, AuditOp, DenyReason};
-use crate::interrupts;
 
 /// 256-bit capability token ID (post-quantum: Grover-safe at 128-bit effective)
 pub type CapId = [u8; 32];
@@ -96,7 +95,7 @@ pub struct Capability {
 
 impl Capability {
     pub fn is_expired(&self) -> bool {
-        self.expires_at.map_or(false, |exp| interrupts::ticks() >= exp)
+        self.expires_at.map_or(false, |exp| crate::time::ticks() >= exp)
     }
 }
 
@@ -152,7 +151,7 @@ impl Vault {
             })?;
 
         // Child expiry cannot exceed parent expiry
-        let expires_at = match (ttl_ticks.map(|ttl| interrupts::ticks() + ttl), parent.expires_at) {
+        let expires_at = match (ttl_ticks.map(|ttl| crate::time::ticks() + ttl), parent.expires_at) {
             (Some(child), Some(parent_exp)) => Some(child.min(parent_exp)),
             (None, Some(parent_exp)) => Some(parent_exp),
             (exp, None) => exp,

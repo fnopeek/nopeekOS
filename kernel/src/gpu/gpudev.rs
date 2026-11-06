@@ -430,8 +430,8 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     }
     // Guest resources in the card's VRAM from a module before leave the
     // guest first; the worker that does it parks at most 100 ms.
-    let end = crate::interrupts::rdtsc() + 2 * crate::interrupts::tsc_freq();
-    while VRAM_LOST.load(Ordering::Acquire) && crate::interrupts::rdtsc() < end {
+    let end = crate::time::counter() + 2 * crate::time::counter_hz();
+    while VRAM_LOST.load(Ordering::Acquire) && crate::time::counter() < end {
         fiber::spin_or_yield();
     }
     if VRAM_LOST.load(Ordering::Acquire) {
@@ -653,7 +653,7 @@ pub fn poll(dev: PciAddr, out: &mut [u8]) -> i32 {
     let core = crate::smp::per_core::current_core_id();
     MODULE_CORE.store(core, Ordering::Relaxed);
     POLL_HALTED_TSC.store(crate::smp::per_core::halt_snapshot(core).0, Ordering::Relaxed);
-    POLL_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+    POLL_TSC.store(crate::time::counter(), Ordering::Relaxed);
     let _ = fiber::take_longest_run(core);
     let mut n = 0;
     while (n + 1) * JOB_BYTES <= out.len() {
@@ -735,8 +735,8 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
     mark_done(seq);
     if STALLED.load(Ordering::Acquire) && is_done(STALL_SEQ.load(Ordering::Acquire)) {
         STALLED.store(false, Ordering::Release);
-        let hz = crate::interrupts::tsc_freq().max(1);
-        let ms = crate::interrupts::rdtsc().saturating_sub(STALL_TSC.load(Ordering::Relaxed)) * 1000 / hz;
+        let hz = crate::time::counter_hz().max(1);
+        let ms = crate::time::counter().saturating_sub(STALL_TSC.load(Ordering::Relaxed)) * 1000 / hz;
         crate::kprintln!("[npk] gpu: the module held job {} for {} ms past its deadline; the CPU composed meanwhile",
             STALL_SEQ.load(Ordering::Relaxed), ms);
     }
@@ -1136,7 +1136,7 @@ fn halt_for(seq: u32, deadline: u64) {
         if !is_done(seq) && READY.load(Ordering::Acquire) {
             // In short steps: the halt re-arms the core's one-shot timer, and
             // a deadline someone else armed earlier is late by one step at most.
-            let step = crate::interrupts::rdtsc() + crate::interrupts::tsc_freq() / (1_000_000 / HALT_STEP_US);
+            let step = crate::time::counter() + crate::time::counter_hz() / (1_000_000 / HALT_STEP_US);
             crate::interrupts::halt_until(Some(deadline.min(step)), crate::smp::per_core::WAKE_HLT_FALLBACK);
         }
     });
@@ -1215,8 +1215,8 @@ fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
         if is_done(seq) {
             continue;
         }
-        let step = crate::interrupts::rdtsc()
-            + PARK_STEP_MS * (crate::interrupts::tsc_freq() / 1000);
+        let step = crate::time::counter()
+            + PARK_STEP_MS * (crate::time::counter_hz() / 1000);
         fiber::wait(fiber::SIG_GPU_DONE, deadline.min(step));
     }
 }
@@ -1227,7 +1227,7 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
     if is_done(seq) {
         return Some(ERRORS.lock().remove(&seq).unwrap_or(0));
     }
-    if !READY.load(Ordering::Acquire) || crate::interrupts::rdtsc() >= deadline {
+    if !READY.load(Ordering::Acquire) || crate::time::counter() >= deadline {
         // A job the module never took must not run after the CPU redid it.
         let mut st = STATE.lock();
         let queued = st.queue.len();
@@ -1239,7 +1239,7 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
             mark_done(seq);
             let core = MODULE_CORE.load(Ordering::Relaxed);
             if core != usize::MAX {
-                let span = crate::interrupts::rdtsc().saturating_sub(POLL_TSC.load(Ordering::Relaxed));
+                let span = crate::time::counter().saturating_sub(POLL_TSC.load(Ordering::Relaxed));
                 let halted = crate::smp::per_core::halt_snapshot(core).0
                     .saturating_sub(POLL_HALTED_TSC.load(Ordering::Relaxed));
                 let (longest, longest_waker, longest_pid) = fiber::take_longest_run(core);
@@ -1247,14 +1247,14 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
                 *MISSED.lock() = Some(Missed {
                     core,
                     task: crate::smp::per_core::native_task(core),
-                    since_poll_ms: span * 1000 / crate::interrupts::tsc_freq().max(1),
+                    since_poll_ms: span * 1000 / crate::time::counter_hz().max(1),
                     halted_pct: (halted.min(span) * 100).checked_div(span).unwrap_or(0),
                     fibers: crate::smp::fiber::fiber_count(core),
-                    longest_run_ms: longest * 1000 / crate::interrupts::tsc_freq().max(1),
+                    longest_run_ms: longest * 1000 / crate::time::counter_hz().max(1),
                     longest_was_module: longest_waker == module,
                     longest_pid,
                     running: fiber::running_on(core).map(|(w, pid, t0)| (
-                        crate::interrupts::rdtsc().saturating_sub(t0) * 1000 / crate::interrupts::tsc_freq().max(1),
+                        crate::time::counter().saturating_sub(t0) * 1000 / crate::time::counter_hz().max(1),
                         w == module, pid)),
                     // SAFETY: HALT_SITE holds null or a `&'static Location`.
                     halted_in: HALT_SITE.get(core)
@@ -1275,7 +1275,7 @@ fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
 fn stall(seq: u32) {
     if !STALLED.swap(true, Ordering::AcqRel) {
         STALL_SEQ.store(seq, Ordering::Release);
-        STALL_TSC.store(crate::interrupts::rdtsc(), Ordering::Relaxed);
+        STALL_TSC.store(crate::time::counter(), Ordering::Relaxed);
         STALLS.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -1292,7 +1292,7 @@ pub fn stalled_now() -> bool {
 }
 
 fn deadline() -> u64 {
-    crate::interrupts::rdtsc() + JOB_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000)
+    crate::time::counter() + JOB_TIMEOUT_MS * (crate::time::counter_hz() / 1000)
 }
 
 /// Before the CPU writes the buffer whose first pixel is at `addr`: wait
@@ -1522,7 +1522,7 @@ pub fn cursor_move(x: i32, y: i32, shown: bool) -> bool {
 /// Wait for scene job `seq`: 0 when the module composed it, else why not.
 #[track_caller]
 pub fn wait_scene(seq: u32) -> i32 {
-    let t0 = crate::interrupts::rdtsc();
+    let t0 = crate::time::counter();
     let r = wait_seq(seq, deadline());
     note_scene_wait(t0);
     r
@@ -1539,8 +1539,8 @@ fn note_scene_wait(t0: u64) {
 /// page walk per 4 KB page in the module, once.
 #[track_caller]
 pub fn wait_scene_bound(seq: u32) -> i32 {
-    let t0 = crate::interrupts::rdtsc();
-    let r = wait_seq(seq, t0 + BIND_TIMEOUT_MS * (crate::interrupts::tsc_freq() / 1000));
+    let t0 = crate::time::counter();
+    let r = wait_seq(seq, t0 + BIND_TIMEOUT_MS * (crate::time::counter_hz() / 1000));
     note_scene_wait(t0);
     r
 }
