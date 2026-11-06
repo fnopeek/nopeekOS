@@ -31,6 +31,8 @@ pub struct Hooks {
     pub echo: fn(u8),
     /// A key, if one is waiting.
     pub key: fn() -> Option<u8>,
+    /// A `kdebug!` line, which skips the screens but goes to the remote mirror.
+    pub quiet: fn(&str),
 }
 
 static HOOKS: spin::Once<Hooks> = spin::Once::new();
@@ -121,7 +123,7 @@ pub fn quiet_line(args: fmt::Arguments) {
     if CAPTURE.lock().is_none() { return; }
     let line = alloc::format!("{}", args);
     capture_bytes(&line);
-    crate::shade::terminal::stream_push_global(&line);
+    if let Some(h) = HOOKS.get() { (h.quiet)(&line); }
 }
 
 /// Append to the kernel log if it runs (called from write_str).

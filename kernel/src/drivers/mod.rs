@@ -2,37 +2,72 @@
 //!
 //! All hardware-facing code: PCI, block devices, network, USB, serial, GPU HAL.
 
+#[cfg(target_arch = "x86_64")]
 pub mod pci;
+#[cfg(target_arch = "x86_64")]
 pub mod nvme;
+#[cfg(target_arch = "x86_64")]
 pub mod virtio_blk;
+#[cfg(target_arch = "x86_64")]
 pub mod virtio_net;
+#[cfg(target_arch = "x86_64")]
 pub mod intel_nic;
+#[cfg(target_arch = "x86_64")]
 pub mod igc;
+#[cfg(target_arch = "x86_64")]
 pub mod rtl8153;
+#[cfg(target_arch = "x86_64")]
 pub mod xhci;
+#[cfg(target_arch = "x86_64")]
 pub mod usb_desc;
+#[cfg(target_arch = "x86_64")]
 pub mod usb_storage;
+#[cfg(target_arch = "x86_64")]
 pub mod sdhci;
+#[cfg(target_arch = "x86_64")]
 pub mod mmc_sd;
+#[cfg(target_arch = "x86_64")]
 pub mod keyboard;
 pub mod font8x16;
+#[cfg(target_arch = "x86_64")]
 pub mod framebuffer;
 pub mod serial;
+#[cfg(target_arch = "x86_64")]
 pub mod uart16550;
+#[cfg(target_arch = "x86_64")]
 pub use uart16550 as uart;
+#[cfg(target_arch = "aarch64")]
+pub mod pl011;
+#[cfg(target_arch = "aarch64")]
+pub use pl011 as uart;
+#[cfg(target_arch = "x86_64")]
 pub mod rtc;
+#[cfg(target_arch = "x86_64")]
 pub mod blkdev;
+#[cfg(target_arch = "x86_64")]
 pub mod netdev;
+#[cfg(target_arch = "x86_64")]
 pub mod wifi;
+#[cfg(target_arch = "x86_64")]
 pub mod report;
+#[cfg(target_arch = "x86_64")]
 pub mod acpi;
+#[cfg(target_arch = "x86_64")]
 pub mod acpi_processor;
+#[cfg(target_arch = "x86_64")]
 pub mod vtd;
+#[cfg(target_arch = "x86_64")]
 pub mod amd_vi;
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod amd_vi_regs;
+#[cfg(target_arch = "x86_64")]
 pub mod iommu;
+#[cfg(target_arch = "x86_64")]
 pub mod smbus;
+#[cfg(target_arch = "x86_64")]
 pub mod battery;
+#[cfg(target_arch = "x86_64")]
 pub mod ec;
+#[cfg(target_arch = "x86_64")]
 pub mod sci;

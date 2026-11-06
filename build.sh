@@ -17,6 +17,11 @@
 #   qemu-intel           Force Intel CPU emulation regardless of host
 #   qemu-amd             Force AMD CPU emulation regardless of host
 #
+# AArch64 (bring-up; QEMU virt stands in for the Raspberry Pi 5):
+#   build-arm            Compile the AArch64 kernel into target/kernel-aarch64.img
+#   qemu-arm             Build + run in QEMU virt (Cortex-A76, GICv2, EL2), serial
+#   qemu-arm-gui         Same, serial console in a window
+#
 # Installer / release:
 #   installer            Two-pass installer build (bundled assets)
 #   qemu-installer       Installer + run (wipes disk, fresh install)
@@ -817,6 +822,55 @@ run_qemu_generic() {
 }
 
 # ============================================================
+# AArch64
+# ============================================================
+
+ARM_TARGET="aarch64-nopeek"
+ARM_ELF="$PROJECT_DIR/target/$ARM_TARGET/release/nopeekos-kernel"
+ARM_IMG="$PROJECT_DIR/target/kernel-aarch64.img"
+
+# The kernel as a flat arm64 Image (header in arch/aarch64/boot.s), as
+# the Pi firmware and QEMU's -kernel load it. C parts of dependencies
+# (blake3's NEON code) build with clang, which cross-compiles without a
+# separate toolchain.
+build_arm() {
+    log "Building AArch64 kernel..."
+    cd "$PROJECT_DIR"
+    CC_aarch64_nopeek=clang AR_aarch64_nopeek=llvm-ar \
+    CFLAGS_aarch64_nopeek="--target=aarch64-unknown-none -ffreestanding -mcpu=cortex-a76" \
+    cargo build \
+        --release \
+        --locked \
+        --target "$ARM_TARGET" \
+        -p nopeekos-kernel \
+        -Zbuild-std=core,alloc \
+        -Zbuild-std-features=compiler-builtins-mem \
+        2>&1
+    llvm-objcopy -O binary "$ARM_ELF" "$ARM_IMG"
+    ok "AArch64 image: $ARM_IMG ($(du -h "$ARM_IMG" | cut -f1))"
+}
+
+# QEMU virt as the Pi 5's stand-in: Cortex-A76, GICv2 (the Pi's GIC-400),
+# EL2 with virtualization, the device tree passed in x0.
+run_qemu_arm() {
+    local display="$1"
+    local -a display_args
+    if [ "$display" = "gui" ]; then
+        display_args=(-display gtk,show-menubar=off -monitor none -serial vc)
+    else
+        display_args=(-nographic -serial mon:stdio)
+    fi
+    qemu-system-aarch64 \
+        -M virt,gic-version=2,virtualization=on \
+        -cpu cortex-a76 \
+        -smp "${QEMU_SMP:-4}" \
+        -m 4096M \
+        "${display_args[@]}" \
+        -kernel "$ARM_IMG" \
+        -no-reboot
+}
+
+# ============================================================
 # USB Stick
 # ============================================================
 
@@ -976,6 +1030,11 @@ Cross-vendor testing (TCG, slow but vendor-correct):
   qemu-intel           Force Intel CPU emulation regardless of host
   qemu-amd             Force AMD CPU emulation regardless of host
 
+AArch64 (bring-up; QEMU virt stands in for the Raspberry Pi 5):
+  build-arm            Compile the AArch64 kernel into target/kernel-aarch64.img
+  qemu-arm             Build + run in QEMU virt (Cortex-A76, GICv2, EL2), serial
+  qemu-arm-gui         Same, serial console in a window
+
 Installer / release:
   installer            Two-pass installer build (kernel.efi + bundled assets)
   qemu-installer       Installer + run (wipes NVMe, attaches installer USB)
@@ -1074,6 +1133,17 @@ case "${1:-}" in
         build_installer_disk
         wipe_disk_img
         run_qemu_generic gui kvm installer
+        ;;
+    build-arm)
+        build_arm
+        ;;
+    qemu-arm)
+        build_arm
+        run_qemu_arm serial
+        ;;
+    qemu-arm-gui)
+        build_arm
+        run_qemu_arm gui
         ;;
     debug)
         check_deps

@@ -1,6 +1,9 @@
 //! nopeekOS Kernel
 //!
 //! Not Unix. Not POSIX. No legacy.
+//!
+//! Modules marked `cfg(target_arch = "x86_64")` are not ported to AArch64
+//! yet; each loses the mark when it builds there.
 
 #![no_std]
 #![no_main]
@@ -8,570 +11,125 @@
 
 extern crate alloc;
 
+#[cfg(target_arch = "x86_64")]
 core::arch::global_asm!(include_str!("boot.s"), options(att_syntax));
 
-// Boot info handed off from the UEFI stub to kernel_main.
-// `mod boot_uefi` does the UEFI-side collection; `kernel_main` reads
-// the populated struct without any UEFI ABI knowledge.
+// Boot info handed off from the firmware stub to kernel_main.
 pub mod boot_info;
+#[cfg(target_arch = "x86_64")]
 mod boot_uefi;
+#[cfg(target_arch = "x86_64")]
+mod kmain;
 
 // ── Module groups ──────────────────────────────────────────────
 mod arch;
+mod platform;
 mod drivers;
-pub use drivers::{serial, pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
+pub use drivers::serial;
+#[cfg(target_arch = "x86_64")]
+pub use drivers::{pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
+#[cfg(target_arch = "x86_64")]
 pub use drivers::{xhci, usb_storage, keyboard, framebuffer, rtc, blkdev, netdev, acpi, smbus, battery, ec, sci};
+#[cfg(target_arch = "x86_64")]
 pub use drivers::wifi;
 
 mod mm;
-pub use mm::{memory, heap, paging};
+pub use mm::{memory, heap};
+#[cfg(target_arch = "x86_64")]
+pub use mm::paging;
 
+#[cfg(target_arch = "x86_64")]
 mod security;
+#[cfg(target_arch = "x86_64")]
 pub use security::{capability, audit, csprng, disk_key};
 
+#[cfg(target_arch = "x86_64")]
 mod crypto;
+#[cfg(target_arch = "x86_64")]
 pub use crypto::{tls, update_key};
 
+#[cfg(target_arch = "x86_64")]
 mod storage;
+#[cfg(target_arch = "x86_64")]
 pub use storage::{npkfs, fat32, gpt, ext};
 
+#[cfg(target_arch = "x86_64")]
 mod gui;
+#[cfg(target_arch = "x86_64")]
 pub use gui::theme;
 
 // ── Standalone modules ────────────────────────────────────────
-mod interrupts;
-mod irq;
-mod ioapic;
-mod notify;
-mod status;
-mod input;
-mod net;
-mod audio;
-mod capture;
-mod camfeed;
-mod devices;
-mod intent;
-mod config;
-mod settings;
-mod time;
-mod shutdown;
-mod vga;
-mod hw;
 mod fatal;
+mod time;
+#[cfg(target_arch = "x86_64")]
+mod interrupts;
+#[cfg(target_arch = "x86_64")]
+mod irq;
+#[cfg(target_arch = "x86_64")]
+mod ioapic;
+#[cfg(target_arch = "x86_64")]
+mod notify;
+#[cfg(target_arch = "x86_64")]
+mod status;
+#[cfg(target_arch = "x86_64")]
+mod input;
+#[cfg(target_arch = "x86_64")]
+mod net;
+#[cfg(target_arch = "x86_64")]
+mod audio;
+#[cfg(target_arch = "x86_64")]
+mod capture;
+#[cfg(target_arch = "x86_64")]
+mod camfeed;
+#[cfg(target_arch = "x86_64")]
+mod devices;
+#[cfg(target_arch = "x86_64")]
+mod intent;
+#[cfg(target_arch = "x86_64")]
+mod config;
+#[cfg(target_arch = "x86_64")]
+mod settings;
+#[cfg(target_arch = "x86_64")]
+mod shutdown;
+#[cfg(target_arch = "x86_64")]
+mod vga;
+#[cfg(target_arch = "x86_64")]
+mod hw;
+#[cfg(target_arch = "x86_64")]
 mod forge_rt;
+#[cfg(target_arch = "x86_64")]
 mod forge_tests;
+#[cfg(target_arch = "x86_64")]
 mod wasm;
+#[cfg(target_arch = "x86_64")]
 mod wasi;
+#[cfg(target_arch = "x86_64")]
 mod shell;
+#[cfg(target_arch = "x86_64")]
 mod setup;
+#[cfg(target_arch = "x86_64")]
 mod gpu;
+#[cfg(target_arch = "x86_64")]
 mod shade;
+#[cfg(target_arch = "x86_64")]
 mod smp;
+#[cfg(target_arch = "x86_64")]
 mod cpu_errata;
+#[cfg(target_arch = "x86_64")]
 mod cpu_vulns;
+#[cfg(target_arch = "x86_64")]
 mod spec_mitigations;
+#[cfg(target_arch = "x86_64")]
 mod process;
+#[cfg(target_arch = "x86_64")]
 mod tss;
+#[cfg(target_arch = "x86_64")]
 mod microvm;
+#[cfg(target_arch = "x86_64")]
 #[allow(dead_code, unused_imports)]
 mod install;
 
 use core::panic::PanicInfo;
-
-
-/// The screens that mirror the console: the boot framebuffer and the
-/// desktop's terminal.
-fn console_screens(s: &str) {
-    framebuffer::write_str(s);
-    shade::terminal::write(s);
-}
-
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) -> ! {
-    vga::show_boot_banner();
-
-    {
-        let mut serial = serial::SERIAL.lock();
-        serial.init();
-    }
-    serial::set_hooks(serial::Hooks {
-        write: console_screens,
-        echo: framebuffer::write_byte,
-        key: keyboard::read_key,
-    });
-
-    kprintln!("                                __   ____  _____");
-    kprintln!("   ____  ____  ____  ___  ___  / /__/ __ \\/ ___/");
-    kprintln!("  / __ \\/ __ \\/ __ \\/ _ \\/ _ \\/ //_/ / / /\\__ \\ ");
-    kprintln!(" / / / / /_/ / /_/ /  __/  __/ ,< / /_/ /___/ / ");
-    kprintln!("/_/ /_/\\____/ .___/\\___/\\___/_/|_|\\____//____/  ");
-    kprintln!("           /_/");
-    kprintln!();
-    // The real crate version, so a boot log identifies the image it came from.
-    kprintln!("[npk] nopeekOS v{}", env!("CARGO_PKG_VERSION"));
-    kprintln!();
-
-    interrupts::init();
-
-    arch::calibrate_counter();
-    crate::time::init_clock();
-    kprintln!("[npk] TSC: {} MHz", crate::time::counter_hz() / 1_000_000);
-    keyboard::init();
-
-    memory::init(boot_info);
-
-
-    heap::init();
-
-    // Start capturing boot log for debug shell (needs heap)
-    serial::start_capture();
-
-    paging::init();
-
-    // Framebuffer init (needs memory + paging for MMIO mapping)
-    framebuffer::init_from_boot_info(boot_info);
-
-    // ACPI: cache the RSDP the UEFI stub picked up via the
-    // EFI Configuration Table, then walk RSDT/XSDT for the FADT.
-    acpi::set_rsdp(boot_info.acpi_rsdp);
-    acpi::init();
-
-    let pci_count = pci::scan();
-    kprintln!("[npk] PCI: {} devices", pci_count);
-    gpu::reserve_intel_stolen();
-    vga::show_status(b"PCI bus scanned");
-
-    // SMBus host controller (Intel i801) — used by the battery status driver
-    // on notebooks. No-op when absent (desktops/QEMU).
-    smbus::init();
-
-    // USB HID (xHCI) — before any user input is needed. One pass finds
-    // keyboards and mice alike; `init_mouse` only reports what it found.
-    if xhci::init() {
-        vga::show_status(b"USB keyboard online");
-    }
-    if xhci::init_mouse() {
-        vga::show_status(b"USB mouse online");
-    }
-
-    // PS/2 touchpad/mouse on the i8042 aux port — only when there's no USB
-    // mouse (e.g. the notebook's internal touchpad). Gives a basic cursor.
-    if keyboard::init_mouse() {
-        vga::show_status(b"PS/2 pointer online");
-    }
-
-    // APIC timer: if the PIT doesn't work (UEFI-only boards), use the Local APIC for 100 Hz ticks.
-    // Must be after xhci::init so poll_events_irq can drain USB events.
-    interrupts::init_apic_timer();
-    // I/O APIC: found and every non-firmware pin masked; nothing is routed
-    // through it until a driver asks.
-    ioapic::init();
-
-    // This core's GDT + TSS (double-fault stack, valid TR for VMX), then
-    // switch the double fault onto it. Before the APs start: they share
-    // the IDT and install their own TSS first thing.
-    tss::init_core();
-    interrupts::use_double_fault_stack();
-    // SMP: discover cores via ACPI MADT, boot Application Processors
-    smp::init();
-
-    // Validate the fiber context-switch primitive on Core 0.
-    // Prints `[fiber] self-test OK`.
-    smp::fiber::self_test();
-
-    // MicroVM: vendor-detect (Intel VMX / AMD SVM), probe
-    // capabilities. Host-state setup reads TR via `str` and walks the
-    // GDT for the TSS base — every core has both (`tss::init_core`).
-    microvm::init();
-
-    if virtio_blk::init() {
-        vga::show_status(b"virtio-blk online");
-    }
-    if nvme::init() {
-        vga::show_status(b"NVMe online");
-    }
-    drivers::mmc_sd::init();
-    if !virtio_blk::is_available() && !nvme::is_available() {
-        kprintln!("[npk] No block device found.");
-    }
-
-    // Wall clock from the RTC (no network needed), and the zone from the
-    // ESP copy so the login screen shows local time.
-    time::zone::load_from_esp();
-    if let Some(t) = time::init_from_rtc() {
-        crate::kdebug!("[npk] RTC: {}", time::format(t));
-        vga::show_status(b"RTC clock set");
-    } else {
-        kprintln!("[npk] RTC: read failed");
-    }
-
-    // Before the network: DNS, NTP and TCP draw ports and ids from it.
-    csprng::init();
-
-    // Both PCI NICs unconditionally (`|`, not `||`): a short circuit left the
-    // second one uninitialised on a machine with two, and the survivor then held
-    // the whole data path — including traffic that belonged elsewhere.
-    //
-    // The USB dongle is NOT free to probe: nic_attach halts and RESETS an xHCI
-    // controller, which drops every device already addressed on it. So it is only
-    // worth that price when no PCI NIC came up (machines without a wired port).
-    // `nic_attach` tries the controller holding keyboard/mouse last and
-    // re-enumerates it if the dongle is not there either.
-    let net_up = virtio_net::init() | intel_nic::init();
-    if !net_up {
-        rtl8153::init();
-        // The dongle scan reset every controller it touched, including any
-        // USB mouse on it. The earlier PS/2 probe was skipped while that
-        // mouse was alive, so probe the aux port now.
-        if !xhci::mouse_available() && keyboard::init_mouse() {
-            vga::show_status(b"PS/2 pointer online");
-        }
-    }
-    // The i8042 by interrupt — only now: `init_mouse` above reads
-    // the controller's answers itself, and an active IRQ would take them.
-    // The tick still drains as fallback.
-    keyboard::enable_irq();
-    if netdev::is_available() {
-        vga::show_status(b"Network online");
-
-        // Fill the carrier cache BEFORE the first DHCP. send() refuses to use an
-        // interface without a link, and the wired carrier is only known through
-        // this cache — which is otherwise first written by the ~1 Hz link tick,
-        // long after boot DHCP has already given up.
-        netdev::refresh_link_state();
-
-        // Boot is the one place where waiting is right: nothing else runs yet,
-        // there is no prompt to take away, and NTP below wants an address.
-        if net::dhcp::run_blocking(5000) {
-            vga::show_status(b"DHCP configured");
-        }
-        // Seed the active-interface tracker so the periodic link tick only
-        // re-configures on a real change (cable pulled, WiFi associated).
-        net::seed_active();
-        // From here the host NIC is drained on its RX interrupt, not by
-        // Core 0's shell loop.
-        net::napi::start();
-    } else {
-        kprintln!("[npk] No network device found.");
-    }
-
-    // Select random color scheme for login screen aurora background
-
-    // Debug shell disabled — enable when needed:
-    // if netdev::is_available() { shell::start_debug_listener(); }
-
-    wasm::init();
-    vga::show_status(b"WASM runtime online (wasmi)");
-
-    // === Identity: Passphrase → Disk Key ===
-    //
-    // First boot:       Setup wizard (storage, name, passphrase, settings)
-    // Subsequent boots: Enter passphrase → open the keyslot
-    //
-    // No users. No accounts. Your passphrase IS your identity.
-
-    // Try to mount existing npkFS first
-    let mut mounted = false;
-    if blkdev::is_available() {
-        // Installer build (USB stick): always install to NVMe, never ask for passphrase
-        if install::has_installer() && nvme::is_available() {
-            kprintln!();
-            match install::install_to_nvme() {
-                Ok(()) => {
-                    mounted = true;
-                    vga::show_status(b"Installed to NVMe");
-                }
-                Err(e) => {
-                    kprintln!("[npk] Installation failed: {}", e);
-                    kprintln!("[npk] System halted.");
-                    crate::arch::halt_forever()
-                }
-            }
-        } else {
-            // Normal boot: detect GPT partition layout, mount existing npkFS.
-            // Set BOTH offset AND size — without the size, block_count()
-            // overshoots into the backup-GPT region and the bitmap can
-            // hand out blocks that fail to write with OutOfRange.
-            // A GPT we cannot read is not the same as a disk without one:
-            // treating both as "offset 0" would point the superblock ring
-            // (and the format below) at the GPT and the ESP.
-            let partition_found = if nvme::is_available() {
-                match gpt::detect_npkfs_partition() {
-                    Some((offset, size)) => {
-                        blkdev::set_partition_offset(offset);
-                        blkdev::set_partition_size(size);
-                        true
-                    }
-                    None => {
-                        kprintln!("[npk] npkfs: no npkFS partition in the GPT — offset stays 0");
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-
-            match npkfs::mount() {
-                Ok(()) => {
-                    mounted = true;
-                    vga::show_status(b"npkFS mounted");
-                }
-                Err(e) if blkdev::is_available() => {
-                    // "mount failed" and "there is no filesystem here" are
-                    // different facts; formatting on the former would destroy
-                    // an installation over one unreadable superblock.
-                    kprintln!("[npk] npkfs: mount failed: {}", e);
-                    let probe = match npkfs::probe_disk() {
-                        Ok(p) => p,
-                        Err(pe) => {
-                            kprintln!("[npk] npkfs: superblock ring unreadable: {}", pe);
-                            npkfs::halt_for_unmountable_disk(&Default::default());
-                        }
-                    };
-                    kprintln!(
-                        "[npk] npkfs: sb ring — {} valid, {} bad csum, {} legacy, {} foreign, {} blank, {} unreadable",
-                        probe.valid, probe.bad_checksum, probe.legacy,
-                        probe.foreign, probe.blank, probe.read_errors,
-                    );
-                    // Format ONLY on a disk that is provably empty where we
-                    // would write: every slot read, every slot zero, and no
-                    // partition table we failed to place ourselves inside of.
-                    let gpt_says_raw = matches!(gpt::has_gpt_header(), Some(false));
-                    if probe.is_pristine() && (partition_found || gpt_says_raw) {
-                        kprintln!("[npk] npkfs: disk is blank — formatting");
-                        match npkfs::mkfs() {
-                            Ok(()) => {
-                                if npkfs::mount().is_ok() {
-                                    mounted = true;
-                                    vga::show_status(b"npkFS formatted");
-                                } else {
-                                    kprintln!("[npk] npkfs: mount after format failed");
-                                }
-                            }
-                            Err(e) => kprintln!("[npk] npkfs: format failed: {}", e),
-                        }
-                    } else {
-                        npkfs::halt_for_unmountable_disk(&probe);
-                    }
-                }
-                Err(e) => kprintln!("[npk] npkfs: mount failed, no block device: {}", e),
-            }
-        }
-    }
-
-    // Setup has run on this disk iff a keyslot is in use. Nothing else can
-    // be asked before unlock: every object is encrypted, trees included.
-    let is_first_boot = !mounted || !npkfs::has_keyslot();
-
-    if is_first_boot {
-        // === First boot: Setup Wizard (identity, settings) ===
-        if !setup::run_fresh_install() {
-            kprintln!("[npk] Setup failed. System halted.");
-            crate::arch::halt_forever()
-        }
-        vga::show_status(b"Setup complete");
-
-        // Seed bundled assets into npkFS now that the disk key is set,
-        // so font + WASM modules end up AEAD-encrypted like everything
-        // else. No-op on non-installer builds. If the user re-runs the
-        // installer on a dirty partition, we get a fresh seed with the
-        // new disk key.
-        install::seed_bundled_assets();
-    } else {
-        // === Subsequent boot: Verify passphrase ===
-        if framebuffer::is_available() {
-            // Graphical login screen
-            gui::login::run();
-        } else {
-            // Fallback: text-mode login (serial only, no framebuffer)
-            text_mode_auth();
-        }
-        vga::show_status(b"Identity verified");
-    }
-
-    // Suppress framebuffer immediately after login (shade takes over)
-    if framebuffer::is_available() {
-        framebuffer::set_gui_mode(true);
-    }
-
-    // Load system config (after identity — config is encrypted at rest)
-    config::load();
-    serial::set_verbose(config::bootlog_verbose());
-    // The module engine is a config setting so it persists across reboots
-    // and also applies to autostart and driver modules.
-    wasm::load_engine_default();
-    keyboard::cache_layout();
-    if let Some(v) = config::get("mouse_speed") {
-        if let Ok(n) = v.trim().parse::<i32>() { shade::cursor::set_speed(n); }
-    }
-    if let Some(v) = config::get("mouse_size") {
-        if let Ok(n) = v.trim().parse::<i32>() { shade::cursor::set_size(n); }
-    }
-
-    // Inter Variable UI font — read from npkFS (seeded by installer), BLAKE3
-    // verified, parsed via fontdue. Login screen + terminals use Spleen
-    // bitmap; the UI font is only needed once widgets come up.
-    gui::text::init();
-
-    // Phosphor icon atlas — alpha-only bitmaps from npkFS
-    // (sys/icons/phosphor), parsed + cached for the CPU rasterizer.
-    gui::icons::init();
-
-    // Trust anchors delivered as data (sys/certs) — OTA assets plus
-    // whatever was trusted by hand. Loaded here, after login, because
-    // npkFS content is AEAD-encrypted and unreadable before the master
-    // key exists. Until this point the built-in floor is the trust set,
-    // which is exactly what the OTA path needs and no more.
-    tls::certstore::load_store();
-
-    // Create home directory and set as working directory
-    intent::setup_home();
-
-    let (vault_ref, root_id) = capability::Vault::init();
-    vga::show_status(b"Capability Vault online");
-
-    // Delegate a console session from root (no DELEGATE/REVOKE rights)
-    let session_id = {
-        use capability::{Rights, ResourceKind};
-        let mut vault = vault_ref.lock();
-        vault.create(
-            root_id,
-            ResourceKind::Kernel,
-            Rights::READ | Rights::WRITE | Rights::EXECUTE | Rights::AUDIT,
-            None,
-        ).expect("failed to create session capability")
-    };
-    vga::show_status(b"Console session issued");
-
-    // Start npk-shell listener (encrypted remote access, port 4444)
-    shell::start_listener();
-
-    kprintln!("[npk] System ready.");
-    ext::store_ready();
-
-    // Start shade compositor (GUI_MODE already set after login)
-    if framebuffer::is_available() {
-        shade::init();
-        // Autostart apps (deck, drivers) via the widget-spawn path —
-        // never via `run`, which would capture input. Names from the
-        // `autostart` config key.
-        shade::start_autostart();
-        // The stored wallpaper, or a random one if none was ever chosen.
-        intent::apply_startup_wallpaper();
-        shade::render_frame();
-    }
-
-    // Everything above is now in the log; file it before the loop takes over.
-    intent::system::persist_boot_log();
-
-    // The shell runs as a fiber on Core 0, which gets the same scheduler as
-    // a worker so other fibers can run beside it. 2 MiB like the boot stack —
-    // Core-0 intents run deep chains (TLS, HTTP) inline, and a fiber stack
-    // has no guard page.
-    *SHELL_ARGS.lock() = Some((vault_ref, session_id));
-    smp::fiber::admit_with_stack(0, shell_fiber, 0, 2 * 1024 * 1024);
-    smp::per_core::core0_loop();
-}
-
-static SHELL_ARGS: spin::Mutex<Option<(&'static spin::Mutex<capability::Vault>, capability::CapId)>> =
-    spin::Mutex::new(None);
-
-fn shell_fiber(_: u64) {
-    let args = SHELL_ARGS.lock().take();
-    if let Some((vault, session)) = args {
-        intent::run_loop(vault, session);
-    }
-}
-
-/// Text-mode passphrase authentication (fallback when no framebuffer).
-fn text_mode_auth() {
-    kprintln!();
-    kprintln!("[npk] ─────────────────────────────────");
-    kprintln!("[npk]  Identity required.");
-    kprintln!("[npk]  Your passphrase IS your identity.");
-    #[cfg(feature = "installer")]
-    kprintln!("[npk]  Type RESET to wipe and reinstall.");
-    kprintln!("[npk] ─────────────────────────────────");
-    kprintln!();
-
-    let mut attempts: u32 = 0;
-    loop {
-        if attempts > 0 {
-            let delay_secs = 1u64 << attempts.min(5);
-            kprintln!("[npk] Wait {} seconds...", delay_secs);
-            let start = crate::time::ticks();
-            let delay_ticks = delay_secs * 100;
-            while crate::time::ticks() - start < delay_ticks {
-                core::hint::spin_loop();
-            }
-        }
-
-        kprint!("[npk] Passphrase: ");
-        let mut buf = [0u8; 128];
-        let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
-        if len == 0 {
-            kprintln!("[npk] Passphrase cannot be empty.");
-            continue;
-        }
-
-        #[cfg(feature = "installer")]
-        if len == 5 && &buf[..5] == b"RESET" {
-            kprintln!();
-            kprintln!("[npk] !! FACTORY RESET !!");
-            kprintln!("[npk] This will ERASE ALL DATA.");
-            kprint!("[npk] Type YES to confirm: ");
-            let mut confirm = [0u8; 16];
-            let clen = { serial::SERIAL.lock().read_line(&mut confirm) };
-            if clen == 3 && &confirm[..3] == b"YES" {
-                for b in buf.iter_mut() { *b = 0; }
-                if install::has_installer() && nvme::is_available() {
-                    match install::install_to_nvme() {
-                        Ok(()) => {}
-                        Err(e) => {
-                            kprintln!("[npk] Installation failed: {}", e);
-                            kprintln!("[npk] System halted.");
-                            crate::arch::halt_forever()
-                        }
-                    }
-                } else {
-                    kprintln!("[npk] Formatting...");
-                    let _ = npkfs::mkfs();
-                    let _ = npkfs::mount();
-                }
-                kprintln!();
-                if !setup::run_fresh_install() {
-                    kprintln!("[npk] Setup failed. System halted.");
-                    crate::arch::halt_forever()
-                }
-                return;
-            } else {
-                kprintln!("[npk] Reset cancelled.");
-                continue;
-            }
-        }
-
-        let ok = disk_key::unlock(&buf[..len]);
-        for b in buf.iter_mut() { *b = 0; }
-
-        if ok {
-            config::load();
-            serial::set_verbose(config::bootlog_verbose());
-            if let Some(name) = config::get("name") {
-                kprintln!("[npk] Welcome back, {}.", name);
-            } else {
-                kprintln!("[npk] Identity verified.");
-            }
-            return;
-        }
-        kprintln!("[npk] Wrong passphrase.");
-        attempts += 1;
-
-        if attempts >= 10 {
-            kprintln!("[npk] Too many failed attempts. System halted.");
-            crate::arch::halt_forever()
-        }
-    }
-}
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {

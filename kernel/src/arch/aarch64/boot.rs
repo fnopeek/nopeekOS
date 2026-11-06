@@ -1,0 +1,165 @@
+//! AArch64 bring-up: from `_start` to a running heap.
+//!
+//! What runs here is the part of the kernel that is ported so far: the
+//! identity map, the console, the clock, the frame allocator and the heap,
+//! all from the device tree. The rest of `kmain` follows module by module.
+
+use crate::boot_info::{BootInfo, MemoryRegion, UEFI_CONVENTIONAL_MEMORY, UEFI_LOADER_DATA};
+use crate::kprintln;
+use crate::platform::dt::Fdt;
+
+const PAGE: u64 = 4096;
+const MAX_REGIONS: usize = 128;
+const MAX_HOLES: usize = 64;
+
+static mut REGIONS: [MemoryRegion; MAX_REGIONS] = [MemoryRegion::ZERO; MAX_REGIONS];
+static mut BOOT_INFO: BootInfo = BootInfo::empty();
+
+unsafe extern "C" {
+    static __image_base: u8;
+    static __heap_start: u8;
+}
+
+/// Every range of RAM the kernel must not hand out: the kernel image, the
+/// device tree, the reservation block and /reserved-memory.
+fn holes(fdt: &Fdt, out: &mut [(u64, u64); MAX_HOLES]) -> usize {
+    let mut n = 0;
+    let mut add = |a: u64, s: u64| {
+        if n < MAX_HOLES && s > 0 {
+            out[n] = (a, a.saturating_add(s));
+            n += 1;
+        }
+    };
+    // SAFETY: linker symbols; only their addresses are taken.
+    let (lo, hi) = unsafe { (&__image_base as *const u8 as u64, &__heap_start as *const u8 as u64) };
+    add(lo, hi - lo);
+    add(fdt.addr() as u64, fdt.size() as u64);
+    fdt.reservations(|a, s| add(a, s));
+    if let Some(rm) = fdt.find_path(b"/reserved-memory") {
+        fdt.walk(|node| {
+            if node.ancestors().last() == Some(&rm.offset) {
+                fdt.reg(node, |a, s| add(a, s));
+            }
+            true
+        });
+    }
+    n
+}
+
+/// The firmware's memory map for the frame allocator: RAM as conventional
+/// memory, minus the holes, which stay typed as loader data (RAM that is
+/// owned).
+fn build_regions(fdt: &Fdt) -> &'static BootInfo {
+    let mut hole = [(0u64, 0u64); MAX_HOLES];
+    let nh = holes(fdt, &mut hole);
+    let hole = &mut hole[..nh];
+    hole.sort_unstable_by_key(|h| h.0);
+
+    // SAFETY: single-threaded boot; nothing reads these until it returns.
+    let regions = unsafe { &mut *core::ptr::addr_of_mut!(REGIONS) };
+    let mut n = 0;
+    let mut push = |start: u64, end: u64, ty: u32| {
+        let (s, e) = if ty == UEFI_CONVENTIONAL_MEMORY {
+            (start.next_multiple_of(PAGE), end & !(PAGE - 1))
+        } else {
+            (start & !(PAGE - 1), end.next_multiple_of(PAGE))
+        };
+        if e > s && n < MAX_REGIONS {
+            regions[n] = MemoryRegion { physical_start: s, page_count: (e - s) / PAGE, uefi_type: ty };
+            n += 1;
+        }
+    };
+    for &(base, size) in crate::arch::aarch64::mmu::ram() {
+        let end = base + size;
+        let mut at = base;
+        for &(hs, he) in hole.iter() {
+            if he <= at || hs >= end { continue; }
+            if hs > at { push(at, hs, UEFI_CONVENTIONAL_MEMORY); }
+            push(hs.max(at), he.min(end), UEFI_LOADER_DATA);
+            at = he.min(end);
+        }
+        if at < end { push(at, end, UEFI_CONVENTIONAL_MEMORY); }
+    }
+    // SAFETY: as above.
+    unsafe {
+        let bi = &mut *core::ptr::addr_of_mut!(BOOT_INFO);
+        bi.region_count = n as u32;
+        bi.regions_ptr = regions.as_ptr();
+        &*bi
+    }
+}
+
+/// Use the console the device tree names, or the first PL011.
+fn console(fdt: &Fdt) -> bool {
+    let node = fdt.stdout()
+        .filter(|n| fdt.prop_has_str(n, b"compatible", b"arm,pl011"))
+        .or_else(|| fdt.find_compatible(b"arm,pl011"));
+    match node.and_then(|n| fdt.reg0(&n)) {
+        Some((base, _)) => {
+            crate::drivers::pl011::set_base(base);
+            crate::serial::SERIAL.lock().init();
+            true
+        }
+        None => false,
+    }
+}
+
+fn cpu_count(fdt: &Fdt) -> usize {
+    let Some(cpus) = fdt.find_path(b"/cpus") else { return 0 };
+    let mut n = 0;
+    fdt.walk(|node| {
+        if node.ancestors().last() == Some(&cpus.offset) && fdt.prop_has_str(node, b"device_type", b"cpu") {
+            n += 1;
+        }
+        true
+    });
+    n
+}
+
+/// The kernel's entry on AArch64, from `_start` with the MMU on.
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_main(dtb: usize) -> ! {
+    // SAFETY: `_start` passes the loader's device tree, mapped by `early_mmu`.
+    let Some(fdt) = (unsafe { Fdt::new(dtb) }) else { crate::arch::halt_forever() };
+    super::mmu::init(&fdt);
+    console(&fdt);
+
+    kprintln!("                                __   ____  _____");
+    kprintln!("   ____  ____  ____  ___  ___  / /__/ __ \\/ ___/");
+    kprintln!("  / __ \\/ __ \\/ __ \\/ _ \\/ _ \\/ //_/ / / /\\__ \\ ");
+    kprintln!(" / / / / /_/ / /_/ /  __/  __/ ,< / /_/ /___/ / ");
+    kprintln!("/_/ /_/\\____/ .___/\\___/\\___/_/|_|\\____//____/  ");
+    kprintln!("           /_/");
+    kprintln!();
+    kprintln!("[npk] nopeekOS v{} on AArch64", env!("CARGO_PKG_VERSION"));
+    kprintln!();
+
+    let mut model = [0u8; 96];
+    let root = fdt.find_path(b"/");
+    let m = root.and_then(|r| fdt.prop_str(&r, b"model", &mut model)).unwrap_or(0);
+    if m > 0 {
+        kprintln!("[npk] Board: {}", core::str::from_utf8(&model[..m]).unwrap_or("?"));
+    }
+    let el = super::cpu::exception_level();
+    kprintln!("[npk] Exception level: EL{}{}", el, if el == 2 { " (VHE)" } else { "" });
+    kprintln!("[npk] CPUs in the device tree: {}", cpu_count(&fdt));
+
+    super::time::calibrate_counter();
+    crate::time::init_clock();
+    kprintln!("[npk] Generic timer: {} MHz", crate::time::counter_hz() / 1_000_000);
+
+    for &(b, s) in super::mmu::ram() {
+        kprintln!("[npk] RAM: {:#x}..{:#x} ({} MB)", b, b + s, s >> 20);
+    }
+    let bi = build_regions(&fdt);
+    crate::memory::init(bi);
+    crate::heap::init();
+    crate::serial::start_capture();
+
+    let v: alloc::vec::Vec<u64> = (1..=1000).collect();
+    kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());
+    kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
+    kprintln!();
+    kprintln!("[npk] AArch64 bring-up reached its end. Halting.");
+    crate::arch::halt_forever()
+}

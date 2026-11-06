@@ -661,7 +661,7 @@ pub unsafe extern "efiapi" fn efi_main(
     // UEFI gave us. kernel_main never returns.
     // SAFETY: BOOT_INFO is fully written and nothing writes it after this
     // point, so a shared 'static reference to it is sound.
-    unsafe { crate::kernel_main(&*(&raw const BOOT_INFO)) };
+    unsafe { crate::kmain::kernel_main(&*(&raw const BOOT_INFO)) };
 }
 
 // ── GDT install (post-ExitBootServices) ────────────────────────────

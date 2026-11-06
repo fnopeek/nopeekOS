@@ -70,3 +70,15 @@ rustflags = [
     "-C", "link-arg=-znorelro",
     "-C", "link-arg=--pack-dyn-relocs=none",
 ]
+
+# AArch64 (targets/aarch64-nopeek.json): the same position-independent
+# image, as a flat arm64 Image (kernel/linker-aarch64.ld, arch/aarch64/boot.s).
+[target.aarch64-nopeek]
+rustflags = [
+    "-Z", "unstable-options",
+    "-C", "link-arg=-Tkernel/linker-aarch64.ld",
+    "-C", "relocation-model=pic",
+    "-C", "link-arg=-pie",
+    "-C", "link-arg=-znorelro",
+    "-C", "link-arg=--pack-dyn-relocs=none",
+]

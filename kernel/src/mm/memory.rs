@@ -11,9 +11,9 @@ use crate::kprintln;
 pub const PAGE_SIZE: usize = 4096;
 
 /// RAM the allocator can track: as far as the identity map can reach
-/// (`paging::IDENTITY_MAX`), since every frame it hands out is used at its
+/// (`arch::IDENTITY_MAX`), since every frame it hands out is used at its
 /// physical address.
-const MAX_FRAMES: usize = (crate::mm::paging::IDENTITY_MAX / PAGE_SIZE as u64) as usize;
+const MAX_FRAMES: usize = (crate::arch::IDENTITY_MAX / PAGE_SIZE as u64) as usize;
 
 /// The bitmap of a machine with up to 64 GiB. A larger one gets its bitmap
 /// from its own RAM at `init`, as Linux's memblock places the early
@@ -221,7 +221,7 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
         let home = boot_info.regions().iter()
             .filter(|r| r.uefi_type == crate::boot_info::UEFI_CONVENTIONAL_MEMORY)
             .map(|r| (r.physical_start.max(0x10_0000).next_multiple_of(page), r.physical_start + r.page_count * page))
-            .find(|&(b, e)| b + bytes <= e && b + bytes <= crate::mm::paging::IDENTITY_MAX);
+            .find(|&(b, e)| b + bytes <= e && b + bytes <= crate::arch::IDENTITY_MAX);
         match home {
             Some((base, _)) => {
                 alloc.bits = base as *mut u8;

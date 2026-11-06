@@ -41,7 +41,7 @@ pub fn begin() -> Option<Writer> {
     if PANICKING.swap(true, Ordering::AcqRel) {
         return None;
     }
-    stop_other_cores();
+    crate::arch::stop_other_cores();
     let mut w = Writer { col: 0, row: 0 };
     let _ = w.write_str("\n[npk] !!! ");
     Some(w)
@@ -51,23 +51,9 @@ pub fn begin() -> Option<Writer> {
 pub fn die(args: fmt::Arguments) -> ! {
     if let Some(mut w) = begin() {
         let _ = w.write_fmt(args);
-        let _ = writeln!(w, "\n[npk] core {}, all cores halted", crate::smp::per_core::current_core_id());
+        let _ = writeln!(w, "\n[npk] core {}, all cores halted", crate::arch::current_core());
     }
     halt()
-}
-
-/// NMI to every other core; their NMI handler sees `PANICKING` and halts.
-fn stop_other_cores() {
-    use crate::interrupts::{LAPIC_ICR_HI, LAPIC_ICR_LO};
-    let lapic = crate::interrupts::lapic();
-    // Bounded: a wedged LAPIC must not keep the message from being written.
-    for _ in 0..100_000 {
-        if lapic.r32(LAPIC_ICR_LO) & (1 << 12) == 0 { break; }
-        core::hint::spin_loop();
-    }
-    lapic.w32(LAPIC_ICR_HI, 0);
-    // Shorthand all-excluding-self, delivery mode NMI, assert.
-    lapic.w32(LAPIC_ICR_LO, (0b11 << 18) | (1 << 14) | (0b100 << 8));
 }
 
 /// Writes to the UART and the top of the framebuffer at once.

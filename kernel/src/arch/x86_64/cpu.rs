@@ -67,3 +67,23 @@ pub fn halt_forever() -> ! {
         unsafe { core::arch::asm!("cli; hlt", options(nomem, nostack)) };
     }
 }
+
+/// This core's index.
+pub fn current_core() -> usize {
+    crate::smp::per_core::current_core_id()
+}
+
+/// NMI to every other core; their NMI handler sees the fatal path running
+/// and halts.
+pub fn stop_other_cores() {
+    use crate::interrupts::{LAPIC_ICR_HI, LAPIC_ICR_LO};
+    let lapic = crate::interrupts::lapic();
+    // Bounded: a wedged LAPIC must not keep the message from being written.
+    for _ in 0..100_000 {
+        if lapic.r32(LAPIC_ICR_LO) & (1 << 12) == 0 { break; }
+        core::hint::spin_loop();
+    }
+    lapic.w32(LAPIC_ICR_HI, 0);
+    // Shorthand all-excluding-self, delivery mode NMI, assert.
+    lapic.w32(LAPIC_ICR_LO, (0b11 << 18) | (1 << 14) | (0b100 << 8));
+}
