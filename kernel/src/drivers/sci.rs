@@ -10,7 +10,7 @@
 //! triggered): clear the status bit first, then handle, so an event that
 //! arrives during the handling sets the bit again and fires again.
 
-use crate::hw::{Port, PortRange};
+use crate::arch::x86_64::{Port, PortRange};
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 static ARMED: AtomicBool = AtomicBool::new(false);

@@ -167,7 +167,7 @@ fn log_tsc_sync(online: usize) {
         // SAFETY: IA32_TSC (MSR 0x10) is architectural on x86_64 and
         // writable at CPL 0; it moves only this core's (core 0's) counter.
         // Interrupts are off, so nothing on this core sees the jump halfway.
-        unsafe { crate::hw::msr::write(0x10, now) };
+        unsafe { crate::arch::x86_64::msr::write(0x10, now) };
     });
     let (lo2, hi2, _, _) = measure_offsets(online);
     kprintln!("[npk] tsc: core 0 moved {:+} us to join the APs — now min {:+} us, max {:+} us",

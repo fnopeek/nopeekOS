@@ -2,13 +2,11 @@
 //!
 //! Nothing here takes a lock or allocates, because the fault may have
 //! happened while holding the console, heap or capture lock. The first core
-//! to get here stops the others with an NMI, then writes to COM1 and
+//! to get here stops the others with an NMI, then writes to the UART and
 //! straight into the framebuffer; a nested fault on any core only halts.
 
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-
-use crate::hw::Port;
 
 static PANICKING: AtomicBool = AtomicBool::new(false);
 
@@ -16,11 +14,6 @@ static FB_ADDR: AtomicU64 = AtomicU64::new(0);
 static FB_PITCH: AtomicU32 = AtomicU32::new(0);
 static FB_W: AtomicU32 = AtomicU32::new(0);
 static FB_H: AtomicU32 = AtomicU32::new(0);
-
-// SAFETY: COM1, the kernel's own serial console.
-const COM1_DATA: Port = unsafe { Port::new(0x3F8) };
-// SAFETY: COM1's line status register; reading it has no side effect.
-const COM1_LSR: Port = unsafe { Port::new(0x3FD) };
 
 /// The visible framebuffer, recorded once it is mapped. 32 bpp only.
 pub fn set_framebuffer(addr: u64, pitch: u32, width: u32, height: u32, bpp: u8) {
@@ -77,7 +70,7 @@ fn stop_other_cores() {
     lapic.w32(LAPIC_ICR_LO, (0b11 << 18) | (1 << 14) | (0b100 << 8));
 }
 
-/// Writes to COM1 and the top of the framebuffer at once.
+/// Writes to the UART and the top of the framebuffer at once.
 pub struct Writer {
     col: u32,
     row: u32,
@@ -85,11 +78,7 @@ pub struct Writer {
 
 impl Writer {
     fn serial(b: u8) {
-        for _ in 0..100_000 {
-            if COM1_LSR.inb() & 0x20 != 0 { break; }
-            core::hint::spin_loop();
-        }
-        COM1_DATA.outb(b);
+        crate::drivers::uart::panic_put(b);
     }
 
     fn screen(&mut self, b: u8) {
@@ -113,7 +102,7 @@ impl Writer {
         if y0 + ch > h { return; }
         let glyph = if b < 128 { b } else { b'?' } as usize * 16;
         for gy in 0..ch {
-            let bits = crate::framebuffer::FONT[glyph + (gy / scale) as usize];
+            let bits = crate::drivers::font8x16::FONT[glyph + (gy / scale) as usize];
             for gx in 0..cw {
                 let on = bits & (0x80 >> (gx / scale)) != 0;
                 let px = if on { 0x00FF_FFFF } else { 0x0080_0000 };

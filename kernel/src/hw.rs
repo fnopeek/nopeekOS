@@ -1,4 +1,4 @@
-//! Typed access to device memory, I/O ports, DMA buffers and MSRs.
+//! Typed access to device memory and DMA buffers.
 //!
 //! Each type states its safety contract once, in its `unsafe` constructor.
 //! After that every access is a safe, bounds-checked method, so a driver
@@ -121,80 +121,6 @@ impl Mmio {
         self.w32(o, v as u32);
         self.w32(o + 4, (v >> 32) as u32);
     }
-}
-
-/// One I/O port.
-#[derive(Clone, Copy, Debug)]
-pub struct Port(u16);
-
-impl Port {
-    pub fn number(&self) -> u16 { self.0 }
-
-    /// # Safety
-    /// The port must belong to a device this code drives; an access to a
-    /// foreign port can reset or reprogram hardware.
-    pub const unsafe fn new(port: u16) -> Self {
-        Port(port)
-    }
-
-    pub fn inb(&self) -> u8 {
-        // SAFETY: the constructor's contract.
-        unsafe { crate::serial::inb(self.0) }
-    }
-    pub fn inw(&self) -> u16 {
-        // SAFETY: the constructor's contract.
-        unsafe { crate::serial::inw(self.0) }
-    }
-    pub fn inl(&self) -> u32 {
-        // SAFETY: the constructor's contract.
-        unsafe { crate::serial::inl(self.0) }
-    }
-    pub fn outb(&self, v: u8) {
-        // SAFETY: the constructor's contract.
-        unsafe { crate::serial::outb(self.0, v) }
-    }
-    pub fn outw(&self, v: u16) {
-        // SAFETY: the constructor's contract.
-        unsafe { crate::serial::outw(self.0, v) }
-    }
-    pub fn outl(&self, v: u32) {
-        // SAFETY: the constructor's contract.
-        unsafe { crate::serial::outl(self.0, v) }
-    }
-}
-
-/// A block of consecutive I/O ports, e.g. a legacy BAR.
-#[derive(Clone, Copy, Debug)]
-pub struct PortRange {
-    base: u16,
-    len: u16,
-}
-
-impl PortRange {
-    pub const fn empty() -> Self {
-        PortRange { base: 0, len: 0 }
-    }
-
-    /// # Safety
-    /// As for `Port::new`, for every port in `base .. base + len`.
-    pub const unsafe fn new(base: u16, len: u16) -> Self {
-        PortRange { base, len }
-    }
-
-    pub fn base(&self) -> u16 { self.base }
-
-    /// The port at `off`.
-    pub fn port(&self, off: u16) -> Port {
-        assert!(off < self.len, "port {:#x} outside a range of {:#x}", off, self.len);
-        Port(self.base + off)
-    }
-
-    pub fn inb(&self, off: u16) -> u8 { self.port(off).inb() }
-    pub fn inw(&self, off: u16) -> u16 { self.port(off).inw() }
-    pub fn inl(&self, off: u16) -> u32 { self.port(off).inl() }
-    pub fn outb(&self, off: u16, v: u8) { self.port(off).outb(v) }
-    pub fn outw(&self, off: u16, v: u16) { self.port(off).outw(v) }
-    pub fn outl(&self, off: u16, v: u32) { self.port(off).outl(v) }
 }
 
 /// A physically contiguous, identity-mapped buffer a device reads or writes.
@@ -370,33 +296,4 @@ impl PhysView {
         unsafe { core::slice::from_raw_parts(self.addr as *const u8, self.len as usize) }
     }
 
-}
-
-/// Model-specific registers.
-pub mod msr {
-    /// # Safety
-    /// `msr` must exist on this CPU (otherwise #GP), and reading it must have
-    /// no side effect the caller does not intend.
-    pub unsafe fn read(msr: u32) -> u64 {
-        let (lo, hi): (u32, u32);
-        // SAFETY: the caller's contract.
-        unsafe {
-            // No `nomem`: callers order MSR reads against memory accesses
-            // (counter snapshots, errata sequences).
-            core::arch::asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
-                options(nostack, preserves_flags));
-        }
-        (hi as u64) << 32 | lo as u64
-    }
-
-    /// # Safety
-    /// `msr` must exist and `v` must be a value the CPU accepts; an MSR
-    /// write can change paging, interrupts or the CPU's mode.
-    pub unsafe fn write(msr: u32, v: u64) {
-        // SAFETY: the caller's contract.
-        unsafe {
-            core::arch::asm!("wrmsr", in("ecx") msr, in("eax") v as u32, in("edx") (v >> 32) as u32,
-                options(nostack, preserves_flags));
-        }
-    }
 }

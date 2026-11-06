@@ -1636,7 +1636,7 @@ pub(crate) fn npk_vga_msr_touch(ctx: &mut HostState) -> i32 {
     }
     // SAFETY: the VGA MSR belongs to the legacy VGA decode of the display
     // controller this module owns; it is rewritten with its own value.
-    let (read, write) = unsafe { (crate::hw::Port::new(0x3CC), crate::hw::Port::new(0x3C2)) };
+    let (read, write) = unsafe { (crate::arch::x86_64::Port::new(0x3CC), crate::arch::x86_64::Port::new(0x3C2)) };
     write.outb(read.inb());
     0
 }

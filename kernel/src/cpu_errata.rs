@@ -3,7 +3,7 @@
 //! A microvm guest's MSR writes stay in the guest, so the host sets these
 //! itself on every core before any guest can run there.
 
-use crate::hw::msr;
+use crate::arch::x86_64::msr;
 
 const MSR_DE_CFG: u32 = 0xC001_1029;
 const DE_CFG_ZEN2_FP_BACKUP_FIX: u64 = 1 << 9;

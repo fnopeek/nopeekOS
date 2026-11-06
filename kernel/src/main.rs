@@ -79,6 +79,13 @@ mod install;
 use core::panic::PanicInfo;
 
 
+/// The screens that mirror the console: the boot framebuffer and the
+/// desktop's terminal.
+fn console_screens(s: &str) {
+    framebuffer::write_str(s);
+    shade::terminal::write(s);
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) -> ! {
     vga::show_boot_banner();
@@ -87,6 +94,11 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
         let mut serial = serial::SERIAL.lock();
         serial.init();
     }
+    serial::set_hooks(serial::Hooks {
+        write: console_screens,
+        echo: framebuffer::write_byte,
+        key: keyboard::read_key,
+    });
 
     kprintln!("                                __   ____  _____");
     kprintln!("   ____  ____  ____  ___  ___  / /__/ __ \\/ ___/");

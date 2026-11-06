@@ -2,7 +2,7 @@
 //! once at boot.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::hw::Port;
+use super::port::Port;
 use crate::kprintln;
 
 // Kept next to the ports we do drive: a register map with holes in it is

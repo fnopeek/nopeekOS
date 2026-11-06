@@ -6,7 +6,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use crate::kprintln;
-use crate::hw::Port;
+use crate::arch::x86_64::Port;
 
 // SAFETY: the i8042 data and status/command ports, driven only by this
 // module.

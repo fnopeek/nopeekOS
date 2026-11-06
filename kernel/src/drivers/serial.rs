@@ -1,13 +1,11 @@
-//! Serial Console Driver (COM1)
-//!
-//! Minimal human interface via serial port.
-//! QEMU: -serial stdio
+//! The kernel console: the UART (`drivers::uart`), the kernel log, and
+//! the screens and keyboard hooked in at boot (`set_hooks`).
 
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 use alloc::string::String;
-use crate::hw::{Port, PortRange};
+use crate::drivers::uart::Uart;
 
 /// Bumped once per console `write_str`. The line editor snapshots
 /// this before its async poll batch and reprints the prompt + input
@@ -22,12 +20,25 @@ pub fn write_gen() -> u64 {
     WRITE_GEN.load(Ordering::Relaxed)
 }
 
-// SAFETY: the 16550 register blocks of COM1 and COM2, which only this
-// driver touches.
-const COM1: PortRange = unsafe { PortRange::new(0x3F8, 8) };
-const COM2_THR: Port = unsafe { Port::new(0x2F8) };
+pub static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new());
 
-pub static SERIAL: Mutex<SerialPort> = Mutex::new(SerialPort::new(COM1));
+/// What the console reaches besides the UART: the screens that mirror its
+/// output, and the keyboard read alongside it.
+pub struct Hooks {
+    /// Console output, after the UART.
+    pub write: fn(&str),
+    /// A byte echoed by the line readers.
+    pub echo: fn(u8),
+    /// A key, if one is waiting.
+    pub key: fn() -> Option<u8>,
+}
+
+static HOOKS: spin::Once<Hooks> = spin::Once::new();
+
+/// Hook the screens and the keyboard in, once at boot.
+pub fn set_hooks(h: Hooks) {
+    HOOKS.call_once(|| h);
+}
 
 /// The kernel log: every console line, kept in a ring like Linux's printk
 /// buffer. Full, it drops its oldest lines; readers copy, never consume.
@@ -122,74 +133,44 @@ fn capture_bytes(s: &str) {
 }
 
 pub struct SerialPort {
-    regs: PortRange,
-    port_exists: bool,
+    uart: Uart,
 }
 
 impl SerialPort {
-    pub const fn new(regs: PortRange) -> Self {
-        SerialPort { regs, port_exists: false }
+    pub const fn new() -> Self {
+        SerialPort { uart: Uart::new() }
     }
 
-    /// Initialize COM1: 115200 baud, 8N1
     pub fn init(&mut self) {
-        let r = self.regs;
-        // Check if serial port exists (0xFF = no hardware)
-        if r.inb(5) == 0xFF {
-            self.port_exists = false;
-            return;
-        }
-        r.outb(1, 0x00);       // Disable interrupts
-        r.outb(3, 0x80);       // Enable DLAB
-        r.outb(0, 0x01);       // Divisor low: 115200 baud
-        r.outb(1, 0x00);       // Divisor high
-        r.outb(3, 0x03);       // 8 bits, no parity, one stop
-        r.outb(2, 0xC7);       // Enable FIFO, 14-byte threshold
-        r.outb(4, 0x0B);       // IRQs off, RTS/DSR set
-        r.outb(4, 0x1E);       // Loopback test
-        r.outb(0, 0xAE);
-        if r.inb(0) != 0xAE {
-            self.port_exists = false;
-            return; // Port defective
-        }
-        r.outb(4, 0x0F);       // Normal operation
-        self.port_exists = true;
+        self.uart.init();
     }
 
     pub fn write_byte(&self, byte: u8) {
-        if !self.port_exists { return; }
-        // Mirror to COM2 — host pipes this to target/serial.log via
-        // -serial file: in build.sh. Written first so the log captures
-        // every byte even if COM1's THR-empty poll stalls. Real HW
-        // discards writes to an absent COM2 port.
-        COM2_THR.outb(byte);
-        while (self.regs.inb(5) & 0x20) == 0 {}
-        self.regs.outb(0, byte);
+        self.uart.put(byte);
     }
 
     /// Write byte with framebuffer echo (for read_line echo on headless systems)
     fn echo_byte(&self, byte: u8) {
         self.write_byte(byte);
-        crate::framebuffer::write_byte(byte);
+        if let Some(h) = HOOKS.get() { (h.echo)(byte); }
     }
 
     /// Blocking read. Polls both serial port and USB keyboard.
     pub fn read_byte(&self) -> u8 {
         loop {
             // Check keyboard first (USB/xHCI — primary on bare metal)
-            if let Some(key) = crate::keyboard::read_key() {
+            if let Some(key) = HOOKS.get().and_then(|h| (h.key)()) {
                 return key;
             }
-            // Check serial (only if port exists — 0xFF means no hardware)
-            if self.port_exists && self.has_data() {
-                return self.regs.inb(0);
+            if self.has_data() {
+                return self.uart.get();
             }
             core::hint::spin_loop();
         }
     }
 
     pub fn has_data(&self) -> bool {
-        self.port_exists && (self.regs.inb(5) & 0x01) != 0
+        self.uart.has_data()
     }
 
     /// Read a single byte directly from the UART receive register.
@@ -198,7 +179,7 @@ impl SerialPort {
     /// poll the USB keyboard separately (e.g. the intent loop) so the
     /// two input sources don't steal each other's keystrokes.
     pub fn read_serial_raw(&self) -> u8 {
-        self.regs.inb(0)
+        self.uart.get()
     }
 
     /// Read a line with masked echo (shows '*'), returns length.
@@ -274,8 +255,7 @@ impl fmt::Write for SerialPort {
         }
         WRITE_GEN.fetch_add(1, Ordering::Relaxed);
         capture_bytes(s);
-        crate::framebuffer::write_str(s);
-        crate::shade::terminal::write(s);
+        if let Some(h) = HOOKS.get() { (h.write)(s); }
         Ok(())
     }
 }
@@ -306,76 +286,4 @@ macro_rules! kdebug {
             $crate::serial::quiet_line(format_args!("{}\n", format_args!($($arg)*)));
         }
     });
-}
-
-/// Write `val` to I/O port `port`.
-///
-/// # Safety
-/// The port must belong to a device the caller drives; an access to a
-/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
-#[inline(always)]
-pub(crate) unsafe fn outb(port: u16, val: u8) {
-    // SAFETY: the caller's contract; `in`/`out` touch no memory.
-    unsafe { core::arch::asm!("out dx, al", in("dx") port, in("al") val); }
-}
-
-/// Write `val` to I/O port `port`.
-///
-/// # Safety
-/// The port must belong to a device the caller drives; an access to a
-/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
-#[inline(always)]
-pub(crate) unsafe fn outw(port: u16, val: u16) {
-    // SAFETY: the caller's contract; `in`/`out` touch no memory.
-    unsafe { core::arch::asm!("out dx, ax", in("dx") port, in("ax") val); }
-}
-
-/// Write `val` to I/O port `port`.
-///
-/// # Safety
-/// The port must belong to a device the caller drives; an access to a
-/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
-#[inline(always)]
-pub(crate) unsafe fn outl(port: u16, val: u32) {
-    // SAFETY: the caller's contract; `in`/`out` touch no memory.
-    unsafe { core::arch::asm!("out dx, eax", in("dx") port, in("eax") val); }
-}
-
-/// Read I/O port `port`.
-///
-/// # Safety
-/// The port must belong to a device the caller drives; an access to a
-/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
-#[inline(always)]
-pub(crate) unsafe fn inb(port: u16) -> u8 {
-    let val: u8;
-    // SAFETY: the caller's contract; `in`/`out` touch no memory.
-    unsafe { core::arch::asm!("in al, dx", in("dx") port, out("al") val); }
-    val
-}
-
-/// Read I/O port `port`.
-///
-/// # Safety
-/// The port must belong to a device the caller drives; an access to a
-/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
-#[inline(always)]
-pub(crate) unsafe fn inw(port: u16) -> u16 {
-    let val: u16;
-    // SAFETY: the caller's contract; `in`/`out` touch no memory.
-    unsafe { core::arch::asm!("in ax, dx", in("dx") port, out("ax") val); }
-    val
-}
-
-/// Read I/O port `port`.
-///
-/// # Safety
-/// The port must belong to a device the caller drives; an access to a
-/// foreign port can reset or reprogram hardware. Prefer `hw::Port`.
-#[inline(always)]
-pub(crate) unsafe fn inl(port: u16) -> u32 {
-    let val: u32;
-    // SAFETY: the caller's contract; `in`/`out` touch no memory.
-    unsafe { core::arch::asm!("in eax, dx", in("dx") port, out("eax") val); }
-    val
 }

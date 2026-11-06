@@ -4,7 +4,7 @@
 //! `tools/gen_cpu_vulns.py`). Only the bugs that bear on guest/host
 //! isolation are kept; `spec_mitigations` picks what to do about them.
 
-use crate::hw::msr;
+use crate::arch::x86_64::msr;
 
 #[path = "cpu_vulns_table.rs"]
 mod table;

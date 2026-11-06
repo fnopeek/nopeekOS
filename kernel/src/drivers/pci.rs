@@ -4,7 +4,8 @@
 //! Scans for VirtIO and other PCI devices.
 
 use crate::kprintln;
-use crate::hw::{Mmio, Port};
+use crate::hw::Mmio;
+use crate::arch::x86_64::Port;
 
 // SAFETY: the PCI configuration mechanism #1 ports, owned by this module;
 // every access goes through `CONFIG_LOCK`.

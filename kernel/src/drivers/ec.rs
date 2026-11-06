@@ -13,7 +13,7 @@
 //! the multiplexed capacity registers — exactly as ACPICA drives the EC. We
 //! never poke arbitrary offsets ourselves.
 
-use crate::hw::Port;
+use crate::arch::x86_64::Port;
 
 // Default ISA EC ports (FADT EC_BLK; 0x62/0x66 is universal on x86 laptops).
 // SAFETY: the EC's data and status/command ports; every multi-step

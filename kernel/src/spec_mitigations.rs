@@ -33,7 +33,7 @@
 //!
 //! Whatever stays open is listed on the boot line as not mitigated.
 
-use crate::hw::msr;
+use crate::arch::x86_64::msr;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 const MSR_SPEC_CTRL: u32 = 0x48;

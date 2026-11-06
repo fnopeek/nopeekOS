@@ -4,7 +4,8 @@
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU16, Ordering};
-use crate::hw::{PhysView, Port};
+use crate::hw::PhysView;
+use crate::arch::x86_64::Port;
 
 /// PM1a control block, from the FADT.
 static PM1A_CNT: spin::Once<Port> = spin::Once::new();

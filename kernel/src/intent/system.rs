@@ -1141,7 +1141,7 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16, extra: &[u64]) {
 /// (PM1_CNT.SCI_EN), which GPE status bits rise, does the EC raise SCI_EVT.
 /// Nothing is written and no event is taken — acpi keeps draining the EC.
 pub fn intent_ec_watch(args: &str) {
-    use crate::hw::{Port, PortRange};
+    use crate::arch::x86_64::{Port, PortRange};
     // SAFETY: the EC status/command port, read only.
     const EC_SC: Port = unsafe { Port::new(0x66) };
     // `ec watch take [s]`: also fetch each event (QR_EC) and print the raw

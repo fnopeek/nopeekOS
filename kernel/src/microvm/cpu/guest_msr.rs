@@ -94,14 +94,14 @@ pub fn pat_valid(v: u64) -> bool {
 /// `msr` exists on this CPU (else #GP) and reading it has no side effect.
 pub unsafe fn host_rdmsr(msr: u32) -> u64 {
     // SAFETY: the caller's contract.
-    unsafe { crate::hw::msr::read(msr) }
+    unsafe { crate::arch::x86_64::msr::read(msr) }
 }
 
 /// # Safety
 /// `msr` exists on this CPU and `v` is a value it accepts.
 unsafe fn host_wrmsr(msr: u32, v: u64) {
     // SAFETY: the caller's contract.
-    unsafe { crate::hw::msr::write(msr, v) }
+    unsafe { crate::arch::x86_64::msr::write(msr, v) }
 }
 
 /// Common RDMSR. `spec_valid` = the vendor's SPEC_CTRL bits (0 = no MSR).

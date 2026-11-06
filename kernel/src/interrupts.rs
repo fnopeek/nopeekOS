@@ -1,7 +1,8 @@
 //! Interrupt Descriptor Table, exception handlers, timer and device IRQs.
 
 use core::fmt::Write as _;
-use crate::hw::{msr, Mmio, Port};
+use crate::hw::Mmio;
+use crate::arch::x86_64::{msr, Port};
 use crate::kprintln;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 

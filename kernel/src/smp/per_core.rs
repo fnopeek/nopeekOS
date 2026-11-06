@@ -6,7 +6,8 @@
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use spin::Mutex;
-use crate::hw::{msr, Mmio};
+use crate::hw::Mmio;
+use crate::arch::x86_64::msr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreState {

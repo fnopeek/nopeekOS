@@ -6,7 +6,7 @@
 
 use bitflags::bitflags;
 use core::sync::atomic::{AtomicU64, Ordering};
-use crate::hw::msr;
+use crate::arch::x86_64::msr;
 use crate::memory;
 
 const IA32_EFER: u32 = 0xC000_0080;

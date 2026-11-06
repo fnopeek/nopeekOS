@@ -4,7 +4,7 @@
 //! UTC (`time` writes it back after each NTP sync). BCD or binary as the
 //! firmware set it, no IRQ, polled.
 
-use crate::hw::Port;
+use crate::arch::x86_64::Port;
 
 // SAFETY: the CMOS index/data pair, always present on x86; `CMOS_LOCK`
 // keeps the pair together.

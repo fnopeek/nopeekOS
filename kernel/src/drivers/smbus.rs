@@ -9,7 +9,7 @@
 
 use spin::Mutex;
 
-use crate::hw::PortRange;
+use crate::arch::x86_64::PortRange;
 use crate::pci;
 
 // SMBus I/O register offsets from the SMBA base (i2c-i801.c).

@@ -6,7 +6,8 @@
 
 use core::sync::atomic::{fence, Ordering};
 use spin::Mutex;
-use crate::hw::{DmaRegion, PortRange};
+use crate::hw::DmaRegion;
+use crate::arch::x86_64::PortRange;
 use crate::{kprintln, memory, pci};
 
 const VIRTIO_VENDOR: u16 = 0x1AF4;
