@@ -416,6 +416,10 @@ pub fn probe() -> Option<Host> {
         kprintln!("[npk] sd: {:02x}:{:02x}.{} is owned already", addr.bus, addr.device, addr.function);
         return None;
     }
+    // pcim_enable_device: D0 and memory decoding; the firmware may leave a
+    // card reader off.
+    pci::enable_bus_master_path(addr);
+    let (was_state, was_cmd) = pci::enable_device_mem(addr);
     // sdhci_pci_probe: one slot, its BAR from PCI_SLOT_INFO.
     let info = pci::read8(addr, PCI_SLOT_INFO);
     let first_bar = (info & 7) as usize;
@@ -456,6 +460,8 @@ pub fn probe() -> Option<Host> {
     if is_o2 {
         host.o2_probe_slot();
     }
+    kprintln!("[npk] sd: {} was D{}, command {:#06x}; version {:#06x}, present {:#010x}",
+        name, was_state, was_cmd, host.readw(SDHCI_HOST_VERSION), host.readl(SDHCI_PRESENT_STATE));
     if let Err(e) = host.setup_host() {
         kprintln!("[npk] sd: {} setup failed: {:?}", name, e);
         return None;
@@ -473,6 +479,14 @@ pub fn probe() -> Option<Host> {
 }
 
 impl Host {
+    /// The registers a failed bring-up is judged by.
+    pub fn dump_regs(&self) {
+        kprintln!("[npk] sd: present {:#010x} clock {:#06x} power {:#04x} host {:#04x} ctrl2 {:#06x} int {:#010x} pci cmd {:#06x}",
+            self.readl(SDHCI_PRESENT_STATE), self.readw(SDHCI_CLOCK_CONTROL), self.readb(SDHCI_POWER_CONTROL),
+            self.readb(SDHCI_HOST_CONTROL), self.readw(SDHCI_HOST_CONTROL2), self.readl(SDHCI_INT_STATUS),
+            pci::read16(self.pci, 0x04));
+    }
+
     pub fn has_auto_cmd12(&self) -> bool { self.flags & SDHCI_AUTO_CMD12 != 0 }
     pub fn has_auto_cmd23(&self) -> bool { self.flags & SDHCI_AUTO_CMD23 != 0 }
 

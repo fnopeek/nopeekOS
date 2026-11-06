@@ -165,6 +165,8 @@ static NEXT_ID: AtomicU32 = AtomicU32::new(SD_ID_BASE);
 static DETECTING: AtomicBool = AtomicBool::new(false);
 /// The card in the slot was ejected: it stays unused until pulled out.
 static EJECTED: AtomicBool = AtomicBool::new(false);
+/// The card in the slot failed to initialise: not retried until pulled out.
+static FAILED: AtomicBool = AtomicBool::new(false);
 static LAST_POLL: AtomicU64 = AtomicU64::new(0);
 
 /// Take the slot for one operation; waits while another holds it.
@@ -202,9 +204,12 @@ pub fn poll() {
         let Some(s) = g.as_mut() else { return };
         let present = s.host.readl(h::SDHCI_PRESENT_STATE) & h::SDHCI_CARD_PRESENT != 0;
         let event = s.host.take_card_event();
-        if !present { EJECTED.store(false, Ordering::Release); }
-        let ejected = EJECTED.load(Ordering::Acquire);
-        event || present != (s.card.is_some() || ejected)
+        if !present {
+            EJECTED.store(false, Ordering::Release);
+            FAILED.store(false, Ordering::Release);
+        }
+        let parked = EJECTED.load(Ordering::Acquire) || FAILED.load(Ordering::Acquire);
+        (event && !parked) || present != (s.card.is_some() || parked)
     };
     if changed { detect_spawn(); }
 }
@@ -230,7 +235,9 @@ fn detect_task(_: u64) {
             drop_disk("removed");
         }
     }
-    if s.card.is_none() && !EJECTED.load(Ordering::Acquire) && s.host.get_cd() {
+    if s.card.is_none() && !EJECTED.load(Ordering::Acquire) && !FAILED.load(Ordering::Acquire)
+        && s.host.get_cd()
+    {
         match rescan_try_freq(&mut s.host) {
             Ok(card) => {
                 let info = disk_info(&card, &s.host);
@@ -246,7 +253,11 @@ fn detect_task(_: u64) {
                 crate::ext::disk_added(id);
                 return;
             }
-            Err(e) => kprintln!("[npk] sd: error {:?} whilst initialising SD card", e),
+            Err(e) => {
+                kprintln!("[npk] sd: error {:?} whilst initialising SD card; pull it out to retry", e);
+                s.host.dump_regs();
+                FAILED.store(true, Ordering::Release);
+            }
         }
     }
     release(s);

@@ -334,6 +334,27 @@ pub fn enable_bus_master(addr: PciAddr) {
     write32(addr, 0x04, cmd | 0x04);
 }
 
+/// `pci_enable_device` for a memory BAR: the function in D0 (PM
+/// capability, 10 ms recovery from D3hot) and memory decoding on. Returns
+/// the power state and command register found before.
+pub fn enable_device_mem(addr: PciAddr) -> (u8, u16) {
+    let pm = find_cap(addr, 0x01);
+    let mut state = 0;
+    if pm != 0 {
+        let csr = read16(addr, pm + 4);
+        state = (csr & 3) as u8;
+        if state != 0 {
+            write16(addr, pm + 4, csr & !3);
+            let t0 = crate::interrupts::rdtsc();
+            let wait = crate::interrupts::tsc_freq() / 100;
+            while crate::interrupts::rdtsc().saturating_sub(t0) < wait { core::hint::spin_loop(); }
+        }
+    }
+    let cmd = read16(addr, 0x04);
+    if cmd & 0x02 == 0 { write16(addr, 0x04, cmd | 0x02); }
+    (state, cmd)
+}
+
 /// Find the bridge behind which `bus` sits: secondary <= bus <=
 /// subordinate. Bus 0 first (the common case), then a full scan.
 fn find_bridge_for_bus(bus: u8) -> Option<PciAddr> {
