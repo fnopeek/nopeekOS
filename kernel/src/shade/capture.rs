@@ -308,6 +308,7 @@ pub fn picked(picker: u32, chosen: bool) {
     SESSIONS.fetch_add(1, Ordering::Relaxed);
     DIRTY.store(true, Ordering::Release);
     crate::kprintln!("[capture] the user shares the screen: {}x{} as {}x{}", fb.width, fb.height, w, h);
+    crate::audit::record(&crate::audit::GUEST, crate::audit::Kind::DeviceOn, "screen share");
     let mut p = [0u8; 4];
     p[0..2].copy_from_slice(&(w as u16).to_le_bytes());
     p[2..4].copy_from_slice(&(h as u16).to_le_bytes());
@@ -372,6 +373,9 @@ fn end(s: &mut Session, reason: Option<u8>) {
         CLOSE_PICKER.store(s.picker, Ordering::Release);
     }
     let was = s.phase;
+    if was == Phase::Running {
+        crate::audit::record(&crate::audit::GUEST, crate::audit::Kind::DeviceOff, "screen share");
+    }
     s.phase = Phase::Idle;
     s.picker = 0;
     let mut n = 0;

@@ -524,6 +524,9 @@ impl VirtioSnd {
             R_PCM_START => {
                 if self.cap.is_none() {
                     self.cap = crate::capture::open(None);
+                    if self.cap.is_some() {
+                        crate::audit::record(&crate::audit::GUEST, crate::audit::Kind::DeviceOn, "microphone");
+                    }
                     crate::kprintln!("[virtio_snd] capture stream {:?}, {} channel(s)", self.cap, self.cap_channels);
                     self.rx_done = 0;
                     if let Some(c) = self.cap {
@@ -536,7 +539,7 @@ impl VirtioSnd {
             }
             R_PCM_STOP | R_PCM_RELEASE => {
                 if let Some(c) = self.cap.take() {
-                    crate::capture::close(c, None);
+                    close_capture(c);
                     crate::kprintln!("[virtio_snd] capture closed after {} rx buffer(s)", self.rx_done);
                 }
                 if code == R_PCM_RELEASE {
@@ -896,7 +899,7 @@ impl VirtioSnd {
                         };
                     }
                     if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
-                    if let Some(c) = self.cap.take() { crate::capture::close(c, None); }
+                    if let Some(c) = self.cap.take() { close_capture(c); }
                     self.started = false;
                     self.tx_reset();
                     self.driver_features = [0; 2];
@@ -944,7 +947,7 @@ impl VirtioSnd {
 /// microphone does not stay open behind a guest that is gone.
 impl Drop for VirtioSnd {
     fn drop(&mut self) {
-        if let Some(c) = self.cap.take() { crate::capture::close(c, None); }
+        if let Some(c) = self.cap.take() { close_capture(c); }
         if self.slot >= 0 { crate::audio::close(self.slot as usize); self.slot = -1; }
     }
 }
@@ -964,4 +967,10 @@ const fn width_mask(width: u8) -> u64 {
         4 => 0xFFFF_FFFF,
         _ => 0xFFFF_FFFF_FFFF_FFFF,
     }
+}
+
+/// The guest's microphone stream `c` closes.
+fn close_capture(c: usize) {
+    crate::capture::close(c, None);
+    crate::audit::record(&crate::audit::GUEST, crate::audit::Kind::DeviceOff, "microphone");
 }

@@ -1157,7 +1157,7 @@ fn summon_launcher() {
     // Grant exactly the rights the app declares in its `.npk.caps`
     // section (per-app, no blanket WRITE); absent → safe default.
     let rights = crate::capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match crate::capability::create_module_cap(rights, None) {
+    let module_cap = match crate::capability::create_module_cap(&name, rights, None) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launcher: cap delegation failed: {}", e); return; }
     };
@@ -1277,7 +1277,7 @@ fn launch_task(arg: u64) {
     // Per-app rights from the module's `.npk.caps` section (no blanket
     // WRITE); absent → safe default.
     let rights = crate::capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match crate::capability::create_module_cap(rights, job.ttl_ticks) {
+    let module_cap = match crate::capability::create_module_cap(name, rights, job.ttl_ticks) {
         Ok(id) => id,
         Err(e) => { crate::kprintln!("[npk] launch_app: cap failed: {}", e); return; }
     };

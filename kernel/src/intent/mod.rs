@@ -2248,7 +2248,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         "audit" => {
             if require_cap(vault, &session, Rights::AUDIT, "audit") {
-                system::intent_audit();
+                system::intent_audit(args);
             }
         }
 
@@ -3017,6 +3017,7 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     // vm_poll_slice when the slice that observes the exit completes.
     match crate::microvm::vm_open(&bytes, cmdline, initramfs.as_deref(), inject) {
         Ok(()) => {
+            crate::audit::guest_started(crate::microvm::app::current().name);
             // Give the guest its own Surface window (a tile, or
             // fullscreen via Mod+F / the guest's own request). virtio-gpu
             // FLUSH renders into it; shade composites it like any window;
@@ -3046,6 +3047,7 @@ fn require_cap(vault: &Mutex<Vault>, cap_id: &CapId, rights: Rights, intent: &st
         Ok(_) => true,
         Err(e) => {
             kprintln!("[npk] DENIED: '{}' requires {:?} — {}", intent, rights, e);
+            crate::audit::denied(cap_id, rights, intent, e.reason());
             false
         }
     }

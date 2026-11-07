@@ -415,7 +415,7 @@ if want_write {
     // has to allow writing, and the capability the run carries
     // has to include WRITE. Either alone would be a hole.
     if !grant_writable { return EPERM; }
-    if capability::check_global(&cap, Rights::WRITE).is_err() { return EPERM; }
+    if !capability::require(&cap, Rights::WRITE, "path_open") { return EPERM; }
 }
 
 let existing = match fs::stat(&full) { Ok(v) => v, Err(e) => return fs_errno(&e) };
@@ -433,6 +433,14 @@ if let Some(st_) = &existing {
 } else {
     if oflags & O_DIRECTORY != 0 { return ENOENT; }
     if oflags & O_CREAT == 0 { return ENOENT; }
+}
+
+// The read-only grant is the program's own bundle; reading it is
+// loading code, not touching the user's files.
+if want_write {
+    crate::audit::record(&cap, crate::audit::Kind::Write, &full);
+} else if grant_writable {
+    crate::audit::record(&cap, crate::audit::Kind::Read, &full);
 }
 
 // Read-only: served range by range, never loaded whole.
@@ -482,7 +490,8 @@ let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, p, pl) { Ok(s) => s, Err(e) => return e };
 let (full, _, writable) = match w.resolve(dirfd, &rel) { Ok(v) => v, Err(e) => return e };
-if !writable || capability::check_global(&cap, Rights::WRITE).is_err() { return EPERM; }
+if !writable || !capability::require(&cap, Rights::WRITE, "path_create_directory") { return EPERM; }
+crate::audit::record(&cap, crate::audit::Kind::Mkdir, &full);
 match fs::mkdir(&full) { Ok(()) => SUCCESS, Err(e) => fs_errno(&e) }
 }
 
@@ -491,7 +500,8 @@ let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, p, pl) { Ok(s) => s, Err(e) => return e };
 let (full, _, writable) = match w.resolve(dirfd, &rel) { Ok(v) => v, Err(e) => return e };
-if !writable || capability::check_global(&cap, Rights::WRITE).is_err() { return EPERM; }
+if !writable || !capability::require(&cap, Rights::WRITE, "path_remove_directory") { return EPERM; }
+crate::audit::record(&cap, crate::audit::Kind::Delete, &full);
 match fs::list(&full) {
     Ok(Some(v)) if !v.is_empty() => return ENOTEMPTY,
     Ok(Some(_)) => {}
@@ -506,7 +516,8 @@ let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, p, pl) { Ok(s) => s, Err(e) => return e };
 let (full, _, writable) = match w.resolve(dirfd, &rel) { Ok(v) => v, Err(e) => return e };
-if !writable || capability::check_global(&cap, Rights::WRITE).is_err() { return EPERM; }
+if !writable || !capability::require(&cap, Rights::WRITE, "path_unlink_file") { return EPERM; }
+crate::audit::record(&cap, crate::audit::Kind::Delete, &full);
 match fs::delete(&full) { Ok(()) => SUCCESS, Err(e) => fs_errno(&e) }
 }
 
@@ -519,7 +530,8 @@ let (from, _, wa) = match w.resolve(ofd, &a) { Ok(v) => v, Err(e) => return e };
 let (to, _, wb) = match w.resolve(nfd, &b) { Ok(v) => v, Err(e) => return e };
 // Both ends must be writable: renaming out of a read-only grant
 // is a delete, renaming into one is a write.
-if !wa || !wb || capability::check_global(&cap, Rights::WRITE).is_err() { return EPERM; }
+if !wa || !wb || !capability::require(&cap, Rights::WRITE, "path_rename") { return EPERM; }
+crate::audit::record(&cap, crate::audit::Kind::Rename, &alloc::format!("{} -> {}", from, to));
 match fs::rename(&from, &to) { Ok(()) => SUCCESS, Err(e) => fs_errno(&e) }
 }
 

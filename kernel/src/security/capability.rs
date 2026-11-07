@@ -4,9 +4,11 @@
 //! Every permission is a token with a random 256-bit ID (post-quantum safe).
 //! Inspired by seL4 capabilities.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use bitflags::bitflags;
 use spin::Mutex;
-use crate::audit::{self, AuditOp, DenyReason};
+use crate::audit;
 
 /// 256-bit capability token ID (post-quantum: Grover-safe at 128-bit effective)
 pub type CapId = [u8; 32];
@@ -18,6 +20,10 @@ const MAX_CAPABILITIES: usize = 256;
 
 static VAULT: Mutex<Vault> = Mutex::new(Vault::empty());
 static ROOT_CAP: Mutex<CapId> = Mutex::new(CAP_NULL);
+/// Checks passed per vault slot since its capability was issued; the
+/// journal gets the sum when the slot is released. Relaxed: a counter
+/// read once at release, under the vault lock that also resets it.
+static SLOT_CHECKS: [AtomicU64; MAX_CAPABILITIES] = [const { AtomicU64::new(0) }; MAX_CAPABILITIES];
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +115,8 @@ impl Vault {
         Vault { caps: [const { None }; MAX_CAPABILITIES], count: 0 }
     }
 
-    /// Create a new capability delegated from parent.
+    /// Create a new capability delegated from parent, issued to `holder`
+    /// (the module it is for; the journal names it).
     /// Rights monotonicity: delegated rights ⊆ parent rights.
     /// Temporal monotonicity: child expiry ≤ parent expiry.
     pub fn create(
@@ -118,23 +125,21 @@ impl Vault {
         resource: ResourceKind,
         rights: Rights,
         ttl_ticks: Option<u64>,
+        holder: &str,
     ) -> Result<CapId, CapError> {
+        let refuse = |e: CapError| {
+            let call = alloc::format!("issue {}", holder);
+            audit::denied(&parent_id, rights, &call, e.reason());
+            e
+        };
         let parent = self.find(&parent_id).ok_or(CapError::NotFound)?;
-        if !parent.active {
-            audit::record(AuditOp::Denied { reason: DenyReason::Revoked });
-            return Err(CapError::Revoked);
-        }
-        if parent.is_expired() {
-            audit::record(AuditOp::Denied { reason: DenyReason::Expired });
-            return Err(CapError::Expired);
-        }
+        if !parent.active { return Err(refuse(CapError::Revoked)); }
+        if parent.is_expired() { return Err(refuse(CapError::Expired)); }
         if !parent.rights.contains(Rights::DELEGATE) {
-            audit::record(AuditOp::Denied { reason: DenyReason::InsufficientRights });
-            return Err(CapError::InsufficientRights);
+            return Err(refuse(CapError::InsufficientRights));
         }
         if !parent.rights.contains(rights) {
-            audit::record(AuditOp::Denied { reason: DenyReason::EscalationAttempt });
-            return Err(CapError::EscalationAttempt);
+            return Err(refuse(CapError::EscalationAttempt));
         }
 
         // A free slot, or one whose capability is revoked or expired: those
@@ -145,10 +150,10 @@ impl Vault {
             .or_else(|| self.caps.iter().position(|c| {
                 c.as_ref().is_some_and(|c| c.id != root && (!c.active || c.is_expired()))
             }))
-            .ok_or_else(|| {
-                audit::record(AuditOp::Denied { reason: DenyReason::VaultFull });
-                CapError::VaultFull
-            })?;
+            .ok_or_else(|| refuse(CapError::VaultFull))?;
+        if let Some(old) = &self.caps[slot] {
+            audit::released(&old.id, SLOT_CHECKS[slot].load(Ordering::Relaxed));
+        }
 
         // Child expiry cannot exceed parent expiry
         let expires_at = match (ttl_ticks.map(|ttl| crate::time::ticks() + ttl), parent.expires_at) {
@@ -165,8 +170,9 @@ impl Vault {
             expires_at,
         });
         self.count += 1;
+        SLOT_CHECKS[slot].store(0, Ordering::Relaxed);
 
-        audit::record(AuditOp::Create { parent_id, new_id: id });
+        audit::issued(&id, holder, rights);
         Ok(id)
     }
 
@@ -187,6 +193,7 @@ impl Vault {
             vault.count = 1;
         }
         *ROOT_CAP.lock() = root_id;
+        audit::issued(&root_id, "system", Rights::ALL);
         (&VAULT, root_id)
     }
 
@@ -195,31 +202,36 @@ impl Vault {
     pub fn revoke(&mut self, revoker_id: CapId, target_id: CapId) -> Result<(), CapError> {
         let revoker = self.find(&revoker_id).ok_or(CapError::NotFound)?;
         if !revoker.rights.contains(Rights::REVOKE) {
-            audit::record(AuditOp::Denied { reason: DenyReason::InsufficientRights });
+            audit::denied(&revoker_id, Rights::REVOKE, "revoke", "");
             return Err(CapError::InsufficientRights);
         }
         self.revoke_recursive(&target_id);
-        audit::record(AuditOp::Revoke { revoker_id, target_id });
+        let target = alloc::format!("{:08x}", short_id(&target_id));
+        audit::record(&revoker_id, audit::Kind::Revoke, &target);
         Ok(())
     }
 
-    /// Check if a capability grants the required rights
+    /// Check if a capability grants the required rights. Journals nothing:
+    /// a failed check may be a probe; the gate that refuses journals it
+    /// (`require`).
     pub fn check(&self, cap_id: &CapId, required: Rights) -> Result<&Capability, CapError> {
-        let cap = self.find(cap_id).ok_or(CapError::NotFound)?;
-        if !cap.active {
-            audit::record(AuditOp::Denied { reason: DenyReason::Revoked });
-            return Err(CapError::Revoked);
-        }
-        if cap.is_expired() {
-            audit::record(AuditOp::Expired { cap_id: *cap_id });
-            return Err(CapError::Expired);
-        }
-        if !cap.rights.contains(required) {
-            audit::record(AuditOp::Denied { reason: DenyReason::InsufficientRights });
-            return Err(CapError::InsufficientRights);
-        }
+        let slot = self.caps.iter()
+            .position(|c| c.as_ref().is_some_and(|c| c.id == *cap_id))
+            .ok_or(CapError::NotFound)?;
+        let Some(cap) = self.caps[slot].as_ref() else { return Err(CapError::NotFound) };
+        if !cap.active { return Err(CapError::Revoked); }
+        if cap.is_expired() { return Err(CapError::Expired); }
+        if !cap.rights.contains(required) { return Err(CapError::InsufficientRights); }
         audit::record_check_passed();
+        SLOT_CHECKS[slot].fetch_add(1, Ordering::Relaxed);
         Ok(cap)
+    }
+
+    /// Checks passed by `cap` since it was issued, 0 if it is not here.
+    pub fn checks_of(&self, cap_id: &CapId) -> u64 {
+        self.caps.iter()
+            .position(|c| c.as_ref().is_some_and(|c| c.id == *cap_id))
+            .map_or(0, |i| SLOT_CHECKS[i].load(Ordering::Relaxed))
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -256,8 +268,9 @@ impl Vault {
     /// Revoke `id` and its delegations and free their slots.
     fn release(&mut self, id: &CapId) {
         self.revoke_recursive(id);
-        for slot in self.caps.iter_mut() {
-            if slot.as_ref().is_some_and(|c| !c.active) {
+        for (i, slot) in self.caps.iter_mut().enumerate() {
+            if let Some(gone) = slot.as_ref().filter(|c| !c.active).map(|c| c.id) {
+                audit::released(&gone, SLOT_CHECKS[i].load(Ordering::Relaxed));
                 *slot = None;
                 self.count = self.count.saturating_sub(1);
             }
@@ -265,10 +278,10 @@ impl Vault {
     }
 }
 
-/// Create a capability for a WASM module (delegates from root internally).
-pub fn create_module_cap(rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId, CapError> {
+/// Create a capability for the WASM module `name` (delegates from root).
+pub fn create_module_cap(name: &str, rights: Rights, ttl_ticks: Option<u64>) -> Result<CapId, CapError> {
     let root = *ROOT_CAP.lock();
-    VAULT.lock().create(root, ResourceKind::Execute, rights, ttl_ticks)
+    VAULT.lock().create(root, ResourceKind::Execute, rights, ttl_ticks, name)
 }
 
 /// A module instance has ended: its capability (one per launch) and what it
@@ -320,6 +333,7 @@ static PATH_GRANTS: Mutex<alloc::vec::Vec<PathGrant>> = Mutex::new(alloc::vec::V
 /// same pair widens the existing entry rather than stacking duplicates.
 pub fn grant_path(cap: CapId, path: &str, rights: Rights) {
     push_grant(cap, path, rights, false);
+    audit::granted(&cap, path, rights);
 }
 
 /// Record that `cap` may act on folder `dir` and everything below it.
@@ -331,6 +345,7 @@ pub fn grant_tree(cap: CapId, dir: &str, rights: Rights) -> bool {
     if top == "sys" || top == ".system" || top == crate::wasm::PRIVATE_ROOT { return false; }
     if dir == crate::ext::ROOT { return false; }
     push_grant(cap, dir, rights, true);
+    audit::granted(&cap, &alloc::format!("{}/", dir), rights);
     true
 }
 
@@ -486,13 +501,36 @@ pub fn check_global(cap_id: &CapId, required: Rights) -> Result<(), CapError> {
     VAULT.lock().check(cap_id, required).map(|_| ())
 }
 
-/// Create a capability for a WASM driver module bound to a specific PCI device.
+/// The gate of `call`: whether `cap_id` holds `required`. A no is a
+/// refusal and goes into the journal with the call.
+pub fn require(cap_id: &CapId, required: Rights, call: &str) -> bool {
+    match check_global(cap_id, required) {
+        Ok(()) => true,
+        Err(e) => {
+            audit::denied(cap_id, required, call, e.reason());
+            false
+        }
+    }
+}
+
+/// Whether `cap_id` holds `required`, asked to choose a path, not to
+/// refuse; a no is not journalled.
+pub fn holds(cap_id: &CapId, required: Rights) -> bool {
+    check_global(cap_id, required).is_ok()
+}
+
+/// Checks `cap_id` passed since it was issued.
+pub fn checks_of(cap_id: &CapId) -> u64 {
+    VAULT.lock().checks_of(cap_id)
+}
+
+/// Create a capability for the driver module `name`, bound to one PCI device.
 pub fn create_driver_cap(
-    bus: u8, device: u8, function: u8,
+    name: &str, bus: u8, device: u8, function: u8,
     rights: Rights, ttl_ticks: Option<u64>,
 ) -> Result<CapId, CapError> {
     let root = *ROOT_CAP.lock();
-    VAULT.lock().create(root, ResourceKind::PciDevice { bus, device, function }, rights, ttl_ticks)
+    VAULT.lock().create(root, ResourceKind::PciDevice { bus, device, function }, rights, ttl_ticks, name)
 }
 
 /// Check that a capability grants access to a specific PCI device.
@@ -522,6 +560,21 @@ pub enum CapError {
     InsufficientRights,
     EscalationAttempt,
     VaultFull,
+}
+
+impl CapError {
+    /// The journal's word for a refusal; empty for missing rights, the
+    /// common case the rights column already says.
+    pub fn reason(&self) -> &'static str {
+        match self {
+            CapError::NotFound => "no token",
+            CapError::Revoked => "revoked",
+            CapError::Expired => "expired",
+            CapError::InsufficientRights => "",
+            CapError::EscalationAttempt => "escalation",
+            CapError::VaultFull => "vault full",
+        }
+    }
 }
 
 impl core::fmt::Display for CapError {

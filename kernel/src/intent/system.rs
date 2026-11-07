@@ -2,6 +2,7 @@
 
 use crate::{kprint, kprintln};
 use crate::capability::{self, Vault};
+use alloc::string::String;
 
 pub fn intent_status(vault: &Vault) {
     let (active_caps, max_caps) = vault.stats();
@@ -1665,40 +1666,60 @@ pub fn intent_caps(vault: &Vault) {
     kprintln!();
 }
 
-pub fn intent_audit() {
-    use crate::audit::{self, AuditOp};
+/// `audit [app] [count]`: the journal, newest last; `app` narrows it to
+/// one holder, `count` (default 30) is how many entries.
+pub fn intent_audit(args: &str) {
+    use crate::audit;
 
-    let entries = audit::recent(10);
-    let total = audit::total_count();
-
-    kprintln!();
-    kprintln!("  Audit Log ({} events, showing last {}; {} checks passed)",
-        total, entries.len(), audit::checks_passed());
-    kprintln!("  ─────────────────────────────────────────────");
-
-    if entries.is_empty() {
-        kprintln!("  (no events recorded)");
-    } else {
-        for entry in &entries {
-            let secs = entry.tick / 100;
-            let ms = (entry.tick % 100) * 10;
-            match entry.op {
-                AuditOp::Create { parent_id, new_id } =>
-                    kprintln!("  [{:>4}.{:03}s] CREATE {:08x} from {:08x}",
-                        secs, ms, capability::short_id(&new_id), capability::short_id(&parent_id)),
-                AuditOp::Revoke { revoker_id, target_id } =>
-                    kprintln!("  [{:>4}.{:03}s] REVOKE {:08x} by {:08x}",
-                        secs, ms, capability::short_id(&target_id), capability::short_id(&revoker_id)),
-                AuditOp::Denied { reason } =>
-                    kprintln!("  [{:>4}.{:03}s] DENIED {:?}",
-                        secs, ms, reason),
-                AuditOp::Expired { cap_id } =>
-                    kprintln!("  [{:>4}.{:03}s] EXPIRED {:08x}",
-                        secs, ms, capability::short_id(&cap_id)),
-            }
+    let mut holder = "";
+    let mut count = 30usize;
+    for w in args.split_whitespace() {
+        match w.parse::<usize>() {
+            Ok(n) => count = n.max(1),
+            Err(_) => holder = w,
         }
     }
+    let entries = audit::since(None, holder, count);
+
     kprintln!();
+    kprintln!("  Audit journal: {} entries, {} token checks passed, showing {}",
+        audit::total_count(), audit::checks_passed(), entries.len());
+    kprintln!("  ─────────────────────────────────────────────");
+    if entries.is_empty() {
+        kprintln!("  (nothing recorded{})", if holder.is_empty() { "" } else { " for this app" });
+    }
+    for e in &entries {
+        let when = if e.wall != 0 {
+            let l = crate::time::wall::local(e.wall);
+            let s = l.rem_euclid(86_400);
+            alloc::format!("{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60)
+        } else {
+            alloc::format!("+{}.{:03}s", e.up_ms / 1000, e.up_ms % 1000)
+        };
+        let who = alloc::format!("{}#{}", e.holder, e.inst);
+        let what = match e.kind {
+            audit::Kind::Launch => alloc::format!("token {}", rights_names(e.rights)),
+            audit::Kind::Exit => alloc::format!("{} checks passed, {} refused", e.checks, e.denied),
+            audit::Kind::Denied => alloc::format!("{}  needs {}", e.object, rights_names(e.rights)),
+            audit::Kind::Grant => alloc::format!("{}  {}", e.object, rights_names(e.rights)),
+            _ => e.object.clone(),
+        };
+        let times = if e.count > 1 { alloc::format!("  x{}", e.count) } else { String::new() };
+        kprintln!("  {:>9}  {:<16} {:<8} {}{}", when, who, e.kind.label(), what, times);
+    }
+    kprintln!();
+}
+
+/// `READ|WRITE|NET`, or `-` for none.
+fn rights_names(r: capability::Rights) -> String {
+    if r.is_empty() { return String::from("-"); }
+    if r == capability::Rights::ALL { return String::from("ALL"); }
+    let mut out = String::new();
+    for (name, _) in r.iter_names() {
+        if !out.is_empty() { out.push('|'); }
+        out.push_str(name);
+    }
+    out
 }
 
 /// `time`: the local time, and whether NTP has set it. `time sync` asks
@@ -1865,7 +1886,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("lock", "Lock the system (clears keys)");
             help_row("passwd", "Change the passphrase");
             help_row("caps", "Capability vault");
-            help_row("audit", "Security event log");
+            help_row("audit [app] [n]", "What each app did with its token");
             help_row("shell", "Encrypted remote shell (port 4444)");
         }
         "config" | "set" | "settings" => {

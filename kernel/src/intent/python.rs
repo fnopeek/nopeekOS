@@ -105,6 +105,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     ctx.preopen(&home, "/home", true);
 
     let cap = match capability::create_module_cap(
+        "python",
         Rights::READ | Rights::WRITE | Rights::EXECUTE,
         None,
     ) {

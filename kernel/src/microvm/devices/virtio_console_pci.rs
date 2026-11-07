@@ -224,6 +224,7 @@ fn cam_stop() {
     let mut c = CAM.lock();
     if let Some(r) = c.reader.take() {
         crate::camfeed::close(r, None);
+        crate::audit::record(&crate::audit::GUEST, crate::audit::Kind::DeviceOff, "camera");
         crate::kprintln!("[microvm] guest camera stopped");
     }
     c.out = Vec::new();
@@ -725,6 +726,9 @@ impl VirtioConsole {
                     let h = u16::from_le_bytes([payload[2], payload[3]]);
                     cam_stop();
                     let r = crate::camfeed::open(None, w, h);
+                    if r.is_some() {
+                        crate::audit::record(&crate::audit::GUEST, crate::audit::Kind::DeviceOn, "camera");
+                    }
                     crate::kprintln!("[microvm] guest camera wants {}x{}{}", w, h,
                         if r.is_some() { "" } else { ", no reader free" });
                     CAM.lock().reader = r;

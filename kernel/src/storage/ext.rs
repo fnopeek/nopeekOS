@@ -177,7 +177,7 @@ fn spawn(disk: u32, role: u32, start: u64, blocks: u64, block_size: u32, read_on
             return false;
         }
     };
-    let Ok(cap) = capability::create_module_cap(Rights::empty(), None) else { return false };
+    let Ok(cap) = capability::create_module_cap(MODULE, Rights::empty(), None) else { return false };
     INSTS.lock().push(Inst {
         cap, disk, role, start, blocks, block_size, read_only,
         gone: false, failed: false, closing: false, born: now(), waker: NO_WAKER,

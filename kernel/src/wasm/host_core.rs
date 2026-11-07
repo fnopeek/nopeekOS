@@ -130,7 +130,7 @@ fn wifi_poll_into(
 
 pub(crate) fn npk_http_status(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+    if !capability::require(&cap_id, capability::Rights::NET, "npk_http_status") {
         return 0;
     }
     ctx.http_status as i32
@@ -138,7 +138,7 @@ pub(crate) fn npk_http_status(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_fs_usage(ctx: &mut HostState) -> i64 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+    if !capability::require(&cap_id, capability::Rights::READ, "npk_fs_usage") {
         return -1;
     }
     let Some((total_blocks, free_blocks, _, _)) = crate::npkfs::stats() else {
@@ -153,7 +153,7 @@ pub(crate) fn npk_fs_usage(ctx: &mut HostState) -> i64 {
 
 pub(crate) fn npk_clipboard_len(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_clipboard_len") {
         return -1;
     }
     if !app_is_focused(ctx) { return -1; }
@@ -162,7 +162,7 @@ pub(crate) fn npk_clipboard_len(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_window_set_close_guard(ctx: &mut HostState, on: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_set_close_guard") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -179,8 +179,8 @@ pub(crate) fn npk_window_close_cancel(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_screen_size(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    let ok = capability::check_global(&cap_id, capability::Rights::RENDER).is_ok()
-        || capability::check_global(&cap_id, capability::Rights::CAPTURE).is_ok();
+    let ok = capability::holds(&cap_id, capability::Rights::RENDER)
+        || capability::holds(&cap_id, capability::Rights::CAPTURE);
     if !ok { return 0; }
     let info = crate::framebuffer::get_info();
     let (w, h) = (logical(info.width), logical(info.height));
@@ -190,7 +190,7 @@ pub(crate) fn npk_screen_size(ctx: &mut HostState) -> i32 {
 /// Physical size of what `npk_capture_screen` writes, packed like
 /// `npk_screen_size`. The screen size apps lay out against is logical.
 pub(crate) fn npk_capture_size(ctx: &mut HostState) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::CAPTURE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::CAPTURE, "npk_capture_size") {
         return 0;
     }
     let info = crate::framebuffer::get_info();
@@ -238,7 +238,7 @@ pub(crate) fn npk_random_bytes(mem: &mut [u8], _ctx: &mut HostState, buf_ptr: i3
 
 pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_theme_token") {
         return 0;
     }
     // The only token table lives in palette.rs; do not copy it here.
@@ -253,7 +253,7 @@ pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
 
 pub(crate) fn npk_cursor_pos(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_cursor_pos") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -266,7 +266,7 @@ pub(crate) fn npk_cursor_pos(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_screen_flash(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::CAPTURE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::CAPTURE, "npk_screen_flash") {
         return -1;
     }
     // Worker cores may only set the state; core 0 ticks and paints
@@ -278,7 +278,7 @@ pub(crate) fn npk_screen_flash(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_overlay") {
         return -1;
     }
     if w <= 0 || h <= 0 { return -1; }
@@ -354,7 +354,7 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
 
 pub(crate) fn npk_window_set_modal(ctx: &mut HostState, modal: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_modal") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -367,7 +367,7 @@ pub(crate) fn npk_window_set_modal(ctx: &mut HostState, modal: i32) -> i32 {
 
 pub(crate) fn npk_window_set_overlay_at(ctx: &mut HostState, x: i32, y: i32, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_overlay_at") {
         return -1;
     }
     if w <= 0 || h <= 0 || x < 0 || y < 0 { return -1; }
@@ -418,7 +418,7 @@ pub(crate) fn npk_window_set_overlay_at(ctx: &mut HostState, x: i32, y: i32, w: 
 
 pub(crate) fn npk_window_set_light_dismiss(ctx: &mut HostState, on: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_set_light_dismiss") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -431,7 +431,7 @@ pub(crate) fn npk_window_set_light_dismiss(ctx: &mut HostState, on: i32) -> i32 
 
 pub(crate) fn npk_window_set_clipboard_sink(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_set_clipboard_sink") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -442,7 +442,7 @@ pub(crate) fn npk_window_set_clipboard_sink(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_panel") {
         return -1;
     }
     // Only the bottom strut panel exists.
@@ -505,7 +505,7 @@ pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32
 ///    map, everything counts as RAM.
 pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_acpi_mem_read") {
         return -1;
     }
     let addr = ((hi as u32 as u64) << 32) | (lo as u32 as u64);
@@ -530,7 +530,7 @@ pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
 /// Takes a pending EC query. -1 = nothing pending or no right.
 pub(crate) fn npk_ec_query(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_ec_query") {
         return -1;
     }
     match crate::ec::query() {
@@ -541,7 +541,7 @@ pub(crate) fn npk_ec_query(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_ec_read(ctx: &mut HostState, addr: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_ec_read") {
         return -1;
     }
     if !(0..=255).contains(&addr) { return -1; }
@@ -553,7 +553,7 @@ pub(crate) fn npk_ec_read(ctx: &mut HostState, addr: i32) -> i32 {
 
 pub(crate) fn npk_ec_write(ctx: &mut HostState, addr: i32, val: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_ec_write") {
         return -1;
     }
     if !(0..=255).contains(&addr) || !(0..=255).contains(&val) { return -1; }
@@ -562,7 +562,7 @@ pub(crate) fn npk_ec_write(ctx: &mut HostState, addr: i32, val: i32) -> i32 {
 
 pub(crate) fn npk_battery_report(ctx: &mut HostState, packed: i32) {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_battery_report") {
         return;
     }
     crate::battery::report(packed);
@@ -571,7 +571,7 @@ pub(crate) fn npk_battery_report(ctx: &mut HostState, packed: i32) {
 pub(crate) fn npk_battery_detail(ctx: &mut HostState, rate: i32, remaining: i32,
     full: i32, voltage_mv: i32, unit: i32) {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_battery_detail") {
         return;
     }
     crate::battery::report_detail(crate::battery::Detail {
@@ -601,7 +601,7 @@ pub(crate) fn npk_audio_format(ctx: &mut HostState, slot: i32, rate: i32, encodi
 /// The audio driver's device format, what `npk_audio_poll_mix` produces.
 /// Requires `Rights::HARDWARE`, like the poll itself.
 pub(crate) fn npk_audio_device_format(ctx: &mut HostState, rate: i32, encoding: i32, channels: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_audio_device_format") {
         return -1;
     }
     let Some(fmt) = audio_format(rate, encoding, channels) else { return -1 };
@@ -622,7 +622,7 @@ pub(crate) fn npk_audio_close(ctx: &mut HostState, slot: i32) -> i32 {
 
 /// The system volume: the shell's control, or the app the user is using.
 pub(crate) fn npk_audio_set_volume(ctx: &mut HostState, pct: i32) -> i32 {
-    let shell = capability::check_global(&ctx.cap_id, capability::Rights::SHELL).is_ok();
+    let shell = capability::holds(&ctx.cap_id, capability::Rights::SHELL);
     if !shell && !app_is_focused(ctx) { return -1; }
     if pct < 0 { return -1; }
     crate::audio::set_volume(pct.min(100) as u8);
@@ -635,7 +635,7 @@ pub(crate) fn npk_audio_get_volume(_ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_workspace_switch(ctx: &mut HostState, n: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_workspace_switch") {
         return -1;
     }
     if !(0..=255).contains(&n) { return -1; }
@@ -654,7 +654,7 @@ pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor:
     ptr: i32, len: i32) -> i32
 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_popup") {
         return -1;
     }
     let parent = ctx.widget_window_id;
@@ -690,7 +690,7 @@ pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor:
 /// Close popup `popup` of the app's window. No `PopupDone`: the app asked.
 pub(crate) fn npk_popup_close(ctx: &mut HostState, popup: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_popup_close") {
         return -1;
     }
     let parent = ctx.widget_window_id;
@@ -706,7 +706,7 @@ pub(crate) fn npk_popup_close(ctx: &mut HostState, popup: i32) -> i32 {
 
 pub(crate) fn npk_window_activate(ctx: &mut HostState, id: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_activate") {
         return -1;
     }
     if id <= 0 { return -1; }
@@ -718,7 +718,7 @@ pub(crate) fn npk_window_activate(ctx: &mut HostState, id: i32) -> i32 {
 
 pub(crate) fn npk_power(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_power") {
         return -1;
     }
     crate::shutdown::request(crate::shutdown::Kind::PowerOff);
@@ -727,7 +727,7 @@ pub(crate) fn npk_power(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_restart(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_restart") {
         return -1;
     }
     crate::shutdown::request(crate::shutdown::Kind::Restart);
@@ -736,7 +736,7 @@ pub(crate) fn npk_restart(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_close_widget(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_close_widget") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -750,8 +750,8 @@ pub(crate) fn npk_close_widget(ctx: &mut HostState) -> i32 {
 
 pub(crate) fn npk_get_fb_size(ctx: &mut HostState) -> i64 {
     // Same rights as `npk_screen_size`.
-    let ok = capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_ok()
-        || capability::check_global(&ctx.cap_id, capability::Rights::CAPTURE).is_ok();
+    let ok = capability::holds(&ctx.cap_id, capability::Rights::RENDER)
+        || capability::holds(&ctx.cap_id, capability::Rights::CAPTURE);
     if !ok { return 0; }
     let (w, h) = crate::framebuffer::get_resolution();
     ((w as i64) << 32) | (h as i64)
@@ -808,7 +808,7 @@ pub(crate) fn npk_sys_info(ctx: &mut HostState, key: i32) -> i64 {
         // BENCH_CACHE until reboot.
         // Benchmarks write raw blocks and the check holds the file system
         // lock for a full scan: disk tooling with WRITE only.
-        30..=34 | 40 if capability::check_global(&ctx.cap_id, capability::Rights::WRITE).is_err() => -1,
+        30..=34 | 40 if !capability::require(&ctx.cap_id, capability::Rights::WRITE, "npk_sys_info") => -1,
         30..=34 => bench_sys_info(key),
 
         // ── fsck self-check (key 40) → read-only integrity scan ──
@@ -1002,7 +1002,7 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
             sig |= SIG_WIFI;
         }
         if mask & WAIT_STATE != 0
-            && capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_ok()
+            && capability::holds(&ctx.cap_id, capability::Rights::RENDER)
         {
             crate::notify::subscribe(w);
             sig |= crate::smp::fiber::SIG_STATE;
@@ -1103,7 +1103,7 @@ pub(crate) fn npk_self_terminal(ctx: &mut HostState) -> i32 {
 /// Terminal output sinks read what any terminal prints, which is a remote
 /// console's job and nobody else's.
 fn stream_allowed(ctx: &HostState) -> bool {
-    capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_ok()
+    capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "terminal stream")
 }
 
 pub(crate) fn npk_stream_open(ctx: &mut HostState, idx: i32) -> i32 {
@@ -1136,7 +1136,7 @@ pub(crate) fn npk_key_inject(ctx: &mut HostState, byte: i32) -> i32 {
         return -1;
     }
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_key_inject") {
         return -1;
     }
     crate::keyboard::inject_byte((byte & 0xFF) as u8);
@@ -1155,6 +1155,7 @@ fn net_allowed(ctx: &mut HostState) -> bool {
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
         crate::kprintln!("[npk] tcp: Modul {} hat kein NET-Recht ({:?})",
             capability::short_id(&cap_id), e);
+        crate::audit::denied(&cap_id, capability::Rights::NET, "socket", e.reason());
         return false;
     }
     true
@@ -1185,6 +1186,14 @@ struct TlsSlot {
 /// TCP connections (`tcp::connect_as`).
 static TLS_SLOTS: spin::Mutex<alloc::vec::Vec<Option<TlsSlot>>> =
     spin::Mutex::new(alloc::vec::Vec::new());
+
+/// `cap` reaches the host of `url`; the journal keeps the host, not the
+/// path, which may carry what the user typed.
+fn journal_url(cap: &crate::capability::CapId, url: &str) {
+    if let Ok((host, _, _)) = crate::intent::http::parse_url(url) {
+        crate::audit::record(cap, crate::audit::Kind::Net, &host);
+    }
+}
 
 /// The TCP owner a module's connections are charged to. A run without a
 /// process entry (pid 0) is still a module, never the kernel.
@@ -1268,6 +1277,7 @@ pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
     // The bare name, without port, goes into SNI and certificate checks.
     let bare: String = String::from(host.split(':').next().unwrap_or(&host));
     if bare.is_empty() || bare.len() > 253 { return -1 }
+    crate::audit::record(&ctx.cap_id, crate::audit::Kind::Net, &bare);
     // The module passes a name, not an address, so `resolve_checked` both
     // resolves and checks the reach class (`ctx.net_reach`) in one step.
     // Resolving in the module would bypass the reach check every request of
@@ -1375,6 +1385,8 @@ pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) ->
     // `debug` the local network is the point (it logs to `nc -lk`).
     // The TLS path above is used by beak on behalf of a page and does apply
     // it.
+    let peer = alloc::format!("{}.{}.{}.{}:{}", ip[0], ip[1], ip[2], ip[3], port);
+    crate::audit::record(&ctx.cap_id, crate::audit::Kind::Net, &peer);
     let Ok(h) = crate::net::tcp::connect_start_as(tcp_owner(ctx), ip, port as u16) else { return -1 };
     // The lowest free descriptor, as `open` hands out file descriptors.
     let fd = match ctx.tcp_handles.iter().position(Option::is_none) {
@@ -1426,7 +1438,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
     let cap_id = ctx.cap_id;
     let a = dev.addr;
     if capability::check_pci_device(&cap_id, capability::Rights::EXECUTE, a.bus, a.device, a.function).is_err()
-        && capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        && !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_pci_bind") {
         kprintln!("[npk] WASM: npk_pci_bind DENIED {:04x}:{:04x}", vid, did);
         return -2;
     }
@@ -1506,7 +1518,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
     let cap_id = ctx.cap_id;
     let a = dev.addr;
     if capability::check_pci_device(&cap_id, capability::Rights::EXECUTE, a.bus, a.device, a.function).is_err()
-        && capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+        && !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_pci_bind_class") {
         kprintln!("[npk] WASM: npk_pci_bind_class DENIED {:02x}:{:02x}", cls, sub);
         return -2;
     }
@@ -1554,7 +1566,7 @@ pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
 /// `HARDWARE`; config reads have no side effects in the header.
 /// `bdf` = bus << 8 | device << 3 | function.
 pub(crate) fn npk_pci_read_config_at(ctx: &mut HostState, bdf: i32, offset: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_pci_read_config_at") {
         return -1;
     }
     if !(0..=0xffff).contains(&bdf) || !(0..=0xFFC).contains(&offset) || offset & 3 != 0 {
@@ -1747,7 +1759,7 @@ pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
 /// line away from its owner. Level lines are one-shot: the kernel ISR masks
 /// them, `npk_wait` unmasks them when the driver waits again.
 pub(crate) fn npk_irq_register_gsi(ctx: &mut HostState, gsi: i32, flags: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_irq_register_gsi") {
         return -1;
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
@@ -1763,7 +1775,7 @@ pub(crate) fn npk_irq_register_gsi(ctx: &mut HostState, gsi: i32, flags: i32) ->
 /// its EC's GPE. Same ownership as `npk_irq_register_gsi` — the vector is
 /// this module's, and `npk_wait(WAIT_IRQ)` arms it. Once per boot.
 pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_sci_arm") {
         return -1;
     }
     if !(0..256).contains(&gpe) { return -1; }
@@ -1802,7 +1814,7 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
 
 /// `npk_sci_service() -> mask`: ack the SCI sources (see `sci::service`).
 pub(crate) fn npk_sci_service(ctx: &mut HostState) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_sci_service") {
         return -1;
     }
     crate::sci::service() as i32
@@ -1814,7 +1826,7 @@ pub(crate) fn npk_sci_service(ctx: &mut HostState) -> i32 {
 /// native backlight by a twentieth of its range; here the kernel does that
 /// step. HARDWARE-gated, the right the AML driver holds.
 pub(crate) fn npk_acpi_video_notify(ctx: &mut HostState, event: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_acpi_video_notify") {
         return -1;
     }
     match event {
@@ -1829,7 +1841,7 @@ pub(crate) fn npk_acpi_video_notify(ctx: &mut HostState, event: i32) -> i32 {
 /// processors' `_OSC`/`_PDC` (see `acpi_processor::proc_cap_bits`).
 /// HARDWARE-gated.
 pub(crate) fn npk_acpi_proc_caps(ctx: &mut HostState) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_acpi_proc_caps") {
         return -1;
     }
     crate::drivers::acpi_processor::proc_cap_bits() as i32
@@ -1838,7 +1850,7 @@ pub(crate) fn npk_acpi_proc_caps(ctx: &mut HostState) -> i32 {
 /// `npk_acpi_cst(ptr, count) -> usable states | -1`: a processor's `_CST`
 /// entries for MWAIT idle (see `acpi_processor::take_cst`). HARDWARE-gated.
 pub(crate) fn npk_acpi_cst(mem: &mut [u8], ctx: &mut HostState, ptr: i32, count: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_acpi_cst") {
         return -1;
     }
     if !(1..=16).contains(&count) { return -1; }
@@ -2003,7 +2015,7 @@ const MMIO_MAP_PAGES_UNDECLARED: i32 = 16;
 
 pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_mmio_map_phys") {
         kprintln!("[npk] WASM: npk_mmio_map_phys DENIED — needs HARDWARE");
         return -1;
     }
@@ -2099,7 +2111,7 @@ pub(crate) fn npk_pointer_inject(
     ctx: &mut HostState, dx: i32, dy: i32, buttons: i32, scroll: i32, hscroll: i32,
 ) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_pointer_inject") {
         return -1;
     }
     let b = (buttons & 0x07) as u8;
@@ -2131,7 +2143,7 @@ pub(crate) fn npk_pointer_inject(
 /// `x`, `y` on 0..=65535 of the screen, clamped. Requires `Rights::HARDWARE`,
 /// like `npk_pointer_inject`.
 pub(crate) fn npk_pointer_abs(ctx: &mut HostState, x: i32, y: i32, buttons: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_pointer_abs") {
         return -1;
     }
     crate::xhci::inject_pointer_abs(
@@ -2442,9 +2454,41 @@ fn ext_tree(base: &str, out: &mut alloc::vec::Vec<u8>) -> bool {
 /// May the module of `ctx` reach `name` in `ext/` for `want`? With
 /// EXTERNAL and the global right, or through a grant from the open dialog.
 fn ext_allowed(ctx: &HostState, name: &str, want: capability::Rights) -> bool {
-    (capability::check_global(&ctx.cap_id, capability::Rights::EXTERNAL).is_ok()
-        && capability::check_global(&ctx.cap_id, want).is_ok())
+    (capability::holds(&ctx.cap_id, capability::Rights::EXTERNAL)
+        && capability::holds(&ctx.cap_id, want))
         || capability::check_path_grant(&ctx.cap_id, name.trim_matches('/'), want)
+}
+
+/// What a file gate journals for `call` once it lets it through; `None`
+/// for the calls on a file already open, which its open journalled.
+fn file_kind(call: &str) -> Option<crate::audit::Kind> {
+    use crate::audit::Kind;
+    match call {
+        "npk_fetch" | "npk_file_open" | "npk_drag_start" => Some(Kind::Read),
+        "npk_store" | "npk_file_create" => Some(Kind::Write),
+        "npk_fs_delete" => Some(Kind::Delete),
+        "npk_fs_mkdir" => Some(Kind::Mkdir),
+        _ => None,
+    }
+}
+
+/// A file gate let `call` on `name` through.
+fn journal_file(ctx: &HostState, name: &str, call: &str) {
+    if let Some(kind) = file_kind(call) {
+        crate::audit::record(&ctx.cap_id, kind, name);
+    }
+}
+
+/// `old` became `new`.
+fn journal_move(ctx: &HostState, kind: crate::audit::Kind, old: &str, new: &str) {
+    let what = alloc::format!("{} -> {}", old, new);
+    crate::audit::record(&ctx.cap_id, kind, &what);
+}
+
+/// A file gate refused `call` on `name`; `why` says which rule.
+fn journal_refusal(ctx: &HostState, want: capability::Rights, name: &str, call: &str, why: &str) {
+    let what = alloc::format!("{} {}", call, name);
+    crate::audit::denied(&ctx.cap_id, want, &what, why);
 }
 
 /// May the module of `ctx` read file `name`? The rule of `npk_fetch` and
@@ -2452,22 +2496,31 @@ fn ext_allowed(ctx: &HostState, name: &str, want: capability::Rights) -> bool {
 /// READ; the module's own area is open even without READ
 /// (`wasm::is_own_private`).
 fn read_allowed(ctx: &HostState, name: &str, call: &str) -> bool {
+    let read = capability::Rights::READ;
     if crate::ext::is_ext(name) {
-        let ok = ext_allowed(ctx, name, capability::Rights::READ);
-        if !ok { kprintln!("[npk] WASM: {} DENIED (no EXTERNAL for {})", call, name); }
-        return ok;
+        let ok = ext_allowed(ctx, name, read);
+        if !ok {
+            kprintln!("[npk] WASM: {} DENIED (no EXTERNAL for {})", call, name);
+            journal_refusal(ctx, read | capability::Rights::EXTERNAL, name, call, "");
+            return false;
+        }
+        journal_file(ctx, name, call);
+        return true;
     }
     if !crate::wasm::private_area_allows(name, &ctx.module_name) {
         kprintln!("[npk] WASM: {} DENIED ({} gehoert einem anderen Modul)", call, name);
+        journal_refusal(ctx, read, name, call, "another app's private area");
         return false;
     }
     if !crate::wasm::is_own_private(name, &ctx.module_name) {
-        if let Err(e) = capability::check_global(&ctx.cap_id, capability::Rights::READ) {
+        if let Err(e) = capability::check_global(&ctx.cap_id, read) {
             kprintln!("[npk] WASM: {} DENIED (cap_id={:08x}, {:?})",
                 call, capability::short_id(&ctx.cap_id), e);
+            journal_refusal(ctx, read, name, call, e.reason());
             return false;
         }
     }
+    journal_file(ctx, name, call);
     true
 }
 
@@ -2681,7 +2734,7 @@ pub(crate) fn npk_vault_system_delete(mem: &mut [u8], ctx: &mut HostState, name_
 
 pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+    if !capability::require(&cap_id, capability::Rights::NET, "npk_http_response_headers") {
         return -1;
     }
     let Some(hdrs) = &ctx.http_reply_headers else { return -1 };
@@ -2690,7 +2743,7 @@ pub(crate) fn npk_http_response_headers(mem: &mut [u8], ctx: &mut HostState, buf
 
 pub(crate) fn npk_http_final_url(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+    if !capability::require(&cap_id, capability::Rights::NET, "npk_http_final_url") {
         return -1;
     }
     let Some(url) = &ctx.http_final_url else { return -1 };
@@ -2699,7 +2752,7 @@ pub(crate) fn npk_http_final_url(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
 
 pub(crate) fn npk_http_content_type(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+    if !capability::require(&cap_id, capability::Rights::NET, "npk_http_content_type") {
         return -1;
     }
     let Some(ct) = &ctx.http_content_type else { return -1 };
@@ -2708,7 +2761,7 @@ pub(crate) fn npk_http_content_type(mem: &mut [u8], ctx: &mut HostState, buf_ptr
 
 pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+    if !capability::require(&cap_id, capability::Rights::NET, "npk_http_last_error") {
         return -1;
     }
     let Some(err) = &ctx.http_last_error else { return -1 };
@@ -2723,15 +2776,19 @@ const PRIVATE_QUOTA_DIVISOR: u64 = 32;
 /// file, `Some(true)` only through its private area (the quota applies),
 /// `None` refused.
 fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
+    let write = capability::Rights::WRITE;
     if crate::ext::is_ext(name) {
-        if !ext_allowed(ctx, name, capability::Rights::WRITE) {
+        if !ext_allowed(ctx, name, write) {
             kprintln!("[npk] WASM: {} DENIED (no EXTERNAL for {})", call, name);
+            journal_refusal(ctx, write | capability::Rights::EXTERNAL, name, call, "");
             return None;
         }
         if !crate::ext::writable(name) {
             kprintln!("[npk] WASM: {} DENIED ({} is read-only)", call, name);
+            journal_refusal(ctx, write, name, call, "read-only drive");
             return None;
         }
+        journal_file(ctx, name, call);
         return Some(false);
     }
     // Apps may not write the module store or the trust store — see
@@ -2740,12 +2797,14 @@ fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
     // become a way in there.
     if is_trust_critical_path(name) {
         kprintln!("[npk] WASM: {} DENIED ({} is read-only to apps)", call, name);
+        journal_refusal(ctx, write, name, call, "module or trust store");
         return None;
     }
     // Another module's private area is closed, even with global READ and
     // WRITE. See `wasm::private_area_owner`.
     if !crate::wasm::private_area_allows(name, &ctx.module_name) {
         kprintln!("[npk] WASM: {} DENIED ({} gehoert einem anderen Modul)", call, name);
+        journal_refusal(ctx, write, name, call, "another app's private area");
         return None;
     }
 
@@ -2762,16 +2821,19 @@ fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
     //      machine's store.
     let cap_id = ctx.cap_id;
     let own_config = alloc::format!("sys/config/{}", ctx.module_name);
-    let has_write = capability::check_global(&cap_id, capability::Rights::WRITE).is_ok()
-        || capability::check_path_grant(&cap_id, name, capability::Rights::WRITE)
+    let has_write = capability::holds(&cap_id, write)
+        || capability::check_path_grant(&cap_id, name, write)
         || (name == own_config && ctx.module_name != crate::ext::MODULE);
     if has_write {
+        journal_file(ctx, name, call);
         return Some(false);
     }
     if crate::wasm::is_own_private(name, &ctx.module_name) {
+        journal_file(ctx, name, call);
         return Some(true);
     }
     kprintln!("[npk] WASM: {} DENIED (no WRITE, no grant for {})", call, name);
+    journal_refusal(ctx, write, name, call, "");
     None
 }
 
@@ -3141,7 +3203,7 @@ fn ext_store(name: &str, data: &[u8]) -> bool {
 
 pub(crate) fn npk_home_dir(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+    if !capability::require(&cap_id, capability::Rights::READ, "npk_home_dir") {
         return -1;
     }
     let home = crate::intent::home_dir();
@@ -3162,7 +3224,7 @@ pub(crate) fn npk_launch_arg(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
 
 pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_clipboard_set") {
         return -1;
     }
     if !app_is_focused(ctx) { return -1; }
@@ -3173,7 +3235,7 @@ pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
 
 pub(crate) fn npk_clipboard_get(mem: &mut [u8], ctx: &mut HostState, ptr: i32, max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_clipboard_get") {
         return -1;
     }
     if !app_is_focused(ctx) { return -1; }
@@ -3186,7 +3248,7 @@ pub(crate) fn npk_clipboard_get(mem: &mut [u8], ctx: &mut HostState, ptr: i32, m
 
 pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_scene_commit") {
         kprintln!("[npk] WASM: npk_scene_commit DENIED (no RENDER)");
         return -1;
     }
@@ -3243,7 +3305,7 @@ pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
 
 pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: i32, ptr: i32, len: i32, width: i32, height: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::CANVAS).is_err() {
+    if !capability::require(&cap_id, capability::Rights::CANVAS, "npk_canvas_commit") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -3274,7 +3336,7 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
 /// being decoded (dropped).
 pub(crate) fn npk_canvas_frame(mem: &mut [u8], ctx: &mut HostState, canvas_id: i32, ptr: i32, len: i32,
                                width: i32, height: i32, format: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::CANVAS).is_err() { return -1; }
+    if !capability::require(&ctx.cap_id, capability::Rights::CANVAS, "npk_canvas_frame") { return -1; }
     let wid = ctx.widget_window_id;
     use crate::shade::scene::Yuv;
     if format == 3 {
@@ -3319,7 +3381,7 @@ pub(crate) fn npk_canvas_commit_yuv(
     ys: i32, cs: i32, width: i32, height: i32, flags: i32,
 ) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::CANVAS).is_err() {
+    if !capability::require(&cap_id, capability::Rights::CANVAS, "npk_canvas_commit_yuv") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -3359,7 +3421,7 @@ pub(crate) fn npk_canvas_commit_yuv(
 
 pub(crate) fn npk_canvas_rect(mem: &mut [u8], ctx: &mut HostState, canvas_id: i32, out_ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_canvas_rect") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -3379,7 +3441,7 @@ pub(crate) fn npk_canvas_rect(mem: &mut [u8], ctx: &mut HostState, canvas_id: i3
 }
 
 pub(crate) fn npk_canvas_drop(ctx: &mut HostState, canvas_id: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_canvas_drop") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -3392,7 +3454,7 @@ const DRAG_MAX_BYTES: usize = 1024 * 1024;
 const DRAG_MAX_PATHS: usize = 16 * 1024;
 
 pub(crate) fn npk_drag_start(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_drag_start") {
         return -1;
     }
     let wid = ctx.widget_window_id;
@@ -3419,9 +3481,10 @@ pub(crate) fn npk_drag_start(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len:
 
 pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::CAPTURE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::CAPTURE, "npk_capture_screen") {
         return -1;
     }
+    crate::audit::record(&cap_id, crate::audit::Kind::Read, "screen");
     let info = crate::framebuffer::get_info();
     let w = info.width as usize;
     let h = info.height as usize;
@@ -3460,7 +3523,7 @@ const CAPTURE_BAND: usize = 64;
 
 pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_event_poll") {
         return -1;
     }
     let window_id = ctx.widget_window_id;
@@ -3491,7 +3554,7 @@ pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
 
 pub(crate) fn npk_list_modules(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_list_modules") {
         return -1;
     }
 
@@ -3515,7 +3578,7 @@ pub(crate) fn npk_list_modules(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
 
 pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_app_meta") {
         return -1;
     }
     if name_len <= 0 || name_len > 64 { return -1; }
@@ -3549,7 +3612,7 @@ pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
 
 pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_spawn_module") {
         return -1;
     }
     if name_len <= 0 || name_len > 64 { return -1; }
@@ -3573,7 +3636,7 @@ pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i3
     // no declaration get the safe default (no WRITE). Per-app, not
     // a blanket grant.
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, None) {
+    let module_cap = match capability::create_module_cap(&name, rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -3614,7 +3677,7 @@ pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32,
     // sound: a shell role (launcher, panel), not something every module with
     // the default EXECUTE may do.
     let need = capability::Rights::EXECUTE | capability::Rights::SHELL;
-    if capability::check_global(&cap_id, need).is_err() {
+    if !capability::require(&cap_id, need, "npk_run_intent") {
         return -1;
     }
     if verb_len <= 0 || verb_len > 64 { return -1; }
@@ -3640,7 +3703,7 @@ pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32,
 
 pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_bar_state") {
         return -1;
     }
     let local = crate::time::local(crate::time::now_or_zero());
@@ -3656,10 +3719,10 @@ pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, m
 
 pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_titles") {
         return -1;
     }
-    let full = capability::check_global(&cap_id, capability::Rights::SHELL).is_ok();
+    let full = capability::holds(&cap_id, capability::Rights::SHELL);
     let s = crate::shade::with_compositor(|c| c.window_lines(full))
         .unwrap_or_default();
     write_whole(mem, buf_ptr, max, s.as_bytes())
@@ -3680,7 +3743,7 @@ pub(crate) fn npk_acpi_table(
     mem: &mut [u8], ctx: &mut HostState, sig: i32, index: i32, buf_ptr: i32, buf_max: i32,
 ) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_acpi_table") {
         return -1;
     }
     if index < 0 || index > 63 { return -1; }
@@ -3698,7 +3761,7 @@ pub(crate) fn npk_acpi_table(
 
 pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_acpi_dsdt") {
         return -1;
     }
     let Some((addr, len)) = crate::acpi::dsdt() else { return -1 };
@@ -3740,7 +3803,7 @@ pub(crate) fn npk_audio_buffered(ctx: &mut HostState, slot: i32) -> i32 {
 /// playback.
 pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], ctx: &mut HostState, ptr: i32, max: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_audio_poll_mix") {
         return -1;
     }
     if ptr < 0 || max < 0 { return -1; }
@@ -3759,7 +3822,7 @@ fn owned_pci_class(ctx: &HostState) -> Option<u8> {
 /// (`pin_eld_notify` of Linux' audio component). Only the driver of a
 /// display device may.
 pub(crate) fn npk_display_audio_set(mem: &mut [u8], ctx: &mut HostState, port: i32, ptr: i32, len: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_set")
         || owned_pci_class(ctx) != Some(0x03)
     {
         return -1;
@@ -3773,7 +3836,7 @@ pub(crate) fn npk_display_audio_set(mem: &mut [u8], ctx: &mut HostState, port: i
 /// no sink is there, `-(needed + 2)` for a short buffer. Only the driver of
 /// a multimedia device may.
 pub(crate) fn npk_display_audio_get(mem: &mut [u8], ctx: &mut HostState, port: i32, ptr: i32, max: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_get")
         || owned_pci_class(ctx) != Some(0x04)
     {
         return -1;
@@ -3789,7 +3852,7 @@ pub(crate) fn npk_display_audio_get(mem: &mut [u8], ctx: &mut HostState, port: i
 /// 0 until the display driver reported once, then a count that moves with
 /// every report.
 pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_generation") {
         return -1;
     }
     crate::audio::display_audio_generation() as i32
@@ -3798,7 +3861,7 @@ pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
 /// The display driver binds the audio component, says request `done` is
 /// carried out, and learns what is wanted now: `(number << 2) | bits`.
 pub(crate) fn npk_display_audio_serve(ctx: &mut HostState, done: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_serve")
         || owned_pci_class(ctx) != Some(0x03)
     {
         return -1;
@@ -3810,7 +3873,7 @@ pub(crate) fn npk_display_audio_serve(ctx: &mut HostState, done: i32) -> i32 {
 /// signal (`bits`): the request's number, -2 while no display driver is
 /// bound, -3 when none will be.
 pub(crate) fn npk_display_audio_request(ctx: &mut HostState, bits: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_request")
         || owned_pci_class(ctx) != Some(0x04)
         || bits < 0
     {
@@ -3825,7 +3888,7 @@ pub(crate) fn npk_display_audio_request(ctx: &mut HostState, bits: i32) -> i32 {
 
 /// The last request the display driver carried out, -2 while none is bound.
 pub(crate) fn npk_display_audio_done(ctx: &mut HostState) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err()
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_done")
         || owned_pci_class(ctx) != Some(0x04)
     {
         return -1;
@@ -3856,7 +3919,7 @@ const BENCH_WINDOW_BLOCKS: u64 = 2048;
 pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: i64, b: i64,
                              out_ptr: i32, out_len: i32) -> i32 {
     use crate::storage::npkfs::{bench, storage as st};
-    if capability::check_global(&ctx.cap_id, capability::Rights::WRITE).is_err() || a < 0 || b < 0 {
+    if !capability::require(&ctx.cap_id, capability::Rights::WRITE, "npk_disk_bench") || a < 0 || b < 0 {
         return -1;
     }
     let (a, b) = (a as u64, b as u64);
@@ -3916,7 +3979,7 @@ pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, 
         }
     }
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+    if !capability::require(&cap_id, capability::Rights::READ, "npk_fs_list") {
         return -1;
     }
     if prefix_len < 0 { return -1; }
@@ -4029,7 +4092,7 @@ pub(crate) fn npk_config_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, 
 /// `npk_setting_get(key, buf)`: a system setting the settings table lets
 /// apps read (docs/spec/SETTINGS.md); RENDER.
 pub(crate) fn npk_setting_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_setting_get") {
         return -1;
     }
     if glen(key_len).is_none_or(|n| n > crate::settings::MAX_KEY) { return -1; }
@@ -4042,7 +4105,7 @@ pub(crate) fn npk_setting_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32,
 /// `npk_setting_set(key, value)`: change a system setting the settings
 /// table lets apps write, through the loop's `set` path; SETTINGS.
 pub(crate) fn npk_setting_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::SETTINGS).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::SETTINGS, "npk_setting_set") {
         return -1;
     }
     if glen(key_len).is_none_or(|n| n > crate::settings::MAX_KEY) { return -1; }
@@ -4050,7 +4113,11 @@ pub(crate) fn npk_setting_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32,
     let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
     let Some(value) = read_str(mem, val_ptr, val_len) else { return -2 };
     match crate::settings::set(&key, &value, crate::settings::Origin::App) {
-        Ok(_) => 0,
+        Ok(_) => {
+            let what = alloc::format!("{} = {}", key, value);
+            crate::audit::record(&ctx.cap_id, crate::audit::Kind::Setting, &what);
+            0
+        }
         Err(crate::settings::Error::NotWritable) => -1,
         Err(crate::settings::Error::Invalid(_)) => -2,
     }
@@ -4058,7 +4125,7 @@ pub(crate) fn npk_setting_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32,
 
 pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, out_ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::READ).is_err() {
+    if !capability::require(&cap_id, capability::Rights::READ, "npk_fs_stat") {
         return -1;
     }
     let name = match read_str(mem, name_ptr, name_len) {
@@ -4100,7 +4167,7 @@ pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, na
 
 pub(crate) fn npk_set_wallpaper(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32, width: i32, height: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::WRITE, "npk_set_wallpaper") {
         kprintln!("[npk] WASM: npk_set_wallpaper DENIED (no WRITE)");
         return -1;
     }
@@ -4122,7 +4189,7 @@ pub(crate) fn npk_set_wallpaper(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
 
 pub(crate) fn npk_set_theme(mem: &mut [u8], ctx: &mut HostState, ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::WRITE, "npk_set_theme") {
         return -1;
     }
 
@@ -4288,6 +4355,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
         kprintln!("[npk] WASM: npk_http_request DENIED (cap_id={:08x}, {:?})",
             capability::short_id(&cap_id), e);
+        crate::audit::denied(&cap_id, capability::Rights::NET, "npk_http_request", e.reason());
         return -1;
     }
     if buf_max <= 0 { return -1; }
@@ -4304,6 +4372,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
             return -1;
         }
     };
+    crate::audit::record(&cap_id, crate::audit::Kind::Net, &host);
 
     let mut out: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
     let mut info = crate::intent::http::FetchInfo::default();
@@ -4347,6 +4416,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
         kprintln!("[npk] WASM: npk_http_send DENIED (cap_id={:08x}, {:?})",
             capability::short_id(&cap_id), e);
+        crate::audit::denied(&cap_id, capability::Rights::NET, "npk_http_send", e.reason());
         return -1;
     }
     if buf_max <= 0 { return -1; }
@@ -4368,6 +4438,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
         Some(s) => s,
         None => return -1,
     };
+    journal_url(&cap_id, &url);
     let hdr_blob = if hdrs_len > 0 {
         match read_str(mem, hdrs_ptr, hdrs_len) {
             Some(s) => s,
@@ -4466,7 +4537,7 @@ pub(crate) fn npk_net_context(
     mem: &mut [u8], ctx: &mut HostState, url_ptr: i32, url_len: i32,
 ) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::NET).is_err() {
+    if !capability::require(&cap_id, capability::Rights::NET, "npk_net_context") {
         return -1;
     }
     let url = match read_str(mem, url_ptr, url_len) {
@@ -4494,6 +4565,7 @@ pub(crate) fn npk_http_begin(
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
         kprintln!("[npk] WASM: npk_http_begin DENIED (cap_id={:08x}, {:?})",
             capability::short_id(&cap_id), e);
+        crate::audit::denied(&cap_id, capability::Rights::NET, "npk_http_begin", e.reason());
         return -1;
     }
     if buf_max <= 0 { return -1; }
@@ -4511,6 +4583,7 @@ pub(crate) fn npk_http_begin(
         Some(s) => s,
         None => return -1,
     };
+    journal_url(&cap_id, &url);
     let hdr_blob = if hdrs_len > 0 {
         match read_str(mem, hdrs_ptr, hdrs_len) {
             Some(s) => s,
@@ -4588,6 +4661,7 @@ pub(crate) fn npk_http_begin_many_hdr(
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
         kprintln!("[npk] WASM: npk_http_begin_many DENIED (cap_id={:08x}, {:?})",
             capability::short_id(&cap_id), e);
+        crate::audit::denied(&cap_id, capability::Rights::NET, "npk_http_begin_many", e.reason());
         return -1;
     }
     if out_max <= 0 { return -1; }
@@ -4601,6 +4675,7 @@ pub(crate) fn npk_http_begin_many_hdr(
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
+    for u in &urls { journal_url(&cap_id, u); }
     // One cookie line per URL, in order, checked like a header on the
     // single-request path. A line that fails becomes no cookie rather than
     // a refused request: the resource then loads anonymously instead of
@@ -4726,6 +4801,7 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
         kprintln!("[npk] WASM: npk_http_request_many DENIED (cap_id={:08x}, {:?})",
             capability::short_id(&cap_id), e);
+        crate::audit::denied(&cap_id, capability::Rights::NET, "npk_http_request_many", e.reason());
         return -1;
     }
     if out_max <= 0 || lens_max <= 0 || out_ptr < 0 || lens_ptr < 0 { return -1; }
@@ -4740,6 +4816,7 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
         .filter(|s| !s.is_empty())
         .map(String::from)
         .collect();
+    for u in &urls { journal_url(&cap_id, u); }
     // Bound the work a single call can ask for, and make sure the
     // guest actually gave us room for one length per URL.
     const MAX_URLS: usize = 64;
@@ -4779,8 +4856,8 @@ fn passable_rights(cap: &capability::CapId, path: &str) -> capability::Rights {
     let mut r = Rights::empty();
     let ext = crate::ext::is_ext(path);
     for want in [Rights::READ, Rights::WRITE] {
-        let global = capability::check_global(cap, want).is_ok()
-            && (!ext || capability::check_global(cap, Rights::EXTERNAL).is_ok());
+        let global = capability::holds(cap, want)
+            && (!ext || capability::holds(cap, Rights::EXTERNAL));
         if global || capability::check_path_grant(cap, path, want)
         {
             r |= want;
@@ -4791,7 +4868,7 @@ fn passable_rights(cap: &capability::CapId, path: &str) -> capability::Rights {
 
 pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::EXECUTE, "npk_open") {
         return -1;
     }
     let app = match read_str(mem, app_ptr, app_len) {
@@ -4835,7 +4912,7 @@ pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_le
         Err(_) => return -1,
     };
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, None) {
+    let module_cap = match capability::create_module_cap(&app, rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -4925,7 +5002,7 @@ pub(crate) fn npk_status_clear(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32
 }
 
 pub(crate) fn npk_status_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_status_list") {
         return -1;
     }
     write_whole(mem, buf_ptr, max, &crate::status::serialize())
@@ -4933,7 +5010,7 @@ pub(crate) fn npk_status_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
 
 pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::EXECUTE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::EXECUTE, "npk_launch") {
         return -1;
     }
     let app = match read_str(mem, app_ptr, app_len) {
@@ -4948,7 +5025,7 @@ pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_
         Err(_) => return -1,
     };
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, None) {
+    let module_cap = match capability::create_module_cap(&app, rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -4957,7 +5034,7 @@ pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_
 
 pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr: i32, start_len: i32, suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_pick") {
         return -1;
     }
     let pick_mode = match mode {
@@ -5007,7 +5084,7 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
         }
     };
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = match capability::create_module_cap(rights, None) {
+    let module_cap = match capability::create_module_cap(&module, rights, None) {
         Ok(id) => id,
         Err(_) => return -1,
     };
@@ -5069,7 +5146,7 @@ pub(crate) fn open_screen_pick(requester: u32, app: &str) -> Option<u32> {
         }
     };
     let rights = capability::widget_rights_from_wasm(&bytes);
-    let module_cap = capability::create_module_cap(rights, None).ok()?;
+    let module_cap = capability::create_module_cap(&module, rights, None).ok()?;
     // "screen\0<app>\0": the app is shown, it grants nothing.
     let app: String = app.chars().filter(|c| *c != '\0').take(64).collect();
     let arg = alloc::format!("screen\0{}\0", app);
@@ -5141,7 +5218,7 @@ pub(crate) fn npk_pick_mkdir(mem: &mut [u8], ctx: &mut HostState, path_ptr: i32,
 
 pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::WRITE, "npk_fs_delete") {
         return -1;
     }
     let name = match read_str(mem, name_ptr, name_len) {
@@ -5156,12 +5233,15 @@ pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
     // is_trust_critical_path.
     if is_trust_critical_path(&name) {
         kprintln!("[npk] WASM: npk_fs_delete DENIED ({} is read-only to apps)", name);
+        journal_refusal(ctx, capability::Rights::WRITE, &name, "npk_fs_delete", "module or trust store");
         return -1;
     }
     if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_fs_delete DENIED ({} gehoert einem anderen Modul)", name);
+        journal_refusal(ctx, capability::Rights::WRITE, &name, "npk_fs_delete", "another app's private area");
         return -1;
     }
+    journal_file(ctx, &name, "npk_fs_delete");
     match crate::npkfs::delete(&name) {
         Ok(_) => 0,
         Err(_) => -1,
@@ -5171,7 +5251,7 @@ pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
 /// Create directory `name`. The parent must exist; an existing entry of
 /// that name is refused. Same rights and areas as `npk_fs_delete`.
 pub(crate) fn npk_fs_mkdir(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::WRITE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::WRITE, "npk_fs_mkdir") {
         return -1;
     }
     let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
@@ -5181,12 +5261,15 @@ pub(crate) fn npk_fs_mkdir(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
     }
     if is_trust_critical_path(&name) {
         kprintln!("[npk] WASM: npk_fs_mkdir DENIED ({} is read-only to apps)", name);
+        journal_refusal(ctx, capability::Rights::WRITE, &name, "npk_fs_mkdir", "module or trust store");
         return -1;
     }
     if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_fs_mkdir DENIED ({} belongs to another module)", name);
+        journal_refusal(ctx, capability::Rights::WRITE, &name, "npk_fs_mkdir", "another app's private area");
         return -1;
     }
+    journal_file(ctx, &name, "npk_fs_mkdir");
     match crate::storage::npkfs::fs::mkdir(&name) {
         Ok(_) => 0,
         Err(_) => -1,
@@ -5195,7 +5278,7 @@ pub(crate) fn npk_fs_mkdir(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
 
 pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::WRITE, "npk_fs_rename") {
         return -1;
     }
     let old = match read_str(mem, old_ptr, old_len) {
@@ -5213,12 +5296,14 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
         {
             return -1;
         }
+        journal_move(ctx, crate::audit::Kind::Rename, &old, &new);
         return if crate::ext::rename(&old, &new, false).is_ok() { 0 } else { -1 };
     }
     // Neither source nor destination may be module or trust store —
     // renaming in would plant an unverified module or anchor.
     if is_trust_critical_path(&old) || is_trust_critical_path(&new) {
         kprintln!("[npk] WASM: npk_fs_rename DENIED (module/trust store is read-only to apps)");
+        journal_refusal(ctx, capability::Rights::WRITE, &old, "npk_fs_rename", "module or trust store");
         return -1;
     }
     // Both sides: checking only the source would let a file be moved into
@@ -5227,8 +5312,10 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
     if !crate::wasm::private_area_allows(&old, &ctx.module_name)
         || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_fs_rename DENIED (privater Bereich eines anderen Moduls)");
+        journal_refusal(ctx, capability::Rights::WRITE, &old, "npk_fs_rename", "another app's private area");
         return -1;
     }
+    journal_move(ctx, crate::audit::Kind::Rename, &old, &new);
     match crate::npkfs::rename(&old, &new) {
         Ok(_) => 0,
         Err(_) => -1,
@@ -5237,7 +5324,7 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
 
 pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if capability::check_global(&cap_id, capability::Rights::WRITE).is_err() {
+    if !capability::require(&cap_id, capability::Rights::WRITE, "npk_fs_copy") {
         return -1;
     }
     let old = match read_str(mem, old_ptr, old_len) {
@@ -5252,6 +5339,7 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
     if crate::ext::is_ext(&old) || crate::ext::is_ext(&new) { return -1; }
     if is_trust_critical_path(&old) || is_trust_critical_path(&new) {
         kprintln!("[npk] WASM: npk_fs_copy DENIED (module/trust store is read-only to apps)");
+        journal_refusal(ctx, capability::Rights::WRITE, &new, "npk_fs_copy", "module or trust store");
         return -1;
     }
     // Both sides, as for rename: copying out of another module's private
@@ -5259,8 +5347,11 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
     if !crate::wasm::private_area_allows(&old, &ctx.module_name)
         || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
         kprintln!("[npk] WASM: npk_fs_copy DENIED (privater Bereich eines anderen Moduls)");
+        journal_refusal(ctx, capability::Rights::WRITE, &old, "npk_fs_copy", "another app's private area");
         return -1;
     }
+    crate::audit::record(&ctx.cap_id, crate::audit::Kind::Read, &old);
+    crate::audit::record(&ctx.cap_id, crate::audit::Kind::Write, &new);
     match crate::npkfs::copy(&old, &new) {
         Ok(_) => 0,
         Err(_) => -1,
@@ -5308,7 +5399,7 @@ pub(crate) fn npk_wifi_send_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
 
 fn is_wifi_manager(ctx: &HostState) -> bool {
     ctx.module_name == "wifid"
-        && capability::check_global(&ctx.cap_id, capability::Rights::NETCTL).is_ok()
+        && capability::holds(&ctx.cap_id, capability::Rights::NETCTL)
 }
 
 /// The network tool the panel opens: it may read the
@@ -5323,7 +5414,7 @@ fn is_wifi_ui(ctx: &HostState) -> bool {
 /// `gateway a.b.c.d`, `dns a.b.c.d`.
 pub(crate) fn npk_net_info(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     use core::fmt::Write;
-    if capability::check_global(&ctx.cap_id, capability::Rights::RENDER).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_net_info") {
         return -1;
     }
     let mut t = String::new();
@@ -5453,7 +5544,7 @@ pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
 /// The display controller this module drives, if it holds one with
 /// HARDWARE: what every `npk_gpudev_*` call requires.
 fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::pci::PciAddr> {
-    if capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "gpudev_device") {
         return None;
     }
     let hw = ctx.hw.as_ref()?;
@@ -5756,7 +5847,7 @@ pub(crate) fn npk_ext_volumes(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
 }
 
 pub(crate) fn npk_ext_eject(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32, label_len: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::EXTERNAL).is_err() { return -1; }
+    if !capability::require(&ctx.cap_id, capability::Rights::EXTERNAL, "npk_ext_eject") { return -1; }
     let Some(label) = read_str(mem, label_ptr, label_len) else { return -1 };
     if crate::ext::eject(&label).is_ok() { 0 } else { -1 }
 }
@@ -5791,7 +5882,7 @@ fn usb_err(e: crate::xhci::usbfn::FnError) -> i32 {
 /// `buf`. Returns the handle (> 0) or an error (< 0).
 pub(crate) fn npk_usb_claim(mem: &mut [u8], ctx: &mut HostState, class: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let Some(right) = usb_class_right(class as u8) else { return -3 };
-    if ctx.pid == 0 || capability::check_global(&ctx.cap_id, right).is_err() {
+    if ctx.pid == 0 || !capability::require(&ctx.cap_id, right, "npk_usb_claim") {
         kprintln!("[npk] WASM: npk_usb_claim DENIED (class {:02x})", class as u8);
         return -3;
     }
@@ -5886,7 +5977,7 @@ pub(crate) fn npk_device_register(mem: &mut [u8], ctx: &mut HostState, kind: i32
                                   id_len: i32, name_ptr: i32, name_len: i32) -> i32 {
     use crate::devices::{self, Kind, Owner};
     let Some(kind) = Kind::from_abi(kind).filter(|k| *k != Kind::Camera) else { return -1 };
-    if ctx.pid == 0 || capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_err() {
+    if ctx.pid == 0 || !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_device_register") {
         return -1;
     }
     let Ok(rank) = u8::try_from(rank) else { return -1 };
@@ -5913,7 +6004,7 @@ pub(crate) fn npk_device_active(ctx: &mut HostState, handle: i32) -> i32 {
 
 /// `npk_device_list(kind, buf, max)`: the shell's device lists.
 pub(crate) fn npk_device_list(mem: &mut [u8], ctx: &mut HostState, kind: i32, buf_ptr: i32, buf_max: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::SHELL).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::SHELL, "npk_device_list") {
         return -1;
     }
     let Some(kind) = crate::devices::Kind::from_abi(kind) else { return -1 };
@@ -5933,18 +6024,18 @@ pub(crate) fn npk_device_list(mem: &mut [u8], ctx: &mut HostState, kind: i32, bu
 
 /// `npk_device_select(handle)`: the user picks the active one of its kind.
 pub(crate) fn npk_device_select(ctx: &mut HostState, handle: i32) -> i32 {
-    if capability::check_global(&ctx.cap_id, capability::Rights::SHELL).is_err() {
+    if !capability::require(&ctx.cap_id, capability::Rights::SHELL, "npk_device_select") {
         return -1;
     }
     if crate::devices::select(handle as u32) { 0 } else { -1 }
 }
 
 fn hardware(ctx: &HostState) -> bool {
-    ctx.pid != 0 && capability::check_global(&ctx.cap_id, capability::Rights::HARDWARE).is_ok()
+    ctx.pid != 0 && capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "audio capture device")
 }
 
 fn mic(ctx: &HostState) -> bool {
-    ctx.pid != 0 && capability::check_global(&ctx.cap_id, capability::Rights::MIC).is_ok()
+    ctx.pid != 0 && capability::require(&ctx.cap_id, capability::Rights::MIC, "microphone")
 }
 
 pub(crate) fn npk_audio_capture_device_format(ctx: &mut HostState, rate: i32, encoding: i32, channels: i32) -> i32 {
@@ -5969,7 +6060,9 @@ pub(crate) fn npk_audio_capture_open(ctx: &mut HostState) -> i32 {
         kprintln!("[npk] WASM: npk_audio_capture_open DENIED");
         return -1;
     }
-    crate::capture::open(Some(ctx.pid)).map_or(-1, |i| i as i32)
+    let s = crate::capture::open(Some(ctx.pid));
+    if s.is_some() { crate::audit::record(&ctx.cap_id, crate::audit::Kind::DeviceOn, "microphone"); }
+    s.map_or(-1, |i| i as i32)
 }
 
 pub(crate) fn npk_audio_capture_format(ctx: &mut HostState, stream: i32, rate: i32, encoding: i32, channels: i32) -> i32 {
@@ -5986,11 +6079,13 @@ pub(crate) fn npk_audio_capture_read(mem: &mut [u8], ctx: &mut HostState, stream
 
 pub(crate) fn npk_audio_capture_close(ctx: &mut HostState, stream: i32) -> i32 {
     let Ok(i) = usize::try_from(stream) else { return -1 };
-    if crate::capture::close(i, Some(ctx.pid)) { 0 } else { -1 }
+    if !crate::capture::close(i, Some(ctx.pid)) { return -1; }
+    crate::audit::record(&ctx.cap_id, crate::audit::Kind::DeviceOff, "microphone");
+    0
 }
 
 fn camera_right(ctx: &HostState) -> bool {
-    ctx.pid != 0 && capability::check_global(&ctx.cap_id, capability::Rights::CAMERA).is_ok()
+    ctx.pid != 0 && capability::require(&ctx.cap_id, capability::Rights::CAMERA, "camera")
 }
 
 pub(crate) fn npk_camera_wanted(ctx: &mut HostState) -> i64 {
@@ -6012,7 +6107,9 @@ pub(crate) fn npk_camera_push(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len
 pub(crate) fn npk_camera_open(ctx: &mut HostState, width: i32, height: i32) -> i32 {
     if !camera_right(ctx) { return -1; }
     let (Ok(w), Ok(h)) = (u16::try_from(width), u16::try_from(height)) else { return -1 };
-    crate::camfeed::open(Some(ctx.pid), w, h).map_or(-1, |i| i as i32)
+    let r = crate::camfeed::open(Some(ctx.pid), w, h);
+    if r.is_some() { crate::audit::record(&ctx.cap_id, crate::audit::Kind::DeviceOn, "camera"); }
+    r.map_or(-1, |i| i as i32)
 }
 
 pub(crate) fn npk_camera_read(mem: &mut [u8], ctx: &mut HostState, reader: i32, buf_ptr: i32, buf_max: i32,
@@ -6036,5 +6133,7 @@ pub(crate) fn npk_camera_read(mem: &mut [u8], ctx: &mut HostState, reader: i32, 
 
 pub(crate) fn npk_camera_close(ctx: &mut HostState, reader: i32) -> i32 {
     let Ok(id) = usize::try_from(reader) else { return -1 };
-    if crate::camfeed::close(id, Some(ctx.pid)) { 0 } else { -1 }
+    if !crate::camfeed::close(id, Some(ctx.pid)) { return -1; }
+    crate::audit::record(&ctx.cap_id, crate::audit::Kind::DeviceOff, "camera");
+    0
 }

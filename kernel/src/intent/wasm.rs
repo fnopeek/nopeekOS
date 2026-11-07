@@ -43,7 +43,7 @@ pub fn intent_run(args: &str) {
     // What the module declares in `.npk.caps` (the widget default without
     // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(declared, None) {
+    let module_cap = match capability::create_module_cap(module_name, declared, None) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
@@ -108,7 +108,7 @@ pub fn intent_run_background(module_name: &str) {
     // What the module declares in `.npk.caps` (the widget default without
     // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(declared, None) {
+    let module_cap = match capability::create_module_cap(module_name, declared, None) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
@@ -144,7 +144,7 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
     // What the module declares in `.npk.caps` (the widget default without
     // one), the same as the click path (`npk_spawn_module`).
     let declared = capability::widget_rights_from_wasm(&wasm_bytes);
-    let module_cap = match capability::create_module_cap(declared, None) {
+    let module_cap = match capability::create_module_cap(module_name, declared, None) {
         Ok(id) => id,
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
@@ -230,7 +230,7 @@ pub fn intent_run_driver(args: &str) {
     // lacks HARDWARE for MMIO by address, GSI interrupts and the audio mixer.
     let a = dev.addr;
     let driver_cap = match capability::create_driver_cap(
-        a.bus, a.device, a.function,
+        module_name, a.bus, a.device, a.function,
         capability::Rights::READ | capability::Rights::WRITE | capability::Rights::EXECUTE
             | capability::Rights::DELEGATE
             | capability::widget_rights_from_wasm(&wasm_bytes),

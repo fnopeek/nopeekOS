@@ -1276,6 +1276,7 @@ pub fn note_guest_shutdown() {
 /// the compositor, whose close path re-enters microvm). Idempotent.
 fn teardown_vm_window() {
     crate::microvm::boottime::report();
+    crate::audit::guest_ended();
     VM_CLOSE_REQUESTED.store(false, Ordering::Release);
     FOCUS_SENT.store(NO_FOCUS, Ordering::Release);
     FS_SENT.store(0, Ordering::Release);

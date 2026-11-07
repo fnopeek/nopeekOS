@@ -364,6 +364,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             ResourceKind::Kernel,
             Rights::READ | Rights::WRITE | Rights::EXECUTE | Rights::AUDIT,
             None,
+            "loop",
         ).expect("failed to create session capability")
     };
     vga::show_status(b"Console session issued");
