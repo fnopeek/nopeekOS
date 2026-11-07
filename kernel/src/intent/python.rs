@@ -19,6 +19,11 @@ use super::{home_dir, resolve_path};
 const MODULE: &str = "sys/wasm/python";
 /// npkFS directory holding the stdlib, `lib/python315.zip`.
 const BUNDLE: &str = "sys/python";
+/// The interpreter's platform library directory (getpath's
+/// `PLATSTDLIB_LANDMARK`). Nothing lives there, this build has no
+/// extension modules, but a missing one makes every start warn. Its
+/// version follows the zip's name.
+const PLATSTDLIB: &[&str] = &["sys/python/lib/python3.15", "sys/python/lib/python3.15/lib-dynload"];
 
 pub fn intent_python(args: &str, vault: &'static spin::Mutex<capability::Vault>, session: capability::CapId) {
     intent_python_on(args, vault, session, crate::wasm::forge_is_default())
@@ -44,6 +49,11 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
         kprintln!("[python] the standard library is missing under {}/lib", BUNDLE);
         kprintln!("[python] 'update' installs it as an asset");
         return;
+    }
+    for d in PLATSTDLIB {
+        if let Err(e) = crate::npkfs::fs::ensure_dir(d) {
+            crate::kdebug!("[python] {}: {:?}", d, e);
+        }
     }
 
     // What the guest will see. Two grants, both named, neither implicit:
