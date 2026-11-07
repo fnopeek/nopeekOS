@@ -231,9 +231,11 @@ pub fn intent_run_driver(args: &str) {
     let a = dev.addr;
     let driver_cap = match capability::create_driver_cap(
         module_name, a.bus, a.device, a.function,
-        capability::Rights::READ | capability::Rights::WRITE | capability::Rights::EXECUTE
-            | capability::Rights::DELEGATE
-            | capability::widget_rights_from_wasm(&wasm_bytes),
+        // EXECUTE on its own device is what lets it bind that device; the
+        // rest is what it declares. A driver parses untrusted input (frames,
+        // reports, firmware replies), so store access it never declared
+        // would be what a compromised driver gets for free.
+        capability::Rights::EXECUTE | capability::widget_rights_from_wasm(&wasm_bytes),
         None, // no expiry for drivers
     ) {
         Ok(id) => id,
