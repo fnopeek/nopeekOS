@@ -67,7 +67,7 @@ const TIME_W: u16 = 64;
 const WHO_W: u16 = 120;
 const KIND_W: u16 = 64;
 /// Rows the timeline shows, newest first; the journal keeps more.
-const TIMELINE_ROWS: usize = 250;
+const TIMELINE_ROWS: usize = 60;
 /// Entries kept here; the kernel's ring is the same size.
 const MAX_ENTRIES: usize = 4096;
 
@@ -181,6 +181,13 @@ impl Journal {
         self.now_local.saturating_sub(self.now_ms.saturating_sub(e.up_ms) / 1000)
     }
 
+    /// What changes the window besides counters: new entries, holders
+    /// coming and going. Counters, folded repeats included, follow on the
+    /// slower `COUNTER_MS` redraw.
+    fn shape(&self) -> (u64, usize) {
+        (self.written, self.live.len())
+    }
+
     fn refused(&self) -> u64 {
         self.entries.values().filter(|e| e.is_denied()).map(|e| e.count as u64).sum()
     }
@@ -254,13 +261,14 @@ struct Peek {
     paused: bool,
     note: String,
     last_tick: u64,
+    last_draw: u64,
 }
 
 impl Peek {
     fn new() -> Self {
         let mut p = Peek {
             page: Page::Timeline, menu: None, journal: Journal::default(),
-            filter: None, paused: false, note: String::new(), last_tick: host::ticks_ms(),
+            filter: None, paused: false, note: String::new(), last_tick: host::ticks_ms(), last_draw: 0,
         };
         if !p.journal.refresh() {
             p.note = "The kernel did not hand over the journal".to_string();
@@ -633,6 +641,10 @@ fn commit_scene(p: &Peek) {
 const EVENT_BUF_SIZE: usize = 4 * 1024;
 /// How often the live view asks the kernel for news.
 const TICK_MS: u64 = 1000;
+/// How often the token counter alone redraws the window. Every app checks
+/// its token many times a second; a redraw per change would make peek the
+/// busiest app on the screen.
+const COUNTER_MS: u64 = 2000;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
@@ -650,10 +662,11 @@ pub extern "C" fn _start() {
                 let now = host::ticks_ms();
                 if !p.paused && now.saturating_sub(p.last_tick) >= TICK_MS {
                     p.last_tick = now;
-                    let before = (p.journal.written, p.journal.checks_passed, p.journal.live.len());
+                    let before = p.journal.shape();
                     if p.journal.refresh()
-                        && before != (p.journal.written, p.journal.checks_passed, p.journal.live.len())
+                        && (before != p.journal.shape() || now.saturating_sub(p.last_draw) >= COUNTER_MS)
                     {
+                        p.last_draw = now;
                         commit_scene(&p);
                     }
                 }
