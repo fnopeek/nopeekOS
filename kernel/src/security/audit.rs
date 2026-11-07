@@ -44,7 +44,8 @@ static CHECKS_PASSED: AtomicU64 = AtomicU64::new(0);
 pub enum Kind {
     /// A token was issued; `rights` holds what it grants.
     Launch,
-    /// The token was released; `checks` and `denied` sum up the instance.
+    /// The token was released; `checks` and `denied` sum up the instance,
+    /// `rights` is what it used of its token.
     Exit,
     /// A gate refused; `rights` is what it asked for, `object` the call.
     Denied,
@@ -188,14 +189,14 @@ pub const GUEST: CapId = [0xff; 32];
 
 /// The guest `name` booted.
 pub fn guest_started(name: &str) {
-    released(&GUEST, 0);
+    released(&GUEST, 0, Rights::empty());
     let n = alloc::format!("{} (VM)", name);
     issued(&GUEST, &n, Rights::empty());
 }
 
 /// The guest is gone.
 pub fn guest_ended() {
-    released(&GUEST, 0);
+    released(&GUEST, 0, Rights::empty());
 }
 
 /// A token was issued to `name`: it becomes a holder with a new instance
@@ -214,16 +215,17 @@ pub fn issued(cap: &CapId, name: &str, rights: Rights) {
     });
 }
 
-/// The token of `cap` was released after `checks` passed checks. The
-/// holder ends here; a recycled id starts a new instance.
-pub fn released(cap: &CapId, checks: u64) {
+/// The token of `cap` was released after `checks` passed checks that used
+/// `used` of its rights. The holder ends here; a recycled id starts a new
+/// instance.
+pub fn released(cap: &CapId, checks: u64, used: Rights) {
     let t = stamp();
     let mut j = LOG.lock();
     let Some(pos) = j.holders.iter().position(|h| h.cap == *cap) else { return };
     let h = j.holders.swap_remove(pos);
     j.push(Entry {
         seq: 0, wall: t.wall, up_ms: t.up_ms, last_up_ms: t.up_ms,
-        inst: h.inst, holder: h.name, kind: Kind::Exit, rights: Rights::empty(),
+        inst: h.inst, holder: h.name, kind: Kind::Exit, rights: used,
         count: 1, object: String::new(), checks, denied: h.denied,
     });
 }

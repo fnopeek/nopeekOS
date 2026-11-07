@@ -4,7 +4,7 @@
 //! Every permission is a token with a random 256-bit ID (post-quantum safe).
 //! Inspired by seL4 capabilities.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use bitflags::bitflags;
 use spin::Mutex;
@@ -24,6 +24,10 @@ static ROOT_CAP: Mutex<CapId> = Mutex::new(CAP_NULL);
 /// journal gets the sum when the slot is released. Relaxed: a counter
 /// read once at release, under the vault lock that also resets it.
 static SLOT_CHECKS: [AtomicU64; MAX_CAPABILITIES] = [const { AtomicU64::new(0) }; MAX_CAPABILITIES];
+/// Rights a check of the slot's capability asked for and got, as bits: what
+/// the holder used of what it holds. Same lifetime and ordering as
+/// `SLOT_CHECKS`.
+static SLOT_USED: [AtomicU32; MAX_CAPABILITIES] = [const { AtomicU32::new(0) }; MAX_CAPABILITIES];
 
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,7 +156,7 @@ impl Vault {
             }))
             .ok_or_else(|| refuse(CapError::VaultFull))?;
         if let Some(old) = &self.caps[slot] {
-            audit::released(&old.id, SLOT_CHECKS[slot].load(Ordering::Relaxed));
+            audit::released(&old.id, SLOT_CHECKS[slot].load(Ordering::Relaxed), slot_used(slot));
         }
 
         // Child expiry cannot exceed parent expiry
@@ -171,6 +175,7 @@ impl Vault {
         });
         self.count += 1;
         SLOT_CHECKS[slot].store(0, Ordering::Relaxed);
+        SLOT_USED[slot].store(0, Ordering::Relaxed);
 
         audit::issued(&id, holder, rights);
         Ok(id)
@@ -224,14 +229,16 @@ impl Vault {
         if !cap.rights.contains(required) { return Err(CapError::InsufficientRights); }
         audit::record_check_passed();
         SLOT_CHECKS[slot].fetch_add(1, Ordering::Relaxed);
+        SLOT_USED[slot].fetch_or(required.bits(), Ordering::Relaxed);
         Ok(cap)
     }
 
-    /// Checks passed by `cap` since it was issued, 0 if it is not here.
-    pub fn checks_of(&self, cap_id: &CapId) -> u64 {
-        self.caps.iter()
-            .position(|c| c.as_ref().is_some_and(|c| c.id == *cap_id))
-            .map_or(0, |i| SLOT_CHECKS[i].load(Ordering::Relaxed))
+    /// What `cap` holds, what it used of it and how many checks it passed
+    /// since it was issued; `None` if it is not here.
+    pub fn usage_of(&self, cap_id: &CapId) -> Option<(Rights, Rights, u64)> {
+        let i = self.caps.iter().position(|c| c.as_ref().is_some_and(|c| c.id == *cap_id))?;
+        let held = self.caps[i].as_ref()?.rights;
+        Some((held, slot_used(i), SLOT_CHECKS[i].load(Ordering::Relaxed)))
     }
 
     pub fn stats(&self) -> (usize, usize) {
@@ -270,7 +277,7 @@ impl Vault {
         self.revoke_recursive(id);
         for (i, slot) in self.caps.iter_mut().enumerate() {
             if let Some(gone) = slot.as_ref().filter(|c| !c.active).map(|c| c.id) {
-                audit::released(&gone, SLOT_CHECKS[i].load(Ordering::Relaxed));
+                audit::released(&gone, SLOT_CHECKS[i].load(Ordering::Relaxed), slot_used(i));
                 *slot = None;
                 self.count = self.count.saturating_sub(1);
             }
@@ -534,9 +541,13 @@ pub fn rights_names(r: Rights) -> alloc::string::String {
     out
 }
 
-/// Checks `cap_id` passed since it was issued.
-pub fn checks_of(cap_id: &CapId) -> u64 {
-    VAULT.lock().checks_of(cap_id)
+/// What `cap_id` holds, what it used of it and its passed checks.
+pub fn usage_of(cap_id: &CapId) -> Option<(Rights, Rights, u64)> {
+    VAULT.lock().usage_of(cap_id)
+}
+
+fn slot_used(slot: usize) -> Rights {
+    Rights::from_bits_truncate(SLOT_USED[slot].load(Ordering::Relaxed))
 }
 
 /// Create a capability for the driver module `name`, bound to one PCI device.

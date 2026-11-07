@@ -1699,7 +1699,8 @@ pub fn intent_audit(args: &str) {
         let who = alloc::format!("{}#{}", e.holder, e.inst);
         let what = match e.kind {
             audit::Kind::Launch => alloc::format!("token {}", capability::rights_names(e.rights)),
-            audit::Kind::Exit => alloc::format!("{} checks passed, {} refused", e.checks, e.denied),
+            audit::Kind::Exit => alloc::format!("{} checks passed, {} refused, used {}",
+                e.checks, e.denied, capability::rights_names(e.rights)),
             audit::Kind::Denied => alloc::format!("{}  needs {}", e.object, capability::rights_names(e.rights)),
             audit::Kind::Grant => alloc::format!("{}  {}", e.object, capability::rights_names(e.rights)),
             _ => e.object.clone(),

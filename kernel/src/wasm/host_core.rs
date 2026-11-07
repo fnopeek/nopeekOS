@@ -5024,7 +5024,7 @@ fn audit_field(out: &mut String, s: &str) {
 
 /// Lines, tab separated, times as local seconds and uptime ms:
 /// `S checks_passed entries now_ms now_local`, then per live holder
-/// `H inst name checks`, then per entry touched since `since_ms`
+/// `H inst name checks held used`, then per entry touched since `since_ms`
 /// `E seq local up_ms last_up_ms inst holder kind rights count checks denied object`.
 pub(crate) fn npk_audit_read(mem: &mut [u8], ctx: &mut HostState, since_ms: i64, buf_ptr: i32, max: i32) -> i32 {
     use core::fmt::Write;
@@ -5037,7 +5037,12 @@ pub(crate) fn npk_audit_read(mem: &mut [u8], ctx: &mut HostState, since_ms: i64,
     for (inst, name, cap) in crate::audit::holders() {
         let _ = write!(out, "H\t{}", inst);
         audit_field(&mut out, &name);
-        let _ = write!(out, "\t{}\n", capability::checks_of(&cap));
+        let (held, used, checks) = capability::usage_of(&cap)
+            .unwrap_or((capability::Rights::empty(), capability::Rights::empty(), 0));
+        let _ = write!(out, "\t{}", checks);
+        audit_field(&mut out, &capability::rights_names(held));
+        audit_field(&mut out, &capability::rights_names(used));
+        out.push('\n');
     }
     for e in crate::audit::touched_since(since_ms.max(0) as u64) {
         let _ = write!(out, "E\t{}\t{}\t{}\t{}\t{}", e.seq, local(e.wall), e.up_ms, e.last_up_ms, e.inst);

@@ -123,6 +123,8 @@ struct Journal {
     entries: BTreeMap<u64, Entry>,
     /// Live holders: instance -> (name, checks passed so far).
     live: BTreeMap<u32, (String, u64)>,
+    /// Live holders: instance -> (rights held, rights used so far).
+    live_rights: BTreeMap<u32, (String, String)>,
     checks_passed: u64,
     written: u64,
     now_ms: u64,
@@ -143,6 +145,7 @@ impl Journal {
         else { return false };
         let Ok(text) = core::str::from_utf8(&b) else { return false };
         self.live.clear();
+        self.live_rights.clear();
         for line in text.lines() {
             let f: Vec<&str> = line.split('\t').collect();
             let num = |i: usize| f.get(i).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
@@ -154,7 +157,10 @@ impl Journal {
                     self.now_ms = num(3);
                     self.now_local = num(4);
                 }
-                Some("H") => { self.live.insert(num(1) as u32, (st(2), num(3))); }
+                Some("H") => {
+                    self.live.insert(num(1) as u32, (st(2), num(3)));
+                    self.live_rights.insert(num(1) as u32, (st(4), st(5)));
+                }
                 Some("E") if f.len() >= 13 => {
                     self.entries.insert(num(1), Entry {
                         local: num(2), up_ms: num(3), last_up_ms: num(4), inst: num(5) as u32,
@@ -227,7 +233,14 @@ struct AppSummary {
     files: Vec<String>,
     hosts: Vec<String>,
     devices: Vec<String>,
-    rights: String,
+    /// Rights its token holds and the ones any instance used.
+    held: Vec<String>,
+    used: Vec<String>,
+}
+
+/// `READ|WRITE` as names; `-` is none.
+fn rights_list(s: &str) -> impl Iterator<Item = &str> {
+    s.split('|').filter(|r| !r.is_empty() && *r != "-")
 }
 
 fn summarize(j: &Journal, name: &str) -> AppSummary {
@@ -235,8 +248,14 @@ fn summarize(j: &Journal, name: &str) -> AppSummary {
     for e in j.entries.values().filter(|e| e.holder == name) {
         let push = |v: &mut Vec<String>, s: &str| if !v.iter().any(|x| x == s) { v.push(s.to_string()) };
         match e.kind.as_str() {
-            "launch" => { a.launches += 1; a.rights = e.rights.clone(); }
-            "exit" => a.checks += e.checks,
+            "launch" => {
+                a.launches += 1;
+                for r in rights_list(&e.rights) { push(&mut a.held, r); }
+            }
+            "exit" => {
+                a.checks += e.checks;
+                for r in rights_list(&e.rights) { push(&mut a.used, r); }
+            }
             "DENIED" => a.refused += e.count as u64,
             "net" => push(&mut a.hosts, &e.object),
             "on" => push(&mut a.devices, &e.object),
@@ -244,8 +263,14 @@ fn summarize(j: &Journal, name: &str) -> AppSummary {
             _ => {}
         }
     }
-    for (n, checks) in j.live.values() {
-        if n == name { a.running += 1; a.checks += checks; }
+    for (inst, (n, checks)) in &j.live {
+        if n != name { continue; }
+        a.running += 1;
+        a.checks += checks;
+        if let Some((held, used)) = j.live_rights.get(inst) {
+            for r in rights_list(held) { if !a.held.iter().any(|x| x == r) { a.held.push(r.to_string()); } }
+            for r in rights_list(used) { if !a.used.iter().any(|x| x == r) { a.used.push(r.to_string()); } }
+        }
     }
     a
 }
@@ -494,6 +519,47 @@ fn list_line(label: &str, items: &[String]) -> Widget {
     ], Spacing::Sm)
 }
 
+/// What a right lets its holder do, in the words the user needs.
+fn meaning(right: &str) -> &'static str {
+    match right {
+        "READ" => "read every file in the store, except other apps' private areas",
+        "WRITE" => "write, delete and rename any file in the store, except modules and trust anchors",
+        "EXECUTE" => "start other apps (each with its own token)",
+        "DELEGATE" => "pass its rights on",
+        "REVOKE" => "take rights back",
+        "AUDIT" => "read this journal",
+        "RENDER" => "draw its own window",
+        "CANVAS" => "show pictures and video in its window",
+        "CAPTURE" => "read the whole screen",
+        "HARDWARE" => "drive its device directly: registers, DMA, interrupts",
+        "NETCTL" => "control Wi-Fi: scan, connect, keys",
+        "NET" => "connect to any host on the internet",
+        "SHELL" => "system UI: panels, overlays, keyboard focus, power off",
+        "EXTERNAL" => "read and write external drives",
+        "CAMERA" => "use the camera",
+        "MIC" => "use the microphone",
+        "SETTINGS" => "change system settings",
+        "ALL" => "everything: the kernel itself",
+        _ => "",
+    }
+}
+
+/// One right of a token: used ones plain, the others muted.
+fn right_line(right: &str, used: bool) -> Widget {
+    let (icon, tint) = if used { (IconId::Check, Token::Success) } else { (IconId::Minus, Token::OnSurfaceFaint) };
+    let mut children = alloc::vec![
+        Widget::Icon { id: icon, size: 14, modifiers: alloc::vec![Modifier::Tint(tint)] },
+        styled(right.to_string(), TextStyle::Mono,
+            alloc::vec![Modifier::MinWidth(WHO_W - 40), Modifier::Tint(if used { Token::OnSurface } else { Token::OnSurfaceMuted })]),
+        styled(meaning(right).to_string(), TextStyle::Caption,
+            alloc::vec![Modifier::Flex(1), Modifier::Tint(Token::OnSurfaceMuted)]),
+    ];
+    if !used {
+        children.push(styled("not used yet".to_string(), TextStyle::Caption, alloc::vec![Modifier::Tint(Token::Warning)]));
+    }
+    row(children, Spacing::Sm)
+}
+
 fn app_card(j: &Journal, name: &str, index: usize) -> Widget {
     let a = summarize(j, name);
     let state = if a.running > 0 { ("running", Token::Success) } else { ("ended", Token::OnSurfaceMuted) };
@@ -509,7 +575,17 @@ fn app_card(j: &Journal, name: &str, index: usize) -> Widget {
         styled(counts, TextStyle::Caption,
             alloc::vec![Modifier::Tint(if a.refused > 0 { Token::Danger } else { Token::OnSurfaceMuted })]),
     ];
-    if !a.rights.is_empty() { body.push(list_line("token", core::slice::from_ref(&a.rights))); }
+    if !a.held.is_empty() {
+        let unused = a.held.iter().filter(|r| !a.used.contains(r)).count();
+        let line = if unused == 0 {
+            alloc::format!("token: {} rights, all used", a.held.len())
+        } else {
+            alloc::format!("token: {} rights, {} not used yet", a.held.len(), unused)
+        };
+        body.push(styled(line, TextStyle::Caption,
+            alloc::vec![Modifier::Tint(if unused > 0 { Token::Warning } else { Token::OnSurfaceMuted })]));
+        for r in &a.held { body.push(right_line(r, a.used.contains(r))); }
+    }
     body.push(list_line("files", &a.files));
     body.push(list_line("hosts", &a.hosts));
     if !a.devices.is_empty() { body.push(list_line("devices", &a.devices)); }
