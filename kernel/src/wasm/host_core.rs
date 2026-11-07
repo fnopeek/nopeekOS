@@ -3612,7 +3612,7 @@ pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
 
 pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
-    if !capability::require(&cap_id, capability::Rights::RENDER, "npk_spawn_module") {
+    if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::EXECUTE, "npk_spawn_module") {
         return -1;
     }
     if name_len <= 0 || name_len > 64 { return -1; }

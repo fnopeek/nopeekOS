@@ -667,7 +667,8 @@ host_imports! {
     // Modelled on `Mod+Enter` + `run <name>` — the user-expected flow
     // when the launcher picks a module. Terminal-kind apps (top, debug) print
     // into the new loop's terminal; widget-kind apps can convert their
-    // window via `npk_window_set_overlay` from `_start`.
+    // window via `npk_window_set_overlay` from `_start`. RENDER and
+    // EXECUTE, like `npk_launch`.
     //
     //   0  → spawn accepted
     //   -1 → cap denied / bad args / module not found / compositor
