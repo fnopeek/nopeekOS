@@ -106,7 +106,10 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
 
     let cap = match capability::create_module_cap(
         "python",
-        Rights::READ | Rights::WRITE | Rights::EXECUTE,
+        // WASI reads go through the preopens alone; WRITE is the second
+        // gate a write into the writable home preopen needs. python
+        // imports nothing but WASI.
+        Rights::WRITE,
         None,
     ) {
         Ok(id) => id,

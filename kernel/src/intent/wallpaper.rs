@@ -235,10 +235,10 @@ fn decode_with_wasm(name: &str) -> bool {
     let _ = crate::npkfs::store(".npk-wallpaper-target", name.as_bytes(),
         crate::capability::CAP_NULL);
 
-    // Delegate capability: READ (fetch image) + WRITE (set wallpaper) + EXECUTE
+    // READ: the target name and the image. WRITE: npk_set_wallpaper.
     let module_cap = match crate::capability::create_module_cap(
         "wallpaper",
-        crate::capability::Rights::READ | crate::capability::Rights::WRITE | crate::capability::Rights::EXECUTE,
+        crate::capability::Rights::READ | crate::capability::Rights::WRITE,
         None,
     ) {
         Ok(id) => id,
@@ -327,9 +327,9 @@ fn delegate_to_wallpaper(target: String, w: u32, h: u32, label: &str) {
 
     let module_cap = match crate::capability::create_module_cap(
         "wallpaper",
-        crate::capability::Rights::READ
-            | crate::capability::Rights::WRITE
-            | crate::capability::Rights::EXECUTE,
+        // READ: the target name. WRITE: the generated pictures and
+        // npk_set_wallpaper.
+        crate::capability::Rights::READ | crate::capability::Rights::WRITE,
         None,
     ) {
         Ok(id) => id,
