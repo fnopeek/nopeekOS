@@ -1870,8 +1870,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // Check if this intent can run on a worker core
         let verb = input.splitn(2, ' ').next().unwrap_or("");
         if !is_core0_intent(verb) && crate::shade::is_active() {
-            // Worker prints prompt when done via from_intent transition
+            // Set even if the worker finishes before the next pass: the
+            // from_intent transition flushes its output and prints the prompt.
             spawn_intent_on_worker(input, crate::shade::terminal::active_idx(), session_id);
+            from_intent = true;
             continue;
         }
 
