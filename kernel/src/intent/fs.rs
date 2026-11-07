@@ -496,20 +496,20 @@ pub fn intent_disk_info() {
                             .filter(|(now, w)| *w != 0 && *now >= *w)
                             .map(|(now, w)| now - w);
                         let when = match ago {
-                            Some(s) if s < 90      => alloc::format!("vor {}s", s),
-                            Some(s) if s < 5400    => alloc::format!("vor {}min", s / 60),
-                            Some(s)                => alloc::format!("vor {}h", s / 3600),
-                            None                   => alloc::string::String::from("diese Session"),
+                            Some(s) if s < 90      => alloc::format!("{}s ago", s),
+                            Some(s) if s < 5400    => alloc::format!("{}min ago", s / 60),
+                            Some(s)                => alloc::format!("{}h ago", s / 3600),
+                            None                   => alloc::string::String::from("this session"),
                         };
                         if g.failed == 0 {
-                            kprintln!("  GC:        sauber {} — {} entfernt, {} behalten",
+                            kprintln!("  GC:        clean {}: {} removed, {} kept",
                                 when, g.removed, g.kept);
                         } else {
-                            kprintln!("  GC:        {} — {} entfernt, {} behalten, {} KORRUPT übersprungen",
+                            kprintln!("  GC:        {}: {} removed, {} kept, {} CORRUPT skipped",
                                 when, g.removed, g.kept, g.failed);
                         }
                     }
-                    None => kprintln!("  GC:        seit Boot nicht gelaufen"),
+                    None => kprintln!("  GC:        not run since boot"),
                 }
                 if let Some((held, dirty)) = crate::storage::npkfs::storage::cache_held() {
                     kprintln!("  Cache:     {} blocks ({} MB), {} dirty", held, held * 4 / 1024, dirty);

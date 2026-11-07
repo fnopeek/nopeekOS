@@ -135,11 +135,11 @@ pub fn service() -> u32 {
 pub fn report() {
     let Some(b) = blocks() else { return };
     if !ARMED.load(Ordering::Acquire) {
-        crate::kprintln!("  SCI: nicht genommen (laeuft acpi?)");
+        crate::kprintln!("  SCI: not claimed (is acpi running?)");
         return;
     }
     let v = VECTOR.load(Ordering::Relaxed) as crate::irq::Irq;
-    crate::kprintln!("  SCI: irq {} fired {} · service {} (EC {}, PM1 {}, leer {})",
+    crate::kprintln!("  SCI: irq {} fired {} · service {} (EC {}, PM1 {}, empty {})",
         v, crate::irq::fired_count(v), CALLS.load(Ordering::Relaxed),
         EC_HITS.load(Ordering::Relaxed), PM1_HITS.load(Ordering::Relaxed),
         EMPTY.load(Ordering::Relaxed));

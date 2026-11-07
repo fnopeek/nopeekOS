@@ -733,7 +733,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
     let m = match forge_core::compile(&job.bytes) {
         Ok(m) => m,
         Err(e) => {
-            kprintln!("[npk] forge: {} liess sich nicht uebersetzen — {}", name_str, e);
+            kprintln!("[npk] forge: {} failed to compile: {}", name_str, e);
             done(pid, terminal_idx, slot);
             return;
         }
@@ -743,7 +743,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
     let entry = m.plan.exports.iter().find(|(n, _)| n == "_start").map(|(_, i)| *i)
         .and_then(|fidx| m.offset_of(fidx));
     let Some(off) = entry else {
-        kprintln!("[npk] forge: {} hat kein _start", name_str);
+        kprintln!("[npk] forge: {} has no _start", name_str);
         done(pid, terminal_idx, slot);
         return;
     };
@@ -777,7 +777,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
     let Some(mut inst) = crate::forge_rt::Instance::new_with_host(&m, &host) else {
         // The most common cause is a lack of frames, so report free memory.
         let (frames, mb) = crate::mm::memory::stats();
-        kprintln!("[npk] forge: {} — Instanz liess sich nicht bauen (frei: {} Rahmen = {} MB)",
+        kprintln!("[npk] forge: {}: instance could not be built (free: {} frames = {} MB)",
             name_str, frames, mb);
         done(pid, terminal_idx, slot);
         return;
@@ -786,7 +786,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
     // rather than have it look like a crash later.
     let open = inst.unresolved_imports();
     if open > 0 {
-        kprintln!("[npk] forge: {} — {} Importe unaufgeloest, das Modul wird stehenbleiben",
+        kprintln!("[npk] forge: {}: {} imports unresolved, the module will stall",
             name_str, open);
     }
     crate::kdebug!("[npk] forge: {} compiled in {} ms ({} B x86)", name_str, compile_ms, m.code.len());
@@ -796,7 +796,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
 
     let (_ret, trap) = inst.call(off, 0, 0, 0);
     if trap != forge_core::trap::NONE {
-        kprintln!("[npk] forge: {} endete mit {}", name_str, forge_core::trap::name(trap));
+        kprintln!("[npk] forge: {} ended with {}", name_str, forge_core::trap::name(trap));
     }
 
     // As in the interpreter path: release hardware.
@@ -937,7 +937,7 @@ pub fn execute_wasi(
     let t_c = crate::time::ticks();
     let module = Module::new(&engine, wasm_bytes)
         .map_err(|_| WasmError::InvalidModule)?;
-    kprintln!("[npk]   wasmi: vorbereiten {} ms",
+    kprintln!("[npk]   wasmi: prepare {} ms",
         crate::time::ticks().saturating_sub(t_c) * 10);
 
     let mut store = Store::new(&engine, HostState {
@@ -976,7 +976,7 @@ pub fn execute_wasi(
 
     let t_r = crate::time::ticks();
     let r = start.call(&mut store, ());
-    crate::kdebug!("[npk]   wasmi: laufen {} ms",
+    crate::kdebug!("[npk]   wasmi: run {} ms",
         crate::time::ticks().saturating_sub(t_r) * 10);
     match r {
         Ok(()) => Ok(0),
@@ -998,7 +998,7 @@ fn execute_inner_forge(
     launch_arg: Option<String>,
 ) -> Option<Result<WasmResult, WasmError>> {
     if args.len() > 3 || args.iter().any(|v| v.i32().is_none()) {
-        kprintln!("[npk] forge: {} nimmt Argumente, die der Eintritt nicht kann — wasmi", func_name);
+        kprintln!("[npk] forge: {} takes arguments the entry cannot pass, using wasmi", func_name);
         return None;
     }
     let m = match forge_core::compile(wasm_bytes) {
@@ -1054,7 +1054,7 @@ fn execute_inner_forge(
         forge_core::trap::OUT_OF_FUEL if cancelled => Err(WasmError::Cancelled),
         forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
         other => {
-            kprintln!("[npk] forge: {} endete mit {}", func_name, forge_core::trap::name(other));
+            kprintln!("[npk] forge: {} ended with {}", func_name, forge_core::trap::name(other));
             Err(WasmError::ExecutionFailed)
         }
     })
@@ -1112,18 +1112,18 @@ pub fn execute_wasi_forge(
         .ok_or(WasmError::InstantiationFailed)?;
     let open = inst.unresolved_imports();
     if open > 0 {
-        kprintln!("[npk] forge: {} Importe unaufgeloest — das Modul wird stehenbleiben", open);
+        kprintln!("[npk] forge: {} imports unresolved, the module will stall", open);
         return Err(WasmError::InstantiationFailed);
     }
     inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
 
-    crate::kdebug!("[npk]   forge: uebersetzen {} ms ({} B x86)", compile_ms, m.code.len());
+    crate::kdebug!("[npk]   forge: compile {} ms ({} B x86)", compile_ms, m.code.len());
     let t_r = crate::time::ticks();
     let fg = foreground(fuel);
     let (_ret, trap) = inst.call(entry, 0, 0, 0);
     let cancelled = fg.is_some() && crate::intent::cancel_requested();
     drop(fg);
-    crate::kdebug!("[npk]   forge: laufen {} ms",
+    crate::kdebug!("[npk]   forge: run {} ms",
         crate::time::ticks().saturating_sub(t_r) * 10);
     match trap {
         // Returning from `_start` is rare for a wasi program but allowed,
@@ -1134,7 +1134,7 @@ pub fn execute_wasi_forge(
         forge_core::trap::OUT_OF_FUEL if cancelled => Err(WasmError::Cancelled),
         forge_core::trap::OUT_OF_FUEL => Err(WasmError::FuelExhausted),
         other => {
-            kprintln!("[npk] forge: python endete mit {}", forge_core::trap::name(other));
+            kprintln!("[npk] forge: python ended with {}", forge_core::trap::name(other));
             Err(WasmError::ExecutionFailed)
         }
     }

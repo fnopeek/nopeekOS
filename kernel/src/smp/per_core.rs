@@ -427,8 +427,8 @@ pub fn pkg_cstate_limit() -> Option<(&'static str, bool)> {
     // SAFETY: MSR_PKG_CST_CONFIG_CONTROL exists on every Intel core since
     // Nehalem, Tiger Lake included; reading it has no side effect.
     let v = unsafe { msr::read(0xE2) };
-    const HSW: [&str; 16] = ["PC0", "PC2", "PC3", "PC6", "PC7", "PC7S", "PC8", "PC9", "unbegrenzt",
-        "reserviert", "reserviert", "reserviert", "reserviert", "reserviert", "reserviert", "reserviert"];
+    const HSW: [&str; 16] = ["PC0", "PC2", "PC3", "PC6", "PC7", "PC7S", "PC8", "PC9", "unlimited",
+        "reserved", "reserved", "reserved", "reserved", "reserved", "reserved", "reserved"];
     Some((HSW[(v & 0xF) as usize], v & (1 << 15) != 0))
 }
 

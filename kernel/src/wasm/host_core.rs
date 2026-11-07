@@ -1153,7 +1153,7 @@ pub(crate) fn npk_key_inject(ctx: &mut HostState, byte: i32) -> i32 {
 fn net_allowed(ctx: &mut HostState) -> bool {
     let cap_id = ctx.cap_id;
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
-        crate::kprintln!("[npk] tcp: Modul {} hat kein NET-Recht ({:?})",
+        crate::kprintln!("[npk] tcp: module {} has no NET right ({:?})",
             capability::short_id(&cap_id), e);
         crate::audit::denied(&cap_id, capability::Rights::NET, "socket", e.reason());
         return false;
@@ -2508,7 +2508,7 @@ fn read_allowed(ctx: &HostState, name: &str, call: &str) -> bool {
         return true;
     }
     if !crate::wasm::private_area_allows(name, &ctx.module_name) {
-        kprintln!("[npk] WASM: {} DENIED ({} gehoert einem anderen Modul)", call, name);
+        kprintln!("[npk] WASM: {} DENIED ({} belongs to another module)", call, name);
         journal_refusal(ctx, read, name, call, "another app's private area");
         return false;
     }
@@ -2803,7 +2803,7 @@ fn write_allowed(ctx: &HostState, name: &str, call: &str) -> Option<bool> {
     // Another module's private area is closed, even with global READ and
     // WRITE. See `wasm::private_area_owner`.
     if !crate::wasm::private_area_allows(name, &ctx.module_name) {
-        kprintln!("[npk] WASM: {} DENIED ({} gehoert einem anderen Modul)", call, name);
+        kprintln!("[npk] WASM: {} DENIED ({} belongs to another module)", call, name);
         journal_refusal(ctx, write, name, call, "another app's private area");
         return None;
     }
@@ -2860,7 +2860,7 @@ fn private_pending(ctx: &HostState) -> u64 {
 fn private_quota_ok(ctx: &HostState, committed: u64, len: usize) -> bool {
     let (_, quota) = private_area(ctx);
     if committed.saturating_add(private_pending(ctx)).saturating_add(len as u64) > quota {
-        kprintln!("[npk] WASM: write DENIED (privater Bereich von {} voll, {} MiB)",
+        kprintln!("[npk] WASM: write DENIED (private area of {} full, {} MiB)",
             ctx.module_name, quota / (1024 * 1024));
         return false;
     }
@@ -5285,7 +5285,7 @@ pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
         return -1;
     }
     if !crate::wasm::private_area_allows(&name, &ctx.module_name) {
-        kprintln!("[npk] WASM: npk_fs_delete DENIED ({} gehoert einem anderen Modul)", name);
+        kprintln!("[npk] WASM: npk_fs_delete DENIED ({} belongs to another module)", name);
         journal_refusal(ctx, capability::Rights::WRITE, &name, "npk_fs_delete", "another app's private area");
         return -1;
     }
@@ -5359,7 +5359,7 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
     // one be moved out.
     if !crate::wasm::private_area_allows(&old, &ctx.module_name)
         || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
-        kprintln!("[npk] WASM: npk_fs_rename DENIED (privater Bereich eines anderen Moduls)");
+        kprintln!("[npk] WASM: npk_fs_rename DENIED (private area of another module)");
         journal_refusal(ctx, capability::Rights::WRITE, &old, "npk_fs_rename", "another app's private area");
         return -1;
     }
@@ -5394,7 +5394,7 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
     // area is the same as reading it.
     if !crate::wasm::private_area_allows(&old, &ctx.module_name)
         || !crate::wasm::private_area_allows(&new, &ctx.module_name) {
-        kprintln!("[npk] WASM: npk_fs_copy DENIED (privater Bereich eines anderen Moduls)");
+        kprintln!("[npk] WASM: npk_fs_copy DENIED (private area of another module)");
         journal_refusal(ctx, capability::Rights::WRITE, &old, "npk_fs_copy", "another app's private area");
         return -1;
     }

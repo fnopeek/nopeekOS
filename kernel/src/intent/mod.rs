@@ -2084,10 +2084,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "ec" => {
             // A/B switches for power measurements (see drivers/sci.rs).
             match args.split_whitespace().collect::<alloc::vec::Vec<_>>().as_slice() {
-                ["gpe", "off"] => kprintln!("  EC-GPE aus: {}", crate::sci::set_ec_gpe(false)),
-                ["gpe", "on"] => kprintln!("  EC-GPE an: {}", crate::sci::set_ec_gpe(true)),
-                ["mode", "legacy"] => kprintln!("  SCI_EN jetzt {:?}", crate::sci::set_acpi_mode(false)),
-                ["mode", "acpi"] => kprintln!("  SCI_EN jetzt {:?}", crate::sci::set_acpi_mode(true)),
+                ["gpe", "off"] => kprintln!("  EC-GPE off: {}", crate::sci::set_ec_gpe(false)),
+                ["gpe", "on"] => kprintln!("  EC-GPE on: {}", crate::sci::set_ec_gpe(true)),
+                ["mode", "legacy"] => kprintln!("  SCI_EN now {:?}", crate::sci::set_acpi_mode(false)),
+                ["mode", "acpi"] => kprintln!("  SCI_EN now {:?}", crate::sci::set_acpi_mode(true)),
                 _ => kprintln!("  ec watch [take] [s] | ec gpe on|off | ec mode acpi|legacy"),
             }
         }
@@ -2440,19 +2440,19 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 let f = crate::net::tcp::rcv_window_force();
                 let (w, srtt, cap) = crate::net::tcp::window_diag();
                 if f > 0 {
-                    kprintln!("[npk] fenster: fest {} KB", f / 1024);
+                    kprintln!("[npk] window: fixed {} KB", f / 1024);
                 } else {
-                    kprintln!("[npk] fenster: automatisch (DRS — was die Anwendung je RTT abholt)");
+                    kprintln!("[npk] window: automatic (DRS: what the application reads per RTT)");
                 }
-                kprintln!("[npk]   zuletzt angeboten {} KB, Deckel {} KB, srtt {} Takte (={} ms)",
+                kprintln!("[npk]   last offered {} KB, cap {} KB, srtt {} ticks (={} ms)",
                           w / 1024, cap / 1024, srtt, srtt * 10);
             } else if a == "auto" {
                 crate::net::tcp::set_rcv_window_force(0);
-                kprintln!("[npk] fenster: automatisch");
+                kprintln!("[npk] window: automatic");
             } else if let Ok(kb) = a.parse::<u32>() {
                 let b = kb.saturating_mul(1024);
                 crate::net::tcp::set_rcv_window_force(b);
-                kprintln!("[npk] fenster: fest {} KB — gilt ab der naechsten Quittung", kb);
+                kprintln!("[npk] window: fixed {} KB, applies from the next ACK", kb);
             } else {
                 kprintln!("usage: window <KB> | window auto");
             }
@@ -2466,7 +2466,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     kprintln!("[npk] NIC USB link: {}",
                               crate::xhci::nic_link_speed_str());
                     crate::drivers::rtl8153::log_link_diag();
-                    crate::drivers::rtl8153::dump_tally("jetzt");
+                    crate::drivers::rtl8153::dump_tally("now");
                     // xHCI bulk-IN completion codes. They answer what the
                     // chip tally leaves open: why the controller reports few
                     // completions although the ring is full and the chip does
@@ -2474,14 +2474,14 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     let (ok, short, other, last, resid) =
                         crate::xhci::nic_take_cc();
                     let n = (ok + short + other).max(1);
-                    kprintln!("[npk] xhci bulk-IN: {} ok, {} short, {} sonstige (letzter cc {}) | Rest je Vollzug {} B von {}",
+                    kprintln!("[npk] xhci bulk-IN: {} ok, {} short, {} other (last cc {}) | residue per completion {} B of {}",
                               ok, short, other, last, resid / n, 16384);
                     if args.trim() == "reset" {
                         crate::drivers::rtl8153::tally_reset();
-                        kprintln!("[npk] rtl8153: Zaehler auf null");
+                        kprintln!("[npk] rtl8153: counters reset");
                     }
                 } else {
-                    kprintln!("[npk] keine USB-NIC angesteckt");
+                    kprintln!("[npk] no USB NIC attached");
                 }
             }
         }

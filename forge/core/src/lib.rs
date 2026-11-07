@@ -117,17 +117,17 @@ pub mod trap {
 
     pub fn name(code: u32) -> &'static str {
         match code {
-            NONE => "kein Trap",
+            NONE => "no trap",
             UNREACHABLE => "unreachable",
-            MEMORY_OUT_OF_BOUNDS => "Speicherzugriff daneben",
-            TABLE_OUT_OF_BOUNDS => "Tabellenindex daneben",
-            BAD_SIGNATURE => "falsche Signatur beim indirekten Aufruf",
-            DIVIDE_ERROR => "Division durch null oder Ueberlauf",
-            OUT_OF_FUEL => "Fuel aufgebraucht",
-            UNCOMPILED => "Funktion nicht uebersetzt",
-            EXIT => "vom Programm selbst beendet",
+            MEMORY_OUT_OF_BOUNDS => "memory access out of bounds",
+            TABLE_OUT_OF_BOUNDS => "table index out of bounds",
+            BAD_SIGNATURE => "wrong signature in indirect call",
+            DIVIDE_ERROR => "division by zero or overflow",
+            OUT_OF_FUEL => "out of fuel",
+            UNCOMPILED => "function not compiled",
+            EXIT => "ended by the program itself",
             STACK_EXHAUSTED => "stack exhausted",
-            _ => "unbekannt",
+            _ => "unknown",
         }
     }
 }

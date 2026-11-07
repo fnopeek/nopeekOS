@@ -158,7 +158,7 @@ pub fn set_wasm_nic_link_state(carrier: bool, dormant: bool) {
     WASM_NIC.lock().link_up = carrier && !dormant;
     if was_c != carrier || was_d != dormant {
         crate::notify::notify(crate::notify::TOPIC_STATUS);
-        crate::kprintln!("[npk] wlan: traeger {} -> {}, dormant {} -> {} (takt {}) — sendbar: {}",
+        crate::kprintln!("[npk] wlan: carrier {} -> {}, dormant {} -> {} (tick {}), can send: {}",
             was_c as u8, carrier as u8, was_d as u8, dormant as u8,
             crate::time::ticks(), (carrier && !dormant) as u8);
     }
@@ -425,7 +425,7 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
         // closed TX gate is indistinguishable from a silent network.
         let n = TX_REJECT_NO_LINK.fetch_add(1, Ordering::Relaxed) + 1;
         if n == 1 || n % 1000 == 0 {
-            crate::kprintln!("[npk] wlan: SENDETOR ZU — {} Rahmen abgewiesen, aktiv={} (takt {})",
+            crate::kprintln!("[npk] wlan: TX GATE CLOSED: {} frames rejected, active={} (tick {})",
                 n, active_name(), crate::time::ticks());
         }
         return Err(NetError::NotInitialized);

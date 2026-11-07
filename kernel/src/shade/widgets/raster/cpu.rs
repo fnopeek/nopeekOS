@@ -703,16 +703,16 @@ mod round_tests {
                         let want = corner_coverage(r - 1 - col, r - 1 - row, r);
                         // check all four corners against the fill
                         for &(px, py) in &[
-                            (col, row),                 // oben links
-                            (w - 1 - col, row),         // oben rechts
-                            (col, h - 1 - row),         // unten links
-                            (w - 1 - col, h - 1 - row), // unten rechts
+                            (col, row),                 // top left
+                            (w - 1 - col, row),         // top right
+                            (col, h - 1 - row),         // bottom left
+                            (w - 1 - col, h - 1 - row), // bottom right
                         ] {
                             let got = rect_coverage(px, py, 0, 0, w, h, r);
                             assert_eq!(
                                 got, want,
-                                "w={w} h={h} r={r} Pixel ({px},{py}): \
-                                 Strich {got} gegen Fuellung {want}"
+                                "w={w} h={h} r={r} pixel ({px},{py}): \
+                                 stroke {got} against fill {want}"
                             );
                         }
                     }
@@ -733,16 +733,16 @@ mod round_tests {
             assert_eq!(
                 left_edge(y),
                 left_edge(h - 1 - y),
-                "Pille bei y={y} nicht spiegelsymmetrisch zu y={}",
+                "pill at y={y} not mirror-symmetric to y={}",
                 h - 1 - y
             );
         }
         let mid = left_edge(h / 2 - 1).unwrap();
-        assert_eq!(mid, 0, "die Pille muss auf halber Hoehe die Kante beruehren");
+        assert_eq!(mid, 0, "the pill must touch the edge at half height");
         for y in 0..h {
             assert!(
                 left_edge(y).unwrap() >= mid,
-                "y={y} ragt links ueber die breiteste Stelle hinaus"
+                "y={y} sticks out left past the widest point"
             );
         }
     }

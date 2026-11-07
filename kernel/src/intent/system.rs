@@ -567,9 +567,9 @@ pub fn intent_history(args: &str) {
 pub fn intent_power(args: &str) {
     if !crate::smp::per_core::has_rapl() {
         kprintln!();
-        kprintln!("  Kein RAPL: CPUID Fn8000_0007_EDX[14] ist nicht gesetzt.");
-        kprintln!("  Das gibt es auf AMD ab Zen (Familie 17h) und auf den");
-        kprintln!("  Intel-Modellen, die Linux' rapl.c listet (hier: Tiger Lake).");
+        kprintln!("  No RAPL: CPUID Fn8000_0007_EDX[14] is not set.");
+        kprintln!("  AMD has it from Zen (family 17h) on, Intel on the");
+        kprintln!("  models Linux' rapl.c lists (here: Tiger Lake).");
         kprintln!();
         return;
     }
@@ -636,25 +636,25 @@ pub fn intent_power(args: &str) {
         / (window_tsc as u128)).min(100) as u64;
 
     kprintln!();
-    kprintln!("  CPU-Leistung (RAPL, {} s Fenster, Core 0 im hlt)", secs);
-    kprintln!("  ─────────────────────────────────────────────");
-    kprintln!("  Package          {}.{:03} W   (Zaehler {}x fortgeschrieben{})",
+    kprintln!("  CPU power (RAPL, {} s window, Core 0 in hlt)", secs);
+    kprintln!("  ─────────────────────────────────────────");
+    kprintln!("  Package          {}.{:03} W   (counter updated {}x{})",
         pkg_mw / 1000, pkg_mw % 1000, jumps,
-        if jumps < 20 { " — ZU WENIG, laenger messen" } else { "" });
+        if jumps < 20 { ", TOO FEW, measure longer" } else { "" });
     if let (Some((ta, ea)), Some((tb, eb))) = (first, latest) {
         if tb > ta + tsc_hz {
             let us = (tb - ta) / (tsc_hz / 1_000_000).max(1);
             let mw = crate::smp::per_core::rapl_mw(eb.wrapping_sub(ea), us);
-            kprintln!("  Package, an den Fortschreibungen gemessen: {}.{:03} W ueber {} s",
+            kprintln!("  Package, measured between updates: {}.{:03} W over {} s",
                 mw / 1000, mw % 1000, us / 1_000_000);
         }
     }
     if crate::smp::per_core::rapl_core_is_all() {
-        kprintln!("  davon Kerne (PP0) {}.{:03} W", core_mw / 1000, core_mw % 1000);
+        kprintln!("  cores (PP0)      {}.{:03} W", core_mw / 1000, core_mw % 1000);
     } else {
-        kprintln!("  davon Core 0     {}.{:03} W", core_mw / 1000, core_mw % 1000);
+        kprintln!("  Core 0           {}.{:03} W", core_mw / 1000, core_mw % 1000);
     }
-    kprintln!("  Core 0 angehalten  {} % des Fensters", halt_pct);
+    kprintln!("  Core 0 halted      {} % of the window", halt_pct);
     // As turbostat: the share of the window each counter advanced, at the
     // TSC rate. PCx is the package, CC6/CC7 the core this runs on.
     if let (Some(a), Some(b)) = (res0, res1) {
@@ -663,10 +663,10 @@ pub fn intent_power(args: &str) {
             let pct = (b[i].wrapping_sub(a[i]) as u128 * 1000 / window_tsc as u128).min(1000) as u64;
             line.push_str(&alloc::format!(" {} {}.{}%", name, pct / 10, pct % 10));
         }
-        kprintln!("  Residenz        {}", line);
+        kprintln!("  Residency       {}", line);
     }
     if let Some((limit, locked)) = crate::smp::per_core::pkg_cstate_limit() {
-        kprintln!("  Package-Grenze    {} (MSR 0xE2{})", limit, if locked { ", von der Firmware gesperrt" } else { "" });
+        kprintln!("  Package limit     {} (MSR 0xE2{})", limit, if locked { ", locked by the firmware" } else { "" });
     }
     let port = crate::interrupts::deep_idle_port();
     let (mwait, mwait_on) = crate::interrupts::mwait_states();
@@ -676,21 +676,21 @@ pub fn intent_power(args: &str) {
             let n = crate::interrupts::MWAIT_ENTRIES[i].load(core::sync::atomic::Ordering::Relaxed);
             line.push_str(&alloc::format!(" 0x{:02x}: {}", hint, n));
         }
-        kprintln!("  Leerlauf          MWAIT aus _CST, Eintritte seit Start:{}", line);
+        kprintln!("  Idle              MWAIT from _CST, entries since boot:{}", line);
     } else if port == 0 {
-        kprintln!("  Leerlauf          C1 (hlt) — 'power cstate' fuer tiefer");
+        kprintln!("  Idle              C1 (hlt), 'power cstate' for deeper");
     } else {
-        kprintln!("  Leerlauf          tief ueber Port 0x{:x}: {} Eintritte/s (alle Kerne)",
+        kprintln!("  Idle              deep via port 0x{:x}: {} entries/s (all cores)",
             port, (deep1 - deep0) / secs);
     }
     kprintln!();
-    kprintln!("  Rohwerte: dPkg={} dCore0={} Einheit={} nJ Fenster={} us",
+    kprintln!("  Raw: dPkg={} dCore0={} unit={} nJ window={} us",
         pkg1.wrapping_sub(pkg0), core0_e1.wrapping_sub(core0_e0),
         crate::smp::per_core::rapl_nj_per_unit(), window_us);
     kprintln!();
-    kprintln!("  Vergleich: 'battery' nennt die Entnahme des AKKUS (Gesamt-");
-    kprintln!("  system). Die Differenz ist alles, was nicht die CPU ist —");
-    kprintln!("  Bildschirm, PCIe-Links, NVMe, USB, WLAN, Audio.");
+    kprintln!("  Compare: 'battery' gives the draw from the BATTERY (whole");
+    kprintln!("  system). The difference is everything that is not the CPU:");
+    kprintln!("  display, PCIe links, NVMe, USB, WLAN, audio.");
     kprintln!();
 }
 
@@ -707,28 +707,28 @@ fn power_cstate(arg: &str) {
         match arg {
             "on" => {
                 if crate::interrupts::set_mwait_idle(true) {
-                    kprintln!("  Leerlauf ueber MWAIT aus _CST — bis zum naechsten Neustart.");
+                    kprintln!("  Idle via MWAIT from _CST, until the next reboot.");
                 } else {
-                    kprintln!("  Keine MWAIT-Zustaende: laeuft 'acpi'? (_CST kommt von dort)");
+                    kprintln!("  No MWAIT states: is 'acpi' running? (_CST comes from there)");
                 }
             }
             "off" => {
                 crate::interrupts::set_mwait_idle(false);
-                kprintln!("  Leerlauf wieder C1 (hlt).");
+                kprintln!("  Idle back to C1 (hlt).");
             }
             _ => {
-                kprintln!("  ARAT (LAPIC-Timer laeuft im Tiefschlaf): {}",
-                    if crate::interrupts::has_arat() { "ja" } else { "NEIN — nur C1" });
+                kprintln!("  ARAT (LAPIC timer runs in deep sleep): {}",
+                    if crate::interrupts::has_arat() { "yes" } else { "NO, C1 only" });
                 let (states, on) = crate::interrupts::mwait_states();
                 if states.is_empty() {
-                    kprintln!("  Keine Zustaende aus _CST (das meldet 'acpi' beim Start).");
+                    kprintln!("  No states from _CST ('acpi' reports them at boot).");
                 }
                 for (i, (hint, target)) in states.iter().enumerate() {
-                    kprintln!("  C{}  MWAIT 0x{:02x}  ab {} us Schlaf", i + 1, hint, target / tsc_per_us);
+                    kprintln!("  C{}  MWAIT 0x{:02x}  from {} us sleep", i + 1, hint, target / tsc_per_us);
                 }
-                kprintln!("  aktiv: {}", if on { "MWAIT" } else { "C1 (hlt)" });
+                kprintln!("  active: {}", if on { "MWAIT" } else { "C1 (hlt)" });
                 kprintln!();
-                kprintln!("  'power cstate on' schaltet ein, 'power cstate off' zurueck.");
+                kprintln!("  'power cstate on' switches it on, 'power cstate off' back.");
             }
         }
         kprintln!();
@@ -736,29 +736,29 @@ fn power_cstate(arg: &str) {
     }
     let base = crate::smp::per_core::amd_cstate_base();
     if arg.is_empty() {
-        kprintln!("  ARAT (LAPIC-Timer laeuft im Tiefschlaf): {}",
-            if crate::interrupts::has_arat() { "ja" } else { "NEIN — Tiefschlaf gesperrt" });
+        kprintln!("  ARAT (LAPIC timer runs in deep sleep): {}",
+            if crate::interrupts::has_arat() { "yes" } else { "NO, deep sleep blocked" });
         match base {
-            Some(b) => kprintln!("  CStateBaseAddr (MSRC001_0073): 0x{:x} — Ports 0x{:x}..0x{:x}",
+            Some(b) => kprintln!("  CStateBaseAddr (MSRC001_0073): 0x{:x}, ports 0x{:x}..0x{:x}",
                 b, b, b + 7),
-            None => kprintln!("  CStateBaseAddr: keine (kein AMD Zen, Hypervisor oder 0)"),
+            None => kprintln!("  CStateBaseAddr: none (not AMD Zen, hypervisor or 0)"),
         }
         let p = crate::interrupts::deep_idle_port();
         if p == 0 {
-            kprintln!("  aktiv: C1 (hlt)");
+            kprintln!("  active: C1 (hlt)");
         } else {
-            kprintln!("  aktiv: Port 0x{:x}", p);
+            kprintln!("  active: port 0x{:x}", p);
         }
         kprintln!();
-        kprintln!("  Vorgabe: Base+2.");
-        kprintln!("  'power cstate <n>' waehlt einen Port, 'power cstate off' zurueck");
-        kprintln!("  auf C1 — beides nur bis zum naechsten Neustart.");
+        kprintln!("  Default: Base+2.");
+        kprintln!("  'power cstate <n>' picks a port, 'power cstate off' goes back");
+        kprintln!("  to C1, both only until the next reboot.");
         kprintln!();
         return;
     }
     if arg == "off" {
         let _ = crate::interrupts::set_deep_idle(0, 0);
-        kprintln!("  Leerlauf wieder C1 (hlt).");
+        kprintln!("  Idle back to C1 (hlt).");
         kprintln!();
         return;
     }
@@ -769,14 +769,14 @@ fn power_cstate(arg: &str) {
     };
     let min_us: u64 = it.next().and_then(|v| v.parse().ok()).unwrap_or(200);
     let Some(b) = base else {
-        kprintln!("  Keine CStateBaseAddr — nichts einzuschalten.");
+        kprintln!("  No CStateBaseAddr: nothing to switch on.");
         kprintln!();
         return;
     };
     match crate::interrupts::set_deep_idle(b + n, min_us) {
-        Ok(()) => kprintln!("  Leerlauf ueber Port 0x{:x} (Base+{}) fuer Halts ab {} us.",
+        Ok(()) => kprintln!("  Idle via port 0x{:x} (Base+{}) for halts from {} us.",
             b + n, n, min_us),
-        Err(e) => kprintln!("  abgelehnt: {}", e),
+        Err(e) => kprintln!("  rejected: {}", e),
     }
     kprintln!();
 }
@@ -850,13 +850,13 @@ fn battery_from_acpi(d: crate::battery::Detail) {
     const UNKNOWN: u32 = 0xFFFF_FFFF;
     let packed = crate::battery::cached();
     kprintln!();
-    kprintln!("  Akku (ACPI _BST/_BIF, ueber acpi)");
-    kprintln!("  ────────────────────────────────");
+    kprintln!("  Battery (ACPI _BST/_BIF, via acpi)");
+    kprintln!("  ──────────────────────────────────");
     if packed >= 0 {
         let st = match packed >> 8 {
-            0 => "entlaedt", 1 => "laedt", 2 => "voll", _ => "am Netz, laedt nicht",
+            0 => "discharging", 1 => "charging", 2 => "full", _ => "on AC, not charging",
         };
-        kprintln!("  Ladung          {} % — {}", packed & 0xFF, st);
+        kprintln!("  Charge          {} %, {}", packed & 0xFF, st);
     }
     // mA/mAh need the voltage to become mW/mWh.
     let to_mw = |v: u32| -> Option<u64> {
@@ -867,26 +867,26 @@ fn battery_from_acpi(d: crate::battery::Detail) {
     };
     match to_mw(d.rate) {
         Some(mw) => {
-            kprintln!("  Entnahme        {}.{:03} W  (ganzes Geraet)", mw / 1000, mw % 1000);
+            kprintln!("  Draw            {}.{:03} W  (whole device)", mw / 1000, mw % 1000);
             if let (Some(rem), true) = (to_mw(d.remaining), packed >= 0 && packed >> 8 == 0) {
                 if mw > 0 {
                     let min = rem * 60 / mw;
-                    kprintln!("  Restlaufzeit    ~{} h {:02} min bei dieser Entnahme", min / 60, min % 60);
+                    kprintln!("  Time left       ~{} h {:02} min at this draw", min / 60, min % 60);
                 }
             }
         }
-        None => kprintln!("  Entnahme        unbekannt (Firmware meldet keine Rate)"),
+        None => kprintln!("  Draw            unknown (firmware reports no rate)"),
     }
     if let (Some(rem), Some(full)) = (to_mw(d.remaining), to_mw(d.full)) {
-        kprintln!("  Kapazitaet      {}.{:03} / {}.{:03} Wh",
+        kprintln!("  Capacity        {}.{:03} / {}.{:03} Wh",
             rem / 1000, rem % 1000, full / 1000, full % 1000);
     }
     if d.voltage_mv != UNKNOWN {
-        kprintln!("  Spannung        {}.{:03} V", d.voltage_mv / 1000, d.voltage_mv % 1000);
+        kprintln!("  Voltage         {}.{:03} V", d.voltage_mv / 1000, d.voltage_mv % 1000);
     }
     kprintln!();
-    kprintln!("  Die Firmware frischt die Rate selbst nur alle paar Sekunden auf,");
-    kprintln!("  acpi liest alle 10 s. Fuer einen Vergleich 20-30 s warten.");
+    kprintln!("  The firmware refreshes the rate only every few seconds,");
+    kprintln!("  acpi reads every 10 s. For a comparison wait 20-30 s.");
     kprintln!();
 }
 
@@ -1174,8 +1174,8 @@ pub fn intent_ec_watch(args: &str) {
         // SAFETY: PM1a_CNT is an I/O port named by the FADT, read only.
         let cnt = unsafe { Port::new(pm1a_cnt as u16) }.inw();
         kprintln!("  PM1_CNT 0x{:04x} — SCI_EN {} ({})", cnt, cnt & 1,
-            if cnt & 1 != 0 { "ACPI-Modus: Ereignisse gehen ans OS" }
-            else { "LEGACY: die Firmware (SMM) behaelt die Ereignisse" });
+            if cnt & 1 != 0 { "ACPI mode: events go to the OS" }
+            else { "LEGACY: the firmware (SMM) keeps the events" });
     }
     let half = (gpe0_len / 2) as usize;
     let gpe_ok = gpe0 != 0 && gpe0 <= 0xFFFF && half > 0 && half <= 16;
@@ -1196,7 +1196,7 @@ pub fn intent_ec_watch(args: &str) {
     for i in 0..half { line.push_str(&alloc::format!("{:02x} ", en[i])); }
     kprintln!("  GPE enable  {}", line);
     kprintln!();
-    kprintln!("  {} s: jetzt die Helligkeitstasten druecken. Jede Aenderung erscheint.", secs);
+    kprintln!("  {} s: press the brightness keys now. Every change is shown.", secs);
 
     let tsc_hz = crate::time::counter_hz().max(1);
     let t0 = crate::time::counter();
@@ -1221,7 +1221,7 @@ pub fn intent_ec_watch(args: &str) {
         if take && ec & 0x20 != 0 {
             match crate::ec::query_raw() {
                 Ok(q) => kprintln!("  {:>6} ms  QR_EC -> 0x{:02x}{}", ms, q,
-                    if q == 0 { " (nichts anstehend)" } else { "" }),
+                    if q == 0 { " (nothing pending)" } else { "" }),
                 Err(e) => kprintln!("  {:>6} ms  QR_EC: {}", ms, e),
             }
             changes += 1;
@@ -1233,7 +1233,7 @@ pub fn intent_ec_watch(args: &str) {
             if rose != 0 {
                 for b in 0..8 {
                     if rose & (1 << b) != 0 {
-                        kprintln!("  {:>6} ms  GPE {} Status gesetzt (enable {})", ms, i * 8 + b,
+                        kprintln!("  {:>6} ms  GPE {} status set (enable {})", ms, i * 8 + b,
                             (en[i] >> b) & 1);
                         changes += 1;
                     }
@@ -1251,7 +1251,7 @@ pub fn intent_ec_watch(args: &str) {
             last_pm1 = p;
         }
     }
-    kprintln!("  Ende ({} Aenderungen).", changes);
+    kprintln!("  End ({} changes).", changes);
     kprintln!();
 }
 
@@ -1791,7 +1791,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("wlan", "WiFi link diagnostics (rate, retries, drops)");
             help_row("wlan reset", "Zero the counters before a measurement");
             help_row("netbench", "Throughput measurement");
-            help_row("window <KB>", "Empfangsfenster festnageln (auto = zurueck)");
+            help_row("window <KB>", "Pin the receive window (auto = back)");
             kprintln!("[npk]");
             help_note("save a download:  https example.com /page.html > page");
             help_row("wlan set <key> <val>", "Change one wifi setting (wlan set band 2.4)");

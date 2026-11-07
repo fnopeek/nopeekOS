@@ -119,13 +119,13 @@ unsafe fn tag_of(block: usize) -> usize {
 
 #[inline]
 unsafe fn size_of_block(block: usize) -> usize {
-    // SAFETY: wie `tag_of`.
+    // SAFETY: as `tag_of`.
     unsafe { tag_of(block) & !FREE_BIT }
 }
 
 #[inline]
 unsafe fn is_free(block: usize) -> bool {
-    // SAFETY: wie `tag_of`.
+    // SAFETY: as `tag_of`.
     unsafe { tag_of(block) & FREE_BIT != 0 }
 }
 

@@ -218,7 +218,7 @@ fn do_http_request(args: &str, use_tls: bool) {
                     // 0 sample that is discarded, so the cap falls back to the
                     // 50 ms assumption, while a 20 ms RTT yields a smaller cap.
                     let (wnd, srtt, cap) = crate::net::tcp::window_diag();
-                    kprintln!("[npk]      tcp-wnd: angeboten={}K  deckel={}K  srtt={} ms",
+                    kprintln!("[npk]      tcp-wnd: offered={}K  cap={}K  srtt={} ms",
                         wnd / 1024, cap / 1024, srtt);
                     // Bytes discarded by our own rx_desc walker.
                     let (frames, trunc, discard) = crate::drivers::rtl8153::take_rx_parse_stats();
@@ -235,13 +235,13 @@ fn do_http_request(args: &str, use_tls: bool) {
         };
         if let Err(e) = stream_result {
             if e == "cancelled" {
-                kprintln!("[npk] ^C — download abgebrochen ({} KiB empfangen)", total / 1024);
+                kprintln!("[npk] ^C: download cancelled ({} KiB received)", total / 1024);
             } else {
                 kprintln!("[npk] download failed: {}", e);
             }
             // Chip counters are dumped on every exit, failures included.
             if crate::xhci::nic_attached() {
-                crate::drivers::rtl8153::dump_tally("nach Abbruch");
+                crate::drivers::rtl8153::dump_tally("after cancel");
                 crate::drivers::rtl8153::log_link_diag();
             }
             // `writer` drops here → StreamingWriter::drop cleans up the partial.
@@ -712,7 +712,7 @@ pub fn resolve_checked(host: &str, from: Option<Reach>) -> Result<[u8; 4], &'sta
     if let Some(from) = from {
         let to = class_of(ip);
         if !super::reach::allows(from, to) {
-            kprintln!("[npk] REICHWEITE verweigert: {} ({}.{}.{}.{}) ist {:?}, die Seite ist {:?}",
+            kprintln!("[npk] REACH denied: {} ({}.{}.{}.{}) is {:?}, the page is {:?}",
                 bare, ip[0], ip[1], ip[2], ip[3], to, from);
             return Err("reach: a public page may not reach the private network");
         }
@@ -1485,7 +1485,7 @@ fn h2_take_coalesced(host: &str, addr: Option<[u8; 4]>) -> Option<Http2> {
         let (other, mut conn, idle_since) = slot.take().unwrap();
         if now.wrapping_sub(idle_since) < POOL_MAX_IDLE_TICKS && conn.is_healthy() {
             conn.reused = true;
-            kprintln!("[npk]   h2 {} teilt sich die Verbindung von {} ({}.{}.{}.{})",
+            kprintln!("[npk]   h2 {} shares the connection of {} ({}.{}.{}.{})",
                 host, other, ip[0], ip[1], ip[2], ip[3]);
             return Some(conn);
         }
@@ -2590,9 +2590,9 @@ fn bench_get(host: &str, path: &str) {
 fn bench_cores() {
     let me = crate::smp::per_core::current_core_id();
     match crate::netdev::wasm_nic_core() {
-        Some(nic) => kprintln!("[netbench] Kern {} · WLAN-Treiber auf Kern {}{}",
-            me, nic, if me == nic { " — DERSELBE" } else { "" }),
-        None => kprintln!("[netbench] Kern {} · kein WLAN-Treiber auf einem Worker", me),
+        Some(nic) => kprintln!("[netbench] core {} · WLAN driver on core {}{}",
+            me, nic, if me == nic { " (THE SAME)" } else { "" }),
+        None => kprintln!("[netbench] core {} · no WLAN driver on a worker", me),
     }
 }
 
@@ -2672,8 +2672,8 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
             use core::sync::atomic::Ordering::Relaxed;
             let (_, _, segs, wb, maxbuf) = crate::net::tcp::send_stats();
             let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
-            kprintln!("[netbench]   send_buf {} KB · Deckel {} KB · Gegenueber {} KB \
-· {} Segmente · {}x WouldBlock · Schlange voll {}x",
+            kprintln!("[netbench]   send_buf {} KB · cap {} KB · peer {} KB \
+· {} segments · {}x WouldBlock · queue full {}x",
                 crate::net::tcp::snd_unacked_of(handle) / 1024,
                 crate::net::tcp::snd_limit_of(handle) / 1024,
                 crate::net::tcp::snd_wnd_of(handle) / 1024,
@@ -2681,10 +2681,10 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
                 crate::net::tcp::STATS.send_refused.load(Relaxed));
             // Congestion state: a cwnd stuck at one and a full send buffer
             // look the same from outside but need opposite fixes.
-            kprintln!("[netbench]   stau: cwnd {} · ssthresh {} · {} Doppelquittungen{} \
-· {}x schnell wiederholt · {}x Zeitueberschreitung",
+            kprintln!("[netbench]   congestion: cwnd {} · ssthresh {} · {} dup ACKs{} \
+· {}x fast retransmit · {}x timeout",
                 cw, ss, crate::net::tcp::STATS.dupacks_seen.load(Relaxed),
-                if rec { " · IN ERHOLUNG" } else { "" },
+                if rec { " · IN RECOVERY" } else { "" },
                 crate::net::tcp::STATS.fast_retrans.load(Relaxed),
                 crate::net::tcp::STATS.rto_fired.load(Relaxed));
             let _ = dup;
@@ -2705,9 +2705,9 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
         let (send_tsc, blocked_tsc, segs, wb, maxbuf) =
             crate::net::tcp::send_stats();
         let pct = |x: u64| if wall == 0 { 0 } else { x * 100 / wall };
-        kprintln!("[netbench] sendepfad: {} Segmente · in send {} % · \
-abgewiesen {} % ({}x WouldBlock) · in net::poll {} % · groesster \
-send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
+        kprintln!("[netbench] send path: {} segments · in send {} % · \
+refused {} % ({}x WouldBlock) · in net::poll {} % · largest \
+send_buf {} KB · cap {} KB (peer {} KB) · queue full {}x",
             segs, pct(send_tsc),
             pct(blocked_tsc), wb, pct(poll_tsc), maxbuf / 1024,
             crate::net::tcp::snd_limit_of(handle) / 1024,
@@ -2717,10 +2717,10 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
         {
             use core::sync::atomic::Ordering::Relaxed;
             let (cw, ss, dup, rec) = crate::net::tcp::cwnd_of(handle);
-            kprintln!("[netbench] stau: cwnd {} Pakete · ssthresh {} · {} Doppelquittungen{} \
-· {}x schnell wiederholt · {}x Zeitueberschreitung · Schlange voll {}x",
+            kprintln!("[netbench] congestion: cwnd {} packets · ssthresh {} · {} dup ACKs{} \
+· {}x fast retransmit · {}x timeout · queue full {}x",
                 cw, ss, crate::net::tcp::STATS.dupacks_seen.load(Relaxed),
-                if rec { " · IN ERHOLUNG" } else { "" },
+                if rec { " · IN RECOVERY" } else { "" },
                 crate::net::tcp::STATS.fast_retrans.load(Relaxed),
                 crate::net::tcp::STATS.rto_fired.load(Relaxed),
                 crate::net::tcp::STATS.send_refused.load(Relaxed));
@@ -2728,7 +2728,7 @@ send_buf {} KB · Deckel {} KB (Gegenueber {} KB) · Schlange voll {}x",
         }
         if segs > 0 {
             // Per-segment cost: says whether the producer is the limit.
-            kprintln!("[netbench] je Segment: {} ns in send, {} ns Wanduhr",
+            kprintln!("[netbench] per segment: {} ns in send, {} ns wall clock",
                 crate::time::counter_to_ns(send_tsc / segs),
                 crate::time::counter_to_ns(wall / segs));
         }

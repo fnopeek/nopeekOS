@@ -133,9 +133,9 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
     crate::kdebug!("[python] {} ms ({})", ms, if use_forge { "forge" } else { "wasmi" });
     // Allocator counters for this run. `steps` are free-list nodes visited,
     // which shows whether the linear search is the bottleneck.
-    crate::kdebug!("[heap] {} allocs / {} frees, Schritte: {} beim Belegen + {} beim Freigeben",
+    crate::kdebug!("[heap] {} allocs / {} frees, steps: {} in alloc + {} in free",
         c.allocs, c.frees, c.alloc_steps, c.free_steps);
-    crate::kdebug!("[heap] Freiliste jetzt {} Knoten, Spitze {}, {} mal gewachsen",
+    crate::kdebug!("[heap] free list now {} nodes, peak {}, grown {} times",
         c.free_nodes, c.max_free_nodes, c.grows);
     let mut line = alloc::string::String::new();
     for (i, n) in c.size_hist.iter().enumerate() {
@@ -144,7 +144,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
             let _ = write!(line, " <{}B:{}", 32usize << i, n);
         }
     }
-    crate::kdebug!("[heap] Groessen:{}", line);
+    crate::kdebug!("[heap] sizes:{}", line);
     match r {
         Ok(0) => {}
         Ok(code) => kprintln!("[python] exit {}", code),

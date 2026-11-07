@@ -81,17 +81,17 @@ pub fn second_chance(host: &str, leaf_der: &[u8], why: CertError) -> Result<(), 
         // The case pinning exists for: the address is allowed, but someone
         // else answers. Reject.
         crate::kprintln!(
-            "[npk] LAN-ANHEFTUNG: {} zeigt ein ANDERES Zertifikat als beim ersten Mal.",
+            "[npk] LAN PIN: {} shows a DIFFERENT certificate than the first time.",
             bare);
-        crate::kprintln!("[npk]   Das kann ein Geraetetausch sein — oder jemand dazwischen.");
-        crate::kprintln!("[npk]   `set net.lan_devices` neu setzen loescht die Anheftung nicht;");
-        crate::kprintln!("[npk]   dafuer braucht es einen Neustart. So ist es gemeint.");
+        crate::kprintln!("[npk]   That can be a replaced device, or someone in between.");
+        crate::kprintln!("[npk]   Setting `set net.lan_devices` again does not clear the pin;");
+        crate::kprintln!("[npk]   that takes a reboot. This is intended.");
         return Err(why);
     }
 
     // First contact. Trust is granted here without backing, so log it.
-    crate::kprintln!("[npk] LAN-Geraet {} beim ERSTEN Mal angenommen ({:?}).", bare, why);
-    crate::kprintln!("[npk]   Fingerabdruck {:02x}{:02x}{:02x}{:02x}… ab jetzt angeheftet.",
+    crate::kprintln!("[npk] LAN device {} accepted on FIRST contact ({:?}).", bare, why);
+    crate::kprintln!("[npk]   fingerprint {:02x}{:02x}{:02x}{:02x}… pinned from now on.",
         fp[0], fp[1], fp[2], fp[3]);
     pins.push((String::from(bare), fp));
     Ok(())
@@ -112,7 +112,7 @@ mod tests {
                   CertError::KeyUsageInvalid, CertError::EkuInvalid,
                   CertError::PathLenExceeded, CertError::UnknownCriticalExt,
                   CertError::BadValidityDate] {
-            assert!(!is_forgivable(e), "{e:?} darf nicht nachgelassen werden");
+            assert!(!is_forgivable(e), "{e:?} must not be forgiven");
         }
     }
 }

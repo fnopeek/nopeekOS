@@ -403,17 +403,17 @@ pub fn enable_bus_master_path(addr: PciAddr) {
     for _ in 0..8 {
         if bus == 0 { return; }
         let Some(bridge) = find_bridge_for_bus(bus) else {
-            kprintln!("[npk] keine Bridge fuer Bus {:02x} gefunden", bus);
+            kprintln!("[npk] no bridge found for bus {:02x}", bus);
             return;
         };
         let before = read32(bridge, 0x04);
         if before & 0x06 != 0x06 {
             write32(bridge, 0x04, before | 0x06);
-            kprintln!("[npk] Bridge {:02x}:{:02x}.{} fuer Bus {:02x}: cmd {:#06x} -> {:#06x} (Bus-Master war AUS)",
+            kprintln!("[npk] bridge {:02x}:{:02x}.{} for bus {:02x}: cmd {:#06x} -> {:#06x} (bus master was OFF)",
                 bridge.bus, bridge.device, bridge.function, bus,
                 before & 0xFFFF, (before | 0x06) & 0xFFFF);
         } else {
-            kprintln!("[npk] Bridge {:02x}:{:02x}.{} fuer Bus {:02x}: cmd {:#06x} (Bus-Master war schon an)",
+            kprintln!("[npk] bridge {:02x}:{:02x}.{} for bus {:02x}: cmd {:#06x} (bus master already on)",
                 bridge.bus, bridge.device, bridge.function, bus, before & 0xFFFF);
         }
         bus = bridge.bus;

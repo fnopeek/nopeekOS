@@ -54,33 +54,33 @@ impl crate::forge_rt::HostImports for ProbeHost {
 fn trap_probe() -> bool {
     use crate::forge_rt::Instance;
     let Ok(m) = forge_core::compile(TRAP_PROBE) else {
-        kprintln!("[npk] forge: Trap-Probe liess sich nicht uebersetzen");
+        kprintln!("[npk] forge: trap probe failed to compile");
         return false;
     };
     let entry = m.plan.exports.iter().find(|(n, _)| n == "f").map(|(_, i)| *i)
         .and_then(|i| m.offset_of(i));
     let Some(off) = entry else {
-        kprintln!("[npk] forge: Trap-Probe hat kein f");
+        kprintln!("[npk] forge: trap probe has no f");
         return false;
     };
     let Some(mut inst) = Instance::new_with_host(&m, &ProbeHost) else {
-        kprintln!("[npk] forge: Trap-Probe — Instanz liess sich nicht bauen");
+        kprintln!("[npk] forge: trap probe: instance could not be built");
         return false;
     };
     if inst.unresolved_imports() != 0 {
-        kprintln!("[npk] forge: Trap-Probe — Import nicht aufgeloest");
+        kprintln!("[npk] forge: trap probe: import not resolved");
         return false;
     }
     inst.set_fuel(i64::MAX / 4);
     let (got, trap) = inst.call(off, 0, 0, 0);
     if trap != forge_core::trap::EXIT {
-        kprintln!("[npk] forge: Trap-Probe -> {} statt EXIT (Ergebnis {})",
+        kprintln!("[npk] forge: trap probe -> {} instead of EXIT (result {})",
             forge_core::trap::name(trap), got);
         return false;
     }
     // 99 means the host function returned instead of trapping.
     if got == 99 {
-        kprintln!("[npk] forge: Trap-Probe ist ZURUECKGEKEHRT — das Abrollen hat nicht gegriffen");
+        kprintln!("[npk] forge: trap probe RETURNED: the unwind did not take");
         return false;
     }
     true
@@ -99,23 +99,23 @@ fn selftest() {
         let m = match forge_core::compile(c.wasm) {
             Ok(m) => m,
             Err(e) => {
-                kprintln!("[npk] forge: {} — uebersetzen: {}", c.name, e);
+                kprintln!("[npk] forge: {}: compile: {}", c.name, e);
                 bad += 1;
                 continue;
             }
         };
         let Some(fidx) = m.plan.exports.iter().find(|(n, _)| n == "f").map(|(_, i)| *i) else {
-            kprintln!("[npk] forge: {} — kein Export f", c.name);
+            kprintln!("[npk] forge: {}: no export f", c.name);
             bad += 1;
             continue;
         };
         let Some(off) = m.offset_of(fidx) else {
-            kprintln!("[npk] forge: {} — keine Adresse", c.name);
+            kprintln!("[npk] forge: {}: no address", c.name);
             bad += 1;
             continue;
         };
         let Some(mut inst) = Instance::new(&m) else {
-            kprintln!("[npk] forge: {} — Instanz liess sich nicht bauen", c.name);
+            kprintln!("[npk] forge: {}: instance could not be built", c.name);
             bad += 1;
             continue;
         };
@@ -127,19 +127,19 @@ fn selftest() {
         } else {
             bad += 1;
             kprintln!(
-                "[npk] forge: {} (arg {}) -> {} / {} statt {} / {}",
+                "[npk] forge: {} (arg {}) -> {} / {} instead of {} / {}",
                 c.name, c.arg, got, forge_core::trap::name(trap), c.want,
                 forge_core::trap::name(c.trap)
             );
         }
     }
 
-    kprintln!("[npk] forge selftest: {}/{} wie auf dem Host", ok, ok + bad);
-    kprintln!("[npk] forge: Host-Trap (Abrollen aus einer Host-Funktion): {}",
-        if trap_probe() { "geht" } else { "GESCHEITERT" });
+    kprintln!("[npk] forge selftest: {}/{} same as on the host", ok, ok + bad);
+    kprintln!("[npk] forge: host trap (unwind from a host function): {}",
+        if trap_probe() { "works" } else { "FAILED" });
     if bad == 0 {
-        kprintln!("[npk] forge: Wachseite, Tabelle, Division, unreachable und Fuel");
-        kprintln!("[npk] forge: melden sich am Geraet mit demselben Grund.");
+        kprintln!("[npk] forge: guard page, table, division, unreachable and fuel");
+        kprintln!("[npk] forge: report the same reason on the device.");
     }
 }
 
@@ -173,14 +173,14 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
         match arg {
             "on" | "forge" => {
                 crate::wasm::set_engine_default(true);
-                kprintln!("[npk] forge ist ab dem naechsten Start der Vorgabemotor");
-                kprintln!("[npk] (laufende Module bleiben auf dem Motor, mit dem sie gestartet sind)");
+                kprintln!("[npk] forge is the default engine from the next start");
+                kprintln!("[npk] (running modules stay on the engine they started with)");
             }
             "off" | "wasmi" => {
                 crate::wasm::set_engine_default(false);
-                kprintln!("[npk] wasmi ist ab dem naechsten Start der Vorgabemotor");
+                kprintln!("[npk] wasmi is the default engine from the next start");
             }
-            "" => kprintln!("[npk] Vorgabemotor: {}",
+            "" => kprintln!("[npk] default engine: {}",
                 if crate::wasm::forge_is_default() { "forge" } else { "wasmi" }),
             _ => kprintln!("[npk] Usage: forge default [on|off]"),
         }
@@ -210,7 +210,7 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
     let m = match forge_core::compile(&wasm) {
         Ok(m) => m,
         Err(e) => {
-            kprintln!("[npk] forge: abgelehnt — {}", e);
+            kprintln!("[npk] forge: rejected: {}", e);
             return;
         }
     };
@@ -234,7 +234,7 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
     // Tenths, printed with a decimal point: "8.4" rather than "84".
     let tenths = if instrs > 0 { m.code.len() as u64 * 10 / instrs } else { 0 };
     kprintln!(
-        "[npk] forge: {}/{} Funktionen, {} Instruktionen -> {} B x86 ({}.{} B je Instr)",
+        "[npk] forge: {}/{} functions, {} instructions -> {} B x86 ({}.{} B per instr)",
         done,
         total,
         instrs,
@@ -244,12 +244,12 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
     );
     kprint!("[npk] forge: {} ms", dt);
     if instrs > 0 && dt > 0 {
-        kprint!(" ({} K Instruktionen/s)", instrs / dt);
+        kprint!(" ({} K instructions/s)", instrs / dt);
     }
     kprintln!("");
 
     if let Some(why) = first_refusal {
-        kprintln!("[npk] forge: {} Funktionen abgelehnt, erste: {}", total - done, why);
+        kprintln!("[npk] forge: {} functions rejected, first: {}", total - done, why);
     }
 
     // An import the glue cannot resolve keeps the trap stub: the module would
@@ -265,9 +265,9 @@ pub fn intent_forge(args: &str, vault: &'static spin::Mutex<crate::security::cap
         }
     }
     if imports > 0 {
-        kprintln!("[npk] forge: {}/{} Importe aufgeloest", resolved, imports);
+        kprintln!("[npk] forge: {}/{} imports resolved", resolved, imports);
         if let Some((mo, na)) = first_missing {
-            kprintln!("[npk] forge: erster offener Import: {}::{}", mo, na);
+            kprintln!("[npk] forge: first open import: {}::{}", mo, na);
         }
     }
 }
