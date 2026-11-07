@@ -24,6 +24,7 @@ exclude = [
     "tools/wasm/cam",
     "tools/wasm/iris",
     "tools/wasm/helm",
+    "tools/wasm/peek",
     "tools/wasm/tune",
     "tools/wasm/snap",
     "tools/wasm/volume",

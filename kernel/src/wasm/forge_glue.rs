@@ -786,6 +786,10 @@ host_imports! {
     // npk_status_list(buf, max) -> bytes / -(needed + 2) / -1; RENDER.
     // Format in `status::serialize`.
     mem fn npk_status_list(buf_ptr: i32, max: i32) -> i32;
+    // npk_audit_read(since_ms, buf, max) -> bytes / -(needed + 2) / -1:
+    // the audit journal touched since uptime `since_ms`, the live holders
+    // and the totals. `peek` with AUDIT only. Format in `npk_audit_read`.
+    mem fn npk_audit_read(since_ms: i64, buf_ptr: i32, max: i32) -> i32;
     // npk_launch_at(app, arg, anchor) -> 0 / -1: `npk_launch`, and the
     // app's first overlay is placed next to node `anchor` of the caller's
     // window, light-dismissed. EXECUTE.

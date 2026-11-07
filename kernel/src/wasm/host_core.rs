@@ -5008,6 +5008,49 @@ pub(crate) fn npk_status_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
     write_whole(mem, buf_ptr, max, &crate::status::serialize())
 }
 
+/// The journal's reader is `peek` by its kernel-assigned name and AUDIT:
+/// the journal names every file and host of every app, and AUDIT alone is
+/// a right a second module could declare.
+fn is_journal_reader(ctx: &HostState) -> bool {
+    ctx.module_name == "peek"
+        && capability::require(&ctx.cap_id, capability::Rights::AUDIT, "npk_audit_read")
+}
+
+/// One field of a journal line: no tab, no line break.
+fn audit_field(out: &mut String, s: &str) {
+    out.push('\t');
+    out.extend(s.chars().map(|c| if c == '\t' || c == '\n' || c == '\r' { ' ' } else { c }));
+}
+
+/// Lines, tab separated, times as local seconds and uptime ms:
+/// `S checks_passed entries now_ms now_local`, then per live holder
+/// `H inst name checks`, then per entry touched since `since_ms`
+/// `E seq local up_ms last_up_ms inst holder kind rights count checks denied object`.
+pub(crate) fn npk_audit_read(mem: &mut [u8], ctx: &mut HostState, since_ms: i64, buf_ptr: i32, max: i32) -> i32 {
+    use core::fmt::Write;
+    if !is_journal_reader(ctx) { return -1; }
+    let local = |w: u64| if w == 0 { 0 } else { crate::time::wall::local(w).max(0) as u64 };
+    let now_ms = crate::time::uptime_us() / 1000;
+    let mut out = String::new();
+    let _ = write!(out, "S\t{}\t{}\t{}\t{}\n", crate::audit::checks_passed(), crate::audit::total_count(),
+        now_ms, local(crate::time::wall::now_or_zero()));
+    for (inst, name, cap) in crate::audit::holders() {
+        let _ = write!(out, "H\t{}", inst);
+        audit_field(&mut out, &name);
+        let _ = write!(out, "\t{}\n", capability::checks_of(&cap));
+    }
+    for e in crate::audit::touched_since(since_ms.max(0) as u64) {
+        let _ = write!(out, "E\t{}\t{}\t{}\t{}\t{}", e.seq, local(e.wall), e.up_ms, e.last_up_ms, e.inst);
+        audit_field(&mut out, &e.holder);
+        audit_field(&mut out, e.kind.label());
+        audit_field(&mut out, &capability::rights_names(e.rights));
+        let _ = write!(out, "\t{}\t{}\t{}", e.count, e.checks, e.denied);
+        audit_field(&mut out, &e.object);
+        out.push('\n');
+    }
+    write_whole(mem, buf_ptr, max, out.as_bytes())
+}
+
 pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::EXECUTE, "npk_launch") {

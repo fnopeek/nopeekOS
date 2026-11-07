@@ -426,6 +426,7 @@ const CAP2_BIT_EXTERNAL: u8 = 0x04; // files on external drives (`ext/`)
 const CAP2_BIT_CAMERA: u8 = 0x08; // a camera's USB interfaces
 const CAP2_BIT_MIC: u8 = 0x10; // a microphone
 const CAP2_BIT_SETTINGS: u8 = 0x20; // writing system settings
+const CAP2_BIT_AUDIT: u8 = 0x40; // reading the audit journal (peek)
 
 fn rights_from_caps_byte2(b: u8) -> Rights {
     let mut r = Rights::empty();
@@ -435,6 +436,7 @@ fn rights_from_caps_byte2(b: u8) -> Rights {
     if b & CAP2_BIT_CAMERA != 0 { r |= Rights::CAMERA; }
     if b & CAP2_BIT_MIC != 0 { r |= Rights::MIC; }
     if b & CAP2_BIT_SETTINGS != 0 { r |= Rights::SETTINGS; }
+    if b & CAP2_BIT_AUDIT != 0 { r |= Rights::AUDIT; }
     r
 }
 
@@ -517,6 +519,19 @@ pub fn require(cap_id: &CapId, required: Rights, call: &str) -> bool {
 /// refuse; a no is not journalled.
 pub fn holds(cap_id: &CapId, required: Rights) -> bool {
     check_global(cap_id, required).is_ok()
+}
+
+/// `READ|WRITE|NET`, `ALL`, or `-` for none.
+pub fn rights_names(r: Rights) -> alloc::string::String {
+    use alloc::string::String;
+    if r.is_empty() { return String::from("-"); }
+    if r == Rights::ALL { return String::from("ALL"); }
+    let mut out = String::new();
+    for (name, _) in r.iter_names() {
+        if !out.is_empty() { out.push('|'); }
+        out.push_str(name);
+    }
+    out
 }
 
 /// Checks `cap_id` passed since it was issued.

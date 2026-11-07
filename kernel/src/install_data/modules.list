@@ -13,6 +13,7 @@ vault
 
 # apps
 helm
+peek
 spell
 iris
 snap

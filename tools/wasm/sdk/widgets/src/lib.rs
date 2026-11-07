@@ -134,6 +134,9 @@ pub mod caps {
         /// `npk_setting_set`: change system settings (the settings app).
         /// See docs/spec/SETTINGS.md.
         pub const SETTINGS: u8 = 0x20;
+        /// `npk_audit_read`: the audit journal, what every app did with
+        /// its token. The kernel also requires the module name `peek`.
+        pub const AUDIT: u8 = 0x40;
     }
 }
 

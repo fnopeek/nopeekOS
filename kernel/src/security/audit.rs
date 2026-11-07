@@ -279,6 +279,13 @@ pub fn since(after_seq: Option<u64>, holder: &str, max: usize) -> Vec<Entry> {
     out
 }
 
+/// Entries first written or folded into at or after uptime `since_ms`,
+/// oldest first: a reader that keeps them by `seq` stays current with
+/// one call per refresh.
+pub fn touched_since(since_ms: u64) -> Vec<Entry> {
+    LOG.lock().entries.iter().filter(|e| e.last_up_ms >= since_ms).cloned().collect()
+}
+
 /// Entries written since boot, folded ones counted once.
 pub fn total_count() -> u64 {
     LOG.lock().next_seq

@@ -1698,10 +1698,10 @@ pub fn intent_audit(args: &str) {
         };
         let who = alloc::format!("{}#{}", e.holder, e.inst);
         let what = match e.kind {
-            audit::Kind::Launch => alloc::format!("token {}", rights_names(e.rights)),
+            audit::Kind::Launch => alloc::format!("token {}", capability::rights_names(e.rights)),
             audit::Kind::Exit => alloc::format!("{} checks passed, {} refused", e.checks, e.denied),
-            audit::Kind::Denied => alloc::format!("{}  needs {}", e.object, rights_names(e.rights)),
-            audit::Kind::Grant => alloc::format!("{}  {}", e.object, rights_names(e.rights)),
+            audit::Kind::Denied => alloc::format!("{}  needs {}", e.object, capability::rights_names(e.rights)),
+            audit::Kind::Grant => alloc::format!("{}  {}", e.object, capability::rights_names(e.rights)),
             _ => e.object.clone(),
         };
         let times = if e.count > 1 { alloc::format!("  x{}", e.count) } else { String::new() };
@@ -1710,17 +1710,6 @@ pub fn intent_audit(args: &str) {
     kprintln!();
 }
 
-/// `READ|WRITE|NET`, or `-` for none.
-fn rights_names(r: capability::Rights) -> String {
-    if r.is_empty() { return String::from("-"); }
-    if r == capability::Rights::ALL { return String::from("ALL"); }
-    let mut out = String::new();
-    for (name, _) in r.iter_names() {
-        if !out.is_empty() { out.push('|'); }
-        out.push_str(name);
-    }
-    out
-}
 
 /// `time`: the local time, and whether NTP has set it. `time sync` asks
 /// NTP now.
