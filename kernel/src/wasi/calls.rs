@@ -401,20 +401,39 @@ let _ = wasi_of!(st);
 match w32(mem, nev, 0) { Ok(()) => SUCCESS, Err(e) => e }
 }
 
+/// Journal a refusal of `call` on the guest path `rel`: it would leave
+/// its grant, or write into a read-only one. The errno is the guest's
+/// answer; the journal is the user's.
+fn refuse(cap: &crate::capability::CapId, want: Rights, call: &str, rel: &str, why: &str) {
+    crate::audit::denied(cap, want, &alloc::format!("{} {}", call, rel), why);
+}
+
+/// `WasiCtx::resolve`, with a path that leaves its grant journalled.
+fn resolve_for(w: &WasiCtx, cap: &crate::capability::CapId, dirfd: i32, rel: &str,
+               want: Rights, call: &str) -> Result<(String, String, bool), i32> {
+    let r = w.resolve(dirfd, rel);
+    if r == Err(ENOTCAPABLE) { refuse(cap, want, call, rel, "outside the grant"); }
+    r
+}
+
 pub(crate) fn path_open(mem: &mut [u8], st: &mut HS, dirfd: i32, _dirflags: i32, path: i32, path_len: i32, oflags: i32, rights: i64, _rights_inh: i64, _fdflags: i32, out: i32) -> i32 {
 let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, path, path_len) { Ok(s) => s, Err(e) => return e };
-let (full, root, grant_writable) = match w.resolve(dirfd, &rel) {
+let want_write = rights & RIGHT_FD_WRITE != 0 || oflags & (O_CREAT | O_TRUNC) != 0;
+let want = if want_write { Rights::WRITE } else { Rights::READ };
+let (full, root, grant_writable) = match resolve_for(w, &cap, dirfd, &rel, want, "path_open") {
     Ok(v) => v, Err(e) => return e,
 };
 
-let want_write = rights & RIGHT_FD_WRITE != 0 || oflags & (O_CREAT | O_TRUNC) != 0;
 if want_write {
     // Two gates, both required: the grant this path came through
     // has to allow writing, and the capability the run carries
     // has to include WRITE. Either alone would be a hole.
-    if !grant_writable { return EPERM; }
+    if !grant_writable {
+        refuse(&cap, Rights::WRITE, "path_open", &rel, "read-only grant");
+        return EPERM;
+    }
     if !capability::require(&cap, Rights::WRITE, "path_open") { return EPERM; }
 }
 
@@ -474,9 +493,10 @@ match w32(mem, out, fd as u32) { Ok(()) => SUCCESS, Err(e) => e }
 }
 
 pub(crate) fn path_filestat_get(mem: &mut [u8], st: &mut HS, dirfd: i32, _flags: i32, path: i32, path_len: i32, out: i32) -> i32 {
+let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, path, path_len) { Ok(s) => s, Err(e) => return e };
-let (full, _, _) = match w.resolve(dirfd, &rel) { Ok(v) => v, Err(e) => return e };
+let (full, _, _) = match resolve_for(w, &cap, dirfd, &rel, Rights::READ, "path_filestat_get") { Ok(v) => v, Err(e) => return e };
 let b = match fs::stat(&full) {
     Ok(Some(s)) => filestat_bytes(s.kind, s.size, s.mtime),
     Ok(None) => return ENOENT,
@@ -489,8 +509,9 @@ pub(crate) fn path_create_directory(mem: &mut [u8], st: &mut HS, dirfd: i32, p: 
 let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, p, pl) { Ok(s) => s, Err(e) => return e };
-let (full, _, writable) = match w.resolve(dirfd, &rel) { Ok(v) => v, Err(e) => return e };
-if !writable || !capability::require(&cap, Rights::WRITE, "path_create_directory") { return EPERM; }
+let (full, _, writable) = match resolve_for(w, &cap, dirfd, &rel, Rights::WRITE, "path_create_directory") { Ok(v) => v, Err(e) => return e };
+if !writable { refuse(&cap, Rights::WRITE, "path_create_directory", &rel, "read-only grant"); return EPERM; }
+if !capability::require(&cap, Rights::WRITE, "path_create_directory") { return EPERM; }
 crate::audit::record(&cap, crate::audit::Kind::Mkdir, &full);
 match fs::mkdir(&full) { Ok(()) => SUCCESS, Err(e) => fs_errno(&e) }
 }
@@ -499,8 +520,9 @@ pub(crate) fn path_remove_directory(mem: &mut [u8], st: &mut HS, dirfd: i32, p: 
 let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, p, pl) { Ok(s) => s, Err(e) => return e };
-let (full, _, writable) = match w.resolve(dirfd, &rel) { Ok(v) => v, Err(e) => return e };
-if !writable || !capability::require(&cap, Rights::WRITE, "path_remove_directory") { return EPERM; }
+let (full, _, writable) = match resolve_for(w, &cap, dirfd, &rel, Rights::WRITE, "path_remove_directory") { Ok(v) => v, Err(e) => return e };
+if !writable { refuse(&cap, Rights::WRITE, "path_remove_directory", &rel, "read-only grant"); return EPERM; }
+if !capability::require(&cap, Rights::WRITE, "path_remove_directory") { return EPERM; }
 crate::audit::record(&cap, crate::audit::Kind::Delete, &full);
 match fs::list(&full) {
     Ok(Some(v)) if !v.is_empty() => return ENOTEMPTY,
@@ -515,8 +537,9 @@ pub(crate) fn path_unlink_file(mem: &mut [u8], st: &mut HS, dirfd: i32, p: i32, 
 let cap = st.cap_id;
 let w = wasi_of!(st);
 let rel = match guest_str(mem, p, pl) { Ok(s) => s, Err(e) => return e };
-let (full, _, writable) = match w.resolve(dirfd, &rel) { Ok(v) => v, Err(e) => return e };
-if !writable || !capability::require(&cap, Rights::WRITE, "path_unlink_file") { return EPERM; }
+let (full, _, writable) = match resolve_for(w, &cap, dirfd, &rel, Rights::WRITE, "path_unlink_file") { Ok(v) => v, Err(e) => return e };
+if !writable { refuse(&cap, Rights::WRITE, "path_unlink_file", &rel, "read-only grant"); return EPERM; }
+if !capability::require(&cap, Rights::WRITE, "path_unlink_file") { return EPERM; }
 crate::audit::record(&cap, crate::audit::Kind::Delete, &full);
 match fs::delete(&full) { Ok(()) => SUCCESS, Err(e) => fs_errno(&e) }
 }
@@ -526,11 +549,16 @@ let cap = st.cap_id;
 let w = wasi_of!(st);
 let a = match guest_str(mem, op, ol) { Ok(s) => s, Err(e) => return e };
 let b = match guest_str(mem, np, nl) { Ok(s) => s, Err(e) => return e };
-let (from, _, wa) = match w.resolve(ofd, &a) { Ok(v) => v, Err(e) => return e };
-let (to, _, wb) = match w.resolve(nfd, &b) { Ok(v) => v, Err(e) => return e };
+let (from, _, wa) = match resolve_for(w, &cap, ofd, &a, Rights::WRITE, "path_rename") { Ok(v) => v, Err(e) => return e };
+let (to, _, wb) = match resolve_for(w, &cap, nfd, &b, Rights::WRITE, "path_rename") { Ok(v) => v, Err(e) => return e };
 // Both ends must be writable: renaming out of a read-only grant
 // is a delete, renaming into one is a write.
-if !wa || !wb || !capability::require(&cap, Rights::WRITE, "path_rename") { return EPERM; }
+if !wa || !wb {
+    let rel = if wa { &b } else { &a };
+    refuse(&cap, Rights::WRITE, "path_rename", rel, "read-only grant");
+    return EPERM;
+}
+if !capability::require(&cap, Rights::WRITE, "path_rename") { return EPERM; }
 crate::audit::record(&cap, crate::audit::Kind::Rename, &alloc::format!("{} -> {}", from, to));
 match fs::rename(&from, &to) { Ok(()) => SUCCESS, Err(e) => fs_errno(&e) }
 }
