@@ -2,6 +2,7 @@
 
 pub mod boot;
 pub mod cpu;
+pub mod exceptions;
 pub mod mmu;
 pub mod time;
 

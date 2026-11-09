@@ -29,7 +29,6 @@ pub mod mmc_sd;
 #[cfg(target_arch = "x86_64")]
 pub mod keyboard;
 pub mod font8x16;
-#[cfg(target_arch = "x86_64")]
 pub mod framebuffer;
 pub mod serial;
 #[cfg(target_arch = "x86_64")]

@@ -14,10 +14,13 @@ static FB_ADDR: AtomicU64 = AtomicU64::new(0);
 static FB_PITCH: AtomicU32 = AtomicU32::new(0);
 static FB_W: AtomicU32 = AtomicU32::new(0);
 static FB_H: AtomicU32 = AtomicU32::new(0);
+static FB_BPP: AtomicU32 = AtomicU32::new(0);
 
-/// The visible framebuffer, recorded once it is mapped. 32 bpp only.
+/// The visible framebuffer, recorded once it is mapped: 32 bpp, or 16 bpp
+/// r5g6b5.
 pub fn set_framebuffer(addr: u64, pitch: u32, width: u32, height: u32, bpp: u8) {
-    if bpp != 32 { return; }
+    if bpp != 32 && bpp != 16 { return; }
+    FB_BPP.store(bpp as u32, Ordering::Relaxed);
     FB_PITCH.store(pitch, Ordering::Relaxed);
     FB_W.store(width, Ordering::Relaxed);
     FB_H.store(height, Ordering::Relaxed);
@@ -87,15 +90,23 @@ impl Writer {
         let (x0, y0) = (self.col * cw, self.row * ch);
         if y0 + ch > h { return; }
         let glyph = if b < 128 { b } else { b'?' } as usize * 16;
+        let wide = FB_BPP.load(Ordering::Relaxed) == 32;
         for gy in 0..ch {
             let bits = crate::drivers::font8x16::FONT[glyph + (gy / scale) as usize];
             for gx in 0..cw {
                 let on = bits & (0x80 >> (gx / scale)) != 0;
-                let px = if on { 0x00FF_FFFF } else { 0x0080_0000 };
-                let off = (y0 + gy) as u64 * pitch + (x0 + gx) as u64 * 4;
-                // SAFETY: inside the mapped framebuffer (x < w, y < h, 32 bpp);
-                // the cores that could also draw are halted.
-                unsafe { core::ptr::write_volatile((addr + off) as *mut u32, px) };
+                let row = addr + (y0 + gy) as u64 * pitch;
+                // SAFETY: inside the mapped framebuffer (x < w, y < h, at the
+                // recorded depth); the cores that could also draw are halted.
+                unsafe {
+                    if wide {
+                        let px: u32 = if on { 0x00FF_FFFF } else { 0x0080_0000 };
+                        core::ptr::write_volatile((row + (x0 + gx) as u64 * 4) as *mut u32, px);
+                    } else {
+                        let px: u16 = if on { 0xFFFF } else { 0x8000 };
+                        core::ptr::write_volatile((row + (x0 + gx) as u64 * 2) as *mut u16, px);
+                    }
+                }
             }
         }
         self.col += 1;

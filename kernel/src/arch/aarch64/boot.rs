@@ -35,6 +35,12 @@ fn holes(fdt: &Fdt, out: &mut [(u64, u64); MAX_HOLES]) -> usize {
     add(lo, hi - lo);
     add(fdt.addr() as u64, fdt.size() as u64);
     fdt.reservations(|a, s| add(a, s));
+    // Whole 2 MiB blocks: `screen` maps them uncached, and no other data
+    // may share them (exclusive loads and stores need cacheable memory).
+    if let Some(Ok(fb)) = crate::platform::simplefb::find(fdt) {
+        let lo = fb.addr & !((2 << 20) - 1);
+        add(lo, (fb.addr + fb.size).next_multiple_of(2 << 20) - lo);
+    }
     if let Some(rm) = fdt.find_path(b"/reserved-memory") {
         fdt.walk(|node| {
             if node.ancestors().last() == Some(&rm.offset) {
@@ -116,13 +122,54 @@ fn cpu_count(fdt: &Fdt) -> usize {
     n
 }
 
+/// The firmware's framebuffer as a second console beside the UART: on a
+/// board without a serial adapter it is the only output.
+fn screen(fdt: &Fdt) {
+    let Some(Ok(m)) = crate::platform::simplefb::find(fdt) else { return };
+    if !super::mmu::map_uncached(m.addr, m.addr + m.size) { return; }
+    crate::framebuffer::init_from_firmware(m.addr, m.width, m.height, m.stride, m.format.bpp());
+    crate::serial::set_hooks(crate::serial::Hooks {
+        write: crate::framebuffer::write_str,
+        echo: crate::framebuffer::write_byte,
+        key: || None,
+        quiet: |_| {},
+    });
+}
+
+/// What `screen` found, once the console is up to show it.
+fn report_screen(fdt: &Fdt) {
+    use crate::platform::simplefb::Error;
+    match crate::platform::simplefb::find(fdt) {
+        None => kprintln!("[npk] Framebuffer: none in the device tree"),
+        Some(Ok(m)) if crate::framebuffer::is_available() => kprintln!(
+            "[npk] Framebuffer: {}x{} {:?}, stride {} @ {:#x} (firmware)",
+            m.width, m.height, m.format, m.stride, m.addr),
+        Some(Ok(m)) => kprintln!("[npk] Framebuffer: {:#x} cannot be mapped uncached", m.addr),
+        Some(Err(Error::Format(name))) => {
+            let n = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+            kprintln!("[npk] Framebuffer: format {:?} not drawn", core::str::from_utf8(&name[..n]).unwrap_or("?"));
+        }
+        Some(Err(e)) => kprintln!("[npk] Framebuffer: unusable node ({:?})", e),
+    }
+}
+
 /// The kernel's entry on AArch64, from `_start` with the MMU on.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb: usize) -> ! {
     // SAFETY: `_start` passes the loader's device tree, mapped by `early_mmu`.
     let Some(fdt) = (unsafe { Fdt::new(dtb) }) else { crate::arch::halt_forever() };
+    super::exceptions::init();
     super::mmu::init(&fdt);
+    let led = crate::platform::led::init(&fdt);
+    crate::platform::led::set(true);
     console(&fdt);
+    super::time::calibrate_counter();
+    crate::time::init_clock();
+    let bi = build_regions(&fdt);
+    crate::memory::init(bi);
+    crate::heap::init();
+    crate::serial::start_capture();
+    screen(&fdt);
 
     kprintln!("                                __   ____  _____");
     kprintln!("   ____  ____  ____  ___  ___  / /__/ __ \\/ ___/");
@@ -144,22 +191,21 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     kprintln!("[npk] Exception level: EL{}{}", el, if el == 2 { " (VHE)" } else { "" });
     kprintln!("[npk] CPUs in the device tree: {}", cpu_count(&fdt));
 
-    super::time::calibrate_counter();
-    crate::time::init_clock();
     kprintln!("[npk] Generic timer: {} MHz", crate::time::counter_hz() / 1_000_000);
 
     for &(b, s) in super::mmu::ram() {
         kprintln!("[npk] RAM: {:#x}..{:#x} ({} MB)", b, b + s, s >> 20);
     }
-    let bi = build_regions(&fdt);
-    crate::memory::init(bi);
-    crate::heap::init();
-    crate::serial::start_capture();
+    report_screen(&fdt);
 
     let v: alloc::vec::Vec<u64> = (1..=1000).collect();
     kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());
     kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
     kprintln!();
+    if led {
+        kprintln!("[npk] AArch64 bring-up reached its end. Activity LED: heartbeat.");
+        crate::platform::led::heartbeat(100, 900)
+    }
     kprintln!("[npk] AArch64 bring-up reached its end. Halting.");
     crate::arch::halt_forever()
 }

@@ -18,8 +18,18 @@ pub struct FbInfo {
     pub bpp: u8,
 }
 
+/// The framebuffer the display scans out. Its format may differ from the
+/// shadows, which are 32 bpp whenever the scanout is 16 bpp (r5g6b5).
+#[derive(Clone, Copy)]
+struct Scanout {
+    addr: u64,
+    pitch: u32,
+    bpp: u8,
+}
+
 pub struct FbConsole {
     info: FbInfo,
+    out: Scanout,
     /// Shadow buffer A in RAM (double-buffer: one of the two render targets)
     shadow: *mut u8,
     /// Shadow buffer B in RAM (double-buffer: the other render target)
@@ -106,7 +116,7 @@ where
     let mut console = CONSOLE.lock();
     // A GPU copy of the front buffer may still be reading the shadows and
     // writing the framebuffer; one that failed is redone here on the CPU.
-    if !crate::gpu::gpudev::wait_framebuffer() {
+    if !gpu_copy_done() {
         if let Some(c) = console.as_ref() {
             blit_all(c);
         }
@@ -131,7 +141,28 @@ pub fn gui_mode() -> bool {
 /// Whether text output stays off the framebuffer: in GUI mode, and always
 /// while the compositor runs, whose frames are drawn under `CONSOLE`.
 fn text_console_off() -> bool {
-    GUI_MODE.load(Ordering::Relaxed) || crate::shade::is_active()
+    GUI_MODE.load(Ordering::Relaxed) || compositor_active()
+}
+
+#[cfg(target_arch = "x86_64")]
+fn compositor_active() -> bool {
+    crate::shade::is_active()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn compositor_active() -> bool {
+    false
+}
+
+/// Wait for a GPU copy of the front buffer; false if it failed.
+#[cfg(target_arch = "x86_64")]
+fn gpu_copy_done() -> bool {
+    crate::gpu::gpudev::wait_framebuffer()
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn gpu_copy_done() -> bool {
+    true
 }
 
 /// The console's `FbInfo`, outside `CONSOLE`: rendering runs under
@@ -192,6 +223,7 @@ pub fn set_npk_color(color: u32) {
 
 /// Initialize framebuffer console from GPU subsystem.
 /// Call after gpu::init() has detected and configured a display.
+#[cfg(target_arch = "x86_64")]
 pub fn init_from_gpu() {
     let gpu_fb = match crate::gpu::framebuffer_info() {
         Some(fb) => fb,
@@ -229,7 +261,29 @@ pub fn init_from_gpu() {
         }
     };
 
-    let info = FbInfo { addr, pitch, width, height, bpp };
+    install(FbInfo { addr, pitch, width, height, bpp });
+}
+
+/// Run the console on a framebuffer the firmware set up and left mapped at
+/// `addr` (the CPU address): 32 bpp x8r8g8b8 or 16 bpp r5g6b5.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn init_from_firmware(addr: u64, width: u32, height: u32, pitch: u32, bpp: u8) {
+    install(FbInfo { addr, pitch, width, height, bpp });
+}
+
+/// Set up shadows and console state for the mapped framebuffer `fb`.
+fn install(fb: FbInfo) {
+    let FbInfo { width, height, .. } = fb;
+    let out = Scanout { addr: fb.addr, pitch: fb.pitch, bpp: fb.bpp };
+    // The shadows are drawn at 32 bpp; a 16 bpp scanout is converted on
+    // the way out, and the console's surface is then the 32 bpp shadow
+    // geometry over the same address.
+    let info = if fb.bpp == 16 {
+        FbInfo { addr: fb.addr, pitch: width * 4, width, height, bpp: 32 }
+    } else {
+        fb
+    };
+    let pitch = info.pitch;
     // 2x pixel scaling for 4K (each glyph pixel → 2×2 block).
     // Threshold matches gui::font::scale_for — keep both in step.
     let scale = if width > 2560 { 2u32 } else { 1 };
@@ -287,14 +341,14 @@ pub fn init_from_gpu() {
     crate::kdebug!("[npk] Framebuffer: double-buffer {}KB x2", shadow_size / 1024);
 
     // Clear MMIO framebuffer
-    clear_screen(&info);
+    clear_screen(&out, height);
 
     // Initialize cached pointer for lock-free cursor
     SHADOW_FRONT_CACHED.store(shadow, Ordering::Release);
-    crate::fatal::set_framebuffer(info.addr, info.pitch, info.width, info.height, info.bpp);
+    crate::fatal::set_framebuffer(out.addr, out.pitch, width, height, out.bpp);
 
     *CONSOLE.lock() = Some(FbConsole {
-        info, shadow, shadow_b, shadow_size, front: 0,
+        info, out, shadow, shadow_b, shadow_size, front: 0,
         col: 0, row: 0, cols, rows, scale,
         shadow_a_gpu: 0, shadow_b_gpu: 0,
     });
@@ -304,17 +358,70 @@ pub fn init_from_gpu() {
 /// Initialize the framebuffer from BootInfo. Delegates to `gpu::init`
 /// (which wraps the GOP-via-UEFI framebuffer driver) then sets up our
 /// shadow + scaling state.
+#[cfg(target_arch = "x86_64")]
 pub fn init_from_boot_info(boot_info: &crate::boot_info::BootInfo) {
     crate::gpu::init(boot_info);
     init_from_gpu();
 }
 
-fn clear_screen(info: &FbInfo) {
-    let fb = info.addr as *mut u8;
-    let size = info.pitch as usize * info.height as usize;
-    // SAFETY: info.addr is the CPU mapping of the framebuffer, pitch * height
-    // bytes long (ioremap in init_from_gpu, or the native driver's mapping).
+fn clear_screen(out: &Scanout, height: u32) {
+    let fb = out.addr as *mut u8;
+    let size = out.pitch as usize * height as usize;
+    // SAFETY: out.addr is the CPU mapping of the framebuffer, pitch * height
+    // bytes long (ioremap in init_from_gpu, the native driver's mapping, or
+    // the firmware's framebuffer in the identity map).
     unsafe { core::ptr::write_bytes(fb, 0, size); }
+}
+
+/// Copy the rectangle `(x, y, w, h)` of the front buffer to the scanout,
+/// converting 32 bpp to r5g6b5 when the scanout is 16 bpp.
+fn scanout(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
+    let info = &console.info;
+    let out = &console.out;
+    let (x, y) = (x.min(info.width), y.min(info.height));
+    let (w, h) = (w.min(info.width - x), h.min(info.height - y));
+    if w == 0 || h == 0 { return; }
+    let src = console.front_ptr();
+    let dst = out.addr as *mut u8;
+    if out.bpp == info.bpp {
+        let bytes = (info.bpp as usize).div_ceil(8);
+        let pitch = info.pitch as usize;
+        if x == 0 && w == info.width && out.pitch == info.pitch {
+            // Whole rows: one copy per 256-row chunk.
+            let mut row = y as usize;
+            let end = (y + h) as usize;
+            while row < end {
+                let rows = 256.min(end - row);
+                // SAFETY: rows y..y+h lie below height, so the range lies in
+                // both the front buffer and the scanout (pitch * height bytes
+                // each), which do not overlap.
+                unsafe { core::ptr::copy_nonoverlapping(src.add(row * pitch), dst.add(row * pitch), rows * pitch) };
+                row += rows;
+            }
+        } else {
+            for row in y..y + h {
+                let s = row as usize * pitch + x as usize * bytes;
+                let d = row as usize * out.pitch as usize + x as usize * bytes;
+                // SAFETY: x + w <= width and row < height keep both spans in
+                // their buffers.
+                unsafe { core::ptr::copy_nonoverlapping(src.add(s), dst.add(d), w as usize * bytes) };
+            }
+        }
+        return;
+    }
+    for row in y..y + h {
+        let s = src.wrapping_add(row as usize * info.pitch as usize) as *const u32;
+        let d = dst.wrapping_add(row as usize * out.pitch as usize) as *mut u16;
+        for col in x..x + w {
+            // SAFETY: col < width and row < height: pixel (col, row) lies in
+            // the 32 bpp front buffer and in the 16 bpp scanout.
+            unsafe {
+                let p = *s.add(col as usize);
+                let v = ((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x001f);
+                core::ptr::write_volatile(d.add(col as usize), v as u16);
+            }
+        }
+    }
 }
 
 /// Write pixel to shadow buffer (RAM, fast).
@@ -371,73 +478,23 @@ fn draw_char(console: &FbConsole, c: u8, col: u32, row: u32) {
 /// Blit a region of the front buffer to the MMIO framebuffer.
 fn blit_region(console: &FbConsole, y_start: u32, y_end: u32) {
     let info = &console.info;
-    if present(console, 0, y_start, info.width, y_end.saturating_sub(y_start)) { return; }
-    let fb = info.addr as *mut u8;
-    let front = console.front_ptr();
-    let start = (y_start * info.pitch) as usize;
-    let end = (y_end * info.pitch) as usize;
-    let len = end.min(console.shadow_size) - start;
-    // SAFETY: y_end comes from text rows below rows, so start <= shadow_size,
-    // and len is clamped to shadow_size; front and the framebuffer mapping are
-    // both shadow_size bytes and do not overlap.
-    unsafe {
-        core::ptr::copy_nonoverlapping(
-            front.add(start),
-            fb.add(start),
-            len,
-        );
-    }
+    let h = y_end.saturating_sub(y_start);
+    if present(console, 0, y_start, info.width, h) { return; }
+    scanout(console, 0, y_start, info.width, h);
 }
 
-/// Blit entire front buffer to MMIO framebuffer in 256-row chunks.
+/// Blit entire front buffer to MMIO framebuffer.
 fn blit_all(console: &FbConsole) {
     if present(console, 0, 0, console.info.width, console.info.height) { return; }
-    let fb = console.info.addr as *mut u8;
-    let front = console.front_ptr();
-    let pitch = console.info.pitch as usize;
-    let height = console.info.height as usize;
-    let chunk = 256;
-    let mut row = 0;
-    while row < height {
-        let rows = chunk.min(height - row);
-        let off = row * pitch;
-        let len = rows * pitch;
-        // SAFETY: off + len <= height * pitch = shadow_size, the size of both
-        // the front buffer and the framebuffer mapping, which do not overlap.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                front.add(off), fb.add(off), len);
-        }
-        row += rows;
-    }
+    scanout(console, 0, 0, console.info.width, console.info.height);
 }
 
 /// Blit a single character cell from front buffer to MMIO.
 fn blit_char(console: &FbConsole, col: u32, row: u32) {
-    let info = &console.info;
     let s = console.scale;
-    let y_start = row * FONT_HEIGHT * s;
-    let y_end = y_start + FONT_HEIGHT * s;
-    let x_start = col * FONT_WIDTH * s;
-    if present(console, x_start, y_start, FONT_WIDTH * s, FONT_HEIGHT * s) { return; }
-    let bytes_per_pixel = (info.bpp as u32 + 7) / 8;
-    let fb = info.addr as *mut u8;
-    let front = console.front_ptr();
-    let char_bytes = (FONT_WIDTH * s * bytes_per_pixel) as usize;
-
-    for y in y_start..y_end.min(info.height) {
-        let offset = (y * info.pitch + x_start * bytes_per_pixel) as usize;
-        // SAFETY: col < cols and row < rows keep the cell inside width, y is
-        // clipped to height, so offset + char_bytes stays within shadow_size in
-        // both the front buffer and the framebuffer mapping.
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                front.add(offset),
-                fb.add(offset),
-                char_bytes,
-            );
-        }
-    }
+    let (x, y) = (col * FONT_WIDTH * s, row * FONT_HEIGHT * s);
+    if present(console, x, y, FONT_WIDTH * s, FONT_HEIGHT * s) { return; }
+    scanout(console, x, y, FONT_WIDTH * s, FONT_HEIGHT * s);
 }
 
 /// Scroll shadow buffer only (no MMIO blit — caller handles batching).
@@ -480,6 +537,7 @@ fn scroll(console: &mut FbConsole) {
 /// (`gpudev::present_by_module`), a rectangle of the front buffer copied
 /// through it: the display would not show a CPU write. False when there is
 /// no such module, or the copy was not taken.
+#[cfg(target_arch = "x86_64")]
 fn present(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) -> bool {
     if !crate::gpu::gpudev::present_by_module() {
         return false;
@@ -493,29 +551,21 @@ fn present(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) -> bool {
     src != 0 && crate::gpu::gpu_blit_rect(src, info.pitch, crate::gpu::fb_gpu_addr(), info.pitch, x, y, w, h)
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn present(_: &FbConsole, _: u32, _: u32, _: u32, _: u32) -> bool {
+    false
+}
+
 /// Blit a rectangular region from front buffer to MMIO framebuffer.
 pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
-    let info = &console.info;
-    if info.bpp != 32 { return; }
+    if console.info.bpp != 32 { return; }
     if present(console, x, y, w, h) { return; }
-    let fb = info.addr as *mut u8;
-    let front = console.front_ptr();
-    for row in y..(y + h).min(info.height) {
-        let offset = (row * info.pitch + x * 4) as usize;
-        let len = ((w.min(info.width.saturating_sub(x))) * 4) as usize;
-        // SAFETY: front buffer and fb are valid for shadow_size bytes, bounds checked above
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                front.add(offset),
-                fb.add(offset),
-                len,
-            );
-        }
-    }
+    scanout(console, x, y, w, h);
 }
 
 /// On-demand version of the boot-time MTRR diagnostic (the `mtrr` intent),
 /// so it can be read without catching the fast-scrolling boot log.
+#[cfg(target_arch = "x86_64")]
 pub fn dump_memory_type() {
     let addr = with_fb(|fb| fb.info().addr).unwrap_or(0);
     if addr == 0 {
@@ -538,6 +588,7 @@ pub fn dump_memory_type() {
 /// Read-only: report the framebuffer's effective memory type (firmware
 /// MTRRs vs our PAT WC). A UC MTRR over this region overrides PAT WC (UC
 /// always wins) and makes the blit slow.
+#[cfg(target_arch = "x86_64")]
 fn diagnose_fb_memory_type(fb_addr: u64) {
     use crate::arch::x86_64::msr;
     /// IA32_MTRRCAP; its VCNT bounds the variable-range MTRRs that exist.
@@ -747,7 +798,7 @@ pub fn clear() {
     let mut console = CONSOLE.lock();
     // As in `with_fb`: a GPU copy still writing the framebuffer would put
     // the old frame back over the cleared one.
-    crate::gpu::gpudev::wait_framebuffer();
+    gpu_copy_done();
     let console = match console.as_mut() {
         Some(c) => c,
         None => return,
@@ -762,10 +813,7 @@ pub fn clear() {
     console.col = 0;
     console.row = 0;
     if present(console, 0, 0, console.info.width, console.info.height) { return; }
-    let fb = console.info.addr as *mut u8;
-    // SAFETY: the framebuffer mapping holds pitch * height = shadow_size bytes;
-    // CONSOLE is held and the GPU copy is done.
-    unsafe { core::ptr::write_bytes(fb, 0, console.shadow_size); }
+    clear_screen(&console.out, console.info.height);
 }
 
 #[allow(dead_code)]

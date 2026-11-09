@@ -24,7 +24,8 @@ const L2_TABLES: usize = 64;
 /// MAIR attribute indices.
 const ATTR_DEVICE: u64 = 0; // Device-nGnRE
 const ATTR_NORMAL: u64 = 1; // Normal, write-back, read/write-allocate
-const MAIR: u64 = 0x04 | (0xff << 8) | (0x44 << 16); // attr2: Normal non-cacheable
+const ATTR_NC: u64 = 2; // Normal non-cacheable
+const MAIR: u64 = 0x04 | (0xff << 8) | (0x44 << 16);
 
 const VALID: u64 = 1;
 const TABLE: u64 = 1 << 1;
@@ -35,6 +36,7 @@ const UXN: u64 = 1 << 54;
 
 const DEVICE_BLOCK: u64 = VALID | AF | (ATTR_DEVICE << 2) | PXN | UXN;
 const NORMAL_BLOCK: u64 = VALID | AF | SH_INNER | (ATTR_NORMAL << 2) | UXN;
+const NC_BLOCK: u64 = VALID | AF | SH_INNER | (ATTR_NC << 2) | PXN | UXN;
 
 #[repr(C, align(4096))]
 struct Table([u64; 512]);
@@ -51,6 +53,9 @@ static mut BOOT: Tables = Tables {
     l1: Table([0; 512]),
     l2: [const { Table([0; 512]) }; L2_TABLES],
 };
+
+/// Second-level tables of `TABLES` in use.
+static mut NEXT_L2: usize = 0;
 
 static mut TABLES: Tables = Tables {
     l0: Table([0; 512]),
@@ -234,8 +239,84 @@ pub fn init(fdt: &Fdt) {
         t.l1.0[g as usize] = l2 as *const Table as u64 | TABLE | VALID;
     }
     t.l0.0[0] = &t.l1 as *const Table as u64 | TABLE | VALID;
+    // SAFETY: single-threaded boot, the only writer.
+    unsafe { NEXT_L2 = next_l2 };
     // SAFETY: the new tables map all RAM, so the kernel image, its stack
     // and the device tree, at themselves with the attributes the boot
     // tables gave them.
     unsafe { enable(t as *const Tables as u64, core::mem::size_of::<Tables>() as u64, false) };
+}
+
+fn flush_tlb() {
+    // SAFETY: TLB maintenance for the running regime, no memory effect.
+    unsafe {
+        core::arch::asm!("dsb ishst", options(nostack));
+        if crate::arch::exception_level() == 2 {
+            core::arch::asm!("tlbi alle2", options(nostack));
+        } else {
+            core::arch::asm!("tlbi vmalle1", options(nostack));
+        }
+        core::arch::asm!("dsb ish", "isb", options(nostack));
+    }
+}
+
+/// Map the 2 MiB blocks covering `[lo, hi)` as Normal non-cacheable, for a
+/// framebuffer the display reads behind the caches: CPU writes reach memory
+/// without a cache clean, and may merge, as write-combining does on x86.
+/// The blocks must hold nothing but that buffer's memory, the running code
+/// and stack never. False when the range lies above the identity map or no
+/// table is left to split a 1 GiB block.
+pub fn map_uncached(lo: u64, hi: u64) -> bool {
+    if hi > IDENTITY_MAX || hi <= lo { return false; }
+    let (lo, hi) = (lo & !(MIB2 - 1), hi.next_multiple_of(MIB2));
+    // Write back and drop any cached lines while the range is still
+    // cacheable: afterwards the CPU no longer looks there.
+    let mut a = lo;
+    while a < hi {
+        // SAFETY: the range is mapped (identity map), cache maintenance only.
+        unsafe { core::arch::asm!("dc civac, {}", in(reg) a, options(nostack)) };
+        a += 64;
+    }
+    // SAFETY: TABLES is the live map, changed only here and in `init` on
+    // the boot core; every descriptor change goes through break-before-make.
+    unsafe {
+        let t = &mut *core::ptr::addr_of_mut!(TABLES);
+        let next = &mut *core::ptr::addr_of_mut!(NEXT_L2);
+        let mut g = lo / GIB;
+        while g * GIB < hi {
+            let e = core::ptr::read_volatile(&t.l1.0[g as usize]);
+            if e & TABLE == 0 {
+                // A 1 GiB block: split it into 2 MiB blocks of the same kind.
+                if *next == L2_TABLES { return false; }
+                let l2 = &mut t.l2[*next];
+                *next += 1;
+                let attrs = e & !(0x0000_ffff_ffff_f000) & !(TABLE);
+                for b in 0..512u64 {
+                    l2.0[b as usize] = (g * GIB + b * MIB2) | attrs;
+                }
+                core::ptr::write_volatile(&mut t.l1.0[g as usize], 0);
+                flush_tlb();
+                core::ptr::write_volatile(&mut t.l1.0[g as usize], l2 as *const Table as u64 | TABLE | VALID);
+                flush_tlb();
+            }
+            g += 1;
+        }
+        let mut a = lo;
+        while a < hi {
+            let l1 = t.l1.0[(a / GIB) as usize];
+            let l2 = (l1 & 0x0000_ffff_ffff_f000) as *mut u64;
+            core::ptr::write_volatile(l2.add(((a % GIB) / MIB2) as usize), 0);
+            a += MIB2;
+        }
+        flush_tlb();
+        let mut a = lo;
+        while a < hi {
+            let l1 = t.l1.0[(a / GIB) as usize];
+            let l2 = (l1 & 0x0000_ffff_ffff_f000) as *mut u64;
+            core::ptr::write_volatile(l2.add(((a % GIB) / MIB2) as usize), a | NC_BLOCK);
+            a += MIB2;
+        }
+        flush_tlb();
+    }
+    true
 }

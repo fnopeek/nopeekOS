@@ -200,6 +200,11 @@ impl Fdt {
         self.prop_at(node.offset, name)
     }
 
+    /// The big-endian cell at `off`, an offset `prop` returned.
+    pub fn cell_u32(&self, off: usize) -> u32 {
+        self.u32_at(off)
+    }
+
     pub fn prop_u32(&self, node: &Node, name: &[u8]) -> Option<u32> {
         let (o, len) = self.prop(node, name)?;
         if len < 4 { return None; }

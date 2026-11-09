@@ -21,6 +21,9 @@
 #   build-arm            Compile the AArch64 kernel into target/kernel-aarch64.img
 #   qemu-arm             Build + run in QEMU virt (Cortex-A76, GICv2, EL2), serial
 #   qemu-arm-gui         Same, serial console in a window
+#   qemu-arm-fb          Same with a firmware framebuffer, screen to target/arm-fb.png
+#   pi5-img              AArch64 kernel as a Pi 5 SD image (target/pi5-sd.img)
+#   pi5-sd /dev/sdX      Same, written to an SD card
 #
 # Installer / release:
 #   installer            Two-pass installer build (bundled assets)
@@ -870,6 +873,85 @@ run_qemu_arm() {
         -no-reboot
 }
 
+# The Pi 5 boots from the first FAT partition of an MBR disk: the
+# firmware in its EEPROM reads config.txt, the board's device tree and
+# the kernel named there. The device trees come from the Raspberry Pi
+# firmware repository (fetched once, outside the repo); the firmware
+# then adds the framebuffer and memory to the tree it hands over.
+PI_FW="${PI_FW:-$HOME/.cache/nopeekos/pi5/firmware}"
+PI_SD_IMG="$PROJECT_DIR/target/pi5-sd.img"
+
+fetch_pi_firmware() {
+    [ -f "$PI_FW/boot/bcm2712-rpi-5-b.dtb" ] && return
+    log "Fetching the Pi 5 device trees (raspberrypi/firmware, sparse)..."
+    mkdir -p "$(dirname "$PI_FW")"
+    git clone -q --depth 1 --filter=blob:none --sparse \
+        https://github.com/raspberrypi/firmware.git "$PI_FW"
+    git -C "$PI_FW" sparse-checkout set --no-cone '/boot/bcm2712*' \
+        '/boot/overlays/overlay_map.dtb' '/boot/LICENCE.broadcom'
+}
+
+build_pi_sd() {
+    for cmd in sfdisk mkfs.fat mcopy mmd; do
+        command -v "$cmd" &>/dev/null || { err "Missing: $cmd"; exit 1; }
+    done
+    fetch_pi_firmware
+    local dir
+    dir=$(mktemp -d)
+    cat > "$dir/config.txt" <<'CFG'
+# nopeekOS on the Raspberry Pi 5
+arm_64bit=1
+kernel=nopeek.img
+# A bare-metal kernel: no check for a Linux-matching device tree.
+os_check=0
+# Firmware framebuffer at 32 bpp; the kernel also draws on 16 bpp.
+framebuffer_depth=32
+framebuffer_ignore_alpha=1
+# The debug UART stays usable for a probe on the 3-pin header.
+enable_uart=1
+uart_2ndstage=1
+CFG
+    local mb=64 start=2048
+    rm -f "$PI_SD_IMG"
+    truncate -s ${mb}M "$PI_SD_IMG"
+    echo "start=$start, type=c, bootable" | sfdisk -q "$PI_SD_IMG"
+    local part="$PI_SD_IMG@@$((start * 512))"
+    mkfs.fat -F 32 -n NOPEEKOS --offset "$start" "$PI_SD_IMG" $(( (mb * 1024 - start / 2) )) >/dev/null
+    mcopy -i "$part" "$ARM_IMG" ::nopeek.img
+    mcopy -i "$part" "$dir/config.txt" ::config.txt
+    mcopy -i "$part" "$PI_FW"/boot/bcm2712*.dtb ::
+    mmd -i "$part" ::overlays
+    [ -f "$PI_FW/boot/overlays/overlay_map.dtb" ] && mcopy -i "$part" "$PI_FW/boot/overlays/overlay_map.dtb" ::overlays/
+    rm -rf "$dir"
+    ok "Pi 5 SD image: $PI_SD_IMG"
+}
+
+write_pi_sd() {
+    local device="${1:-}"
+    if [ -z "$device" ]; then
+        err "Usage: ./build.sh pi5-sd /dev/sdX   (or /dev/mmcblkN)"
+        err "List devices with: lsblk"
+        exit 1
+    fi
+    [ ! -b "$device" ] && { err "'$device' is not a block device."; exit 1; }
+    if [[ "$device" == *"nvme"* ]]; then
+        err "Refusing to write to NVMe device: $device"
+        exit 1
+    fi
+    local dev_size
+    dev_size=$(lsblk -bno SIZE "$device" 2>/dev/null | head -1)
+    warn "This will ERASE ALL DATA on $device ($((dev_size / 1024 / 1024 / 1024)) GB)!"
+    lsblk -o NAME,SIZE,MODEL,TRAN "$device"
+    read -p "[npk] Continue? (yes/NO): " confirm
+    [ "$confirm" != "yes" ] && { err "Aborted."; exit 1; }
+    for part in "${device}"* "${device}p"*; do
+        [ -b "$part" ] && sudo umount "$part" 2>/dev/null || true
+    done
+    sudo dd if="$PI_SD_IMG" of="$device" bs=4M conv=fsync status=progress
+    sync
+    ok "SD card ready: $device. Insert it in the Pi 5, HDMI on the port next to the USB-C power."
+}
+
 # ============================================================
 # USB Stick
 # ============================================================
@@ -1034,6 +1116,9 @@ AArch64 (bring-up; QEMU virt stands in for the Raspberry Pi 5):
   build-arm            Compile the AArch64 kernel into target/kernel-aarch64.img
   qemu-arm             Build + run in QEMU virt (Cortex-A76, GICv2, EL2), serial
   qemu-arm-gui         Same, serial console in a window
+  qemu-arm-fb          Same with a firmware framebuffer, screen to target/arm-fb.png
+  pi5-img              AArch64 kernel as a Pi 5 SD image (target/pi5-sd.img)
+  pi5-sd /dev/sdX      Same, written to an SD card
 
 Installer / release:
   installer            Two-pass installer build (kernel.efi + bundled assets)
@@ -1144,6 +1229,21 @@ case "${1:-}" in
     qemu-arm-gui)
         build_arm
         run_qemu_arm gui
+        ;;
+    qemu-arm-fb)
+        # The Pi's boot path in QEMU: a firmware framebuffer in the device
+        # tree, the screen saved as target/arm-fb.png.
+        build_arm
+        python3 tools/qemu-simplefb.py "$ARM_IMG" "$PROJECT_DIR/target/arm-fb.png" "${@:2}"
+        ;;
+    pi5-img)
+        build_arm
+        build_pi_sd
+        ;;
+    pi5-sd)
+        build_arm
+        build_pi_sd
+        write_pi_sd "${2:-}"
         ;;
     debug)
         check_deps
