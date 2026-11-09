@@ -153,11 +153,37 @@ fn report_screen(fdt: &Fdt) {
     }
 }
 
+/// GIC and the periodic tick on the boot core, interrupts on, and a
+/// check that the tick arrives.
+fn interrupts(fdt: &Fdt) {
+    if !super::gic::init(fdt) {
+        kprintln!("[npk] GIC: none in the device tree");
+        return;
+    }
+    let Some(irq) = super::timer::start(fdt) else {
+        kprintln!("[npk] GIC: {} lines; timer interrupt not in the device tree", super::gic::irqs());
+        return;
+    };
+    // SAFETY: vectors, GIC and timer handler are in place.
+    unsafe { core::arch::asm!("msr DAIFClr, #2", options(nomem, nostack)) };
+    let before = super::timer::fired();
+    crate::time::delay_ms(200);
+    let n = super::timer::fired() - before;
+    kprintln!("[npk] GIC: {} lines; timer on INTID {}: {} ticks in 200 ms ({} Hz)",
+        super::gic::irqs(), irq, n, super::timer::HZ);
+    let cores = super::cores::start(fdt);
+    let before = super::timer::fired();
+    crate::time::delay_ms(200);
+    let n = super::timer::fired() - before;
+    kprintln!("[npk] Cores online: {} (PSCI); {} ticks in 200 ms across them", cores, n);
+}
+
 /// The kernel's entry on AArch64, from `_start` with the MMU on.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb: usize) -> ! {
     // SAFETY: `_start` passes the loader's device tree, mapped by `early_mmu`.
     let Some(fdt) = (unsafe { Fdt::new(dtb) }) else { crate::arch::halt_forever() };
+    super::cpu::set_core_index(0);
     super::exceptions::init();
     super::mmu::init(&fdt);
     let led = crate::platform::led::init(&fdt);
@@ -197,6 +223,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         kprintln!("[npk] RAM: {:#x}..{:#x} ({} MB)", b, b + s, s >> 20);
     }
     report_screen(&fdt);
+    interrupts(&fdt);
 
     let v: alloc::vec::Vec<u64> = (1..=1000).collect();
     kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());

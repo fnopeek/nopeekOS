@@ -1,10 +1,13 @@
 //! AArch64.
 
 pub mod boot;
+pub mod cores;
 pub mod cpu;
 pub mod exceptions;
+pub mod gic;
 pub mod mmu;
 pub mod time;
+pub mod timer;
 
 core::arch::global_asm!(include_str!("boot.s"));
 

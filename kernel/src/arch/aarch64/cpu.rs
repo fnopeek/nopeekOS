@@ -61,12 +61,29 @@ pub fn halt_forever() -> ! {
     }
 }
 
-/// This core's index: affinity level 0 of MPIDR_EL1.
+/// This core's logical index (0 = the boot core), as `set_core_index`
+/// stored it. Linux keeps its per-CPU offset in the same register; the
+/// MPIDR itself is no index (the Pi 5 numbers its cores in affinity 1).
 pub fn current_core() -> usize {
-    let mpidr: u64;
+    let v: u64;
+    // SAFETY: reads TPIDR_EL1 (TPIDR_EL2 under VHE), no other effect.
+    unsafe { core::arch::asm!("mrs {}, TPIDR_EL1", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v as usize
+}
+
+/// Record this core's logical index for `current_core`.
+pub fn set_core_index(i: usize) {
+    // SAFETY: TPIDR_EL1 holds nothing else in this kernel.
+    unsafe { core::arch::asm!("msr TPIDR_EL1, {}", in(reg) i as u64, options(nomem, nostack, preserves_flags)) };
+}
+
+/// This core's affinity fields of MPIDR_EL1 (Aff3..Aff0), as the device
+/// tree's `cpu` nodes give them in `reg`.
+pub fn mpidr() -> u64 {
+    let v: u64;
     // SAFETY: reads MPIDR_EL1, no other effect.
-    unsafe { core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) mpidr, options(nomem, nostack, preserves_flags)) };
-    (mpidr & 0xff) as usize
+    unsafe { core::arch::asm!("mrs {}, MPIDR_EL1", out(reg) v, options(nomem, nostack, preserves_flags)) };
+    v & 0xff_00ff_ffff
 }
 
 /// The other cores are not started yet; nothing to stop.
