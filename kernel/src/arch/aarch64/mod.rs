@@ -3,6 +3,7 @@
 pub mod boot;
 pub mod cores;
 pub mod cpu;
+pub mod dma;
 pub mod exceptions;
 pub mod gic;
 pub mod mmu;

@@ -247,17 +247,30 @@ pub fn init(fdt: &Fdt) {
     unsafe { enable(t as *const Tables as u64, core::mem::size_of::<Tables>() as u64, false) };
 }
 
+/// Drop stale translations on every core (inner shareable broadcast).
 fn flush_tlb() {
     // SAFETY: TLB maintenance for the running regime, no memory effect.
     unsafe {
         core::arch::asm!("dsb ishst", options(nostack));
         if crate::arch::exception_level() == 2 {
-            core::arch::asm!("tlbi alle2", options(nostack));
+            core::arch::asm!("tlbi alle2is", options(nostack));
         } else {
-            core::arch::asm!("tlbi vmalle1", options(nostack));
+            core::arch::asm!("tlbi vmalle1is", options(nostack));
         }
         core::arch::asm!("dsb ish", "isb", options(nostack));
     }
+}
+
+/// Write back and invalidate the cache lines of `[lo, hi)`.
+fn clean_inval(lo: u64, hi: u64) {
+    let mut a = lo & !63;
+    while a < hi {
+        // SAFETY: the range is mapped (identity map), cache maintenance only.
+        unsafe { core::arch::asm!("dc civac, {}", in(reg) a, options(nostack)) };
+        a += 64;
+    }
+    // SAFETY: a barrier, no memory effect of its own.
+    unsafe { core::arch::asm!("dsb sy", options(nostack)) };
 }
 
 /// Map the 2 MiB blocks covering `[lo, hi)` as Normal non-cacheable, for a
@@ -267,18 +280,29 @@ fn flush_tlb() {
 /// and stack never. False when the range lies above the identity map or no
 /// table is left to split a 1 GiB block.
 pub fn map_uncached(lo: u64, hi: u64) -> bool {
+    set_blocks(lo, hi, NC_BLOCK)
+}
+
+/// Map RAM blocks `map_uncached` took back as Normal write-back memory.
+/// Nothing may use them while this runs.
+pub fn map_cached(lo: u64, hi: u64) -> bool {
+    set_blocks(lo, hi, NORMAL_BLOCK)
+}
+
+/// Serializes changes to the live map; the cores' walks need no lock.
+static REMAP: spin::Mutex<()> = spin::Mutex::new(());
+
+fn set_blocks(lo: u64, hi: u64, kind: u64) -> bool {
     if hi > IDENTITY_MAX || hi <= lo { return false; }
+    let _g = REMAP.lock();
     let (lo, hi) = (lo & !(MIB2 - 1), hi.next_multiple_of(MIB2));
-    // Write back and drop any cached lines while the range is still
-    // cacheable: afterwards the CPU no longer looks there.
-    let mut a = lo;
-    while a < hi {
-        // SAFETY: the range is mapped (identity map), cache maintenance only.
-        unsafe { core::arch::asm!("dc civac, {}", in(reg) a, options(nostack)) };
-        a += 64;
-    }
-    // SAFETY: TABLES is the live map, changed only here and in `init` on
-    // the boot core; every descriptor change goes through break-before-make.
+    // Write back and drop cached lines while the range is still cacheable:
+    // once uncached the CPU no longer looks there, and once cached again it
+    // must not find lines from before.
+    clean_inval(lo, hi);
+    // SAFETY: TABLES is the live map, changed only here under REMAP and in
+    // `init` on the boot core; every descriptor change goes through
+    // break-before-make.
     unsafe {
         let t = &mut *core::ptr::addr_of_mut!(TABLES);
         let next = &mut *core::ptr::addr_of_mut!(NEXT_L2);
@@ -313,10 +337,40 @@ pub fn map_uncached(lo: u64, hi: u64) -> bool {
         while a < hi {
             let l1 = t.l1.0[(a / GIB) as usize];
             let l2 = (l1 & 0x0000_ffff_ffff_f000) as *mut u64;
-            core::ptr::write_volatile(l2.add(((a % GIB) / MIB2) as usize), a | NC_BLOCK);
+            core::ptr::write_volatile(l2.add(((a % GIB) / MIB2) as usize), a | kind);
             a += MIB2;
         }
         flush_tlb();
     }
+    if kind == NORMAL_BLOCK {
+        clean_inval(lo, hi);
+    }
     true
+}
+
+/// Why a device window cannot be used.
+#[derive(Clone, Copy, Debug)]
+pub enum MapError {
+    /// Above the identity map.
+    OutOfRange,
+    /// The range holds RAM, which is no device window.
+    Ram,
+}
+
+impl core::fmt::Display for MapError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            MapError::OutOfRange => f.write_str("above the identity map"),
+            MapError::Ram => f.write_str("RAM, not a device window"),
+        }
+    }
+}
+
+/// Is `[phys, phys + len)` a device window the identity map covers as
+/// Device memory?
+pub fn device_window(phys: u64, len: u64) -> Result<(), MapError> {
+    let end = phys.checked_add(len).ok_or(MapError::OutOfRange)?;
+    if end > IDENTITY_MAX { return Err(MapError::OutOfRange); }
+    if holds_ram(phys, end) { return Err(MapError::Ram); }
+    Ok(())
 }

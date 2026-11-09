@@ -4,7 +4,7 @@
 //! Exposes same block API as virtio_blk for npkFS compatibility.
 
 use alloc::vec::Vec;
-use crate::{kprintln, pci, memory};
+use crate::{kprintln, pci};
 use crate::hw::{DmaRegion, Mmio};
 use crate::virtio_blk::BlkError;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -809,7 +809,7 @@ pub fn init() -> bool {
     state.io_free = (0..ids).rev().collect();
 
     // Free identify buffer
-    memory::deallocate_frame(identify_buf.phys());
+    identify_buf.free();
 
     kprintln!("[npk] nvme: online");
     AVAILABLE.store(true, Ordering::Relaxed);
@@ -851,14 +851,14 @@ fn setup_host_mem(state: &mut NvmeState, ask: HostMemAsk) {
         let mut entries = preferred.div_ceil(chunk) as usize;
         if ask.max_descs != 0 { entries = entries.min(ask.max_descs); }
         let Some(descs) = DmaRegion::alloc_zeroed((entries * 16).div_ceil(4096)) else { return };
-        let mut pieces: Vec<(u64, u64)> = Vec::new();
+        let mut pieces: Vec<DmaRegion> = Vec::new();
         let mut size = 0u64;
         while size < preferred && pieces.len() < entries {
             let len = chunk.min(preferred - size);
             let Some(piece) = DmaRegion::alloc_zeroed((len / 4096) as usize) else { break };
             descs.w64(pieces.len() as u64 * 16, piece.phys());
             descs.w32(pieces.len() as u64 * 16 + 8, (len / 4096) as u32);
-            pieces.push((piece.phys(), len / 4096));
+            pieces.push(piece);
             size += len;
         }
         if size > 0 && size >= ask.min {
@@ -877,10 +877,10 @@ fn setup_host_mem(state: &mut NvmeState, ask: HostMemAsk) {
             }
             kprintln!("[npk] nvme: the controller refused its host memory buffer");
         }
-        for (phys, pages) in pieces {
-            memory::deallocate_contiguous(phys, pages as usize);
+        for piece in pieces {
+            piece.free();
         }
-        memory::deallocate_contiguous(descs.phys(), (entries * 16).div_ceil(4096));
+        descs.free();
         if size > 0 && size >= ask.min { return; }
         chunk /= 2;
     }

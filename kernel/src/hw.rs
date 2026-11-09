@@ -5,7 +5,10 @@
 //! needs no `unsafe` per register. An access outside the window panics
 //! instead of touching whatever lies behind it.
 
+#[cfg(target_arch = "x86_64")]
 use crate::paging::{self, PageFlags, PagingError};
+#[cfg(target_arch = "aarch64")]
+pub use crate::arch::aarch64::mmu::MapError as PagingError;
 
 const PAGE: u64 = 4096;
 
@@ -41,9 +44,21 @@ impl Mmio {
     /// # Safety
     /// `phys .. phys + len` must be device registers (a BAR or a fixed
     /// device window) that this driver owns, not RAM.
+    #[cfg(target_arch = "x86_64")]
     pub unsafe fn map(phys: u64, len: u64) -> Result<Self, PagingError> {
         let base = paging::ioremap(phys, len, PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_CACHE)?;
         Ok(Mmio { base, len })
+    }
+
+    /// The identity map already covers every device window as Device
+    /// memory (`arch::aarch64::mmu`); this only checks the range.
+    ///
+    /// # Safety
+    /// As on x86: device registers this driver owns, not RAM.
+    #[cfg(target_arch = "aarch64")]
+    pub unsafe fn map(phys: u64, len: u64) -> Result<Self, PagingError> {
+        crate::arch::aarch64::mmu::device_window(phys, len)?;
+        Ok(Mmio { base: phys, len })
     }
 
     /// A window that is already mapped.
@@ -137,9 +152,12 @@ impl DmaRegion {
         DmaRegion { phys: 0, len: 0 }
     }
 
-    /// `pages` zeroed pages anywhere in RAM.
+    /// `pages` zeroed pages anywhere in RAM (Linux `dma_alloc_coherent`).
     pub fn alloc_zeroed(pages: usize) -> Option<Self> {
+        #[cfg(target_arch = "x86_64")]
         let phys = crate::memory::allocate_contiguous(pages)?;
+        #[cfg(target_arch = "aarch64")]
+        let phys = crate::arch::aarch64::dma::alloc(pages, 1, u64::MAX)?;
         let r = DmaRegion { phys, len: pages as u64 * PAGE };
         r.zero();
         Some(r)
@@ -148,10 +166,30 @@ impl DmaRegion {
     /// `pages` zeroed pages, aligned to their own size rounded up to a
     /// power of two and below 4 GiB, as Linux allocates `GFP_DMA32` tables.
     pub fn alloc_zeroed_dma32_aligned(pages: usize) -> Option<Self> {
-        let phys = crate::memory::allocate_contiguous_aligned_below(pages, pages.next_power_of_two(), 1 << 32)?;
+        Self::alloc_zeroed_aligned_below(pages, pages.next_power_of_two(), 1 << 32)
+    }
+
+    /// `pages` zeroed pages whose base is a multiple of `align` pages (a
+    /// power of two), wholly below `below`.
+    pub fn alloc_zeroed_aligned_below(pages: usize, align: usize, below: u64) -> Option<Self> {
+        #[cfg(target_arch = "x86_64")]
+        let phys = crate::memory::allocate_contiguous_aligned_below(pages, align, below)?;
+        #[cfg(target_arch = "aarch64")]
+        let phys = crate::arch::aarch64::dma::alloc(pages, align, below)?;
         let r = DmaRegion { phys, len: pages as u64 * PAGE };
         r.zero();
         Some(r)
+    }
+
+    /// Give the region back (Linux `dma_free_coherent`), once no device
+    /// reads or writes it any more. Only for a region from `alloc_*`.
+    pub fn free(self) {
+        let pages = (self.len / PAGE) as usize;
+        if self.phys == 0 || pages == 0 { return; }
+        #[cfg(target_arch = "x86_64")]
+        crate::memory::deallocate_contiguous(self.phys, pages);
+        #[cfg(target_arch = "aarch64")]
+        crate::arch::aarch64::dma::free(self.phys, pages);
     }
 
     /// A region allocated elsewhere.

@@ -93,7 +93,6 @@ mod settings;
 mod shutdown;
 #[cfg(target_arch = "x86_64")]
 mod vga;
-#[cfg(target_arch = "x86_64")]
 mod hw;
 #[cfg(target_arch = "x86_64")]
 mod forge_rt;

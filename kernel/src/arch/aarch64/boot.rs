@@ -178,6 +178,30 @@ fn interrupts(fdt: &Fdt) {
     kprintln!("[npk] Cores online: {} (PSCI); {} ticks in 200 ms across them", cores, n);
 }
 
+/// The coherent DMA zone grows, shares a block, and gives everything back.
+fn dma_check() {
+    use crate::hw::DmaRegion;
+    let free0 = crate::memory::stats();
+    let a = DmaRegion::alloc_zeroed(1);
+    let b = DmaRegion::alloc_zeroed_aligned_below(3, 4, 1 << 32);
+    let c = DmaRegion::alloc_zeroed(600);
+    let (Some(a), Some(b), Some(c)) = (a, b, c) else {
+        kprintln!("[npk] DMA zone: allocation failed");
+        return;
+    };
+    a.w32(0u64, 0xdead_beef);
+    c.w64(599u64 * 4096, 0x0123_4567_89ab_cdef);
+    let ok = a.r32(0u64) == 0xdead_beef && c.r64(599u64 * 4096) == 0x0123_4567_89ab_cdef
+        && b.phys() % (4 * 4096) == 0 && b.phys() < 1 << 32;
+    let held = crate::arch::aarch64::dma::zone_bytes();
+    a.free();
+    b.free();
+    c.free();
+    kprintln!("[npk] DMA zone (uncached): {} MiB while in use, {} after, frames back: {}, {}",
+        held >> 20, crate::arch::aarch64::dma::zone_bytes() >> 20,
+        crate::memory::stats() == free0, if ok { "ok" } else { "MISMATCH" });
+}
+
 /// The kernel's entry on AArch64, from `_start` with the MMU on.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb: usize) -> ! {
@@ -227,6 +251,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
 
     let v: alloc::vec::Vec<u64> = (1..=1000).collect();
     kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());
+    dma_check();
     kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
     kprintln!();
     if led {
