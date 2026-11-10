@@ -58,6 +58,10 @@ pub struct Modifiers {
 /// waits here and is drained before the next key press. For ASCII the buffer
 /// is always empty.
 ///
+/// Final byte of `ESC [ x` for F1; F2..F12 follow in order. A private
+/// range: no ANSI sequence ends in a lowercase letter after `ESC [`.
+pub(crate) const FKEY_FINAL: u8 = b'a';
+
 /// One type with two instances, one per keyboard driver (PS/2 in
 /// `drivers::keyboard`, USB-HID in `drivers::xhci`), so both producers share
 /// the same logic.
@@ -138,6 +142,7 @@ impl Modifiers {
     };
 
     /// Read current modifier state from keyboard driver atomics.
+    #[cfg(target_arch = "x86_64")]
     pub fn current() -> Self {
         Modifiers {
             shift: crate::keyboard::is_shift_held(),

@@ -25,11 +25,11 @@ mod kmain;
 mod arch;
 mod platform;
 mod drivers;
-pub use drivers::{serial, framebuffer};
+pub use drivers::{serial, framebuffer, xhci};
 #[cfg(target_arch = "x86_64")]
 pub use drivers::{pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
 #[cfg(target_arch = "x86_64")]
-pub use drivers::{xhci, usb_storage, keyboard, rtc, blkdev, netdev, acpi, smbus, battery, ec, sci};
+pub use drivers::{usb_storage, keyboard, rtc, blkdev, netdev, acpi, smbus, battery, ec, sci};
 #[cfg(target_arch = "x86_64")]
 pub use drivers::wifi;
 
@@ -71,7 +71,6 @@ mod ioapic;
 mod notify;
 #[cfg(target_arch = "x86_64")]
 mod status;
-#[cfg(target_arch = "x86_64")]
 mod input;
 #[cfg(target_arch = "x86_64")]
 mod net;

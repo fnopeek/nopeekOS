@@ -330,7 +330,7 @@ fn configure(state: &mut XhciState, slot: u8, drop: &[u8], add: &[(EpInfo, u64)]
     for (ep, ring) in add {
         ep_ctx_init(state, speed, ep, *ring, 1);
     }
-    post_command(state, state.input_ctx.phys(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
+    post_command(state, state.input_ctx.bus(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
     match wait_command_completion(state) {
         Some((cc, _)) if cc == CC_SUCCESS => Ok(()),
         Some((CC_BANDWIDTH, _)) => Err(FnError::Bandwidth),
@@ -344,7 +344,7 @@ fn configure(state: &mut XhciState, slot: u8, drop: &[u8], add: &[(EpInfo, u64)]
 
 fn new_ring(state: &mut XhciState) -> Option<DmaRegion> {
     let r = take_page(state, "usb fn ring")?;
-    write_trb(r, FN_RING_TRBS - 1, r.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(r, FN_RING_TRBS - 1, r.bus(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     Some(r)
 }
 
@@ -381,7 +381,7 @@ fn configure_device(state: &mut XhciState, slot: u8) -> Result<(), FnError> {
             eps.push(FnEp { ep, ifnum: i, ring, cycle: 1, enq: 0 });
         }
     }
-    let add: Vec<(EpInfo, u64)> = eps.iter().map(|e| (e.ep, e.ring.phys())).collect();
+    let add: Vec<(EpInfo, u64)> = eps.iter().map(|e| (e.ep, e.ring.bus())).collect();
     if !add.is_empty() {
         if let Err(e) = configure(state, slot, &[], &add, last_dci(&eps)) {
             state.free_pages.extend(eps.iter().map(|e| e.ring));
@@ -407,8 +407,7 @@ pub(super) fn attached(s: &mut XhciState, slot: u8) {
     if interfaces(&seen.cfg, Some(CLASS_VIDEO)).is_empty() || seen.device.len() < 18 { return; }
     let vid = u16::from_le_bytes([seen.device[8], seen.device[9]]);
     let pid = u16::from_le_bytes([seen.device[10], seen.device[11]]);
-    let a = s.pci_addr;
-    let id = alloc::format!("usb-{:02x}:{:02x}.{}-{}-{:04x}:{:04x}", a.bus, a.device, a.function, seen.port, vid, pid);
+    let id = alloc::format!("usb-{}-{}-{:04x}:{:04x}", s.ctrl, seen.port, vid, pid);
     let name = if seen.product.is_empty() { alloc::string::String::from("USB camera") } else { seen.product.clone() };
     let name: alloc::string::String = name.chars().take(crate::devices::NAME_MAX).collect();
     if let Some(h) = crate::devices::register(crate::devices::Kind::Camera, crate::devices::RANK_USB, &id, &name,
@@ -522,12 +521,12 @@ fn reset_endpoint(s: &mut XhciState, i: usize, ep_addr: u8) -> Result<(), FnErro
     let _ = wait_command_completion(s);
     let ring = s.fn_devs[fd].eps[e].ring;
     ring.zero();
-    write_trb(ring, FN_RING_TRBS - 1, ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(ring, FN_RING_TRBS - 1, ring.bus(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     let ep = s.fn_devs[fd].eps[e].ep;
     s.fn_devs[fd].eps[e].enq = 0;
     s.fn_devs[fd].eps[e].cycle = 1;
     let last = last_dci(&s.fn_devs[fd].eps);
-    configure(s, slot, &[dci], &[(ep, ring.phys())], last)
+    configure(s, slot, &[dci], &[(ep, ring.bus())], last)
 }
 
 /// `usb_set_interface`: bandwidth for the new alternate setting first
@@ -555,7 +554,7 @@ pub fn set_alt(id: u32, owner: u32, ifnum: u8, alt: u8) -> Result<(), FnError> {
         }
         let kept: Vec<u8> = s.fn_devs[fd].eps.iter().filter(|e| e.ifnum != ifnum).map(|e| e.ep.dci()).collect();
         let last = kept.iter().copied().chain(new_eps.iter().map(|e| e.ep.dci())).max().unwrap_or(1);
-        let add: Vec<(EpInfo, u64)> = new_eps.iter().map(|e| (e.ep, e.ring.phys())).collect();
+        let add: Vec<(EpInfo, u64)> = new_eps.iter().map(|e| (e.ep, e.ring.bus())).collect();
         if let Err(e) = configure(s, slot, &dcis, &add, last) {
             s.free_pages.extend(new_eps.iter().map(|e| e.ring));
             return Err(e);
@@ -564,7 +563,7 @@ pub fn set_alt(id: u32, owner: u32, ifnum: u8, alt: u8) -> Result<(), FnError> {
         // A device with one setting may stall the request; Linux carries on.
         if !ok && !(s.last_cc == CC_STALL && alt_count(&cfg, ifnum) == 1) {
             let old: Vec<(EpInfo, u64)> = s.fn_devs[fd].eps.iter().filter(|e| e.ifnum == ifnum)
-                .map(|e| (e.ep, e.ring.phys())).collect();
+                .map(|e| (e.ep, e.ring.bus())).collect();
             let back_dcis: Vec<u8> = new_eps.iter().map(|e| e.ep.dci()).collect();
             let back_last = kept.iter().copied().chain(old.iter().map(|e| e.0.dci())).max().unwrap_or(1);
             let _ = configure(s, slot, &back_dcis, &old, back_last);
@@ -617,7 +616,7 @@ pub fn stream_open(id: u32, owner: u32, ep_addr: u8, td_len: usize, count: usize
             .ok_or(FnError::NoMemory)?;
         // SAFETY: `pages` frames just allocated for this stream, identity
         // mapped; freed in `stream_close_locked` after the endpoint stopped.
-        let bufs = unsafe { DmaRegion::from_raw(base, (pages * 4096) as u64) };
+        let bufs = unsafe { DmaRegion::from_raw(base, (pages * 4096) as u64) }.with_bus_offset(dma_bus_off());
         bufs.zero();
         let sid = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let enq = s.fn_devs[fd].eps.iter().find(|e| e.ep.dci() == dci).map_or(0, |e| e.enq);
@@ -678,7 +677,7 @@ fn refill(s: &mut XhciState, i: usize, st: usize) {
         stream.armed += 1;
         ring_ep.enq += 1;
         if ring_ep.enq >= FN_RING_TRBS - 1 {
-            write_trb(ring, FN_RING_TRBS - 1, ring.phys(), 0, TRB_LINK | ring_ep.cycle | (1 << 1));
+            write_trb(ring, FN_RING_TRBS - 1, ring.bus(), 0, TRB_LINK | ring_ep.cycle | (1 << 1));
             ring_ep.cycle ^= 1;
             ring_ep.enq = 0;
         }
@@ -704,7 +703,7 @@ pub(super) fn dispatch(s: &mut XhciState, e: &Evt) -> bool {
     let mut hit = None;
     for fd in &s.fn_devs {
         for ep in &fd.eps {
-            let base = ep.ring.phys();
+            let base = ep.ring.bus();
             let slot_dci = (fd.slot, ep.ep.dci());
             let on = e.param >= base && e.param < base + (FN_RING_TRBS * 16) as u64;
             let id_hit = e.param == 0 && ((e.control >> 24) as u8, ((e.control >> 16) & 0x1F) as u8) == slot_dci;
@@ -774,7 +773,7 @@ fn recover(s: &mut XhciState, i: usize, st_i: usize) {
     let Some(fd) = s.fn_devs.iter().position(|f| f.slot == slot) else { return };
     let Some(e) = s.fn_devs[fd].eps.iter().position(|e| e.ep.dci() == dci) else { return };
     let (ring, enq, cycle) = (s.fn_devs[fd].eps[e].ring, s.fn_devs[fd].eps[e].enq, s.fn_devs[fd].eps[e].cycle);
-    post_command(s, ring.phys() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
+    post_command(s, ring.bus() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
     let _ = wait_command_completion(s);
     let st = &mut s.fns[i].streams[st_i];
     while st.armed > 0 { complete_oldest(st, 0, PKT_ERROR); }
@@ -822,7 +821,7 @@ fn stream_close_locked(s: &mut XhciState, i: usize, sid: u32) {
         if let Some(fd) = s.fn_devs.iter().position(|f| f.slot == slot) {
             if let Some(e) = s.fn_devs[fd].eps.iter().position(|e| e.ep.dci() == dci) {
                 let ep = &s.fn_devs[fd].eps[e];
-                let deq = ep.ring.phys() + (ep.enq * 16) as u64 | ep.cycle as u64;
+                let deq = ep.ring.bus() + (ep.enq * 16) as u64 | ep.cycle as u64;
                 post_command(s, deq, 0, TRB_SET_DEQ | sel);
                 let _ = wait_command_completion(s);
             }

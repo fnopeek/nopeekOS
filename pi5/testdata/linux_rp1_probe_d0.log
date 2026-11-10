@@ -3893,11 +3893,11 @@ MAP 0x1f00200000 size 0x8000
 R32 rp1.bar1+0x200010 = 0x2000000d  ; xhci cap
 R32 rp1.bar1+0x208000 = 0x02000402  ; xhci xcap
 R32 rp1.bar1+0x208000 = 0x02000402  ; xhci xcap
-R32 rp1.bar1+0x208008 = 0x00000101  ; xhci xcap
+R32 rp1.bar1+0x208008 = 0x00000201  ; xhci xcap
 R32 rp1.bar1+0x208000 = 0x02000402  ; xhci xcap
 R32 rp1.bar1+0x208010 = 0x03000002  ; xhci xcap
 R32 rp1.bar1+0x208010 = 0x03000002  ; xhci xcap
-R32 rp1.bar1+0x208018 = 0x00000102  ; xhci xcap
+R32 rp1.bar1+0x208018 = 0x00000103  ; xhci xcap
 R32 rp1.bar1+0x208010 = 0x03000002  ; xhci xcap
 } dwc3_get_num_ports
 { dwc3_alloc_event_buffers
@@ -3916,6 +3916,10 @@ W32 rp1.bar1+0x20c2c0 <- 0x10000000  ; dwc3.0 +0xc2c0
 R32 rp1.bar1+0x20c200 = 0x00000000  ; dwc3.0 +0xc200
 W32 rp1.bar1+0x20c200 <- 0x00000100  ; dwc3.0 +0xc200
 } dwc3_hs_phy_setup
+{ dwc3_hs_phy_setup
+R32 rp1.bar1+0x20c204 = 0x00000000  ; dwc3.0 +0xc204
+W32 rp1.bar1+0x20c204 <- 0x00000100  ; dwc3.0 +0xc204
+} dwc3_hs_phy_setup
 } dwc3_phy_setup
 { dwc3_core_ulpi_init
 } dwc3_core_ulpi_init
@@ -3929,6 +3933,8 @@ R32 rp1.bar1+0x20c2c0 = 0x10000000  ; dwc3.0 +0xc2c0
 W32 rp1.bar1+0x20c2c0 <- 0x10020000  ; dwc3.0 +0xc2c0
 R32 rp1.bar1+0x20c200 = 0x00000100  ; dwc3.0 +0xc200
 W32 rp1.bar1+0x20c200 <- 0x00000140  ; dwc3.0 +0xc200
+R32 rp1.bar1+0x20c204 = 0x00000100  ; dwc3.0 +0xc204
+W32 rp1.bar1+0x20c204 <- 0x00000140  ; dwc3.0 +0xc204
 } dwc3_enable_susphy
 } dwc3_phy_init
 { dwc3_core_soft_reset
@@ -3984,11 +3990,13 @@ W32 rp1.bar1+0x20c110 <- 0x00001000  ; dwc3.0 +0xc110
 { dwc3_power_off_all_roothub_ports
 MAP 0x1f00200000 size 0x7fff
 R32 rp1.bar1+0x200000 = 0x01200020  ; xhci cap
-R32 rp1.bar1+0x200004 = 0x02000440  ; xhci cap
+R32 rp1.bar1+0x200004 = 0x03000440  ; xhci cap
 R32 rp1.bar1+0x200420 = 0x00000000
 W32 rp1.bar1+0x200420 <- 0x00000000
 R32 rp1.bar1+0x200430 = 0x00000000
 W32 rp1.bar1+0x200430 <- 0x00000000
+R32 rp1.bar1+0x200440 = 0x00000000
+W32 rp1.bar1+0x200440 <- 0x00000000
 } dwc3_power_off_all_roothub_ports
 { dwc3_host_get_irq
 { rp1_irq_xlate
@@ -4042,11 +4050,11 @@ MAP 0x1f00300000 size 0x8000
 R32 rp1.bar1+0x300010 = 0x2000000d  ; xhci cap
 R32 rp1.bar1+0x308000 = 0x02000402  ; xhci xcap
 R32 rp1.bar1+0x308000 = 0x02000402  ; xhci xcap
-R32 rp1.bar1+0x308008 = 0x00000101  ; xhci xcap
+R32 rp1.bar1+0x308008 = 0x00000201  ; xhci xcap
 R32 rp1.bar1+0x308000 = 0x02000402  ; xhci xcap
 R32 rp1.bar1+0x308010 = 0x03000002  ; xhci xcap
 R32 rp1.bar1+0x308010 = 0x03000002  ; xhci xcap
-R32 rp1.bar1+0x308018 = 0x00000102  ; xhci xcap
+R32 rp1.bar1+0x308018 = 0x00000103  ; xhci xcap
 R32 rp1.bar1+0x308010 = 0x03000002  ; xhci xcap
 } dwc3_get_num_ports
 { dwc3_alloc_event_buffers
@@ -4065,6 +4073,10 @@ W32 rp1.bar1+0x30c2c0 <- 0x10000000  ; dwc3.1 +0xc2c0
 R32 rp1.bar1+0x30c200 = 0x00000000  ; dwc3.1 +0xc200
 W32 rp1.bar1+0x30c200 <- 0x00000100  ; dwc3.1 +0xc200
 } dwc3_hs_phy_setup
+{ dwc3_hs_phy_setup
+R32 rp1.bar1+0x30c204 = 0x00000000  ; dwc3.1 +0xc204
+W32 rp1.bar1+0x30c204 <- 0x00000100  ; dwc3.1 +0xc204
+} dwc3_hs_phy_setup
 } dwc3_phy_setup
 { dwc3_core_ulpi_init
 } dwc3_core_ulpi_init
@@ -4078,6 +4090,8 @@ R32 rp1.bar1+0x30c2c0 = 0x10000000  ; dwc3.1 +0xc2c0
 W32 rp1.bar1+0x30c2c0 <- 0x10020000  ; dwc3.1 +0xc2c0
 R32 rp1.bar1+0x30c200 = 0x00000100  ; dwc3.1 +0xc200
 W32 rp1.bar1+0x30c200 <- 0x00000140  ; dwc3.1 +0xc200
+R32 rp1.bar1+0x30c204 = 0x00000100  ; dwc3.1 +0xc204
+W32 rp1.bar1+0x30c204 <- 0x00000140  ; dwc3.1 +0xc204
 } dwc3_enable_susphy
 } dwc3_phy_init
 { dwc3_core_soft_reset
@@ -4133,11 +4147,13 @@ W32 rp1.bar1+0x30c110 <- 0x00001000  ; dwc3.1 +0xc110
 { dwc3_power_off_all_roothub_ports
 MAP 0x1f00300000 size 0x7fff
 R32 rp1.bar1+0x300000 = 0x01200020  ; xhci cap
-R32 rp1.bar1+0x300004 = 0x02000440  ; xhci cap
+R32 rp1.bar1+0x300004 = 0x03000440  ; xhci cap
 R32 rp1.bar1+0x300420 = 0x00000000
 W32 rp1.bar1+0x300420 <- 0x00000000
 R32 rp1.bar1+0x300430 = 0x00000000
 W32 rp1.bar1+0x300430 <- 0x00000000
+R32 rp1.bar1+0x300440 = 0x00000000
+W32 rp1.bar1+0x300440 <- 0x00000000
 } dwc3_power_off_all_roothub_ports
 { dwc3_host_get_irq
 { rp1_irq_xlate

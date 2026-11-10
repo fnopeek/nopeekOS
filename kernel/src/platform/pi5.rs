@@ -5,7 +5,7 @@ use super::dt::{Fdt, Node};
 use crate::hw::Mmio;
 use crate::kprintln;
 use pi5_core::hw::{Block, Hw};
-use pi5_core::{mip::Mip, pcie};
+use pi5_core::{dwc3, mip::Mip, pcie};
 
 const MAX_WINDOWS: usize = 8;
 
@@ -124,13 +124,103 @@ fn is_mem(flags: u32) -> bool {
     matches!((flags >> 24) & 3, 2 | 3)
 }
 
-/// Bring up the PCIe link to RP1 and report what answered.
-pub fn init(fdt: &Fdt) {
+/// RP1's BAR1 alone, for the DWC3 work after bring-up.
+struct Bar1(Mmio);
+
+impl Hw for Bar1 {
+    fn read(&mut self, _: Block, off: u64, _: u8) -> u32 { self.0.r32(off) }
+    fn write(&mut self, _: Block, off: u64, _: u8, v: u32) { self.0.w32(off, v) }
+    fn delay_us(&mut self, us: u64) { crate::time::delay_us(us) }
+}
+
+/// The DWC3 whose xHCI is being attached, for `plat_start`.
+static STARTING: spin::Mutex<Option<(Mmio, dwc3::Dwc3)>> = spin::Mutex::new(None);
+
+/// `dwc3_xhci_plat_start`: the PHYs may suspend again once xHCI runs.
+fn dwc3_plat_start() {
+    if let Some((bar1, d)) = *STARTING.lock() {
+        d.enable_susphy(&mut Bar1(bar1), true);
+    }
+}
+
+/// A `snps,dwc3` node's quirks (`dwc3_get_properties`).
+fn dwc3_config(fdt: &Fdt, n: &Node) -> dwc3::Config {
+    let b = |name: &[u8]| fdt.prop(n, name).is_some();
+    let u8p = |name: &[u8]| {
+        let mut v = [0u8; 1];
+        fdt.prop_bytes(n, name, &mut v).map(|_| v[0]).unwrap_or(0)
+    };
+    dwc3::Config {
+        dis_rxdet_inp3: b(b"snps,dis_rxdet_inp3_quirk"),
+        enh_nak_fs: b(b"snps,enhanced-nak-fs-quirk"),
+        enh_nak_hs: b(b"snps,enhanced-nak-hs-quirk"),
+        parkmode_disable_ss: b(b"snps,parkmode-disable-ss-quirk"),
+        parkmode_disable_hs: b(b"snps,parkmode-disable-hs-quirk"),
+        parkmode_disable_fsls: b(b"snps,parkmode-disable-fsls-quirk"),
+        dis_tx_ipgap_linecheck: b(b"snps,dis-tx-ipgap-linecheck-quirk"),
+        dis_enblslpm: b(b"snps,dis_enblslpm_quirk"),
+        dis_u2_freeclk_exists: b(b"snps,dis-u2-freeclk-exists-quirk"),
+        dis_u2_susphy: b(b"snps,dis_u2_susphy_quirk"),
+        dis_u3_susphy: b(b"snps,dis_u3_susphy_quirk"),
+        axi_pipe_limit: u8p(b"snps,axi-pipe-limit"),
+        rx_thr_num_pkt: u8p(b"snps,rx-thr-num-pkt"),
+        rx_max_burst: u8p(b"snps,rx-max-burst"),
+        tx_thr_num_pkt: u8p(b"snps,tx-thr-num-pkt"),
+        tx_max_burst: u8p(b"snps,tx-max-burst"),
+        tx_thr_num_pkt_prd: u8p(b"snps,tx-thr-num-pkt-prd"),
+        tx_max_burst_prd: u8p(b"snps,tx-max-burst-prd"),
+    }
+}
+
+/// `DWC3_XHCI_REGS_END + 1`: the xHCI part of a DWC3's window.
+const DWC3_XHCI_LEN: u64 = 0x8000;
+
+/// The DWC3 hosts under the RP1 node: each core into host mode, then its
+/// xHCI to the USB driver. True when a keyboard came up.
+fn usb(fdt: &Fdt, pcie_node: &Node, board: &mut Board, bar1_cpu: u64, dma_off: u64) -> bool {
+    let mut rp1 = None;
+    fdt.children(pcie_node, |c| {
+        if fdt.name_is(c, b"rp1") { rp1 = Some(*c); }
+        rp1.is_none()
+    });
+    let Some(rp1) = rp1 else { return false };
+    let mut hosts = [None; 4];
+    let mut n = 0;
+    fdt.children(&rp1, |c| {
+        if fdt.prop_has_str(c, b"compatible", b"snps,dwc3") && fdt.is_enabled(c) && n < hosts.len() {
+            hosts[n] = Some(*c);
+            n += 1;
+        }
+        true
+    });
+    let mut keyboard = false;
+    for node in hosts.iter().flatten() {
+        let Some((cpu, _)) = fdt.reg0(node) else { continue };
+        let mut name = [0u8; 32];
+        let l = fdt.name_into(node, &mut name);
+        let name = core::str::from_utf8(&name[..l]).unwrap_or("?");
+        let d = match dwc3::probe(board, cpu - bar1_cpu, dwc3_config(fdt, node), 0) {
+            Ok(d) => d,
+            Err(e) => { kprintln!("[npk] RP1 {}: {:?}", name, e); continue; }
+        };
+        kprintln!("[npk] RP1 {}: DWC3 {:x}, {} USB 2.0 + {} USB 3.0 ports, host mode; xHCI next",
+            name, d.revision, d.num_usb2_ports, d.num_usb3_ports);
+        *STARTING.lock() = Some((board.bar1, d));
+        let quirks = crate::xhci::Quirks { write_64_hi_lo: true, plat_start: Some(dwc3_plat_start) };
+        keyboard |= crate::xhci::attach_platform(cpu, DWC3_XHCI_LEN, dma_off, quirks);
+        *STARTING.lock() = None;
+    }
+    keyboard
+}
+
+/// Bring up the PCIe link to RP1 and report what answered; then USB.
+/// True when a USB keyboard came up.
+pub fn init(fdt: &Fdt) -> bool {
     let Some(node) = rp1_controller(fdt) else {
         kprintln!("[npk] PCIe: no controller with RP1 in the device tree");
-        return;
+        return false;
     };
-    let Some((pcie_base, pcie_len)) = fdt.reg0(&node) else { return };
+    let Some((pcie_base, pcie_len)) = fdt.reg0(&node) else { return false };
 
     let mut out = [pcie::Window { cpu: 0, pci: 0, size: 0 }; MAX_WINDOWS];
     let mut n_out = 0;
@@ -150,7 +240,7 @@ pub fn init(fdt: &Fdt) {
     });
     if n_out == 0 {
         kprintln!("[npk] PCIe: no memory window");
-        return;
+        return false;
     }
 
     let mut vdm = [0u8; 8];
@@ -187,11 +277,11 @@ pub fn init(fdt: &Fdt) {
     let reg_of = |n: Option<Node>| n.and_then(|n| fdt.reg0(&n));
     let Some(mip_node) = fdt.prop_u32(&node, b"msi-parent").and_then(|ph| fdt.find_phandle(ph)) else {
         kprintln!("[npk] PCIe: no msi-parent");
-        return;
+        return false;
     };
     let Some(mip) = mip_from_dt(fdt, &mip_node) else {
         kprintln!("[npk] PCIe: MIP node unreadable");
-        return;
+        return false;
     };
     let empty = Mmio::empty();
     let win = out[0];
@@ -214,19 +304,19 @@ pub fn init(fdt: &Fdt) {
     mip.init(&mut board);
     let mut p = match pcie::probe(&mut board, &cfg) {
         Ok(p) => p,
-        Err(e) => { kprintln!("[npk] PCIe: probe failed: {:?}", e); return; }
+        Err(e) => { kprintln!("[npk] PCIe: probe failed: {:?}", e); return false; }
     };
     kprintln!("[npk] PCIe: setup done, hardware revision {:#x}; starting the link", p.hw_rev);
     pi5_core::pci::root_port_init(&mut board);
     let link = match p.start_link(&mut board) {
         Ok(l) => l,
-        Err(e) => { kprintln!("[npk] PCIe: {:?}", e); return; }
+        Err(e) => { kprintln!("[npk] PCIe: {:?}", e); return false; }
     };
     let gts = match link.speed { 1 => "2.5", 2 => "5.0", 3 => "8.0", _ => "?" };
     kprintln!("[npk] PCIe: link up, {} GT/s x{}", gts, link.width);
     let Some(dev) = pi5_core::pci::scan(&mut board, win.pci) else {
         kprintln!("[npk] PCIe: nothing on bus 1");
-        return;
+        return false;
     };
     kprintln!("[npk] PCIe: 01:00.0 [{:04x}:{:04x}] class {:06x}", dev.vendor, dev.device, dev.class);
     for (i, b) in dev.bars.iter().enumerate().filter(|(_, b)| b.size != 0) {
@@ -237,27 +327,49 @@ pub fn init(fdt: &Fdt) {
     board.bar1 = map(cpu_of(dev.bars[1].bus), dev.bars[1].size).unwrap_or(empty);
     if (dev.vendor, dev.device) != (pi5_core::rp1::PCI_VENDOR_ID_RPI, pi5_core::rp1::PCI_DEVICE_ID_RP1_C0) {
         kprintln!("[npk] PCIe: not RP1");
-        return;
+        return false;
     }
     let rp1 = match pi5_core::rp1::probe(&mut board, &dev, &mip) {
         Ok(r) => r,
-        Err(e) => { kprintln!("[npk] RP1: {:?}", e); return; }
+        Err(e) => { kprintln!("[npk] RP1: {:?}", e); return false; }
     };
     kprintln!("[npk] RP1: chip {:#x}{}, {} MSI-X vectors -> GIC SPI {}+",
         rp1.chip_id, if rp1.fpga { " (FPGA)" } else { "" }, pi5_core::rp1::RP1_IRQS, mip.msi_base);
 
-    // The two USB controllers' identity, read before any driver touches
-    // them: GSNPSID and GHWPARAMS0..8 of each DWC3.
-    for (name, off) in [("usb@200000", 0x20_0000u64), ("usb@300000", 0x30_0000)] {
-        kprintln!("[npk] RP1 {}: reading DWC3 ID registers...", name);
-        let id = board.r32(Block::Rp1Bar1, off + 0xc120);
-        let mut hp = [0u32; 9];
-        for (i, v) in hp.iter_mut().enumerate().take(8) {
-            *v = board.r32(Block::Rp1Bar1, off + 0xc140 + 4 * i as u64);
+    let dma_off = inb[..n_in].iter().find(|w| w.cpu == 0).map(|w| w.pci).unwrap_or(0);
+    usb(fdt, &node, &mut board, cpu_of(dev.bars[1].bus), dma_off)
+}
+
+/// What there is to do once bring-up ends: show what the USB keyboard
+/// types, poll the controllers (events are not interrupt-driven here yet)
+/// and take ports that change; the activity LED blinks at 1 Hz meanwhile.
+pub fn echo_keys(led: bool) -> ! {
+    kprintln!("[npk] USB keyboard ready: type, the keys appear below.");
+    let mut led_on = false;
+    let mut led_at = crate::time::ticks();
+    loop {
+        crate::xhci::poll_events();
+        crate::xhci::hotplug_pass();
+        while let Some(b) = crate::xhci::poll_keyboard() {
+            match b {
+                b'\r' | b'\n' => crate::framebuffer::write_byte(b'\n'),
+                0x08 | 0x7f => crate::framebuffer::write_byte(0x08),
+                0x20..=0x7e => crate::framebuffer::write_byte(b),
+                // Escape sequences (arrows, F keys) and control bytes.
+                0x00..=0x1f => {}
+                // The console font is ASCII: one mark per character, at
+                // its first byte.
+                0xc0..=0xff => crate::framebuffer::write_byte(b'?'),
+                _ => {}
+            }
         }
-        hp[8] = board.r32(Block::Rp1Bar1, off + 0xc600);
-        kprintln!("[npk]   GSNPSID {:#010x}", id);
-        kprintln!("[npk]   GHWPARAMS {:08x} {:08x} {:08x} {:08x} {:08x}", hp[0], hp[1], hp[2], hp[3], hp[4]);
-        kprintln!("[npk]             {:08x} {:08x} {:08x} {:08x}", hp[5], hp[6], hp[7], hp[8]);
+        if led && crate::time::ticks() >= led_at + 50 {
+            led_on = !led_on;
+            crate::platform::led::set(led_on);
+            led_at = crate::time::ticks();
+        }
+        // SAFETY: waits for the next interrupt (the 100 Hz tick at least);
+        // no memory is touched.
+        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
     }
 }

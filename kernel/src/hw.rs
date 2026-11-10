@@ -24,6 +24,25 @@ impl Off for i32 {
     fn get(self) -> u64 { u64::try_from(self).expect("negative register offset") }
 }
 
+/// Order earlier memory writes (DMA buffers included) before a register
+/// write, as Linux `writel` does with `__iowmb` on arm64 (`dmb oshst`).
+/// x86 keeps stores in order to uncached memory without one.
+#[inline(always)]
+fn io_wmb() {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: a barrier; no memory is accessed.
+    unsafe { core::arch::asm!("dmb oshst", options(nostack, preserves_flags)) };
+}
+
+/// Order a register read before later memory reads (a buffer the device
+/// filled), as Linux `readl` does with `__iormb` on arm64 (`dmb oshld`).
+#[inline(always)]
+fn io_rmb() {
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: a barrier; no memory is accessed.
+    unsafe { core::arch::asm!("dmb oshld", options(nostack, preserves_flags)) };
+}
+
 /// A window of memory-mapped device registers.
 #[derive(Clone, Copy, Debug)]
 pub struct Mmio {
@@ -90,35 +109,47 @@ impl Mmio {
     pub fn r8(&self, off: impl Off) -> u8 {
         // SAFETY: inside the window (`at`), which the constructor's contract
         // makes mapped device memory.
-        unsafe { core::ptr::read_volatile(self.at(off, 1) as *const u8) }
+        let v = unsafe { core::ptr::read_volatile(self.at(off, 1) as *const u8) };
+        io_rmb();
+        v
     }
     pub fn w8(&self, off: impl Off, v: u8) {
+        io_wmb();
         // SAFETY: as in `r8`.
         unsafe { core::ptr::write_volatile(self.at(off, 1) as *mut u8, v) }
     }
     pub fn r16(&self, off: impl Off) -> u16 {
         // SAFETY: as in `r8`.
-        unsafe { core::ptr::read_volatile(self.at(off, 2) as *const u16) }
+        let v = unsafe { core::ptr::read_volatile(self.at(off, 2) as *const u16) };
+        io_rmb();
+        v
     }
     pub fn w16(&self, off: impl Off, v: u16) {
+        io_wmb();
         // SAFETY: as in `r8`.
         unsafe { core::ptr::write_volatile(self.at(off, 2) as *mut u16, v) }
     }
     pub fn r32(&self, off: impl Off) -> u32 {
         // SAFETY: as in `r8`.
-        unsafe { core::ptr::read_volatile(self.at(off, 4) as *const u32) }
+        let v = unsafe { core::ptr::read_volatile(self.at(off, 4) as *const u32) };
+        io_rmb();
+        v
     }
     pub fn w32(&self, off: impl Off, v: u32) {
+        io_wmb();
         // SAFETY: as in `r8`.
         unsafe { core::ptr::write_volatile(self.at(off, 4) as *mut u32, v) }
     }
     /// One 64-bit read (Linux `readq`).
     pub fn r64(&self, off: impl Off) -> u64 {
         // SAFETY: as in `r8`.
-        unsafe { core::ptr::read_volatile(self.at(off, 8) as *const u64) }
+        let v = unsafe { core::ptr::read_volatile(self.at(off, 8) as *const u64) };
+        io_rmb();
+        v
     }
     /// One 64-bit write (Linux `writeq`).
     pub fn w64(&self, off: impl Off, v: u64) {
+        io_wmb();
         // SAFETY: as in `r8`.
         unsafe { core::ptr::write_volatile(self.at(off, 8) as *mut u64, v) }
     }
@@ -145,11 +176,14 @@ impl Mmio {
 pub struct DmaRegion {
     phys: u64,
     len: u64,
+    /// What the device adds to a physical address to reach it (Linux
+    /// `dma-ranges`); 0 where devices see RAM where the CPU does.
+    bus_off: u64,
 }
 
 impl DmaRegion {
     pub const fn empty() -> Self {
-        DmaRegion { phys: 0, len: 0 }
+        DmaRegion { phys: 0, len: 0, bus_off: 0 }
     }
 
     /// `pages` zeroed pages anywhere in RAM (Linux `dma_alloc_coherent`).
@@ -158,7 +192,7 @@ impl DmaRegion {
         let phys = crate::memory::allocate_contiguous(pages)?;
         #[cfg(target_arch = "aarch64")]
         let phys = crate::arch::aarch64::dma::alloc(pages, 1, u64::MAX)?;
-        let r = DmaRegion { phys, len: pages as u64 * PAGE };
+        let r = DmaRegion { phys, len: pages as u64 * PAGE, bus_off: 0 };
         r.zero();
         Some(r)
     }
@@ -176,7 +210,7 @@ impl DmaRegion {
         let phys = crate::memory::allocate_contiguous_aligned_below(pages, align, below)?;
         #[cfg(target_arch = "aarch64")]
         let phys = crate::arch::aarch64::dma::alloc(pages, align, below)?;
-        let r = DmaRegion { phys, len: pages as u64 * PAGE };
+        let r = DmaRegion { phys, len: pages as u64 * PAGE, bus_off: 0 };
         r.zero();
         Some(r)
     }
@@ -198,16 +232,26 @@ impl DmaRegion {
     /// `phys .. phys + len` must be identity-mapped RAM owned by this driver
     /// for as long as the value is used.
     pub const unsafe fn from_raw(phys: u64, len: u64) -> Self {
-        DmaRegion { phys, len }
+        DmaRegion { phys, len, bus_off: 0 }
     }
 
+    /// The same region as a device behind `dma-ranges` with offset `off`
+    /// sees it.
+    pub const fn with_bus_offset(self, off: u64) -> Self {
+        DmaRegion { bus_off: off, ..self }
+    }
+
+    /// The CPU's physical address.
     pub fn phys(&self) -> u64 { self.phys }
+
+    /// The address the device uses (Linux `dma_addr_t`).
+    pub fn bus(&self) -> u64 { self.phys + self.bus_off }
 
     /// The part `off .. off + len` of this region.
     pub fn sub(&self, off: impl Off, len: u64) -> DmaRegion {
         let off = off.get();
         assert!(off.checked_add(len).is_some_and(|e| e <= self.len), "dma sub out of range");
-        DmaRegion { phys: self.phys + off, len }
+        DmaRegion { phys: self.phys + off, len, bus_off: self.bus_off }
     }
 
     fn at(&self, off: impl Off, size: u64) -> u64 {

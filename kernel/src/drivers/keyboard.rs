@@ -106,9 +106,7 @@ const KEY_PGDN: u8 = 0x87;
 const KEY_DEL: u8 = 0x88;
 const KEY_INSERT: u8 = 0x89;
 
-/// Final byte of `ESC [ x` for F1; F2..F12 follow in order. A private
-/// range: no ANSI sequence ends in a lowercase letter after `ESC [`.
-pub(crate) const FKEY_FINAL: u8 = b'a';
+use crate::input::FKEY_FINAL;
 const FKEY_FINAL_LAST: u8 = FKEY_FINAL + 11;
 
 /// Initialize PS/2 keyboard controller.

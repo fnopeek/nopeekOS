@@ -16,7 +16,6 @@ pub mod intel_nic;
 pub mod igc;
 #[cfg(target_arch = "x86_64")]
 pub mod rtl8153;
-#[cfg(target_arch = "x86_64")]
 pub mod xhci;
 #[cfg(target_arch = "x86_64")]
 pub mod usb_desc;

@@ -7,7 +7,8 @@
 //! bring-up, which replaces the PCI core with the share this topology
 //! needs, must leave every register Linux wrote with Linux's final value.
 //! The model behind these runs answers RP1's xHCI capability registers as
-//! the RP1 datasheet (chapter 5) and the xHCI 1.2 layout give them.
+//! the RP1 datasheet (chapter 5) and the xHCI 1.2 layout give them, with
+//! the port count the board reports (two USB 2.0, one USB 3.0).
 
 use super::*;
 use crate::hw::{Block, Hw};
@@ -370,7 +371,7 @@ fn dwc3_matches_linux() {
             let mut hw = StrictCaps { strict: Strict::new(probe), caps };
             let d = dwc3::probe(&mut hw, base, RP1_USB, LINUX_GUID).unwrap_or_else(|e| panic!("{name} {i}: {e:?}"));
             hw.strict.done();
-            assert_eq!((d.revision, d.num_usb2_ports, d.num_usb3_ports, d.is_fpga), (0x330b, 1, 1, false), "{name} {i}");
+            assert_eq!((d.revision, d.num_usb2_ports, d.num_usb3_ports, d.is_fpga), (0x330b, 2, 1, false), "{name} {i}");
         }
     }
 }

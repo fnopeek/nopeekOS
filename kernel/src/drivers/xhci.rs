@@ -5,15 +5,23 @@
 //! (`usb_storage`) and one USB network device. Every device
 //! enumeration meets stays addressed with its descriptors until it is
 //! unplugged (`devices`).
+//!
+//! On AArch64 the controller, hubs and HID run; storage, network and the
+//! module-facing functions (`usbfn`) are not wired up there yet.
+
+#![cfg_attr(target_arch = "aarch64", allow(dead_code))]
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::{kprintln, pci};
+use crate::kprintln;
+#[cfg(target_arch = "x86_64")]
+use crate::pci;
 use crate::hw::{DmaRegion, Mmio};
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering, fence};
 
+#[cfg(target_arch = "x86_64")]
 pub mod usbfn;
 
 // === Capability register offsets (from BAR0) ===
@@ -284,14 +292,17 @@ fn inject_pointer(evt: MouseEvent, cheap: bool) {
     crate::arch::without_interrupts(|| {
         let _g = POINTER_LOCK.lock();
         MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+        #[cfg(target_arch = "x86_64")]
         crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
         push_mouse_locked(evt);
     });
+    #[cfg(target_arch = "x86_64")]
     if cheap {
         crate::shade::request_cursor_move();
     } else {
         crate::shade::request_render();
     }
+    let _ = cheap;
 }
 
 /// Put the pointer at an absolute position (0..=65535 per axis of the
@@ -301,10 +312,13 @@ pub fn inject_pointer_abs(x: u16, y: u16, buttons: u8) {
     crate::arch::without_interrupts(|| {
         let _g = POINTER_LOCK.lock();
         MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
+        #[cfg(target_arch = "x86_64")]
         crate::shade::cursor::set_atomic_abs(x, y, buttons);
         push_mouse_locked(MouseEvent { buttons, dx: 0, dy: 0, scroll: 0, hscroll: 0 });
     });
+    #[cfg(target_arch = "x86_64")]
     crate::shade::request_render();
+    let _ = (x, y);
 }
 
 /// Inject a mouse event from another input source (e.g. the PS/2 touchpad on
@@ -346,7 +360,7 @@ pub fn poll_keyboard() -> Option<u8> {
         let since_last = (now.wrapping_sub(last)) * 10;
         if held_ms >= 500 && since_last >= 50 {
             REPEAT_LAST.store(now, Ordering::Relaxed);
-            let is_de = crate::keyboard::is_de_layout();
+            let is_de = is_de_layout();
             let shift = REPEAT_SHIFT.load(Ordering::Relaxed);
             let altgr = REPEAT_ALTGR.load(Ordering::Relaxed);
             // Navigation keys are escape sequences, not characters: ESC
@@ -378,7 +392,7 @@ fn nav_seq_final(key: u8) -> Option<u8> {
         0x4D => b'F', // End
         0x4B => b'5', // PgUp
         0x4E => b'6', // PgDn
-        k @ 0x3A..=0x45 => crate::keyboard::FKEY_FINAL + (k - 0x3A), // F1..F12
+        k @ 0x3A..=0x45 => crate::input::FKEY_FINAL + (k - 0x3A), // F1..F12
         _ => return None,
     })
 }
@@ -434,11 +448,41 @@ pub fn mouse_available() -> bool { MOUSE_AVAILABLE.load(Ordering::Relaxed) }
 pub fn is_available() -> bool { AVAILABLE.load(Ordering::Relaxed) }
 
 #[allow(dead_code)]
+/// Which controller: a PCI function on PCs, a register window where the
+/// xHCI sits inside another device (RP1 on the Raspberry Pi 5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CtrlId {
+    #[cfg(target_arch = "x86_64")]
+    Pci(pci::PciAddr),
+    /// Physical address of the register window.
+    Mmio(u64),
+}
+
+impl core::fmt::Display for CtrlId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            #[cfg(target_arch = "x86_64")]
+            CtrlId::Pci(a) => write!(f, "{:02x}:{:02x}.{}", a.bus, a.device, a.function),
+            CtrlId::Mmio(a) => write!(f, "@{:x}", a),
+        }
+    }
+}
+
+/// What the platform glue tells the driver (Linux `xhci-plat.c` properties
+/// and `xhci_plat_priv`).
+#[derive(Clone, Copy, Default)]
+pub struct Quirks {
+    /// `write-64-hi-lo-quirk`: ERSTBA high half first.
+    pub write_64_hi_lo: bool,
+    /// `xhci_plat_priv.plat_start`, run once the controller runs.
+    pub plat_start: Option<fn()>,
+}
+
 struct XhciState {
-    /// PCI address of this controller, so a reset by another path (the NIC
-    /// scan) can be attributed to exactly this controller and not discard
-    /// working devices on another one.
-    pci_addr: pci::PciAddr,
+    /// This controller, so a reset by another path (the NIC scan) can be
+    /// attributed to exactly this controller and not discard working
+    /// devices on another one.
+    ctrl: CtrlId,
     mmio: Mmio,
     oper: Mmio,         // operational registers
     rt: Mmio,           // runtime registers
@@ -456,7 +500,6 @@ struct XhciState {
     evt_dequeue: usize,
     /// Entries of the event ring, all segments.
     evt_trbs: usize,
-    evt_seg_table: DmaRegion,
     input_ctx: DmaRegion,
     /// Data stage of control transfers, `MAX_CONTROL_LEN` bytes.
     data_buf: DmaRegion,
@@ -486,7 +529,9 @@ struct XhciState {
     msc: Vec<MscPipe>,
     /// Interfaces modules claimed (`usbfn`), and the devices configured
     /// for them.
+    #[cfg(target_arch = "x86_64")]
     fns: Vec<usbfn::UsbFn>,
+    #[cfg(target_arch = "x86_64")]
     fn_devs: Vec<usbfn::FnDev>,
     /// Cameras in the device register: slot and handle.
     cams: Vec<(u8, u32)>,
@@ -500,7 +545,7 @@ static CTRLS: spin::Mutex<Vec<XhciState>> = spin::Mutex::new(Vec::new());
 /// address, else adds it.
 fn store_ctrl(state: XhciState) {
     let mut g = CTRLS.lock();
-    match g.iter_mut().find(|s| s.pci_addr == state.pci_addr) {
+    match g.iter_mut().find(|s| s.ctrl == state.ctrl) {
         Some(s) => *s = state,
         None => g.push(state),
     }
@@ -508,6 +553,7 @@ fn store_ctrl(state: XhciState) {
 
 /// Initialize xHCI controller and enumerate USB keyboard.
 /// Tries all xHCI controllers until one with a connected device is found.
+#[cfg(target_arch = "x86_64")]
 pub fn init() -> bool {
     let mut found = false;
     // Find all xHCI controllers (class 0C:03:30) and bring up each
@@ -543,10 +589,9 @@ pub fn init() -> bool {
     found
 }
 
-/// Bring a controller from PCI-discovered to running: map BAR0, halt+reset,
-/// set up command/event rings + scratchpad, start it, power and settle ports.
-/// Returns the running state with no device enumerated yet; every device
-/// slot the controller has is enabled (`xhci_init`: `HCS_MAX_SLOTS`).
+/// Bring a controller from PCI-discovered to running: map BAR0, then
+/// `bring_up`, with interrupter 0 on MSI-X where the device has it.
+#[cfg(target_arch = "x86_64")]
 fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
 
     crate::kdebug!("[npk] xhci: PCI {:02x}:{:02x}.{} [{:04x}:{:04x}]",
@@ -598,12 +643,52 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
     if bar0 == 0 { kprintln!("[npk] xhci: BAR0 is zero"); return None; }
 
     // Map BAR0 (64KB)
-    let map_size = BAR0_MAP;
     // SAFETY: BAR0 of this xHCI controller, its register window.
-    let mmio = match unsafe { Mmio::map(bar0, map_size) } {
+    let mmio = match unsafe { Mmio::map(bar0, BAR0_MAP) } {
         Ok(m) => m,
         Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return None; }
     };
+    bring_up(CtrlId::Pci(dev.addr), mmio, Quirks::default(), |oper| {
+        // Interrupter 0 by MSI-X to core 0. Without MSI-X the timer tick
+        // drains the event ring.
+        if pci::program_msix(dev.addr, 0, crate::interrupts::XHCI_VECTOR,
+                             crate::interrupts::current_apic_id()) {
+            oper.w32(OP_USBSTS, STS_EINT);
+            oper.w32(OP_USBCMD, oper.r32(OP_USBCMD) | CMD_INTE);
+            crate::kdebug!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// A controller whose registers are not a PCI function: a `generic-xhci`
+/// window (`xhci-plat.c`), here the DWC3 hosts inside RP1, which reach RAM
+/// at `dma_bus_off` above its physical address. Events are polled. Returns
+/// whether a keyboard came up.
+pub fn attach_platform(phys: u64, len: u64, dma_bus_off: u64, quirks: Quirks) -> bool {
+    DMA_BUS_OFF.store(dma_bus_off, Ordering::Relaxed);
+    // SAFETY: the caller passes the xHCI register window of a device it
+    // brought up, from the device tree.
+    let mmio = match unsafe { Mmio::map(phys, len) } {
+        Ok(m) => m,
+        Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return false; }
+    };
+    let Some(mut state) = bring_up(CtrlId::Mmio(phys), mmio, quirks, |_| false) else { return false };
+    enumerate_root_ports(&mut state);
+    let keyboard = state.hid.iter().any(|h| h.running && h.keyboard);
+    store_ctrl(state);
+    keyboard
+}
+
+/// Halt and reset the controller, set up command and event rings and the
+/// scratchpad, start it (`irq` decides whether events come by interrupt),
+/// power and settle the ports. Returns the running state with no device
+/// enumerated yet; every device slot the controller has is enabled
+/// (`xhci_init`: `HCS_MAX_SLOTS`).
+fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> bool) -> Option<XhciState> {
+    let map_size = mmio.len();
 
     // Read capability registers
     let caplength = mmio.r8(CAP_CAPLENGTH) as u32;
@@ -671,11 +756,11 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
     };
 
     // Set up Link TRBs at end of rings (wrap back to start)
-    write_trb(cmd_ring, NUM_CMD_TRBS - 1, cmd_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1)); // Toggle Cycle
+    write_trb(cmd_ring, NUM_CMD_TRBS - 1, cmd_ring.bus(), 0, TRB_LINK | TRB_CYCLE | (1 << 1)); // Toggle Cycle
 
     // Event Ring Segment Table: base and size of each segment.
     for i in 0..evt_segs {
-        evt_seg_table.w64(i * 16, evt_ring.phys() + (i * EVT_SEG_TRBS * 16) as u64);
+        evt_seg_table.w64(i * 16, evt_ring.bus() + (i * EVT_SEG_TRBS * 16) as u64);
         evt_seg_table.w64(i * 16 + 8, EVT_SEG_TRBS as u64);
     }
 
@@ -691,23 +776,29 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
             let Some(page) = alloc_dma(1, "scratchpad page") else {
                 kprintln!("[npk] xhci: scratchpad page alloc failed"); return None;
             };
-            sp_array.w64(i * 8, page.phys());
+            sp_array.w64(i * 8, page.bus());
         }
         // DCBAA[0] = scratchpad array pointer
-        dcbaa.w64(0u32, sp_array.phys());
+        dcbaa.w64(0u32, sp_array.bus());
         crate::kdebug!("[npk] xhci: {} scratchpad buffers", num_scratchpad);
     }
 
     // Program controller
     oper.w32(OP_CONFIG, max_slots); // MaxSlotsEn
-    oper.w64_lo_hi(OP_DCBAAP, dcbaa.phys());
-    oper.w64_lo_hi(OP_CRCR, cmd_ring.phys() | 1); // cycle bit = 1
+    oper.w64_lo_hi(OP_DCBAAP, dcbaa.bus());
+    oper.w64_lo_hi(OP_CRCR, cmd_ring.bus() | 1); // cycle bit = 1
 
     // Program Event Ring (interrupter 0)
     let ir0 = rt.sub(IR0, IR_LEN);
     ir0.w32(0x08u32, evt_segs as u32);              // ERSTSZ
-    ir0.w64_lo_hi(0x18u32, evt_ring.phys());        // ERDP
-    ir0.w64_lo_hi(0x10u32, evt_seg_table.phys());   // ERSTBA (write AFTER ERSTSZ)
+    ir0.w64_lo_hi(0x18u32, evt_ring.bus());        // ERDP
+    // ERSTBA, after ERSTSZ (xhci_set_hc_event_deq / xhci_add_interrupter).
+    if quirks.write_64_hi_lo {
+        ir0.w32(0x14u32, (evt_seg_table.bus() >> 32) as u32);
+        ir0.w32(0x10u32, evt_seg_table.bus() as u32);
+    } else {
+        ir0.w64_lo_hi(0x10u32, evt_seg_table.bus());
+    }
     // Enable interrupter (for event ring to work, even in polling mode)
     ir0.w32(0x00u32, ir0.r32(0x00u32) | 0x02); // IMAN.IE = 1
 
@@ -718,27 +809,26 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
         return None;
     }
     crate::kdebug!("[npk] xhci: controller running");
-
-    // Interrupter 0 by MSI-X to core 0. Without MSI-X the timer tick drains
-    // the event ring.
-    if pci::program_msix(dev.addr, 0, crate::interrupts::XHCI_VECTOR,
-                         crate::interrupts::current_apic_id()) {
-        oper.w32(OP_USBSTS, STS_EINT);
-        oper.w32(OP_USBCMD, oper.r32(OP_USBCMD) | CMD_INTE);
-        crate::kdebug!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
-    } else {
+    if let Some(start) = quirks.plat_start {
+        start();
+    }
+    if !irq(oper) {
         NEEDS_POLL.store(true, Ordering::Relaxed);
     }
 
     let state = XhciState {
-        pci_addr: dev.addr,
+        ctrl,
         mmio, oper, rt, db, ctx_size, max_ports, hci_version,
         dcbaa, cmd_ring, cmd_cycle: 1, cmd_enqueue: 0,
-        evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_seg_table, evt_trbs: evt_segs * EVT_SEG_TRBS,
+        evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_trbs: evt_segs * EVT_SEG_TRBS,
         input_ctx, data_buf,
         devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
         last_fail: ("", 0), failed: Vec::new(), nic: None, msc: Vec::new(),
-        fns: Vec::new(), fn_devs: Vec::new(), cams: Vec::new(),
+        #[cfg(target_arch = "x86_64")]
+        fns: Vec::new(),
+        #[cfg(target_arch = "x86_64")]
+        fn_devs: Vec::new(),
+        cams: Vec::new(),
     };
 
     // Power on all ports
@@ -793,6 +883,7 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
 }
 
 /// Initialize one xHCI controller and every device on it.
+#[cfg(target_arch = "x86_64")]
 fn init_controller(dev: pci::PciDevice) -> bool {
     let Some(mut state) = bring_up_controller(dev) else { return false };
     enumerate_root_ports(&mut state);
@@ -1048,7 +1139,7 @@ fn hub_probe(state: &mut XhciState, slot: u8, device: &[u8], cfg: &[u8]) {
         state.free_pages.push(ring);
         state.free_pages.push(buf);
     };
-    if !cmd_configure_endpoints(state, slot, &[(dci, ring.phys(), EP_TYPE_INTERRUPT_IN, w_max, interval)]) {
+    if !cmd_configure_endpoints(state, slot, &[(dci, ring.bus(), EP_TYPE_INTERRUPT_IN, w_max, interval)]) {
         kprintln!("[npk] xhci: hub on port {}: configure endpoints failed", path);
         give_back(state);
         return;
@@ -1148,7 +1239,7 @@ fn xhci_update_hub_device(state: &mut XhciState, slot: u8, nports: u8, multi_tt:
     }
     input.w32(ctx + 12, 0); // dev_state
     let trb = if new_ctx { TRB_CONFIGURE_EP } else { TRB_EVALUATE_CTX };
-    post_command(state, input.phys(), 0, trb | ((slot as u32) << 24));
+    post_command(state, input.bus(), 0, trb | ((slot as u32) << 24));
     matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS)
 }
 
@@ -1211,10 +1302,10 @@ fn hub_activate(state: &mut XhciState, slot: u8) {
 fn hub_submit(state: &mut XhciState, slot: u8) {
     let Some(h) = hub_of_mut(state, slot) else { return };
     if !h.running { return; }
-    write_trb(h.ring, h.enqueue, h.buf.phys(), h.maxp as u32, TRB_NORMAL | TRB_IOC | h.cycle);
+    write_trb(h.ring, h.enqueue, h.buf.bus(), h.maxp as u32, TRB_NORMAL | TRB_IOC | h.cycle);
     h.enqueue += 1;
     if h.enqueue >= NUM_TR_TRBS - 1 {
-        write_trb(h.ring, NUM_TR_TRBS - 1, h.ring.phys(), 0, TRB_LINK | h.cycle | (1 << 1));
+        write_trb(h.ring, NUM_TR_TRBS - 1, h.ring.bus(), 0, TRB_LINK | h.cycle | (1 << 1));
         h.cycle ^= 1;
         h.enqueue = 0;
     }
@@ -1896,7 +1987,7 @@ fn take_page(state: &mut XhciState, name: &str) -> Option<DmaRegion> {
 /// A transfer ring on a fresh page: zeroed, Link TRB at the end.
 fn take_ring(state: &mut XhciState, name: &str) -> Option<DmaRegion> {
     let r = take_page(state, name)?;
-    write_trb(r, NUM_TR_TRBS - 1, r.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(r, NUM_TR_TRBS - 1, r.bus(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
     Some(r)
 }
 
@@ -1941,7 +2032,7 @@ fn usb_port_init(state: &mut XhciState, place: Place, speed: u32, retry: u32) ->
         state.free_pages.push(ep0);
         return None;
     };
-    state.dcbaa.w64(slot as usize * 8, dctx.phys());
+    state.dcbaa.w64(slot as usize * 8, dctx.bus());
     let port = dev_path(state, place);
     state.devs.push(UsbDevice {
         slot, place, speed, dctx, ep0, ep0_cycle: 1, ep0_enqueue: 0,
@@ -2152,6 +2243,7 @@ fn usb_new_device(state: &mut XhciState, slot: u8) {
         hub_probe(state, slot, &device, &cfg);
         return;
     }
+    #[cfg(target_arch = "x86_64")]
     if parse_hid_interfaces(&cfg).is_empty() {
         if let Some(m) = parse_msc_interface(&cfg) {
             msc_probe(state, slot, &cfg, m);
@@ -2159,6 +2251,7 @@ fn usb_new_device(state: &mut XhciState, slot: u8) {
         }
     }
     hid_probe(state, slot, &cfg);
+    #[cfg(target_arch = "x86_64")]
     usbfn::attached(state, slot);
 }
 
@@ -2182,11 +2275,11 @@ fn hid_probe(state: &mut XhciState, slot: u8, cfg: &[u8]) {
             break;
         };
         let in_dci = (d.ep_in.addr & 0x0F) * 2 + 1;
-        eps.push((in_dci, in_ring.phys(), EP_TYPE_INTERRUPT_IN, d.ep_in.max_pkt, d.ep_in.interval));
+        eps.push((in_dci, in_ring.bus(), EP_TYPE_INTERRUPT_IN, d.ep_in.max_pkt, d.ep_in.interval));
         let out = match d.ep_out {
             Some(o) => take_ring(state, "hid out").map(|ring| {
                 let dci = (o.addr & 0x0F) * 2;
-                eps.push((dci, ring.phys(), EP_TYPE_INTERRUPT_OUT, o.max_pkt, o.interval));
+                eps.push((dci, ring.bus(), EP_TYPE_INTERRUPT_OUT, o.max_pkt, o.interval));
                 OutEp { dci, ring, cycle: 1, enqueue: 0 }
             }),
             None => None,
@@ -2248,7 +2341,10 @@ fn usb_disconnect(state: &mut XhciState, slot: u8) {
         pages.push(m.out_ring);
     }
     state.msc.retain(|m| m.slot != slot);
+    #[cfg(target_arch = "x86_64")]
     let (fn_pages, fn_bufs) = usbfn::detached(state, slot);
+    #[cfg(not(target_arch = "x86_64"))]
+    let (fn_pages, fn_bufs): (Vec<DmaRegion>, Vec<(u64, usize)>) = (Vec::new(), Vec::new());
     pages.extend(fn_pages);
     let dev = state.devs.remove(d);
     if let Some(h) = dev.hub {
@@ -2259,7 +2355,9 @@ fn usb_disconnect(state: &mut XhciState, slot: u8) {
     // The slot is disabled: the controller no longer touches the buffer.
     for (id, buf) in gone_msc {
         crate::memory::deallocate_contiguous(buf.phys(), MSC_BUF_PAGES);
+        #[cfg(target_arch = "x86_64")]
         crate::usb_storage::detached(id);
+        let _ = id;
     }
     for (phys, n) in fn_bufs {
         crate::memory::deallocate_contiguous(phys, n);
@@ -2329,6 +2427,7 @@ static HOTPLUG_RUNNING: AtomicBool = AtomicBool::new(false);
 /// handling waits on devices for seconds when one misbehaves; the shell's
 /// core must not wait with it. Events of other devices keep flowing: the
 /// waits drain the event ring themselves.
+#[cfg(target_arch = "x86_64")]
 pub fn hotplug() {
     crate::usb_storage::kick();
     if !HOTPLUG.load(Ordering::Acquire) { return; }
@@ -2336,6 +2435,7 @@ pub fn hotplug() {
     crate::smp::scheduler::spawn("usb hotplug", hotplug_task, 0);
 }
 
+#[cfg(target_arch = "x86_64")]
 fn hotplug_task(_: u64) {
     loop {
         hotplug_pass();
@@ -2350,12 +2450,12 @@ fn hotplug_task(_: u64) {
 
 /// Handle the ports that changed since the last pass: a device that came
 /// is enumerated, one that went is torn down; then the hubs' ports.
-fn hotplug_pass() {
+pub fn hotplug_pass() {
     if !HOTPLUG.swap(false, Ordering::AcqRel) { return; }
     // Which ports, and whether each saw a connect change. Read and cleared
     // under the lock; the debounce waits outside it, so the interrupt keeps
     // draining every other device meanwhile.
-    let mut work: Vec<(pci::PciAddr, Mmio, u32, bool)> = Vec::new();
+    let mut work: Vec<(CtrlId, Mmio, u32, bool)> = Vec::new();
     {
         let mut g = CTRLS.lock();
         for s in g.iter_mut() {
@@ -2375,7 +2475,7 @@ fn hotplug_pass() {
                         && (s.devs.iter().any(|d| d.place.parent.is_none() && d.place.root_port == p)
                             || s.failed.iter().any(|d| d.port == path));
                     if sc & PORTSC_CSC != 0 || gone {
-                        work.push((s.pci_addr, s.oper, p, sc & PORTSC_CSC != 0));
+                        work.push((s.ctrl, s.oper, p, sc & PORTSC_CSC != 0));
                     }
                 }
             }
@@ -2388,7 +2488,7 @@ fn hotplug_pass() {
             false
         };
         let mut g = CTRLS.lock();
-        let Some(s) = g.iter_mut().find(|s| s.pci_addr == addr) else { continue };
+        let Some(s) = g.iter_mut().find(|s| s.ctrl == addr) else { continue };
         let root = s.devs.iter().find(|d| d.place.parent.is_none() && d.place.root_port == port).map(|d| d.slot);
         if let Some(slot) = root {
             usb_disconnect(s, slot);
@@ -2484,9 +2584,8 @@ fn usbhid_start(state: &mut XhciState, i: usize, d: &HidIntfDesc) {
     }
     let slot = state.hid[i].slot;
     let path = dev_idx(state, slot).map(|x| state.devs[x].seen.port.as_str()).unwrap_or("?");
-    kprintln!("[npk] xhci: USB HID on {:02x}:{:02x}.{} port {} interface {}{}{}",
-        state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function,
-        path, d.ifnum,
+    kprintln!("[npk] xhci: USB HID on {} port {} interface {}{}{}",
+        state.ctrl, path, d.ifnum,
         if kbd { " keyboard" } else { "" }, if ptr { " pointer" } else { "" });
     schedule_hid_in(state, i);
 }
@@ -2503,12 +2602,12 @@ fn usbhid_set_leds(state: &mut XhciState, i: usize) {
         h.buf.copy_in(HID_OUT_OFF, &report);
         let len = report.len() as u32;
         let slot = h.slot as u32;
-        let buf = h.buf.phys() + HID_OUT_OFF;
+        let buf = h.buf.bus() + HID_OUT_OFF;
         let Some(o) = state.hid[i].out.as_mut() else { return };
         write_trb(o.ring, o.enqueue, buf, len, TRB_NORMAL | TRB_IOC | o.cycle);
         o.enqueue += 1;
         if o.enqueue >= NUM_TR_TRBS - 1 {
-            write_trb(o.ring, NUM_TR_TRBS - 1, o.ring.phys(), 0, TRB_LINK | o.cycle | (1 << 1));
+            write_trb(o.ring, NUM_TR_TRBS - 1, o.ring.bus(), 0, TRB_LINK | o.cycle | (1 << 1));
             o.cycle ^= 1;
             o.enqueue = 0;
         }
@@ -2526,11 +2625,11 @@ fn usbhid_set_leds(state: &mut XhciState, i: usize) {
 fn schedule_hid_in(state: &mut XhciState, i: usize) {
     let slot = state.hid[i].slot as u32;
     let h = &mut state.hid[i];
-    write_trb(h.in_ring, h.in_enqueue, h.buf.phys(), h.insize as u32,
+    write_trb(h.in_ring, h.in_enqueue, h.buf.bus(), h.insize as u32,
         TRB_NORMAL | TRB_IOC | h.in_cycle);
     h.in_enqueue += 1;
     if h.in_enqueue >= NUM_TR_TRBS - 1 {
-        write_trb(h.in_ring, NUM_TR_TRBS - 1, h.in_ring.phys(), 0, TRB_LINK | h.in_cycle | (1 << 1));
+        write_trb(h.in_ring, NUM_TR_TRBS - 1, h.in_ring.bus(), 0, TRB_LINK | h.in_cycle | (1 << 1));
         h.in_cycle ^= 1;
         h.in_enqueue = 0;
     }
@@ -2582,6 +2681,7 @@ fn hid_stop(h: &mut HidIntf) {
     if h.kbd.repeat_key != 0 && REPEAT_KEY.load(Ordering::Relaxed) == h.kbd.repeat_key {
         REPEAT_KEY.store(0, Ordering::Relaxed);
     }
+    #[cfg(target_arch = "x86_64")]
     if h.keyboard && h.input.modifiers() != 0 {
         crate::keyboard::set_super(false);
         crate::keyboard::set_shift(false);
@@ -2634,6 +2734,7 @@ fn hid_deliver(h: &mut HidIntf, f: &hid_core::input::Frame) {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     for m in f.media.as_slice() {
         match m {
             hid_core::input::Media::Mute => crate::keyboard::toggle_mute(),
@@ -2680,8 +2781,15 @@ pub fn log_unmapped() {
 
 // === Helper functions ===
 
+/// What a controller adds to a physical address to reach RAM (its bus's
+/// `dma-ranges`), set by `attach_platform`; 0 on PCs. Assumes every xHCI
+/// controller in the system sees RAM at the same offset.
+static DMA_BUS_OFF: AtomicU64 = AtomicU64::new(0);
+
+fn dma_bus_off() -> u64 { DMA_BUS_OFF.load(Ordering::Relaxed) }
+
 fn alloc_dma(pages: usize, _name: &str) -> Option<DmaRegion> {
-    DmaRegion::alloc_zeroed(pages)
+    DmaRegion::alloc_zeroed(pages).map(|r| r.with_bus_offset(dma_bus_off()))
 }
 
 
@@ -2800,7 +2908,7 @@ pub struct UsbSeen {
 
 /// One entry of `devices`.
 pub struct UsbListed {
-    pub ctrl: pci::PciAddr,
+    pub ctrl: CtrlId,
     /// What took the device: `hid`, `hub`, `net`, `usb-storage`, or empty.
     pub driver: &'static str,
     pub dev: UsbSeen,
@@ -2818,10 +2926,10 @@ pub fn devices() -> Vec<UsbListed> {
                 else if s.nic.as_ref().is_some_and(|n| n.slot_id == d.slot) { "net" }
                 else if s.msc.iter().any(|m| m.slot == d.slot) { "usb-storage" }
                 else { "" };
-            out.push(UsbListed { ctrl: s.pci_addr, driver, dev: d.seen.clone() });
+            out.push(UsbListed { ctrl: s.ctrl, driver, dev: d.seen.clone() });
         }
         for f in &s.failed {
-            out.push(UsbListed { ctrl: s.pci_addr, driver: "", dev: f.clone() });
+            out.push(UsbListed { ctrl: s.ctrl, driver: "", dev: f.clone() });
         }
     }
     out
@@ -2974,6 +3082,7 @@ struct MscIntfDesc {
     burst: u8,
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The first Bulk-Only mass storage interface of alternate setting 0 with
 /// a bulk IN and a bulk OUT endpoint (`usb_stor_probe1`, `get_pipes`).
 fn parse_msc_interface(cfg: &[u8]) -> Option<MscIntfDesc> {
@@ -3020,6 +3129,7 @@ fn parse_msc_interface(cfg: &[u8]) -> Option<MscIntfDesc> {
     if take && done(&cur) { cur } else { None }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The endpoint context of a bulk endpoint (`xhci_endpoint_init` for bulk:
 /// interval 0, max burst from the companion, CErr 3), its dequeue pointer at
 /// `deq` with cycle state `cycle`.
@@ -3033,6 +3143,7 @@ fn msc_ep_ctx(state: &XhciState, dci: u8, ep_type: u32, deq: u64, cycle: u32, ma
     input.w32(ep + 16, 0);
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Configure both bulk endpoints of a mass storage interface.
 fn cmd_configure_msc(state: &mut XhciState, slot: u8, m: &MscIntfDesc, in_ring: u64, out_ring: u64,
     max_pkt: u16) -> bool
@@ -3045,10 +3156,11 @@ fn cmd_configure_msc(state: &mut XhciState, slot: u8, m: &MscIntfDesc, in_ring: 
     input_slot_copy(state, d, in_dci.max(out_dci));
     msc_ep_ctx(state, in_dci, EP_TYPE_BULK_IN, in_ring, 1, max_pkt, m.burst);
     msc_ep_ctx(state, out_dci, EP_TYPE_BULK_OUT, out_ring, 1, max_pkt, m.burst);
-    post_command(state, state.input_ctx.phys(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
+    post_command(state, state.input_ctx.bus(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
     matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Reset the controller's side of one bulk endpoint, data toggle or
 /// sequence number included: stop it, then drop and add it again with its
 /// dequeue pointer at the enqueue pointer (`xhci_endpoint_reset`).
@@ -3069,13 +3181,14 @@ fn msc_reinit_ep(state: &mut XhciState, i: usize, dir_in: bool) -> bool {
     state.input_ctx.w32(0u32, 1u32 << dci);
     state.input_ctx.w32(4u32, 1 | (1u32 << dci));
     input_slot_copy(state, d, dci);
-    msc_ep_ctx(state, dci, ep_type, ring.phys() + (enq * 16) as u64, cycle, max_pkt, burst);
-    post_command(state, state.input_ctx.phys(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
+    msc_ep_ctx(state, dci, ep_type, ring.bus() + (enq * 16) as u64, cycle, max_pkt, burst);
+    post_command(state, state.input_ctx.bus(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
     let ok = matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS);
     state.msc[i].events.clear();
     ok
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Set up the pipe of a Bulk-Only interface and hand it to `usb_storage`.
 fn msc_probe(state: &mut XhciState, slot: u8, cfg: &[u8], m: MscIntfDesc) {
     let Some(d) = dev_idx(state, slot) else { return };
@@ -3101,8 +3214,8 @@ fn msc_probe(state: &mut XhciState, slot: u8, cfg: &[u8], m: MscIntfDesc) {
     };
     // SAFETY: freshly allocated contiguous frames, identity-mapped RAM as
     // every DMA region; owned by this pipe until `usb_disconnect` frees it.
-    let buf = unsafe { DmaRegion::from_raw(phys, (MSC_BUF_PAGES * 4096) as u64) };
-    if !cmd_configure_msc(state, slot, &m, in_ring.phys(), out_ring.phys(), max_pkt) {
+    let buf = unsafe { DmaRegion::from_raw(phys, (MSC_BUF_PAGES * 4096) as u64) }.with_bus_offset(dma_bus_off());
+    if !cmd_configure_msc(state, slot, &m, in_ring.bus(), out_ring.bus(), max_pkt) {
         kprintln!("[npk] xhci: port {} mass storage: configure endpoints failed", path);
         crate::memory::deallocate_contiguous(phys, MSC_BUF_PAGES);
         state.free_pages.push(in_ring);
@@ -3133,6 +3246,7 @@ fn msc_probe(state: &mut XhciState, slot: u8, cfg: &[u8], m: MscIntfDesc) {
     });
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The controller is about to be reset: every pipe on it ends. Returns the
 /// data buffers, to be freed once the reset stopped the controller.
 fn msc_forget(state: &mut XhciState) -> Vec<DmaRegion> {
@@ -3167,6 +3281,7 @@ fn with_msc<R>(id: u32, f: impl FnOnce(&mut XhciState, usize) -> R) -> Result<R,
     Err(MscError::Gone)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Post one TD of `len` bytes from the pipe's buffer on its IN or OUT ring:
 /// chained TRBs of at most 64 KiB, interrupt on a short packet and at the
 /// end. Returns the TD's first and last TRB address.
@@ -3183,7 +3298,7 @@ fn msc_post(state: &mut XhciState, i: usize, dir_in: bool, len: usize) -> (u64, 
         for k in *enq..NUM_TR_TRBS - 1 {
             write_trb(ring, k, 0, 0, TRB_TR_NOOP | *cycle);
         }
-        write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | *cycle | (1 << 1));
+        write_trb(ring, NUM_TR_TRBS - 1, ring.bus(), 0, TRB_LINK | *cycle | (1 << 1));
         *cycle ^= 1;
         *enq = 0;
     }
@@ -3197,7 +3312,7 @@ fn msc_post(state: &mut XhciState, i: usize, dir_in: bool, len: usize) -> (u64, 
         let flags = if last { TRB_IOC } else { TRB_CHAIN };
         let c = if k == 0 { *cycle ^ 1 } else { *cycle };
         let size = td_remainder(state.hci_version, off, n, len, m.max_pkt as usize, !last);
-        write_trb(ring, first + k, m.buf.phys() + off as u64, n as u32 | (size << 17),
+        write_trb(ring, first + k, m.buf.bus() + off as u64, n as u32 | (size << 17),
             TRB_NORMAL | TRB_ISP | flags | c);
     }
     fence(Ordering::SeqCst);
@@ -3205,11 +3320,11 @@ fn msc_post(state: &mut XhciState, i: usize, dir_in: bool, len: usize) -> (u64, 
     write_trb(ring, first, p, st, ctl ^ TRB_CYCLE);
     *enq = first + trbs;
     if *enq >= NUM_TR_TRBS - 1 {
-        write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | *cycle | (1 << 1));
+        write_trb(ring, NUM_TR_TRBS - 1, ring.bus(), 0, TRB_LINK | *cycle | (1 << 1));
         *cycle ^= 1;
         *enq = 0;
     }
-    let base = ring.phys();
+    let base = ring.bus();
     let (slot, dci) = (m.slot as u32, if dir_in { m.in_dci } else { m.out_dci } as u32);
     m.events.clear();
     ring_doorbell(state, slot, dci);
@@ -3230,6 +3345,7 @@ fn td_remainder(hci_version: u16, queued: usize, trb_len: usize, total: usize, m
     r.min(31) as u32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Stop the endpoint if `stop`, then move its dequeue pointer to the
 /// enqueue pointer, past whatever the TD left (`xhci_handle_halted_endpoint`,
 /// `xhci_move_dequeue_past_td`).
@@ -3237,6 +3353,7 @@ fn msc_skip_td(state: &mut XhciState, i: usize, dir_in: bool, stop: bool) {
     msc_skip_td_then(state, i, dir_in, stop, |_| {});
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `msc_skip_td`, with `after_stop` run between the stop and the move.
 fn msc_skip_td_then(state: &mut XhciState, i: usize, dir_in: bool, stop: bool, after_stop: impl FnOnce(&XhciState)) {
     let m = &state.msc[i];
@@ -3250,11 +3367,12 @@ fn msc_skip_td_then(state: &mut XhciState, i: usize, dir_in: bool, stop: bool, a
     }
     let _ = wait_command_completion(state);
     after_stop(state);
-    post_command(state, ring.phys() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
+    post_command(state, ring.bus() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
     let _ = wait_command_completion(state);
     state.msc[i].events.clear();
 }
 
+#[cfg(target_arch = "x86_64")]
 /// One bulk transfer of `len` bytes through the pipe's buffer: OUT sends
 /// what `msc_buf_write` put there, IN fills it. Returns the bytes moved.
 /// `timeout_ms` bounds the wait; on its end the TD is aborted.
@@ -3296,6 +3414,7 @@ pub(crate) fn msc_transfer(id: u32, dir_in: bool, len: usize, timeout_ms: u64) -
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// What the controller says about a TD that got no completion: the
 /// endpoint's state and dequeue pointer, so a log tells a device that did
 /// not answer from a completion that went missing.
@@ -3320,18 +3439,21 @@ fn msc_timeout_report(state: &XhciState, i: usize, dir_in: bool, len: usize, fir
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Copy `data` into the pipe's buffer at `off`.
 pub(crate) fn msc_buf_write(id: u32, off: usize, data: &[u8]) -> Result<(), MscError> {
     if off.checked_add(data.len()).is_none_or(|e| e > MSC_MAX_XFER) { return Err(MscError::Failed(0)); }
     with_msc(id, |s, i| s.msc[i].buf.copy_in(off, data))
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Copy from the pipe's buffer at `off` into `out`.
 pub(crate) fn msc_buf_read(id: u32, off: usize, out: &mut [u8]) -> Result<(), MscError> {
     if off.checked_add(out.len()).is_none_or(|e| e > MSC_MAX_XFER) { return Err(MscError::Failed(0)); }
     with_msc(id, |s, i| s.msc[i].buf.copy_out(off, out))
 }
 
+#[cfg(target_arch = "x86_64")]
 /// A class request to the interface on EP0; IN data lands in `buf`.
 pub(crate) fn msc_class_request(id: u32, req_type: u8, request: u8, value: u16, buf: &mut [u8]) -> bool {
     with_msc(id, |s, i| {
@@ -3345,6 +3467,7 @@ pub(crate) fn msc_class_request(id: u32, req_type: u8, request: u8, value: u16, 
     }).unwrap_or(false)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// CLEAR_FEATURE(ENDPOINT_HALT) on the bulk IN or OUT endpoint, then the
 /// controller's side of it reset to match (`usb_clear_halt`).
 pub(crate) fn msc_clear_halt(id: u32, dir_in: bool) -> bool {
@@ -3355,6 +3478,7 @@ pub(crate) fn msc_clear_halt(id: u32, dir_in: bool) -> bool {
     }).unwrap_or(false)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The interface subclass (command set) of the pipe.
 pub(crate) fn msc_subclass(id: u32) -> Option<u8> {
     with_msc(id, |s, i| s.msc[i].subclass).ok()
@@ -3369,7 +3493,7 @@ fn post_command(state: &mut XhciState, param: u64, status: u32, mut control: u32
     if state.cmd_enqueue >= NUM_CMD_TRBS - 1 {
         // Wrap: update Link TRB cycle bit and reset enqueue
         let link_ctrl = TRB_LINK | state.cmd_cycle | (1 << 1); // Toggle Cycle
-        write_trb(state.cmd_ring, NUM_CMD_TRBS - 1, state.cmd_ring.phys(), 0, link_ctrl);
+        write_trb(state.cmd_ring, NUM_CMD_TRBS - 1, state.cmd_ring.bus(), 0, link_ctrl);
         state.cmd_cycle ^= 1;
         state.cmd_enqueue = 0;
     }
@@ -3426,7 +3550,7 @@ fn cmd_disable_slot(state: &mut XhciState, slot_id: u8) {
 fn cmd_address_device(state: &mut XhciState, slot: u8, max_packet: u16, bsr: bool) -> bool {
     let Some(d) = dev_idx(state, slot) else { return false };
     let (place, speed) = (state.devs[d].place, state.devs[d].speed);
-    let deq = state.devs[d].ep0.phys() + (state.devs[d].ep0_enqueue * 16) as u64;
+    let deq = state.devs[d].ep0.bus() + (state.devs[d].ep0_enqueue * 16) as u64;
     let dcs = state.devs[d].ep0_cycle;
     let ctx = state.ctx_size;
     let input = state.input_ctx;
@@ -3462,7 +3586,7 @@ fn cmd_address_device(state: &mut XhciState, slot: u8, max_packet: u16, bsr: boo
     input.w32(ep0_off + 16, 8);
 
     let bsr = if bsr { TRB_BSR } else { 0 };
-    post_command(state, input.phys(), 0, TRB_ADDRESS_DEVICE | bsr | ((slot as u32) << 24));
+    post_command(state, input.bus(), 0, TRB_ADDRESS_DEVICE | bsr | ((slot as u32) << 24));
     match wait_command_completion(state) {
         Some((cc, _)) => {
             state.last_cc = cc;
@@ -3499,12 +3623,12 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
         for i in enq..NUM_TR_TRBS - 1 {
             write_trb(ring, i, 0, 0, TRB_TR_NOOP | cycle);
         }
-        write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | cycle | (1 << 1));
+        write_trb(ring, NUM_TR_TRBS - 1, ring.bus(), 0, TRB_LINK | cycle | (1 << 1));
         cycle ^= 1;
         enq = 0;
     }
 
-    let td_first = ring.phys() + (enq * 16) as u64;
+    let td_first = ring.bus() + (enq * 16) as u64;
 
     // Setup Stage TRB
     let setup_lo = bm_request as u32 | ((b_request as u32) << 8)
@@ -3518,19 +3642,19 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
     // Data Stage TRB (if needed)
     if w_length > 0 {
         let dir_bit = if dir_in { TRB_DIR_IN } else { 0 };
-        write_trb(ring, enq, state.data_buf.phys(), w_length as u32, TRB_DATA_STAGE | dir_bit | cycle);
+        write_trb(ring, enq, state.data_buf.bus(), w_length as u32, TRB_DATA_STAGE | dir_bit | cycle);
         enq += 1;
     }
 
     // Status Stage TRB
     let status_dir = if w_length > 0 && dir_in { 0 } else { TRB_DIR_IN };
     write_trb(ring, enq, 0, 0, TRB_STATUS_STAGE | TRB_IOC | status_dir | cycle);
-    let td_last = ring.phys() + (enq * 16) as u64;
+    let td_last = ring.bus() + (enq * 16) as u64;
     enq += 1;
 
     // Wrap check
     if enq >= NUM_TR_TRBS - 1 {
-        write_trb(ring, NUM_TR_TRBS - 1, ring.phys(), 0, TRB_LINK | cycle | (1 << 1));
+        write_trb(ring, NUM_TR_TRBS - 1, ring.bus(), 0, TRB_LINK | cycle | (1 << 1));
         cycle ^= 1;
         enq = 0;
     }
@@ -3563,7 +3687,7 @@ fn usb_control_transfer(state: &mut XhciState, slot: u8, bm_request: u8, b_reque
             if !ok { ep0_recover(state, slot); }
             return ok;
         }
-        if in_ring(e.param, ring.phys()) { continue; }
+        if in_ring(e.param, ring.bus()) { continue; }
         dispatch_transfer(state, &e);
     }
 }
@@ -3587,7 +3711,7 @@ fn ep0_recover(state: &mut XhciState, slot: u8) {
     if ep_state == EP_STATE_HALTED || ep_state == EP_STATE_RUNNING {
         let _ = wait_command_completion(state);
     }
-    post_command(state, ring.phys() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
+    post_command(state, ring.bus() + (enq * 16) as u64 | cycle as u64, 0, TRB_SET_DEQ | sel);
     let _ = wait_command_completion(state);
 }
 
@@ -3679,7 +3803,7 @@ fn cmd_configure_endpoints(state: &mut XhciState, slot: u8, eps: &[(u8, u64, u32
         input.w32(ep_off + 16, ((esit & 0xFFFF) << 16) | (esit & 0xFFFF));
     }
 
-    post_command(state, input.phys(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
+    post_command(state, input.bus(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
     match wait_command_completion(state) {
         Some((cc, _)) => cc == CC_SUCCESS,
         None => false,
@@ -3701,7 +3825,7 @@ fn cmd_evaluate_ep0(state: &mut XhciState, slot: u8, max_packet: u16) -> bool {
     let dw1 = (input.r32(ctx * 2 + 4) & 0x0000_FFFF) | ((max_packet as u32) << 16);
     input.w32(ctx * 2 + 4, dw1);
 
-    post_command(state, input.phys(), 0, TRB_EVALUATE_CTX | ((slot as u32) << 24));
+    post_command(state, input.bus(), 0, TRB_EVALUATE_CTX | ((slot as u32) << 24));
     match wait_command_completion(state) {
         Some((cc, _)) => cc == CC_SUCCESS,
         None => false,
@@ -3826,6 +3950,7 @@ pub fn nic_attached() -> bool {
 /// Ridge xHCI that is never brought up) while the USB2 half of a device lands
 /// on the PCH xHCI. Mem-decode is enabled so BAR reads work; nothing is reset,
 /// halted, or addressed.
+#[cfg(target_arch = "x86_64")]
 pub fn scan_all_controllers() {
     let mut n = 0u32;
     for bus in 0u16..=255 {
@@ -3850,6 +3975,7 @@ pub fn scan_all_controllers() {
     else { kprintln!("[npk] usb: {} xHCI controller(s) total", n); }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn scan_one_controller(addr: pci::PciAddr, vid: u16, did: u16) {
     // Thunderbolt/USB4 host xHCIs are the usual hiding place for USB-C SS.
     let tb = vid == 0x8086 && matches!(did, 0x1574 | 0x15b5 | 0x15b6 | 0x15c1 | 0x15d4
@@ -3899,6 +4025,7 @@ fn scan_one_controller(addr: pci::PciAddr, vid: u16, did: u16) {
 /// hot reset (PR, bit 4), which cannot revive a Disabled link. If a port reaches
 /// Enabled (PED=1) at speed=4 afterwards, SuperSpeed trained and the device is
 /// attachable on this controller. Touches only TB-host USB3 ports.
+#[cfg(target_arch = "x86_64")]
 pub fn tb_warm_reset() {
     let mut hit = 0u32;
     for bus in 0u16..=255 {
@@ -3924,6 +4051,7 @@ pub fn tb_warm_reset() {
     if hit == 0 { kprintln!("[npk] tbtrain: no Thunderbolt xHCI found"); }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn tb_warm_reset_ctrl(addr: pci::PciAddr, did: u16) {
     let cmd = pci::read16(addr, 0x04);
     pci::write32(addr, 0x04, (cmd | 0x02) as u32);
@@ -4083,20 +4211,19 @@ fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -
         return false;
     };
     // Bulk-IN uses NIC_RX_BUFS slots; bulk-OUT uses the whole ring.
-    write_trb(in_ring, NIC_RX_BUFS, in_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
-    write_trb(out_ring, NUM_TR_TRBS - 1, out_ring.phys(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(in_ring, NIC_RX_BUFS, in_ring.bus(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
+    write_trb(out_ring, NUM_TR_TRBS - 1, out_ring.bus(), 0, TRB_LINK | TRB_CYCLE | (1 << 1));
 
     let in_dci = ep_in * 2 + 1;   // IN endpoint
     let out_dci = ep_out * 2;     // OUT endpoint
     let bulk_mp = if speed >= SPEED_SUPER { 1024 } else { 512 };
-    if !cmd_configure_bulk(state, slot, in_dci, in_ring.phys(), out_dci, out_ring.phys(), bulk_mp) {
+    if !cmd_configure_bulk(state, slot, in_dci, in_ring.bus(), out_dci, out_ring.bus(), bulk_mp) {
         kprintln!("[npk] xhci: nic configure-bulk failed (speed {})", speed);
         return false;
     }
 
-    kprintln!("[npk] xhci: NIC attached on {:02x}:{:02x}.{} port {} (slot {}, bulk in EP{} out EP{}, speed {})",
-        state.pci_addr.bus, state.pci_addr.device, state.pci_addr.function,
-        path, slot, ep_in, ep_out, speed);
+    kprintln!("[npk] xhci: NIC attached on {} port {} (slot {}, bulk in EP{} out EP{}, speed {})",
+        state.ctrl, path, slot, ep_in, ep_out, speed);
 
     state.nic = Some(NicRings {
         slot_id: slot, port_num: root_port, port_speed: speed,
@@ -4120,6 +4247,7 @@ fn nic_probe(state: &mut XhciState, vid: u16, pid: u16, ep_in: u8, ep_out: u8) -
 /// 3. Last resort: reset the known controllers, enumerate again, look.
 ///
 /// The fallbacks exist because without network there is no way to update.
+#[cfg(target_arch = "x86_64")]
 pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     if nic_attached() { return true; }
 
@@ -4167,7 +4295,10 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
     // Last resort: reset the known controllers. `init()` stores every
     // controller, so the previous fallback usually finds none; losing the
     // devices on a controller is better than having no network.
-    let addrs: Vec<pci::PciAddr> = CTRLS.lock().iter().map(|s| s.pci_addr).collect();
+    let addrs: Vec<pci::PciAddr> = CTRLS.lock().iter().filter_map(|s| match s.ctrl {
+        CtrlId::Pci(a) => Some(a),
+        _ => None,
+    }).collect();
     for a in addrs {
         kprintln!("[npk] xhci: NIC not found gently on {:02x}:{:02x}.{} — falling back to a \
                    controller RESET (everything addressed there loses its slot)",
@@ -4176,12 +4307,12 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
         let mut fn_bufs: Vec<(u64, usize)> = Vec::new();
         {
             let mut g = CTRLS.lock();
-            for s in g.iter_mut().filter(|s| s.pci_addr == a) {
+            for s in g.iter_mut().filter(|s| s.ctrl == CtrlId::Pci(a)) {
                 hid_forget(s);
                 msc_bufs.extend(msc_forget(s));
                 fn_bufs.extend(usbfn::forget(s));
             }
-            g.retain(|s| s.pci_addr != a);
+            g.retain(|s| s.ctrl != CtrlId::Pci(a));
         }
         let id = pci::read32(a, 0x00);
         let pci_dev = pci::PciDevice {
@@ -4205,8 +4336,9 @@ pub fn nic_attach(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> bool {
 }
 
 /// Whether the table already tracks this controller.
+#[cfg(target_arch = "x86_64")]
 fn ctrl_known(addr: pci::PciAddr) -> bool {
-    CTRLS.lock().iter().any(|s| s.pci_addr == addr)
+    CTRLS.lock().iter().any(|s| s.ctrl == CtrlId::Pci(addr))
 }
 
 /// Configure both bulk endpoints (IN + OUT) of `slot` in one Configure
@@ -4235,7 +4367,7 @@ fn cmd_configure_bulk(state: &mut XhciState, slot: u8, in_dci: u8, in_ring: u64,
         input.w32(ep + 16, max_pkt as u32);
     }
 
-    post_command(state, input.phys(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
+    post_command(state, input.bus(), 0, TRB_CONFIGURE_EP | ((slot as u32) << 24));
     matches!(wait_command_completion(state), Some((cc, _)) if cc == CC_SUCCESS)
 }
 
@@ -4248,13 +4380,13 @@ fn nic_arm_rx(state: &mut XhciState, buf_idx: usize) {
         let n = match state.nic.as_mut() { Some(n) => n, None => return };
         let ring_slot = n.in_enq;
         let cyc = n.in_cycle;
-        let addr = n.in_buf.phys() + (buf_idx * NIC_BULK_BUF_BYTES) as u64;
+        let addr = n.in_buf.bus() + (buf_idx * NIC_BULK_BUF_BYTES) as u64;
         write_trb(n.in_ring, ring_slot, addr, NIC_BULK_BUF_BYTES as u32,
             TRB_NORMAL | TRB_IOC | cyc);
         n.trb_buf[ring_slot] = buf_idx;
         n.in_enq += 1;
         if n.in_enq >= NIC_RX_BUFS {
-            write_trb(n.in_ring, NIC_RX_BUFS, n.in_ring.phys(), 0, TRB_LINK | cyc | (1 << 1));
+            write_trb(n.in_ring, NIC_RX_BUFS, n.in_ring.bus(), 0, TRB_LINK | cyc | (1 << 1));
             n.in_cycle ^= 1;
             n.in_enq = 0;
         }
@@ -4313,7 +4445,7 @@ fn nic_bulk_out_on(state: &mut XhciState, data: &[u8]) -> bool {
         let n = match state.nic.as_mut() { Some(n) => n, None => return false };
         let bidx = n.tx_next;
         let off = bidx * NIC_TX_BUF_BYTES;
-        let addr = n.out_buf.phys() + off as u64;
+        let addr = n.out_buf.bus() + off as u64;
         // Slot `bidx` is free: tx_inflight < NIC_TX_BUFS means the last user
         // of this round-robin slot has completed.
         n.out_buf.copy_in(off, &data[..len]);
@@ -4323,7 +4455,7 @@ fn nic_bulk_out_on(state: &mut XhciState, data: &[u8]) -> bool {
         write_trb(n.out_ring, idx, addr, len as u32, TRB_NORMAL | TRB_IOC | cyc);
         n.out_enq += 1;
         if n.out_enq >= NUM_TR_TRBS - 1 {
-            write_trb(n.out_ring, NUM_TR_TRBS - 1, n.out_ring.phys(), 0, TRB_LINK | cyc | (1 << 1));
+            write_trb(n.out_ring, NUM_TR_TRBS - 1, n.out_ring.bus(), 0, TRB_LINK | cyc | (1 << 1));
             n.out_cycle ^= 1;
             n.out_enq = 0;
         }
@@ -4471,7 +4603,7 @@ fn next_event(state: &mut XhciState) -> Option<Evt> {
 /// run at least once per pass that took events, or the controller reports
 /// no further events.
 fn flush_erdp(state: &XhciState) {
-    let erdp = state.evt_ring.phys() + (state.evt_dequeue * 16) as u64;
+    let erdp = state.evt_ring.bus() + (state.evt_dequeue * 16) as u64;
     state.rt.sub(IR0, IR_LEN).w64_lo_hi(0x18u32, erdp | (1 << 3));
 }
 
@@ -4486,13 +4618,14 @@ fn in_ring(a: u64, base: u64) -> bool {
 /// Returns `false` if the event belongs to no device here (then it belongs
 /// to a synchronous waiter running a control transfer or command).
 fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
+    #[cfg(target_arch = "x86_64")]
     if !state.fn_devs.is_empty() && usbfn::dispatch(state, e) { return true; }
     let a = e.param;
     let cc = e.cc;
     let ok = cc == CC_SUCCESS || cc == CC_SHORT_PACKET;
 
     // The network device: largest rings and most events at runtime.
-    if let Some((ir, or)) = state.nic.as_ref().map(|n| (n.in_ring.phys(), n.out_ring.phys())) {
+    if let Some((ir, or)) = state.nic.as_ref().map(|n| (n.in_ring.bus(), n.out_ring.bus())) {
         let on_in = ir != 0 && a >= ir && a < ir + ((NIC_RX_BUFS + 1) * 16) as u64;
         let on_out = or != 0 && a >= or && a < or + (NUM_TR_TRBS * 16) as u64;
         if on_in {
@@ -4542,7 +4675,7 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
 
     // Mass storage: the waiter in `msc_transfer` picks its completion up.
     if let Some(m) = state.msc.iter_mut()
-        .find(|m| in_ring(a, m.in_ring.phys()) || in_ring(a, m.out_ring.phys()))
+        .find(|m| in_ring(a, m.in_ring.bus()) || in_ring(a, m.out_ring.bus()))
     {
         if m.events.len() < MSC_MAX_EVENTS {
             m.events.push(MscEvt { addr: a, cc, residual: e.residual });
@@ -4553,18 +4686,18 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
     // HID interfaces: an IN completion is a report, an OUT completion the
     // end of an output report (LEDs).
     for i in 0..state.hid.len() {
-        if in_ring(a, state.hid[i].in_ring.phys()) {
+        if in_ring(a, state.hid[i].in_ring.bus()) {
             if state.hid[i].running { hid_irq_in(state, i, e); }
             return true;
         }
-        if state.hid[i].out.as_ref().is_some_and(|o| in_ring(a, o.ring.phys())) {
+        if state.hid[i].out.as_ref().is_some_and(|o| in_ring(a, o.ring.bus())) {
             return true;
         }
     }
 
     // Hub status change endpoints.
     let hub = state.devs.iter()
-        .find(|d| d.hub.as_ref().is_some_and(|h| in_ring(a, h.ring.phys())))
+        .find(|d| d.hub.as_ref().is_some_and(|h| in_ring(a, h.ring.bus())))
         .map(|d| d.slot);
     if let Some(slot) = hub {
         hub_irq(state, slot, e);
@@ -4617,13 +4750,18 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
     let super_held = (modifiers & 0x88) != 0; // L/R GUI (Super)
 
     // Update shared modifier state (used by shade compositor)
-    crate::keyboard::set_super(super_held);
-    crate::keyboard::set_shift(shift);
-    crate::keyboard::set_ctrl(ctrl);
-    crate::keyboard::set_alt(alt);
+    #[cfg(target_arch = "x86_64")]
+    {
+        crate::keyboard::set_super(super_held);
+        crate::keyboard::set_shift(shift);
+        crate::keyboard::set_ctrl(ctrl);
+        crate::keyboard::set_alt(alt);
+    }
 
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (alt, super_held);
     // Use cached layout (IRQ-safe, no allocation)
-    let is_de = crate::keyboard::is_de_layout();
+    let is_de = is_de_layout();
 
     // Find the first non-zero key in the current report for repeat tracking
     let first_key = keys.iter().find(|&&k| k != 0 && k != 1).copied().unwrap_or(0);
@@ -4669,12 +4807,14 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
         // focused Input/TextArea). Routed as a ShadeAction so the actual
         // copy runs in the main loop, not this poll/IRQ context. In a
         // terminal Ctrl+C must stay SIGINT, so copy is the Shift variant.
+        #[cfg(target_arch = "x86_64")]
         if ctrl && shift && key == 0x06 {
             crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::Copy);
             continue;
         }
         // Ctrl+Shift+V → paste the clipboard (terminal input line or focused
         // Input/TextArea). Plain Ctrl+V still reaches widgets as 'v'+ctrl.
+        #[cfg(target_arch = "x86_64")]
         if ctrl && shift && key == 0x19 {
             crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::Paste);
             continue;
@@ -4686,12 +4826,14 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
         // a copy when a text widget is focused. Elsewhere the loop consumes
         // it as ^C. HID 0x06 = 'c'.
         if ctrl && key == 0x06 {
+            #[cfg(target_arch = "x86_64")]
             crate::intent::request_cancel();
             push_key(0x03);
             continue;
         }
 
         // Mod+special keys: push shade actions directly (avoids ESC sequence race)
+        #[cfg(target_arch = "x86_64")]
         if super_held && crate::shade::is_active() {
             let handled = match key {
                 0x4F => { crate::shade::input::push_action_direct(if ctrl { crate::shade::input::ShadeAction::ResizeRight } else if shift { crate::shade::input::ShadeAction::SwapRight } else { crate::shade::input::ShadeAction::FocusRight }); true }
@@ -4740,6 +4882,15 @@ static UTF8_TAIL: spin::Mutex<crate::input::Utf8Tail> =
 /// forever on it.
 fn take_tail() -> Option<u8> {
     crate::arch::without_interrupts(|| UTF8_TAIL.lock().take())
+}
+
+/// Whether keys map through the de_CH layout. Where the `keyboard` setting
+/// is not ported (it lives in `config`), its default.
+fn is_de_layout() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return crate::keyboard::is_de_layout();
+    #[cfg(not(target_arch = "x86_64"))]
+    true
 }
 
 /// HID code to the first byte of the character; the rest goes to
