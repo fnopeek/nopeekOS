@@ -717,6 +717,41 @@ fn can_take(c: usize) -> bool {
 /// core has looked again at least once.
 const INBOX_STARVE_MS: u64 = 20;
 
+/// Wake period of `worker_idle_hlt` in counter units; 0 = 10 ms.
+static POLL_PERIOD: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
+
+/// How often `worker_idle_hlt` wakes on the calling worker: `hz` per second.
+/// A native network loop (download) raises it to poll its NIC ring without a
+/// device IRQ; pass 100 to go back to 10 ms.
+pub fn set_worker_poll_hz(hz: u32) {
+    let cid = current_core_id();
+    if cid == 0 || cid >= 256 { return; }
+    let freq = crate::time::counter_hz();
+    let period = if hz <= 100 { 0 } else { freq / hz as u64 };
+    POLL_PERIOD[cid].store(period, Ordering::Relaxed);
+}
+
+/// Idle step of a worker-core wait loop that polls (the native network
+/// receive loops: `tcp_recv_poll`, `recv_blocking`): halt for one poll
+/// period — 10 ms, or what `set_worker_poll_hz` asked for — or until an
+/// interrupt. Spin on Core 0, which has its own idle path.
+pub fn worker_idle_hlt() {
+    let cid = current_core_id();
+    if cid == 0 || cid >= 256 { core::hint::spin_loop(); return; }
+    let freq = crate::time::counter_hz();
+    let p = match POLL_PERIOD[cid].load(Ordering::Relaxed) {
+        0 => freq / 100,
+        p => p,
+    };
+    hw::halt_until(Some(crate::time::counter() + p), WAKE_HLT_FALLBACK);
+}
+
+/// Halt this core until `deadline` or an interrupt (the architecture's
+/// `halt_until`).
+pub fn halt_until(deadline: Option<u64>, cause: usize) {
+    hw::halt_until(deadline, cause);
+}
+
 /// A started core's scheduler loop, entered from the architecture's AP
 /// entry once the core can take interrupts, with them masked. Waits for
 /// `start_scheduler`, then never returns.

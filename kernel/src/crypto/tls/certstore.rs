@@ -302,13 +302,11 @@ pub fn verify_chain(chain: &[&[u8]], hostname: &str) -> Result<(), CertError> {
 
 // ── Validity dates ────────────────────────────────────────────────────
 //
-// Below this, the clock is not believable and the check is skipped rather
-// than enforced. A dead CMOS battery reads the year 2000; enforcing
+// Below the clock's floor (`time::CLOCK_SANE_FLOOR`) the check is skipped
+// rather than enforced. A dead CMOS battery reads the year 2000; enforcing
 // against that would reject every certificate and take HTTPS down
-// completely, a far worse failure than honouring a stale one. The floor
-// only has to be late enough that a plausible clock is a useful clock:
-// 1 January 2025.
-pub(crate) const CLOCK_SANE_FLOOR: u64 = 1_735_689_600;
+// completely, a far worse failure than honouring a stale one.
+use crate::time::CLOCK_SANE_FLOOR;
 
 /// Current UTC seconds, or `None` when the clock is unset or implausible.
 fn now_unix() -> Option<u64> {

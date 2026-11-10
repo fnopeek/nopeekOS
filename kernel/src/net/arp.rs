@@ -56,7 +56,7 @@ pub fn our_ip() -> [u8; 4] { *OUR_IP.lock() }
 fn ticks() -> u64 { crate::time::ticks() }
 
 /// Do what a call into the table left to do, after its lock is gone.
-fn run(out: Out<Pkt>) -> Option<Result<(), crate::virtio_net::NetError>> {
+fn run(out: Out<Pkt>) -> Option<Result<(), crate::netdev::NetError>> {
     let mut last = None;
     for (target, dst) in out.solicit {
         send_request(target, dst.unwrap_or(eth::BROADCAST));
@@ -76,7 +76,7 @@ fn run(out: Out<Pkt>) -> Option<Result<(), crate::virtio_net::NetError>> {
 /// Send `p` to the next hop `hop` (`ip_finish_output2`): at once when its
 /// address is known, else once ARP answers. `Ok(true)` when it went to the
 /// card, `Ok(false)` when it waits, the card's refusal otherwise.
-pub fn output(hop: [u8; 4], p: Pkt) -> Result<bool, crate::virtio_net::NetError> {
+pub fn output(hop: [u8; 4], p: Pkt) -> Result<bool, crate::netdev::NetError> {
     let mut out = Out::default();
     TABLE.lock().output(&mut out, ticks(), hop, p);
     let mine = !out.send.is_empty();

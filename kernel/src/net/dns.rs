@@ -324,7 +324,7 @@ fn lookup_until(name: &str, cancellable: bool) -> Option<Outcome> {
         // Halt until the next poll period instead of spinning: the wait can
         // last two minutes.
         if out.send.is_empty() {
-            crate::interrupts::worker_idle_hlt();
+            crate::smp::per_core::worker_idle_hlt();
         }
     }
 }

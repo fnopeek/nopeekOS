@@ -679,7 +679,7 @@ const EGRESS_MAX: usize = 4096;
 /// (`CHECKSUM_PARTIAL`, as the guest handed it over with `VIRTIO_NET_F_CSUM`),
 /// and the card or `netdev::checksum_help` completes it.
 fn egress_send(dst: [u8; 4], proto: u8, seg: &[u8], head: Forwarded)
-    -> Result<bool, crate::virtio_net::NetError>
+    -> Result<bool, crate::netdev::NetError>
 {
     if proto == PROTO_TCP || proto == PROTO_UDP {
         crate::net::ipv4::try_send_partial(dst, proto, seg, head)
@@ -691,7 +691,7 @@ fn egress_send(dst: [u8; 4], proto: u8, seg: &[u8], head: Forwarded)
 /// Hand one masqueraded packet to the host card, or park it behind the ones
 /// already waiting.
 fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded) {
-    use crate::virtio_net::NetError;
+    use crate::netdev::NetError;
     // What no card can send never parks: the backlog's bound is then
     // `EGRESS_MAX` frames of at most an MTU, whatever the guest hands us.
     if ETH_HDR_LEN + IPV4_HDR_LEN + seg.len() > crate::netdev::MTU {
@@ -721,7 +721,7 @@ fn egress(dst: [u8; 4], proto: u8, seg: Vec<u8>, head: Forwarded) {
 
 /// Send what the card will take now. True when nothing is left waiting.
 pub fn egress_flush() -> bool {
-    use crate::virtio_net::NetError;
+    use crate::netdev::NetError;
     if EGRESS_LEN.load(AtOrd::Acquire) == 0 { return true; }
     let mut q = EGRESS.lock();
     if EGRESS_BLOCKED.load(AtOrd::Acquire) { return false; }
@@ -1259,7 +1259,7 @@ fn emit_tcp_tso(hp: u16, our_ip: [u8; 4], dst_ip: [u8; 4], l4: &[u8],
                 NS_TX_BYTES.fetch_add(bytes, AtOrd::Relaxed);
                 return true;
             }
-            Err(crate::virtio_net::NetError::QueueFull) => {}
+            Err(crate::netdev::NetError::QueueFull) => {}
             Err(_) => return false,
         }
     }

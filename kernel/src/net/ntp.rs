@@ -52,7 +52,7 @@ pub fn query(server_ip: [u8; 4]) -> Option<u64> {
             if udp::take_error(local_port) == Some((server_ip, NTP_PORT)) {
                 break 'attempts;
             }
-            crate::interrupts::worker_idle_hlt();
+            crate::smp::per_core::worker_idle_hlt();
         }
     }
     udp::unlisten(local_port);
@@ -73,5 +73,5 @@ fn parse_reply(data: &[u8], nonce: &[u8; 8]) -> Option<u64> {
     let unix = secs.checked_sub(NTP_EPOCH_OFFSET)?;
     // Earlier than this is not believable, and certificate checks would
     // stop being enforced below it.
-    (unix >= crate::tls::certstore::CLOCK_SANE_FLOOR).then_some(unix)
+    (unix >= crate::time::CLOCK_SANE_FLOOR).then_some(unix)
 }

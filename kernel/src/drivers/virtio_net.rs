@@ -24,6 +24,7 @@ use spin::Mutex;
 use crate::hw::DmaRegion;
 use crate::arch::x86_64::PortRange;
 use crate::{kprintln, memory, pci};
+use crate::netdev::NetError;
 
 const VIRTIO_VENDOR: u16 = 0x1AF4;
 const VIRTIO_NET_DEV: u16 = 0x1000;
@@ -751,19 +752,3 @@ fn align_up(val: usize, align: usize) -> usize {
     (val + align - 1) & !(align - 1)
 }
 
-#[derive(Debug)]
-pub enum NetError {
-    NotInitialized,
-    FrameTooLarge,
-    QueueFull,
-}
-
-impl core::fmt::Display for NetError {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        match self {
-            NetError::NotInitialized => write!(f, "network not initialized"),
-            NetError::FrameTooLarge => write!(f, "frame too large"),
-            NetError::QueueFull => write!(f, "TX queue full"),
-        }
-    }
-}

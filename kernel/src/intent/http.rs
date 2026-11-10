@@ -2228,10 +2228,10 @@ fn https_get_once(
     // Timer-NAPI at 10 kHz for the handshake and the body; at the default
     // 100 Hz the socket would be polled only every 10 ms. The guard restores
     // 100 Hz on every exit path, including the `?` returns below.
-    crate::interrupts::set_worker_poll_hz(10_000);
+    crate::smp::per_core::set_worker_poll_hz(10_000);
     struct PollHzGuard;
     impl Drop for PollHzGuard {
-        fn drop(&mut self) { crate::interrupts::set_worker_poll_hz(100); }
+        fn drop(&mut self) { crate::smp::per_core::set_worker_poll_hz(100); }
     }
     let _hz = PollHzGuard;
 
@@ -2633,10 +2633,10 @@ fn http_post_zeros(host: &str, path: &str, total: usize) -> Result<String, &'sta
                   ip[0], ip[1], ip[2], ip[3], port, e);
         "TCP connect failed"
     })?;
-    crate::interrupts::set_worker_poll_hz(10_000);
+    crate::smp::per_core::set_worker_poll_hz(10_000);
     struct PollHzGuard;
     impl Drop for PollHzGuard {
-        fn drop(&mut self) { crate::interrupts::set_worker_poll_hz(100); }
+        fn drop(&mut self) { crate::smp::per_core::set_worker_poll_hz(100); }
     }
     let _poll_hz_guard = PollHzGuard;
 
@@ -2929,10 +2929,10 @@ fn http_exchange(
     // transfer so the recv loop's HLT wakes every ~100 µs (vs 10 ms at 100 Hz):
     // low-latency polling without burning the core. The guard restores 100 Hz on
     // every exit path (success, error, redirect).
-    crate::interrupts::set_worker_poll_hz(10_000);
+    crate::smp::per_core::set_worker_poll_hz(10_000);
     struct PollHzGuard;
     impl Drop for PollHzGuard {
-        fn drop(&mut self) { crate::interrupts::set_worker_poll_hz(100); }
+        fn drop(&mut self) { crate::smp::per_core::set_worker_poll_hz(100); }
     }
     let _poll_hz_guard = PollHzGuard;
 

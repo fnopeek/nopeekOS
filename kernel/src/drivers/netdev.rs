@@ -3,11 +3,28 @@
 //! Dispatches to Intel NIC, WASM driver NIC, or virtio-net (in that order).
 
 use crate::{virtio_net, intel_nic, rtl8153};
-use crate::virtio_net::NetError;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 pub const MTU: usize = 1514;
+
+/// How a frame could not be handed to the network device.
+#[derive(Debug)]
+pub enum NetError {
+    NotInitialized,
+    FrameTooLarge,
+    QueueFull,
+}
+
+impl core::fmt::Display for NetError {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        match self {
+            NetError::NotInitialized => write!(f, "network not initialized"),
+            NetError::FrameTooLarge => write!(f, "frame too large"),
+            NetError::QueueFull => write!(f, "TX queue full"),
+        }
+    }
+}
 
 // ── WASM-backed NIC (registered by WASM driver modules) ──
 

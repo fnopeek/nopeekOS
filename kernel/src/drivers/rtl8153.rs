@@ -7,7 +7,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use spin::Mutex;
-use crate::virtio_net::NetError;
+use crate::netdev::NetError;
 use crate::drivers::netdev::MTU;
 
 const VID: u16 = 0x0bda;

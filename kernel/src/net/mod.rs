@@ -231,7 +231,7 @@ pub fn rx_wait(since: u64) {
     crate::arch::without_interrupts(|| {
         if RX_GEN.load(Ordering::SeqCst) == since {
             let tick = crate::time::counter() + crate::time::counter_hz() / 100;
-            crate::interrupts::halt_until(Some(tick), crate::smp::per_core::WAKE_HLT_FALLBACK);
+            crate::smp::per_core::halt_until(Some(tick), crate::smp::per_core::WAKE_HLT_FALLBACK);
         }
     });
     RX_WAITERS.fetch_and(!bit, Ordering::SeqCst);

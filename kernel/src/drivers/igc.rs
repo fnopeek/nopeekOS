@@ -15,7 +15,7 @@ use core::sync::atomic::{AtomicU16, Ordering};
 use spin::Mutex;
 use crate::{kprintln, pci};
 use crate::hw::{DmaRegion, Mmio};
-use crate::virtio_net::NetError;
+use crate::netdev::NetError;
 
 pub const MTU: usize = 1514;
 

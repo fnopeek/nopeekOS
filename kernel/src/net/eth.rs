@@ -35,19 +35,19 @@ fn pkt_type(frame: &[u8]) -> net_core::ip::PktType {
 }
 
 /// Build and send an Ethernet frame
-pub fn send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), crate::virtio_net::NetError> {
+pub fn send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), crate::netdev::NetError> {
     netdev::send(&build_frame(dst, ethertype, payload))
 }
 
 /// `send_frame` through `netdev::try_send`: a full ring is refused at once.
-pub fn try_send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), crate::virtio_net::NetError> {
+pub fn try_send_frame(dst: &[u8; 6], ethertype: u16, payload: &[u8]) -> Result<(), crate::netdev::NetError> {
     netdev::try_send(&build_frame(dst, ethertype, payload))
 }
 
 /// `try_send_frame` for an IPv4 packet whose TCP/UDP check holds the
 /// pseudo-header seed; `l4_off` is the L4 header's offset in `payload`.
 pub fn try_send_frame_csum(dst: &[u8; 6], ethertype: u16, payload: &[u8], l4_off: usize,
-                           tcp: bool) -> Result<(), crate::virtio_net::NetError> {
+                           tcp: bool) -> Result<(), crate::netdev::NetError> {
     let mut frame = build_frame(dst, ethertype, payload);
     netdev::try_send_csum(&mut frame, HEADER_LEN + l4_off, tcp)
 }

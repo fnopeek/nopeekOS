@@ -8,6 +8,10 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 use super::zone;
 
+/// Below this a clock is not believable: late enough that a plausible
+/// clock is a useful one, 1 January 2025.
+pub const CLOCK_SANE_FLOOR: u64 = 1_735_689_600;
+
 /// UTC seconds and the `time::uptime_ns` they were taken at.
 static WALL: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 

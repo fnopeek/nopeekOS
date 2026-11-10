@@ -562,8 +562,6 @@ pub fn make_core0_tickless() {
 /// TSC value the core's one-shot is armed to; 0 = not armed (fired or
 /// disarmed). Lets a vCPU skip re-arming the same deadline on every entry.
 static ARMED: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-/// Wake period of `worker_idle_hlt` in TSC cycles; 0 = 10 ms.
-static POLL_PERIOD: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
 
 /// Wake IPI for an idle worker — pure EOI; the interrupt ending the HLT is
 /// the effect.
@@ -820,32 +818,6 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     // Woken by something else: the one-shot is still pending — drop it.
     if own_timer && deadline.is_some() { disarm(); }
     crate::arch::irq_restore(irq);
-}
-
-/// How often `worker_idle_hlt` wakes on the calling worker: `hz` per second.
-/// A native network loop (download) raises it to poll its NIC ring without a
-/// device IRQ; pass 100 to go back to 10 ms.
-pub fn set_worker_poll_hz(hz: u32) {
-    let cid = crate::smp::per_core::current_core_id();
-    if cid == 0 || cid >= 256 { return; }
-    let freq = crate::time::counter_hz();
-    let period = if hz <= 100 { 0 } else { freq / hz as u64 };
-    POLL_PERIOD[cid].store(period, Ordering::Relaxed);
-}
-
-/// Idle step of a worker-core wait loop that polls (the native network
-/// receive loops: `tcp_recv_poll`, `recv_blocking`): halt for one poll
-/// period — 10 ms, or what `set_worker_poll_hz` asked for — or until an
-/// interrupt. Spin on Core 0, which has its own idle path.
-pub fn worker_idle_hlt() {
-    let cid = crate::smp::per_core::current_core_id();
-    if cid == 0 || cid >= 256 { core::hint::spin_loop(); return; }
-    let freq = crate::time::counter_hz();
-    let p = match POLL_PERIOD[cid].load(Ordering::Relaxed) {
-        0 => freq / 100,
-        p => p,
-    };
-    halt_until(Some(crate::time::counter() + p), crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
 // ── Input interrupts ────────────────────────────────────────────────

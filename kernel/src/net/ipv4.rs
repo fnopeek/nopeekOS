@@ -345,7 +345,7 @@ pub struct Forwarded {
 /// address, `Err(QueueFull)` when the ring is full and the caller should keep
 /// the packet and retry.
 pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
-    -> Result<bool, crate::virtio_net::NetError>
+    -> Result<bool, crate::netdev::NetError>
 {
     transmit(dst_ip, protocol, payload, 64, Tx::Try, Some(head), None).map(|h| h == Handed::Card)
 }
@@ -353,7 +353,7 @@ pub fn try_send(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
 /// `try_send` for a TCP or UDP payload whose check field holds the
 /// pseudo-header seed (`CHECKSUM_PARTIAL`); the card completes it.
 pub fn try_send_partial(dst_ip: [u8; 4], protocol: u8, payload: &[u8], head: Forwarded)
-    -> Result<bool, crate::virtio_net::NetError>
+    -> Result<bool, crate::netdev::NetError>
 {
     transmit(dst_ip, protocol, payload, 64, Tx::TryPartial, Some(head), None).map(|h| h == Handed::Card)
 }
@@ -386,7 +386,7 @@ enum Handed {
 /// address, ours by default.
 fn transmit(dst_ip: [u8; 4], protocol: u8, payload: &[u8], ttl: u8, tx: Tx,
             head: Option<Forwarded>, src: Option<[u8; 4]>)
-    -> Result<Handed, crate::virtio_net::NetError>
+    -> Result<Handed, crate::netdev::NetError>
 {
     mib::inc(Mib::IpOutRequests);
     // __mkroute_output: no loopback device, and 0/8 and 240/4 lead nowhere.

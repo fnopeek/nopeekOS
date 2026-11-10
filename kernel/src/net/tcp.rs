@@ -184,7 +184,7 @@ fn connect_with(owner: Owner, remote_ip: [u8; 4], remote_port: u16, cancellable:
         }
         // Halt until the next poll period instead of spinning through up to
         // ten seconds of handshake.
-        crate::interrupts::worker_idle_hlt();
+        crate::smp::per_core::worker_idle_hlt();
     }
 
     Ok(handle)
