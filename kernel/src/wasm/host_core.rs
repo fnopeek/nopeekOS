@@ -1154,27 +1154,31 @@ fn stream_allowed(ctx: &HostState) -> bool {
     capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "terminal stream")
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_stream_open(ctx: &mut HostState, idx: i32) -> i32 {
     if !stream_allowed(ctx) { return -1; }
     // -1 = the everything-sink: every write, whichever terminal it was
     // routed to. A remote console bound to one index goes silent as soon
     // as output is redirected elsewhere.
     if idx < 0 {
-        return if crate::shade::terminal::stream_open_global() { 0 } else { -1 };
+        crate::serial::mirror_open();
+        return 0;
     }
-    if crate::shade::terminal::stream_open(idx as usize) { 0 } else { -1 }
+    #[cfg(target_arch = "x86_64")]
+    if crate::shade::terminal::stream_open(idx as usize) { return 0; }
+    -1
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_stream_close(ctx: &mut HostState, idx: i32) -> i32 {
     if !stream_allowed(ctx) { return -1; }
-    if idx >= 0 { crate::shade::terminal::stream_close(idx as usize); }
-    else { crate::shade::terminal::stream_close_global(); }
+    if idx < 0 {
+        crate::serial::mirror_close();
+    } else {
+        #[cfg(target_arch = "x86_64")]
+        crate::shade::terminal::stream_close(idx as usize);
+    }
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 /// Injects a key byte into the shell's input queue.
 ///
 /// Requires `Rights::HARDWARE`: the shell executes what arrives there with
@@ -1190,7 +1194,7 @@ pub(crate) fn npk_key_inject(ctx: &mut HostState, byte: i32) -> i32 {
     if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_key_inject") {
         return -1;
     }
-    crate::keyboard::inject_byte((byte & 0xFF) as u8);
+    crate::input::inject_byte((byte & 0xFF) as u8);
     0
 }
 
@@ -4375,16 +4379,17 @@ pub(crate) fn npk_set_theme(mem: &mut [u8], ctx: &mut HostState, ptr: i32) -> i3
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_stream_read(mem: &mut [u8], ctx: &mut HostState, idx: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     if !stream_allowed(ctx) { return -1; }
     if buf_len <= 0 { return 0; }
     let Some(out) = guest_mut(mem, buf_ptr, buf_len as usize) else { return -1 };
     if idx < 0 {
-        crate::shade::terminal::stream_read_global(out) as i32
-    } else {
-        crate::shade::terminal::stream_read(idx as usize, out) as i32
+        return crate::serial::mirror_read(out) as i32;
     }
+    #[cfg(target_arch = "x86_64")]
+    return crate::shade::terminal::stream_read(idx as usize, out) as i32;
+    #[cfg(not(target_arch = "x86_64"))]
+    0
 }
 
 /// Most one `npk_tcp_send` may hand the kernel. The send buffer takes a

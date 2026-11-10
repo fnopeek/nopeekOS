@@ -1160,21 +1160,17 @@ host_imports! {
     ctx fn npk_self_terminal() -> i32;
 
     // npk_stream_open(idx) -> 0 ok, -1 error
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_stream_open(idx: i32) -> i32;
 
     // npk_stream_read(idx, buf_ptr, buf_len) -> bytes read (>=0) or -1 on error
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_stream_read(idx: i32, buf_ptr: i32, buf_len: i32) -> i32;
 
     // npk_stream_close(idx) -> 0
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_stream_close(idx: i32) -> i32;
 
     // npk_key_inject(byte) -> 0
     // Injects a raw byte into the global keyboard buffer. Routes to the
     // currently-focused window's intent session. Used by debug.wasm.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_key_inject(byte: i32) -> i32;
 
     // ── TCP/TLS socket host functions ────────────────────────────

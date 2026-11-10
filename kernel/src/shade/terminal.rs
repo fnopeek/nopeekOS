@@ -5,7 +5,6 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use alloc::boxed::Box;
-use alloc::collections::VecDeque;
 use spin::Mutex;
 
 /// Maximum lines and columns in each terminal buffer.
@@ -1283,66 +1282,10 @@ pub fn write_prompt() {
 // (from write() and write_idx()). Used by debug.wasm to mirror a terminal
 // over TCP. Drop-oldest when full. Allocated on first open, freed on close.
 
-const STREAM_CAPACITY: usize = 65536;
-
-/// One mirror buffer. The flag keeps the print path at a single load while
-/// nothing is mirrored; the buffer lives behind the lock, so closing can
-/// never free it under a reader or a writer.
-struct Sink {
-    open: AtomicBool,
-    buf: Mutex<Option<VecDeque<u8>>>,
-}
-
-impl Sink {
-    const fn new() -> Self {
-        Self { open: AtomicBool::new(false), buf: Mutex::new(None) }
-    }
-
-    fn open(&self) {
-        let mut g = self.buf.lock();
-        if g.is_none() {
-            *g = Some(VecDeque::with_capacity(STREAM_CAPACITY));
-        }
-        self.open.store(true, Ordering::Release);
-    }
-
-    fn close(&self) {
-        self.open.store(false, Ordering::Release);
-        *self.buf.lock() = None;
-    }
-
-    fn push(&self, bytes: &[u8]) {
-        if !self.open.load(Ordering::Acquire) { return; }
-        if let Some(q) = self.buf.lock().as_mut() {
-            let overflow = (q.len() + bytes.len()).saturating_sub(STREAM_CAPACITY);
-            q.drain(..overflow.min(q.len()));
-            let skip = bytes.len().saturating_sub(STREAM_CAPACITY);
-            q.extend(bytes[skip..].iter().copied());
-        }
-    }
-
-    fn pop_into(&self, dst: &mut [u8]) -> usize {
-        match self.buf.lock().as_mut() {
-            Some(q) => {
-                let n = q.len().min(dst.len());
-                for (d, b) in dst.iter_mut().zip(q.drain(..n)) { *d = b; }
-                n
-            }
-            None => 0,
-        }
-    }
-}
+use crate::serial::Sink;
 
 static STREAM_SINKS: [Sink; MAX_SLOTS] = [const { Sink::new() }; MAX_SLOTS];
 
-/// A sink that gets every write, whichever terminal it was addressed to.
-///
-/// Per-slot mirroring is not what a remote console wants: output is routed by
-/// the per-core redirect, so a background message goes to the primary loop, a
-/// command's output to the loop it was typed in, and a failing path may print
-/// from a core with no redirect at all. A mirror bound to one index would go
-/// quiet while the machine is still talking.
-static GLOBAL_SINK: Sink = Sink::new();
 
 /// Open a stream sink for a terminal. Idempotent — calling twice is a no-op.
 pub fn stream_open(idx: usize) -> bool {
@@ -1369,25 +1312,12 @@ pub fn stream_close(idx: usize) {
 /// there). Without this its output would reach only the physical UART and
 /// never the remote mirror.
 pub fn stream_push_global(s: &str) {
-    GLOBAL_SINK.push(s.as_bytes());
+    crate::serial::mirror_push(s);
 }
 
 /// Internal: push bytes to sink if active. Called from write() and write_idx().
 fn stream_push(idx: usize, s: &str) {
-    GLOBAL_SINK.push(s.as_bytes());
+    crate::serial::mirror_push(s);
     if let Some(sink) = STREAM_SINKS.get(idx) { sink.push(s.as_bytes()); }
 }
 
-/// Open/read/close the everything-sink. Index -1 on the ABI.
-pub fn stream_open_global() -> bool {
-    GLOBAL_SINK.open();
-    true
-}
-
-pub fn stream_read_global(dst: &mut [u8]) -> usize {
-    GLOBAL_SINK.pop_into(dst)
-}
-
-pub fn stream_close_global() {
-    GLOBAL_SINK.close();
-}

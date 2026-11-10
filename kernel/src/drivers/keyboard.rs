@@ -13,86 +13,8 @@ use crate::arch::x86_64::Port;
 const DATA_PORT: Port = unsafe { Port::new(0x60) };
 const STATUS_PORT: Port = unsafe { Port::new(0x64) };
 
-// Ring buffer for decoded key bytes. Written by the PS/2 ISR, by injection
-// from modules and the terminal, read by several loops, so every access holds
-// the lock with IF=0 (the ISR takes it too). A multi-byte sequence goes in
-// under one hold, so another producer cannot split it.
-// A burst of keys arrives faster than the shell drains one per loop
-// iteration; a paste does not go through here (`inject_paste`).
-const BUF_SIZE: usize = 512;
-
-struct KeyRing {
-    buf: [u8; BUF_SIZE],
-    head: usize,
-    tail: usize,
-}
-
-impl KeyRing {
-    fn is_empty(&self) -> bool {
-        self.head == self.tail
-    }
-
-    fn free(&self) -> usize {
-        (self.tail + BUF_SIZE - self.head - 1) % BUF_SIZE
-    }
-
-    fn pop(&mut self) -> Option<u8> {
-        if self.is_empty() {
-            return None;
-        }
-        let b = self.buf[self.tail];
-        self.tail = (self.tail + 1) % BUF_SIZE;
-        Some(b)
-    }
-
-    /// All of `seq` or nothing: half an escape sequence is worse than none.
-    fn push_seq(&mut self, seq: &[u8]) {
-        if seq.len() > self.free() {
-            return;
-        }
-        for &b in seq {
-            self.buf[self.head] = b;
-            self.head = (self.head + 1) % BUF_SIZE;
-        }
-    }
-}
-
-static KEY_RING: spin::Mutex<KeyRing> =
-    spin::Mutex::new(KeyRing { buf: [0; BUF_SIZE], head: 0, tail: 0 });
-
-fn push_seq(seq: &[u8]) {
-    crate::arch::without_interrupts(|| KEY_RING.lock().push_seq(seq));
-}
-
-// Modifier state (shared across all keyboard drivers)
-static SHIFT: AtomicBool = AtomicBool::new(false);
-static CTRL: AtomicBool = AtomicBool::new(false);
-static ALT: AtomicBool = AtomicBool::new(false);
-static ALT_GR: AtomicBool = AtomicBool::new(false);
-static SUPER: AtomicBool = AtomicBool::new(false);
 static CAPS_LOCK: AtomicBool = AtomicBool::new(false);
 static EXTENDED: AtomicBool = AtomicBool::new(false);
-
-// --- Public modifier API (used by shade, any driver can write) ---
-
-/// Set Super/GUI/Meta key state. Called by any keyboard driver.
-pub fn set_super(held: bool) { SUPER.store(held, Ordering::Release); }
-
-/// Set Shift key state. Called by any keyboard driver.
-pub fn set_shift(held: bool) { SHIFT.store(held, Ordering::Release); }
-
-/// Set Ctrl key state. Called by any keyboard driver.
-pub fn set_ctrl(held: bool) { CTRL.store(held, Ordering::Release); }
-
-/// Set left Alt state. Called by any keyboard driver. AltGr is separate.
-pub fn set_alt(held: bool) { ALT.store(held, Ordering::Release); }
-
-/// Query modifier state (used by shade::input).
-pub fn is_super_held() -> bool { SUPER.load(Ordering::Acquire) }
-pub fn is_ctrl_held() -> bool { CTRL.load(Ordering::Acquire) }
-pub fn is_shift_held() -> bool { SHIFT.load(Ordering::Acquire) }
-pub fn is_alt_held() -> bool { ALT.load(Ordering::Acquire) }
-pub fn is_alt_gr_held() -> bool { ALT_GR.load(Ordering::Acquire) }
 
 // Special key codes (escape sequences sent as ESC [ X)
 const KEY_UP: u8 = 0x80;
@@ -106,8 +28,9 @@ const KEY_PGDN: u8 = 0x87;
 const KEY_DEL: u8 = 0x88;
 const KEY_INSERT: u8 = 0x89;
 
-use crate::input::FKEY_FINAL;
-const FKEY_FINAL_LAST: u8 = FKEY_FINAL + 11;
+use crate::input::{FKEY_FINAL, push_seq, ALT, ALT_GR, CTRL, SHIFT, SUPER};
+pub use crate::input::{inject_byte, inject_paste, is_alt_gr_held, is_alt_held, is_ctrl_held,
+    is_shift_held, is_super_held, read_event, read_key, set_alt, set_ctrl, set_shift, set_super};
 
 /// Initialize PS/2 keyboard controller.
 /// Safe on systems without PS/2 (returns silently).
@@ -333,40 +256,14 @@ fn feed_mouse(byte: u8) {
 
 #[allow(dead_code)]
 /// Check if a key is available (IRQ buffer or polled port 0x60).
-pub fn has_key() -> bool {
-    if !crate::arch::without_interrupts(|| KEY_RING.lock().is_empty()) {
-        return true;
-    }
-    // PS/2 byte waiting in the i8042 output buffer (keyboard, not aux)?
-    if STATUS_PORT.inb() & 0x21 == 0x01 {
-        return true;
-    }
-    crate::xhci::is_available()
-}
-
-/// Read next raw key byte from buffer. Falls back to PS/2 polling, then
-/// xHCI USB keyboard. Prefer `read_event()` for typed KeyEvent w/ modifiers.
-pub fn read_key() -> Option<u8> {
-    if let Some(key) = crate::arch::without_interrupts(|| KEY_RING.lock().pop()) {
-        return Some(key);
-    }
-    if let Some(key) = PASTE.lock().pop_front() {
-        return Some(key);
-    }
-    // PS/2 polling: with the legacy PIC masked (UEFI/APIC machines) IRQ1
-    // never fires, so the buffer above stays empty — but the i8042 still
-    // latches scancodes. Read them on demand. (No-op if no PS/2 keyboard.)
-    // SKIP when the Core-0 timer IRQ owns the i8042 (PS2_IRQ_ACTIVE): polling
-    // here would race the IRQ on the single output buffer (it can preempt us
-    // between the STATUS and DATA reads → misread byte). Keyboard bytes then
-    // arrive via the IRQ → push_char → the ring read above.
-    if !PS2_IRQ_ACTIVE.load(Ordering::Relaxed) {
-        if let Some(c) = poll_ps2() {
-            return Some(c);
-        }
-    }
-    // xHCI USB keyboard (real driver, no legacy emulation needed)
-    crate::xhci::poll_keyboard()
+/// One key byte from the i8042 when no interrupt owns it: with the legacy
+/// PIC masked (UEFI/APIC machines) IRQ1 never fires, but the i8042 still
+/// latches scancodes. Skipped while the Core-0 timer IRQ owns the i8042
+/// (`PS2_IRQ_ACTIVE`): polling here would race the IRQ on the single output
+/// buffer. Keyboard bytes then arrive via the IRQ in the key ring.
+pub fn poll() -> Option<u8> {
+    if PS2_IRQ_ACTIVE.load(Ordering::Relaxed) { return None; }
+    poll_ps2()
 }
 
 /// Poll the i8042 PS/2 controller for one keyboard scancode. Skips aux
@@ -541,50 +438,6 @@ pub fn poll_ps2_irq() {
     }
 }
 
-/// Read next key as a typed KeyEvent. Converts ANSI escape sequences
-/// (ESC [ A/B/C/D/H/F/2/3/5/6, a..l for F1..F12) to KeyCode variants. Captures current
-/// modifier state (Shift, Ctrl, Alt, AltGr, Super) in the event.
-pub fn read_event() -> Option<crate::input::KeyEvent> {
-    use crate::input::{KeyEvent, KeyCode, Modifiers};
-    let byte = read_key()?;
-    let mods = Modifiers::current();
-
-    match byte {
-        0x1B => {
-            // ESC — might be start of ANSI escape sequence (pushed as 3 bytes by push_arrow)
-            if let Some(bracket) = read_key() {
-                if bracket == b'[' {
-                    if let Some(code) = read_key() {
-                        let key = match code {
-                            b'A' => KeyCode::Up,
-                            b'B' => KeyCode::Down,
-                            b'C' => KeyCode::Right,
-                            b'D' => KeyCode::Left,
-                            b'H' => KeyCode::Home,
-                            b'F' => KeyCode::End,
-                            b'5' => KeyCode::PageUp,
-                            b'6' => KeyCode::PageDown,
-                            b'3' => KeyCode::Delete,
-                            b'2' => KeyCode::Insert,
-                            c @ FKEY_FINAL..=FKEY_FINAL_LAST => KeyCode::F(c - FKEY_FINAL + 1),
-                            _ => return Some(KeyEvent::special(KeyCode::Escape, mods)),
-                        };
-                        return Some(KeyEvent::special(key, mods));
-                    }
-                }
-                // ESC + non-bracket: return ESC (bracket byte is lost — rare edge case)
-            }
-            Some(KeyEvent::special(KeyCode::Escape, mods))
-        }
-        b'\r' | b'\n' => Some(KeyEvent::special(KeyCode::Enter, mods)),
-        0x08 => Some(KeyEvent::special(KeyCode::Backspace, mods)),
-        0x7F => Some(KeyEvent::special(KeyCode::Delete, mods)),
-        b'\t' => Some(KeyEvent::special(KeyCode::Tab, mods)),
-        c if c >= 0x20 && c < 0x7F => Some(KeyEvent::char(c, mods)),
-        c => Some(KeyEvent::char(c, mods)), // control chars etc.
-    }
-}
-
 /// Push a decoded character: its first byte and the UTF-8 tail behind it.
 fn push_char(first: u8) {
     let mut seq = [first, 0, 0, 0];
@@ -596,24 +449,6 @@ fn push_char(first: u8) {
         }
     }
     push_seq(&seq[..n]);
-}
-
-/// Inject a raw key byte into the keyboard buffer as if it came from hardware.
-/// Used by the remote debug shell to drive the focused window from outside.
-/// Clients should send ANSI escape sequences for arrow/nav keys (ESC [ A etc).
-pub fn inject_byte(byte: u8) {
-    push_seq(&[byte]);
-}
-
-/// Pasted text waiting to be read as typed input, after the keys in the
-/// ring. On the heap, not in the IRQ ring, so a paste of any length arrives
-/// whole.
-static PASTE: spin::Mutex<alloc::collections::VecDeque<u8>> =
-    spin::Mutex::new(alloc::collections::VecDeque::new());
-
-/// Queue `bytes` as typed input.
-pub fn inject_paste(bytes: &[u8]) {
-    PASTE.lock().extend(bytes.iter().copied());
 }
 
 /// Push an arrow key as ANSI escape sequence: ESC [ A/B/C/D

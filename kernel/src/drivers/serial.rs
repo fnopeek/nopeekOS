@@ -2,7 +2,8 @@
 //! the screens and keyboard hooked in at boot (`set_hooks`).
 
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use alloc::collections::VecDeque;
 use spin::Mutex;
 use alloc::string::String;
 use crate::drivers::uart::Uart;
@@ -416,4 +417,79 @@ pub fn read_line(buf: &mut [u8]) -> usize {
 /// Read a line with masked echo (`*`), returns its length.
 pub fn read_line_masked(buf: &mut [u8]) -> usize {
     read_line_echo(buf, true)
+}
+
+// === Mirrors of the console output (the remote console, `debug`) ===
+
+/// Most bytes a mirror holds; full, it drops its oldest.
+pub const STREAM_CAPACITY: usize = 65536;
+
+/// One mirror buffer. The flag keeps the print path at a single load while
+/// nothing is mirrored; the buffer lives behind the lock, so closing can
+/// never free it under a reader or a writer.
+pub struct Sink {
+    open: AtomicBool,
+    buf: Mutex<Option<VecDeque<u8>>>,
+}
+
+impl Sink {
+    pub const fn new() -> Self {
+        Self { open: AtomicBool::new(false), buf: Mutex::new(None) }
+    }
+
+    pub fn open(&self) {
+        let mut g = self.buf.lock();
+        if g.is_none() {
+            *g = Some(VecDeque::with_capacity(STREAM_CAPACITY));
+        }
+        self.open.store(true, Ordering::Release);
+    }
+
+    pub fn close(&self) {
+        self.open.store(false, Ordering::Release);
+        *self.buf.lock() = None;
+    }
+
+    pub fn push(&self, bytes: &[u8]) {
+        if !self.open.load(Ordering::Acquire) { return; }
+        if let Some(q) = self.buf.lock().as_mut() {
+            let overflow = (q.len() + bytes.len()).saturating_sub(STREAM_CAPACITY);
+            q.drain(..overflow.min(q.len()));
+            let skip = bytes.len().saturating_sub(STREAM_CAPACITY);
+            q.extend(bytes[skip..].iter().copied());
+        }
+    }
+
+    pub fn pop_into(&self, dst: &mut [u8]) -> usize {
+        match self.buf.lock().as_mut() {
+            Some(q) => {
+                let n = q.len().min(dst.len());
+                for (d, b) in dst.iter_mut().zip(q.drain(..n)) { *d = b; }
+                n
+            }
+            None => 0,
+        }
+    }
+}
+
+/// The mirror of everything the console prints, whichever screen or
+/// terminal it went to, and the `kdebug!` lines the screens skip. A remote
+/// console bound to one terminal would go quiet while the machine is still
+/// talking.
+static MIRROR: Sink = Sink::new();
+
+pub fn mirror_push(s: &str) {
+    MIRROR.push(s.as_bytes());
+}
+
+pub fn mirror_open() {
+    MIRROR.open();
+}
+
+pub fn mirror_read(dst: &mut [u8]) -> usize {
+    MIRROR.pop_into(dst)
+}
+
+pub fn mirror_close() {
+    MIRROR.close();
 }

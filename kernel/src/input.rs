@@ -141,15 +141,180 @@ impl Modifiers {
         shift: false, ctrl: false, alt: false, alt_gr: false, super_key: false,
     };
 
-    /// Read current modifier state from keyboard driver atomics.
-    #[cfg(target_arch = "x86_64")]
+    /// The modifier state the keyboard drivers keep.
     pub fn current() -> Self {
         Modifiers {
-            shift: crate::keyboard::is_shift_held(),
-            ctrl: crate::keyboard::is_ctrl_held(),
-            alt: crate::keyboard::is_alt_held(),
-            alt_gr: crate::keyboard::is_alt_gr_held(),
-            super_key: crate::keyboard::is_super_held(),
+            shift: is_shift_held(),
+            ctrl: is_ctrl_held(),
+            alt: is_alt_held(),
+            alt_gr: is_alt_gr_held(),
+            super_key: is_super_held(),
         }
     }
+}
+
+// === The key queue every keyboard driver feeds (Linux's input core between
+// atkbd/usbhid and the readers) ===
+
+use core::sync::atomic::{AtomicBool, Ordering};
+
+const FKEY_FINAL_LAST: u8 = FKEY_FINAL + 11;
+
+// Ring buffer for decoded key bytes. Written by the keyboard drivers (the
+// PS/2 ISR among them) and by injection from modules and the terminal, read
+// by several loops, so every access holds the lock with interrupts masked
+// (the ISR takes it too). A multi-byte sequence goes in
+// under one hold, so another producer cannot split it.
+// A burst of keys arrives faster than the shell drains one per loop
+// iteration; a paste does not go through here (`inject_paste`).
+const BUF_SIZE: usize = 512;
+
+struct KeyRing {
+    buf: [u8; BUF_SIZE],
+    head: usize,
+    tail: usize,
+}
+
+impl KeyRing {
+    fn is_empty(&self) -> bool {
+        self.head == self.tail
+    }
+
+    fn free(&self) -> usize {
+        (self.tail + BUF_SIZE - self.head - 1) % BUF_SIZE
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.is_empty() {
+            return None;
+        }
+        let b = self.buf[self.tail];
+        self.tail = (self.tail + 1) % BUF_SIZE;
+        Some(b)
+    }
+
+    /// All of `seq` or nothing: half an escape sequence is worse than none.
+    fn push_seq(&mut self, seq: &[u8]) {
+        if seq.len() > self.free() {
+            return;
+        }
+        for &b in seq {
+            self.buf[self.head] = b;
+            self.head = (self.head + 1) % BUF_SIZE;
+        }
+    }
+}
+
+static KEY_RING: spin::Mutex<KeyRing> =
+    spin::Mutex::new(KeyRing { buf: [0; BUF_SIZE], head: 0, tail: 0 });
+
+/// Queue a key's bytes, all or none.
+pub(crate) fn push_seq(seq: &[u8]) {
+    crate::arch::without_interrupts(|| KEY_RING.lock().push_seq(seq));
+}
+
+// Modifier state (shared across all keyboard drivers)
+pub(crate) static SHIFT: AtomicBool = AtomicBool::new(false);
+pub(crate) static CTRL: AtomicBool = AtomicBool::new(false);
+pub(crate) static ALT: AtomicBool = AtomicBool::new(false);
+pub(crate) static ALT_GR: AtomicBool = AtomicBool::new(false);
+pub(crate) static SUPER: AtomicBool = AtomicBool::new(false);
+
+// --- Public modifier API (used by shade, any driver can write) ---
+
+/// Set Super/GUI/Meta key state. Called by any keyboard driver.
+pub fn set_super(held: bool) { SUPER.store(held, Ordering::Release); }
+
+/// Set Shift key state. Called by any keyboard driver.
+pub fn set_shift(held: bool) { SHIFT.store(held, Ordering::Release); }
+
+/// Set Ctrl key state. Called by any keyboard driver.
+pub fn set_ctrl(held: bool) { CTRL.store(held, Ordering::Release); }
+
+/// Set left Alt state. Called by any keyboard driver. AltGr is separate.
+pub fn set_alt(held: bool) { ALT.store(held, Ordering::Release); }
+
+/// Query modifier state (used by shade::input).
+pub fn is_super_held() -> bool { SUPER.load(Ordering::Acquire) }
+pub fn is_ctrl_held() -> bool { CTRL.load(Ordering::Acquire) }
+pub fn is_shift_held() -> bool { SHIFT.load(Ordering::Acquire) }
+pub fn is_alt_held() -> bool { ALT.load(Ordering::Acquire) }
+pub fn is_alt_gr_held() -> bool { ALT_GR.load(Ordering::Acquire) }
+
+/// Next key byte: the ring, then pasted text, then the drivers polled
+/// directly (the i8042 when no interrupt owns it, the xHCI keyboard).
+/// Prefer `read_event()` for a typed KeyEvent with modifiers.
+pub fn read_key() -> Option<u8> {
+    if let Some(key) = crate::arch::without_interrupts(|| KEY_RING.lock().pop()) {
+        return Some(key);
+    }
+    if let Some(key) = PASTE.lock().pop_front() {
+        return Some(key);
+    }
+    #[cfg(target_arch = "x86_64")]
+    if let Some(c) = crate::keyboard::poll() {
+        return Some(c);
+    }
+    crate::xhci::poll_keyboard()
+}
+
+/// Read next key as a typed KeyEvent. Converts ANSI escape sequences
+/// (ESC [ A/B/C/D/H/F/2/3/5/6, a..l for F1..F12) to KeyCode variants. Captures current
+/// modifier state (Shift, Ctrl, Alt, AltGr, Super) in the event.
+pub fn read_event() -> Option<KeyEvent> {
+    let byte = read_key()?;
+    let mods = Modifiers::current();
+
+    match byte {
+        0x1B => {
+            // ESC — might be start of ANSI escape sequence (pushed as 3 bytes by push_arrow)
+            if let Some(bracket) = read_key() {
+                if bracket == b'[' {
+                    if let Some(code) = read_key() {
+                        let key = match code {
+                            b'A' => KeyCode::Up,
+                            b'B' => KeyCode::Down,
+                            b'C' => KeyCode::Right,
+                            b'D' => KeyCode::Left,
+                            b'H' => KeyCode::Home,
+                            b'F' => KeyCode::End,
+                            b'5' => KeyCode::PageUp,
+                            b'6' => KeyCode::PageDown,
+                            b'3' => KeyCode::Delete,
+                            b'2' => KeyCode::Insert,
+                            c @ FKEY_FINAL..=FKEY_FINAL_LAST => KeyCode::F(c - FKEY_FINAL + 1),
+                            _ => return Some(KeyEvent::special(KeyCode::Escape, mods)),
+                        };
+                        return Some(KeyEvent::special(key, mods));
+                    }
+                }
+                // ESC + non-bracket: return ESC (bracket byte is lost — rare edge case)
+            }
+            Some(KeyEvent::special(KeyCode::Escape, mods))
+        }
+        b'\r' | b'\n' => Some(KeyEvent::special(KeyCode::Enter, mods)),
+        0x08 => Some(KeyEvent::special(KeyCode::Backspace, mods)),
+        0x7F => Some(KeyEvent::special(KeyCode::Delete, mods)),
+        b'\t' => Some(KeyEvent::special(KeyCode::Tab, mods)),
+        c if c >= 0x20 && c < 0x7F => Some(KeyEvent::char(c, mods)),
+        c => Some(KeyEvent::char(c, mods)), // control chars etc.
+    }
+}
+
+/// Inject a raw key byte into the key ring as if it came from hardware.
+/// Used by the remote debug shell to drive the focused window from outside.
+/// Clients should send ANSI escape sequences for arrow/nav keys (ESC [ A etc).
+pub fn inject_byte(byte: u8) {
+    push_seq(&[byte]);
+}
+
+/// Pasted text waiting to be read as typed input, after the keys in the
+/// ring. On the heap, not in the IRQ ring, so a paste of any length arrives
+/// whole.
+static PASTE: spin::Mutex<alloc::collections::VecDeque<u8>> =
+    spin::Mutex::new(alloc::collections::VecDeque::new());
+
+/// Queue `bytes` as typed input.
+pub fn inject_paste(bytes: &[u8]) {
+    PASTE.lock().extend(bytes.iter().copied());
 }

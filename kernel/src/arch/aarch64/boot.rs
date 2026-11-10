@@ -138,18 +138,18 @@ const BERRY: [&str; 8] = [
     r"            ''",
 ];
 
+/// Console output to the text framebuffer and the remote mirror.
+fn console_screen(s: &str) {
+    crate::framebuffer::write_str(s);
+    crate::serial::mirror_push(s);
+}
+
 /// The firmware's framebuffer as a second console beside the UART: on a
 /// board without a serial adapter it is the only output.
 fn screen(fdt: &Fdt) {
     let Some(Ok(m)) = crate::platform::simplefb::find(fdt) else { return };
     if !super::mmu::map_uncached(m.addr, m.addr + m.size) { return; }
     crate::framebuffer::init_from_firmware(m.addr, m.width, m.height, m.stride, m.format.bpp());
-    crate::serial::set_hooks(crate::serial::Hooks {
-        write: crate::framebuffer::write_str,
-        echo: crate::framebuffer::write_byte,
-        key: crate::xhci::poll_keyboard,
-        quiet: |_| {},
-    });
 }
 
 /// What `screen` found, once the console is up to show it.
@@ -229,6 +229,12 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     crate::heap::init();
     crate::serial::start_capture();
     screen(&fdt);
+    crate::serial::set_hooks(crate::serial::Hooks {
+        write: console_screen,
+        echo: crate::framebuffer::write_byte,
+        key: crate::input::read_key,
+        quiet: crate::serial::mirror_push,
+    });
     // The UART and the text framebuffer are the shell's only screen.
     crate::serial::set_line_repair(true);
 
