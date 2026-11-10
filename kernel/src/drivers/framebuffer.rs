@@ -221,6 +221,18 @@ pub fn set_npk_color(color: u32) {
     NPK_TAG_COLOR.store(color, core::sync::atomic::Ordering::Release);
 }
 
+/// Colour of console text other than the tag; `FG_COLOR` except inside
+/// `with_text_color`.
+static TEXT_COLOR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(FG_COLOR);
+
+/// Run `f` with console text drawn in `color` (a boot banner). The serial
+/// line is unaffected.
+pub fn with_text_color(color: u32, f: impl FnOnce()) {
+    let old = TEXT_COLOR.swap(color, core::sync::atomic::Ordering::AcqRel);
+    f();
+    TEXT_COLOR.store(old, core::sync::atomic::Ordering::Release);
+}
+
 /// Initialize framebuffer console from GPU subsystem.
 /// Call after gpu::init() has detected and configured a display.
 #[cfg(target_arch = "x86_64")]
@@ -734,7 +746,7 @@ pub fn write_str(s: &str) {
             i += 5;
             continue;
         } else {
-            (bytes[i], FG_COLOR)
+            (bytes[i], TEXT_COLOR.load(core::sync::atomic::Ordering::Relaxed))
         };
         i += 1;
 

@@ -125,6 +125,22 @@ fn cpu_count(fdt: &Fdt) -> usize {
 
 /// The firmware's framebuffer as a second console beside the UART: on a
 /// board without a serial adapter it is the only output.
+/// The console's accent on the Pi: the `[npk]` tag and the berry above
+/// the banner, in raspberry red.
+const RASPBERRY: u32 = 0x00C5_1A4A;
+
+/// A raspberry, leaves on top.
+const BERRY: [&str; 8] = [
+    r"            \|/",
+    r"        .-(o)(o)-.",
+    r"       (o)(o)(o)(o)",
+    r"      (o)(o)(o)(o)(o)",
+    r"       (o)(o)(o)(o)",
+    r"        (o)(o)(o)",
+    r"          (o)(o)",
+    r"            ''",
+];
+
 fn screen(fdt: &Fdt) {
     let Some(Ok(m)) = crate::platform::simplefb::find(fdt) else { return };
     if !super::mmu::map_uncached(m.addr, m.addr + m.size) { return; }
@@ -385,6 +401,10 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     crate::serial::start_capture();
     screen(&fdt);
 
+    crate::framebuffer::set_npk_color(RASPBERRY);
+    crate::framebuffer::with_text_color(RASPBERRY, || {
+        for l in BERRY { kprintln!("{}", l); }
+    });
     kprintln!("                                __   ____  _____");
     kprintln!("   ____  ____  ____  ___  ___  / /__/ __ \\/ ___/");
     kprintln!("  / __ \\/ __ \\/ __ \\/ _ \\/ _ \\/ //_/ / / /\\__ \\ ");
