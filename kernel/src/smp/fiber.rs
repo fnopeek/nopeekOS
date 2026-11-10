@@ -1,11 +1,11 @@
 //! Stackful fibers (green threads) for WASM apps.
 //!
-//! A fiber is a stack plus a saved
-//! context that runs until it yields. wasmi cannot be paused mid-`_start`,
-//! so each app gets its own stack and the whole CPU context is switched at
-//! the yield point (`npk_sleep`). Only `rsp`, RFLAGS and the callee-saved
-//! registers are swapped, so the primitive is agnostic to what runs on the
-//! stack (apps, guest vCPU run-loops, kernel workers).
+//! A fiber is a stack plus a saved context that runs until it yields.
+//! wasmi cannot be paused mid-`_start`, so each app gets its own stack and
+//! the whole CPU context is switched at the yield point (`npk_sleep`). Only
+//! the stack pointer, the interrupt state and the callee-saved registers
+//! are swapped (`arch::fiber`), so the primitive is agnostic to what runs
+//! on the stack (apps, guest vCPU run-loops, kernel workers).
 //!
 //! `npk_sleep` parks the fiber and switches back to a per-core scheduler
 //! that round-robins the core's other fibers, so many apps share few cores.
@@ -19,72 +19,18 @@ use alloc::collections::VecDeque;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 
-/// Saved execution context. Only `rsp` lives here — the callee-saved
-/// registers (rbx, rbp, r12–r15) and RFLAGS are pushed onto the fiber's own
-/// stack by `switch` and popped back on resume, System V style.
-///
-/// RFLAGS travels with the context because IF is per-context state: a vCPU
-/// fiber runs with interrupts enabled, while an AP's scheduler loop relies on
-/// IF=0 for its idle check and for locks it shares with ISRs.
+/// Saved execution context: the stack pointer. The callee-saved registers
+/// and the interrupt state are on the fiber's own stack (`arch::fiber`).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
-    pub rsp: u64,
+    pub sp: u64,
 }
 
 impl Context {
     pub const fn empty() -> Self {
-        Context { rsp: 0 }
+        Context { sp: 0 }
     }
-}
-
-// The switch + the fresh-fiber entry trampoline. AT&T syntax to match
-// boot.s / trampoline.s. System V args: rdi = `from`, rsi = `to`.
-//
-//   switch: save callee-saved + RFLAGS + rsp into *from, load *to's rsp,
-//           RFLAGS and regs, `ret` into to's resume point.
-//   trampoline: where a *fresh* fiber's first `ret` lands. The initial
-//           frame put the entry fn in r12 and its arg in r13 (they were
-//           just popped by `switch`), so move the arg into rdi and call
-//           the entry. If the entry ever returns, fall into `fiber_on_exit`,
-//           which switches back to the scheduler.
-core::arch::global_asm!(
-    r#"
-.global fiber_context_switch
-fiber_context_switch:
-    pushq %rbp
-    pushq %rbx
-    pushq %r12
-    pushq %r13
-    pushq %r14
-    pushq %r15
-    pushfq
-    movq %rsp, (%rdi)
-    movq (%rsi), %rsp
-    popfq
-    popq %r15
-    popq %r14
-    popq %r13
-    popq %r12
-    popq %rbx
-    popq %rbp
-    ret
-
-.global fiber_trampoline
-fiber_trampoline:
-    movq %r13, %rdi
-    callq *%r12
-    callq fiber_on_exit
-.Lfiber_hang:
-    hlt
-    jmp .Lfiber_hang
-"#,
-    options(att_syntax)
-);
-
-unsafe extern "C" {
-    fn fiber_context_switch(from: *mut Context, to: *const Context);
-    fn fiber_trampoline();
 }
 
 /// Called by the trampoline when a fiber's entry function returns — the
@@ -112,9 +58,6 @@ pub extern "C" fn fiber_on_exit() {
 /// holds the compiled module's frames and the host functions it calls.
 /// The page below it is a guard (`mm::stack`).
 pub const DEFAULT_STACK_BYTES: usize = 1024 * 1024;
-
-/// RFLAGS bit 1 reads as one and must be written as one.
-const RFLAGS_RESERVED: u64 = 1 << 1;
 
 // ── Per-core fiber scheduler ───────────────────────────────────────────
 //
@@ -465,15 +408,11 @@ pub fn run_core_fibers(cid: usize) {
 
         if !fiber.started {
             fiber.started = true;
-            // A fresh fiber starts with this loop's RFLAGS, as if called
-            // from here. The slot is the lowest word of its initial frame.
-            let flags: u64;
-            // SAFETY: reading RFLAGS has no side effect; ctx.rsp points at
-            // the 8-word frame `Fiber::new` wrote and nothing has run on it.
-            unsafe {
-                core::arch::asm!("pushfq; pop {}", out(reg) flags, options(preserves_flags));
-                *(fiber.ctx.rsp as *mut u64) = flags;
-            }
+            // A fresh fiber starts with this loop's interrupt state, as if
+            // called from here.
+            // SAFETY: ctx.sp is the frame `Fiber::new` laid out; nothing
+            // has run on it.
+            unsafe { crate::arch::inherit_flags(fiber.ctx.sp) };
         }
 
         let fptr: *mut Fiber = &mut *fiber;
@@ -977,7 +916,7 @@ pub struct Fiber {
     app_arg: u64,
     /// The process it runs (`set_current_pid`), 0 for none.
     pid: u32,
-    /// Switched into at least once. Until then its RFLAGS slot is a
+    /// Switched into at least once. Until then its interrupt-state slot is a
     /// placeholder that the scheduler replaces with its own (`run_core_fibers`).
     started: bool,
     stack: crate::mm::stack::KernelStack,
@@ -989,28 +928,12 @@ impl Fiber {
     /// `None` when no stack of that size can be had.
     pub fn new(stack_bytes: usize, entry: extern "C" fn(u64), arg: u64) -> Option<Fiber> {
         let stack = crate::mm::stack::KernelStack::new(stack_bytes)?;
-        let top = stack.top() as usize; // page-aligned, so 16-aligned
-
-        // Eight u64 slots below `top`, mirroring what `switch` pops then
-        // `ret`s through:  rflags r15 r14 r13 r12 rbx rbp [return addr]
-        // At trampoline entry rsp == top (16-aligned) → ABI-correct `call`.
-        let sp0 = top - 64;
-        // SAFETY: sp0..top lies inside the freshly allocated stack; we
-        // write exactly the 8 machine words the switch/ret sequence reads.
-        unsafe {
-            let p = sp0 as *mut u64;
-            *p.add(0) = RFLAGS_RESERVED; // rflags: IF=0 unless the scheduler says otherwise
-            *p.add(1) = 0; // r15
-            *p.add(2) = 0; // r14
-            *p.add(3) = arg; // r13 → rdi in trampoline
-            *p.add(4) = entry as usize as u64; // r12 → call target
-            *p.add(5) = 0; // rbx
-            *p.add(6) = 0; // rbp
-            *p.add(7) = fiber_trampoline as *const () as u64; // ret → trampoline
-        }
+        // Page-aligned, so 16-aligned.
+        // SAFETY: the frame goes below the top of the fresh stack.
+        let sp0 = unsafe { crate::arch::initial_frame(stack.top(), entry, arg) };
 
         Some(Fiber {
-            ctx: Context { rsp: sp0 as u64 },
+            ctx: Context { sp: sp0 },
             state: FiberState::Ready,
             waker: NO_WAKER,
             movable: false,
@@ -1044,8 +967,9 @@ pub fn current_stack_lo() -> Option<u64> {
 /// SAFETY: `to` must reference a context produced by `Fiber::new` or a
 /// prior `switch` out, and its backing stack must still be alive.
 pub unsafe fn switch(from: *mut Context, to: *const Context) {
-    // SAFETY: forwarded to the asm primitive under the caller's contract.
-    unsafe { fiber_context_switch(from, to) }
+    // SAFETY: forwarded to the arch primitive under the caller's contract;
+    // `Context` is the saved stack pointer alone.
+    unsafe { crate::arch::fiber_switch(from as *mut u64, to as *const u64) }
 }
 
 // ── Boot self-test ────────────────────────────────────────────────────
