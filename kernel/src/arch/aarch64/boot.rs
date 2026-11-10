@@ -419,6 +419,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     crypto_check(&fdt);
     stack_check();
     smp_check(&fdt);
+    crate::forge_check::selftest();
     let keyboard = crate::platform::pi5::init(&fdt);
     if let Some(id) = crate::platform::pi5_sd::init(&fdt) {
         if let Some((off, blocks)) = crate::platform::pi5_sd::system_disk(id) {

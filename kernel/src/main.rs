@@ -88,7 +88,7 @@ mod shutdown;
 mod vga;
 mod hw;
 mod forge_rt;
-#[cfg(target_arch = "x86_64")]
+mod forge_check;
 mod forge_tests;
 mod wasm;
 mod wasi;
