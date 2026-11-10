@@ -11,6 +11,7 @@ use wasmi::{Config, Engine, Linker, Module, Store, Val};
 use spin::Mutex;
 use crate::{kprint, kprintln, capability};
 use crate::capability::CapId;
+#[cfg(target_arch = "x86_64")]
 use crate::drivers::pci;
 
 pub(crate) mod host_core;
@@ -74,7 +75,7 @@ fn foreground(fuel: u64) -> Option<Foreground> {
     if fuel != UNTIL_CANCELLED || cid >= 256 {
         return None;
     }
-    crate::intent::clear_cancel();
+    shell_clear_cancel();
     FOREGROUND[cid].store(true, AtOrd::Release);
     Some(Foreground(cid))
 }
@@ -82,13 +83,14 @@ fn foreground(fuel: u64) -> Option<Foreground> {
 /// Ctrl+C asked to end the foreground run on this core.
 pub fn foreground_cancelled() -> bool {
     let cid = crate::smp::per_core::current_core_id();
-    cid < 256 && FOREGROUND[cid].load(AtOrd::Acquire) && crate::intent::cancel_requested()
+    cid < 256 && FOREGROUND[cid].load(AtOrd::Acquire) && shell_cancel_requested()
 }
 
 pub struct WasmResult {
     pub output: String,
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Hardware driver state for WASM modules that access PCI devices.
 pub(crate) struct HwDriverState {
     /// Whether this state belongs to a PCI device. A driver using
@@ -118,6 +120,7 @@ pub(crate) struct HwDriverState {
     dma_limit: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl HwDriverState {
     /// DMA buffers the driver holds (`npk_dma_free` empties a slot).
     pub(crate) fn dma_live(&self) -> usize {
@@ -167,6 +170,7 @@ pub(crate) struct HostState {
     /// Process ID in the process table
     pid: u32,
     /// Hardware driver state (only set for driver modules)
+    #[cfg(target_arch = "x86_64")]
     hw: Option<HwDriverState>,
     /// Network reach of the document this module currently shows.
     ///
@@ -174,6 +178,7 @@ pub(crate) struct HostState {
     /// otherwise cannot reach the private network. Only `npk_net_context`
     /// with a private address widens it, and only after the kernel has
     /// resolved that address itself.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) net_reach: crate::intent::http::Reach,
     /// Shade window id owned by this WASM app for widget rendering.
     /// 0 = no widget window yet (first scene_commit allocates one).
@@ -357,6 +362,7 @@ pub fn set_debug_target(ip_packed: u32, port: u16) {
     DEBUG_TARGET.store(v, AtOrd::Release);
 }
 
+#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 struct BenchCache {
     blake3_mbs: u64,
@@ -366,8 +372,10 @@ struct BenchCache {
     raw_read_mbs: u64,
 }
 
+#[cfg(target_arch = "x86_64")]
 static BENCH_CACHE: Mutex<Option<BenchCache>> = Mutex::new(None);
 
+#[cfg(target_arch = "x86_64")]
 fn ensure_bench() -> BenchCache {
     let mut lock = BENCH_CACHE.lock();
     if let Some(b) = *lock { return b; }
@@ -410,6 +418,7 @@ fn fsck_sys_info() -> i64 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn bench_sys_info(key: i32) -> i64 {
     let b = ensure_bench();
     match key & 0xFF {
@@ -589,7 +598,7 @@ fn wasm_job_dropped(arg: u64) {
             job.name.as_str());
         if (job.terminal_idx as usize) < MAX_APP_BUFS {
             APP_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
-            crate::intent::wake_shell();
+            wake_shell();
         }
     }
     JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
@@ -635,11 +644,13 @@ fn wasm_worker_task(arg: u64) {
         limits: guest_limits(),
         output: String::new(),
         cap_id: core::mem::replace(&mut job.cap_id, capability::CAP_NULL),
+        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
         core_id,
         pid,
+        #[cfg(target_arch = "x86_64")]
         hw: None,
         widget_window_id: job.widget_window_id,
         module_name: String::from(name_str),
@@ -701,7 +712,7 @@ fn wasm_worker_task(arg: u64) {
     crate::process::exit(pid);
     if (terminal_idx as usize) < MAX_APP_BUFS {
         APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
-        crate::intent::wake_shell();
+        wake_shell();
     }
     JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
 }
@@ -724,7 +735,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
         crate::process::exit(pid);
         if (terminal_idx as usize) < MAX_APP_BUFS {
             APP_RUNNING[terminal_idx as usize].store(false, AtOrd::Release);
-        crate::intent::wake_shell();
+        wake_shell();
         }
         JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
     };
@@ -754,11 +765,13 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
         limits: guest_limits(),
         output: String::new(),
         cap_id: core::mem::replace(&mut job.cap_id, capability::CAP_NULL),
+        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
         core_id,
         pid,
+        #[cfg(target_arch = "x86_64")]
         hw: None,
         widget_window_id: job.widget_window_id,
         module_name: String::from(name_str),
@@ -863,7 +876,9 @@ fn execute_inner(
         terminal_idx: 255,
         core_id: 0,
         pid: 0,
+        #[cfg(target_arch = "x86_64")]
         hw: None,
+        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -948,7 +963,9 @@ pub fn execute_wasi(
         terminal_idx,
         core_id: 0,
         pid: 0,
+        #[cfg(target_arch = "x86_64")]
         hw: None,
+        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -1019,7 +1036,9 @@ fn execute_inner_forge(
         terminal_idx: TERM_IDX_ACTIVE,
         core_id: 0,
         pid: 0,
+        #[cfg(target_arch = "x86_64")]
         hw: None,
+        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -1045,7 +1064,7 @@ fn execute_inner_forge(
     let a = |i: usize| args.get(i).and_then(|v| v.i32()).unwrap_or(0) as u32;
     let fg = foreground(fuel);
     let (_ret, trap) = inst.call(off, a(0), a(1), a(2));
-    let cancelled = fg.is_some() && crate::intent::cancel_requested();
+    let cancelled = fg.is_some() && shell_cancel_requested();
     drop(fg);
 
     cleanup_instance_state(&mut hs);
@@ -1093,7 +1112,9 @@ pub fn execute_wasi_forge(
         terminal_idx,
         core_id: 0,
         pid: 0,
+        #[cfg(target_arch = "x86_64")]
         hw: None,
+        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -1121,7 +1142,7 @@ pub fn execute_wasi_forge(
     let t_r = crate::time::ticks();
     let fg = foreground(fuel);
     let (_ret, trap) = inst.call(entry, 0, 0, 0);
-    let cancelled = fg.is_some() && crate::intent::cancel_requested();
+    let cancelled = fg.is_some() && shell_cancel_requested();
     drop(fg);
     crate::kdebug!("[npk]   forge: run {} ms",
         crate::time::ticks().saturating_sub(t_r) * 10);
@@ -1140,17 +1161,39 @@ pub fn execute_wasi_forge(
     }
 }
 
+/// The shell's cancel request (Ctrl-C) for the foreground run; there is no
+/// shell to ask yet on AArch64.
+fn shell_cancel_requested() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return crate::intent::cancel_requested();
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
+fn shell_clear_cancel() {
+    #[cfg(target_arch = "x86_64")]
+    crate::intent::clear_cancel();
+}
+
+/// Let the shell look at a finished run.
+fn wake_shell() {
+    #[cfg(target_arch = "x86_64")]
+    crate::intent::wake_shell();
+}
+
 /// Route a string to wherever this run's output belongs: straight to a
 /// specific terminal on a worker core, to the active terminal via
 /// `kprint`, or into the buffer a one-shot `run` prints at the end.
 pub(crate) fn emit_output(state: &mut HostState, s: &str) {
     if state.direct_output {
         let idx = state.terminal_idx;
+        #[cfg(target_arch = "x86_64")]
         if idx != TERM_IDX_ACTIVE && (idx as usize) < MAX_APP_BUFS {
             crate::shade::terminal::write_idx(idx as usize, s);
-        } else {
-            kprint!("{}", s);
+            return;
         }
+        let _ = idx;
+        kprint!("{}", s);
     } else {
         state.output.push_str(s);
     }
@@ -1164,35 +1207,50 @@ fn register_host_functions(linker: &mut Linker<HostState>) -> Result<(), WasmErr
 
 fn cleanup_instance_state(state: &mut HostState) {
     // An app's popups do not outlive it, even when its window does.
+    #[cfg(target_arch = "x86_64")]
     if state.widget_window_id != 0 {
         let parent = crate::shade::WindowId(state.widget_window_id);
         crate::shade::with_compositor(|c| c.close_popups_of(parent, false));
     }
     // A dead driver's snapshot must not read as live numbers.
+    #[cfg(target_arch = "x86_64")]
     crate::drivers::report::clear(&state.module_name);
     // Otherwise an app closed mid-load holds its fetch slots and reserved
     // buffers until the next boot.
+    #[cfg(target_arch = "x86_64")]
     crate::intent::fetch::release_owner(state.pid);
+    #[cfg(target_arch = "x86_64")]
     for h in state.tcp_handles.drain(..).flatten() {
         let _ = crate::net::tcp::close(h);
     }
+    #[cfg(target_arch = "x86_64")]
     crate::wasm::host_core::tls_release_owner(state.pid);
     // A file still being written is dropped unpublished: its name keeps the
     // old content, and the chunks already stored go to the next GC.
+    #[cfg(target_arch = "x86_64")]
     host_core::drop_ext_writers(state);
     state.files.clear();
+    #[cfg(target_arch = "x86_64")]
     crate::audio::release_owner(state.pid);
+    #[cfg(target_arch = "x86_64")]
     crate::devices::release_owner(state.pid);
+    #[cfg(target_arch = "x86_64")]
     crate::capture::release_owner(state.pid);
+    #[cfg(target_arch = "x86_64")]
     crate::camfeed::release_owner(state.pid);
+    #[cfg(target_arch = "x86_64")]
     crate::xhci::usbfn::release_owner(state.pid);
+    #[cfg(target_arch = "x86_64")]
     crate::audio::display_audio_release(state.pid);
+    #[cfg(target_arch = "x86_64")]
     crate::ext::instance_ended(&state.cap_id);
+    #[cfg(target_arch = "x86_64")]
     if let Some(hw) = state.hw.take() {
         release_hw(hw);
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Let go of a driver's device: quiet it, give back its interrupt vector,
 /// its DMA buffers and its network registration. On module exit, and when a
 /// driver binds another device in place of this one.
@@ -1288,7 +1346,7 @@ pub(crate) fn private_area_allows(name: &str, module: &str) -> bool {
 /// The name is the authorisation, and the kernel assigns it: a module cannot
 /// leave `priv/<itself>` or enter another's, whatever its `.npk.caps` says.
 pub(crate) fn is_own_private(name: &str, module: &str) -> bool {
-    !module.is_empty() && module != crate::ext::MODULE && private_area_owner(name) == Some(module)
+    !module.is_empty() && module != crate::npkfs::paths::EXTFS_MODULE && private_area_owner(name) == Some(module)
 }
 
 /// True if `name` targets the module store (`sys/wasm/…`), the trust
@@ -1342,7 +1400,7 @@ fn is_trust_critical_path(name: &str) -> bool {
     // separator is how this class of guard usually leaks.
     let under = |dir: &str| c == dir || (c.starts_with(dir) && c.as_bytes().get(dir.len()) == Some(&b'/'));
     // Firmware is loaded into the hardware: only `install` writes it.
-    under(crate::tls::certstore::STORE_DIR) || under(crate::intent::install::FIRMWARE_DIR)
+    under(crate::npkfs::paths::CERT_DIR) || under(crate::npkfs::paths::FIRMWARE_DIR)
 }
 
 /// Extract a WASM custom section's payload by name, walking the module header.
@@ -1394,6 +1452,7 @@ fn read_wasm_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
 /// True if the calling WASM app owns the currently-focused widget window.
 /// The clipboard focus-gate: only the focused app may touch the clipboard,
 /// so a background app cannot snoop or poison it.
+#[cfg(target_arch = "x86_64")]
 fn app_is_focused(state: &HostState) -> bool {
     let wid = state.widget_window_id;
     wid != 0 && crate::shade::focused_widget_id() == Some(wid)

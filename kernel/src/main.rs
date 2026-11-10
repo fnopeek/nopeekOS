@@ -88,13 +88,10 @@ mod shutdown;
 #[cfg(target_arch = "x86_64")]
 mod vga;
 mod hw;
-#[cfg(target_arch = "x86_64")]
 mod forge_rt;
 #[cfg(target_arch = "x86_64")]
 mod forge_tests;
-#[cfg(target_arch = "x86_64")]
 mod wasm;
-#[cfg(target_arch = "x86_64")]
 mod wasi;
 #[cfg(target_arch = "x86_64")]
 mod shell;

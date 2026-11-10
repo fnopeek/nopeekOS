@@ -32,6 +32,18 @@ pub const EMPTY_ROOT: [u8; 32] = [0u8; 32];
 /// never store objects.
 pub const EXT_ROOT: &str = "ext";
 
+/// The module that parses external volumes (`storage::ext`): it never
+/// gets a private area, its names are the volumes'.
+pub const EXTFS_MODULE: &str = "extfs";
+
+/// The certificate store: it decides whom TLS trusts for the whole
+/// system, so module writes are refused there (`wasm::is_trust_critical_path`).
+pub const CERT_DIR: &str = "sys/certs";
+
+/// Where a module's firmware lives; module writes are refused there
+/// (`wasm::is_trust_critical_path`).
+pub const FIRMWARE_DIR: &str = "sys/firmware";
+
 /// Root of the per-module private areas.
 ///
 /// `priv/<module>/…` is the one place in storage that no capability opens:

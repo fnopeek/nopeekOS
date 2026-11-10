@@ -2,6 +2,7 @@
 
 pub mod cpu;
 pub mod fiber;
+pub mod forge;
 pub mod msr;
 pub mod port;
 pub mod time;

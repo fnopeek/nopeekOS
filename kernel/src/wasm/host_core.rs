@@ -9,14 +9,20 @@
 #![allow(clippy::too_many_arguments)]
 
 use super::{
-    HostState, HwDriverState, MAX_APP_BUFS, MAX_DMA_ALLOCS, MAX_DMA_ALLOCS_GPU, MAX_DMA_PAGES, MAX_DMA_PAGES_GPU,
-    MAX_DMA_PAGES_PER_CALL, MAX_MMIO_MAPS, app_is_focused, bench_sys_info,
-    fsck_sys_info, get_debug_target, pop_app_key, append_entry,
-    extract_wasm_custom_section, is_trust_critical_path, spawn_on_worker,
-    spawn_on_worker_inner, picker_module_name, TERM_IDX_ACTIVE, PICKER_W,
-    PICKER_H,
+    HostState, get_debug_target, pop_app_key, extract_wasm_custom_section, spawn_on_worker_inner,
 };
-use crate::{kprint, kprintln, capability};
+// What the host functions not yet built on AArch64 use.
+#[cfg(target_arch = "x86_64")]
+use super::{
+    HwDriverState, MAX_APP_BUFS, MAX_DMA_ALLOCS, MAX_DMA_ALLOCS_GPU, MAX_DMA_PAGES, MAX_DMA_PAGES_GPU,
+    MAX_DMA_PAGES_PER_CALL, MAX_MMIO_MAPS, app_is_focused, bench_sys_info,
+    fsck_sys_info, append_entry, is_trust_critical_path, spawn_on_worker, picker_module_name,
+    TERM_IDX_ACTIVE, PICKER_W, PICKER_H,
+};
+use crate::{kprintln, capability};
+#[cfg(target_arch = "x86_64")]
+use crate::kprint;
+#[cfg(target_arch = "x86_64")]
 use crate::drivers::pci;
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -108,6 +114,7 @@ pub(crate) fn write_whole(mem: &mut [u8], buf_ptr: i32, buf_max: i32, bytes: &[u
     write_bytes(mem, buf_ptr, bytes)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Shared body of the WLAN queue polls: moves one message from `dequeue`
 /// into the guest buffer. Its length, 0 for an empty queue, `too_small`
 /// with the message left queued, or -1 for a bad range.
@@ -151,6 +158,7 @@ pub(crate) fn npk_fs_usage(ctx: &mut HostState) -> i64 {
     (((used & 0xFFFF_FFFF) << 32) | (total & 0xFFFF_FFFF)) as i64
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_clipboard_len(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_clipboard_len") {
@@ -160,6 +168,7 @@ pub(crate) fn npk_clipboard_len(ctx: &mut HostState) -> i32 {
     crate::shade::clipboard::text_len() as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_set_close_guard(ctx: &mut HostState, on: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_set_close_guard") {
@@ -171,12 +180,14 @@ pub(crate) fn npk_window_set_close_guard(ctx: &mut HostState, on: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_close_cancel(ctx: &mut HostState) -> i32 {
     let wid = ctx.widget_window_id;
     if wid == 0 { return -1; }
     if crate::shade::widgets::cancel_close_request(wid) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_screen_size(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     let ok = capability::holds(&cap_id, capability::Rights::RENDER)
@@ -197,8 +208,10 @@ pub(crate) fn npk_capture_size(ctx: &mut HostState) -> i32 {
     (((info.width & 0xFFFF) << 16) | (info.height & 0xFFFF)) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Window geometry crosses the ABI in logical px.
 fn phys(v: i32) -> i32 { crate::shade::widgets::scale::len_i(v) }
+#[cfg(target_arch = "x86_64")]
 fn logical(v: u32) -> u32 { crate::shade::widgets::scale::logical(v) }
 
 pub(crate) fn npk_ticks(_ctx: &mut HostState) -> i64 {
@@ -236,6 +249,7 @@ pub(crate) fn npk_random_bytes(mem: &mut [u8], _ctx: &mut HostState, buf_ptr: i3
     len
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_theme_token") {
@@ -251,6 +265,7 @@ pub(crate) fn npk_theme_token(ctx: &mut HostState, token_id: i32) -> i32 {
     crate::shade::widgets::palette::for_window(ctx.widget_window_id).colors[token as u8 as usize] as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_cursor_pos(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_cursor_pos") {
@@ -264,6 +279,7 @@ pub(crate) fn npk_cursor_pos(ctx: &mut HostState) -> i32 {
     (x << 16) | y
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_screen_flash(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::CAPTURE, "npk_screen_flash") {
@@ -276,6 +292,7 @@ pub(crate) fn npk_screen_flash(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_overlay") {
@@ -352,6 +369,7 @@ pub(crate) fn npk_window_set_overlay(ctx: &mut HostState, w: i32, h: i32) -> i32
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_set_modal(ctx: &mut HostState, modal: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_modal") {
@@ -365,6 +383,7 @@ pub(crate) fn npk_window_set_modal(ctx: &mut HostState, modal: i32) -> i32 {
     if ok { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_set_overlay_at(ctx: &mut HostState, x: i32, y: i32, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_overlay_at") {
@@ -416,6 +435,7 @@ pub(crate) fn npk_window_set_overlay_at(ctx: &mut HostState, x: i32, y: i32, w: 
     if ok { crate::shade::request_render(); 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_set_light_dismiss(ctx: &mut HostState, on: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_set_light_dismiss") {
@@ -429,6 +449,7 @@ pub(crate) fn npk_window_set_light_dismiss(ctx: &mut HostState, on: i32) -> i32 
     if ok { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_set_clipboard_sink(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_set_clipboard_sink") {
@@ -440,6 +461,7 @@ pub(crate) fn npk_window_set_clipboard_sink(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32, w: i32, h: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_set_panel") {
@@ -489,6 +511,7 @@ pub(crate) fn npk_window_set_panel(ctx: &mut HostState, edge: i32, behavior: i32
     if ok { crate::shade::request_render(); 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Reads one byte from an ACPI SystemMemory operation region.
 ///
 /// Some firmware talks to its embedded controller through a memory-mapped
@@ -527,6 +550,7 @@ pub(crate) fn npk_acpi_mem_read(ctx: &mut HostState, hi: i32, lo: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Takes a pending EC query. -1 = nothing pending or no right.
 pub(crate) fn npk_ec_query(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
@@ -539,6 +563,7 @@ pub(crate) fn npk_ec_query(ctx: &mut HostState) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ec_read(ctx: &mut HostState, addr: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_ec_read") {
@@ -551,6 +576,7 @@ pub(crate) fn npk_ec_read(ctx: &mut HostState, addr: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ec_write(ctx: &mut HostState, addr: i32, val: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_ec_write") {
@@ -560,6 +586,7 @@ pub(crate) fn npk_ec_write(ctx: &mut HostState, addr: i32, val: i32) -> i32 {
     if crate::ec::write(addr as u8, val as u8) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_battery_report(ctx: &mut HostState, packed: i32) {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_battery_report") {
@@ -568,6 +595,7 @@ pub(crate) fn npk_battery_report(ctx: &mut HostState, packed: i32) {
     crate::battery::report(packed);
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_battery_detail(ctx: &mut HostState, rate: i32, remaining: i32,
     full: i32, voltage_mv: i32, unit: i32) {
     let cap_id = ctx.cap_id;
@@ -580,6 +608,7 @@ pub(crate) fn npk_battery_detail(ctx: &mut HostState, rate: i32, remaining: i32,
     });
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Audio slots belong to the module that opened them (`ctx.pid`); submit,
 /// buffered and close answer only to that module. pid 0 is the shared
 /// identity of the inline execution paths, not an owner (same rule as
@@ -589,6 +618,7 @@ pub(crate) fn npk_audio_open(ctx: &mut HostState) -> i32 {
     crate::audio::open_for(ctx.pid)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The format of the caller's stream `slot` (`audio::Encoding` numbering);
 /// empties its ring. -1 for a foreign slot or a format the mixer does not
 /// take.
@@ -598,6 +628,7 @@ pub(crate) fn npk_audio_format(ctx: &mut HostState, slot: i32, rate: i32, encodi
     if crate::audio::set_format_for(slot as usize, ctx.pid, fmt) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The audio driver's device format, what `npk_audio_poll_mix` produces.
 /// Requires `Rights::HARDWARE`, like the poll itself.
 pub(crate) fn npk_audio_device_format(ctx: &mut HostState, rate: i32, encoding: i32, channels: i32) -> i32 {
@@ -608,6 +639,7 @@ pub(crate) fn npk_audio_device_format(ctx: &mut HostState, rate: i32, encoding: 
     if crate::audio::set_device_format(ctx.pid, fmt) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn audio_format(rate: i32, encoding: i32, channels: i32) -> Option<crate::audio::Format> {
     let encoding = crate::audio::Encoding::from_abi(encoding)?;
     let rate = u32::try_from(rate).ok()?;
@@ -615,11 +647,13 @@ fn audio_format(rate: i32, encoding: i32, channels: i32) -> Option<crate::audio:
     Some(crate::audio::Format { rate, encoding, channels })
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_close(ctx: &mut HostState, slot: i32) -> i32 {
     if slot < 0 { return -1; }
     if crate::audio::close_for(slot as usize, ctx.pid) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The system volume: the shell's control, or the app the user is using.
 pub(crate) fn npk_audio_set_volume(ctx: &mut HostState, pct: i32) -> i32 {
     let shell = capability::holds(&ctx.cap_id, capability::Rights::SHELL);
@@ -629,10 +663,12 @@ pub(crate) fn npk_audio_set_volume(ctx: &mut HostState, pct: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_get_volume(_ctx: &mut HostState) -> i32 {
  crate::audio::get_volume() as i32 
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_workspace_switch(ctx: &mut HostState, n: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_workspace_switch") {
@@ -647,6 +683,7 @@ pub(crate) fn npk_workspace_switch(ctx: &mut HostState, n: i32) -> i32 {
 /// Popups an app may hold open at once (`npk_popup`'s number).
 const MAX_POPUPS: i32 = 8;
 
+#[cfg(target_arch = "x86_64")]
 /// Open or update popup `popup` of the app's window: a window of its own,
 /// as large as `ptr..ptr+len` (a scene tree) wants, next to anchor node
 /// `anchor` in the app's own tree, `gap` px away.
@@ -687,6 +724,7 @@ pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor:
     if r >= 0 { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Close popup `popup` of the app's window. No `PopupDone`: the app asked.
 pub(crate) fn npk_popup_close(ctx: &mut HostState, popup: i32) -> i32 {
     let cap_id = ctx.cap_id;
@@ -704,6 +742,7 @@ pub(crate) fn npk_popup_close(ctx: &mut HostState, popup: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_activate(ctx: &mut HostState, id: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_window_activate") {
@@ -716,6 +755,7 @@ pub(crate) fn npk_window_activate(ctx: &mut HostState, id: i32) -> i32 {
     if ok { crate::shade::request_render(); 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_power(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_power") {
@@ -725,6 +765,7 @@ pub(crate) fn npk_power(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_restart(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::SHELL, "npk_restart") {
@@ -734,6 +775,7 @@ pub(crate) fn npk_restart(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_close_widget(ctx: &mut HostState) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_close_widget") {
@@ -757,6 +799,7 @@ pub(crate) fn npk_get_fb_size(ctx: &mut HostState) -> i64 {
     ((w as i64) << 32) | (h as i64)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_sys_info(ctx: &mut HostState, key: i32) -> i64 {
     match key & 0xFF {
         0 => crate::smp::per_core::core_count() as i64,
@@ -838,6 +881,7 @@ fn follow_core(ctx: &mut HostState) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_sleep(ctx: &mut HostState, ms: i32) -> i32 {
     if ms <= 0 || ms > 60000 { return -1; }
 
@@ -880,6 +924,7 @@ const WAIT_STATE: i32 = 32;
 /// (`npk_display_audio_serve`).
 const WAIT_GPU_CMD: i32 = 64;
 
+#[cfg(target_arch = "x86_64")]
 /// Which of `mask`'s conditions hold right now. Bits the caller may not
 /// wait on (a driver bit without a driver, an event bit without NETCTL)
 /// never fire.
@@ -927,6 +972,7 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
     r
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Is input waiting for this app? Also true once its widget window is
 /// gone, so a parked app wakes and leaves its loop.
 fn input_ready(ctx: &HostState) -> bool {
@@ -940,6 +986,7 @@ fn input_ready(ctx: &HostState) -> bool {
     crate::wasm::has_app_key(ctx.terminal_idx)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_wait(mask, timeout_ms)` — park until something in `mask` happens,
 /// or `timeout_ms` passes (< 0: no timeout). Returns the bits that fired,
 /// 0 on timeout. Bits: `WAIT_INPUT` 1, `WAIT_IRQ` 2, `WAIT_NET_TX` 4,
@@ -1037,6 +1084,7 @@ pub(crate) fn npk_input_poll(ctx: &mut HostState) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
     let term_idx = ctx.terminal_idx;
     let core_id = ctx.core_id;
@@ -1087,6 +1135,7 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
     result
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_clear(ctx: &mut HostState) {
     let idx = ctx.terminal_idx;
     if (idx as usize) < MAX_APP_BUFS {
@@ -1106,6 +1155,7 @@ fn stream_allowed(ctx: &HostState) -> bool {
     capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "terminal stream")
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_stream_open(ctx: &mut HostState, idx: i32) -> i32 {
     if !stream_allowed(ctx) { return -1; }
     // -1 = the everything-sink: every write, whichever terminal it was
@@ -1117,6 +1167,7 @@ pub(crate) fn npk_stream_open(ctx: &mut HostState, idx: i32) -> i32 {
     if crate::shade::terminal::stream_open(idx as usize) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_stream_close(ctx: &mut HostState, idx: i32) -> i32 {
     if !stream_allowed(ctx) { return -1; }
     if idx >= 0 { crate::shade::terminal::stream_close(idx as usize); }
@@ -1124,6 +1175,7 @@ pub(crate) fn npk_stream_close(ctx: &mut HostState, idx: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Injects a key byte into the shell's input queue.
 ///
 /// Requires `Rights::HARDWARE`: the shell executes what arrives there with
@@ -1171,6 +1223,7 @@ fn net_allowed(ctx: &mut HostState) -> bool {
 // this is a long-lived, mostly idle connection, hence a slot table instead
 // of a queue.
 
+#[cfg(target_arch = "x86_64")]
 struct TlsSlot {
     /// Owner. A handle is served only to the process that opened it, as
     /// with the HTTP handles.
@@ -1184,9 +1237,11 @@ struct TlsSlot {
 
 /// Grows with the connections; how many one module holds is bounded by its
 /// TCP connections (`tcp::connect_as`).
+#[cfg(target_arch = "x86_64")]
 static TLS_SLOTS: spin::Mutex<alloc::vec::Vec<Option<TlsSlot>>> =
     spin::Mutex::new(alloc::vec::Vec::new());
 
+#[cfg(target_arch = "x86_64")]
 /// `cap` reaches the host of `url`; the journal keeps the host, not the
 /// path, which may carry what the user typed.
 fn journal_url(cap: &crate::capability::CapId, url: &str) {
@@ -1195,12 +1250,14 @@ fn journal_url(cap: &crate::capability::CapId, url: &str) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The TCP owner a module's connections are charged to. A run without a
 /// process entry (pid 0) is still a module, never the kernel.
 fn tcp_owner(ctx: &HostState) -> crate::net::tcp::Owner {
     if ctx.pid != 0 { ctx.pid } else { u32::MAX }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Common gate for every access to an existing handle.
 fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
     if !net_allowed(ctx) { return None }
@@ -1212,6 +1269,7 @@ fn tls_slot_ok(ctx: &mut HostState, handle: i32) -> Option<usize> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Close every TLS handle of module `pid` (it has ended). A session checked
 /// out by a running call cannot be: there is none once the module is gone.
 pub(crate) fn tls_release_owner(pid: u32) {
@@ -1231,6 +1289,7 @@ pub(crate) fn tls_release_owner(pid: u32) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Check the session of slot `i` out of the table; `None` if it is busy.
 fn tls_checkout(i: usize, pid: u32) -> Option<crate::crypto::tls::TlsSession> {
     let mut g = TLS_SLOTS.lock();
@@ -1240,6 +1299,7 @@ fn tls_checkout(i: usize, pid: u32) -> Option<crate::crypto::tls::TlsSession> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Return a checked-out session, or close it if the handle was closed
 /// meanwhile.
 fn tls_checkin(i: usize, pid: u32, mut session: crate::crypto::tls::TlsSession) {
@@ -1261,6 +1321,7 @@ fn tls_checkin(i: usize, pid: u32, mut session: crate::crypto::tls::TlsSession) 
     let _ = crate::crypto::tls::tls_close(&mut session);
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_tls_connect(ip, port, host_ptr, host_len) -> handle | -1`
 ///
 /// Blocks for the handshake, once per connection, like `open_tls` on the
@@ -1317,6 +1378,7 @@ pub(crate) fn npk_tls_connect(mem: &mut [u8], ctx: &mut HostState,
     free as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_tls_send(handle, ptr, len) -> 0 | -1`
 pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
                            handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
@@ -1334,6 +1396,7 @@ pub(crate) fn npk_tls_send(mem: &mut [u8], ctx: &mut HostState,
     r
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_tls_recv(handle, ptr, cap) -> n | 0 (nothing yet) | -1 (closed/error)`
 ///
 /// Returns immediately: `tls_poll` only collects what the TCP stack already
@@ -1352,6 +1415,7 @@ pub(crate) fn npk_tls_recv(mem: &mut [u8], ctx: &mut HostState,
     r
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_tls_close(handle) -> 0`
 pub(crate) fn npk_tls_close(ctx: &mut HostState, handle: i32) -> i32 {
     let Some(i) = tls_slot_ok(ctx, handle) else { return -1 };
@@ -1370,6 +1434,7 @@ pub(crate) fn npk_tls_close(ctx: &mut HostState, handle: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     let ip = [
@@ -1401,12 +1466,14 @@ fn own_tcp(ctx: &HostState, fd: i32) -> Option<usize> {
     *ctx.tcp_handles.get(usize::try_from(fd).ok()?)?
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_status(ctx: &mut HostState, handle: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     let Some(h) = own_tcp(ctx, handle) else { return -1 };
     crate::net::tcp::connect_status(h)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_close(ctx: &mut HostState, handle: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     if let Some(h) = own_tcp(ctx, handle) {
@@ -1424,6 +1491,7 @@ pub(crate) fn npk_debug_target_port(_ctx: &mut HostState) -> i32 {
     get_debug_target().1 as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Binds the module to a PCI device. Allowed with a capability for that
 /// exact device (the `driver` intent) or with global `Rights::HARDWARE`:
 /// a bound device gives MMIO, bus mastering and DMA, i.e. reach into all
@@ -1466,6 +1534,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Make `addr` this module's device: free, already its own, or handed over
 /// by the kernel driver that had it. The GPU is the only kernel-driven
 /// device that hands over (`gpu::yield_to_module`); every other kernel
@@ -1484,6 +1553,7 @@ fn take_binding(ctx: &mut HostState, addr: pci::PciAddr) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 fn take_device(pid: u32, addr: pci::PciAddr) -> bool {
     // pid 0 is the shared identity of the inline paths, not an owner.
     if pid == 0 { return false; }
@@ -1498,10 +1568,12 @@ fn take_device(pid: u32, addr: pci::PciAddr) -> bool {
     pci::claim(addr, me).is_ok()
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pci_bind_class(ctx: &mut HostState, class: i32, subclass: i32) -> i32 {
     npk_pci_bind_class_n(ctx, class, subclass, 0)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Bind the `index`-th PCI device of a class. Same rights check as
 /// `npk_pci_bind_class`; `index` 0 is the first match.
 ///
@@ -1546,6 +1618,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
         Some(h) if h.is_pci => h,
@@ -1560,6 +1633,7 @@ pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
     pci::read32(hw.pci_addr, offset as u8) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Read a config dword of any PCI function, read-only. Linux drivers read
 /// other functions' config to learn the platform: i915 asks the ISA bridge
 /// for the PCH type and the host bridge for MCHBAR. Needs global
@@ -1583,6 +1657,7 @@ pub(crate) fn npk_pci_read_config_at(ctx: &mut HostState, bdf: i32, offset: i32)
     pci::read32(addr, offset as u8) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Base and size of memory BAR `bar` of the bound device, as the boot scan
 /// sized it: `npk_pci_bar_size` returns the size (0 = no such BAR).
 pub(crate) fn npk_pci_bar_size(ctx: &mut HostState, bar: i32) -> i64 {
@@ -1594,6 +1669,7 @@ pub(crate) fn npk_pci_bar_size(ctx: &mut HostState, bar: i32) -> i64 {
     pci::bar(hw.pci_addr, bar as usize).map_or(0, |b| b.size as i64)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
         Some(h) if h.is_pci => h,
@@ -1617,6 +1693,7 @@ pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32)
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_pci_write_config16(offset, value)`: a word write to the bound
 /// device's config space, with the same refusals as the dword form.
 pub(crate) fn npk_pci_write_config16(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
@@ -1633,6 +1710,7 @@ pub(crate) fn npk_pci_write_config16(ctx: &mut HostState, offset: i32, value: i3
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_vga_msr_touch()`: `outb(inb(VGA_MIS_R), VGA_MIS_W)`, Linux
 /// intel_vga_reset_io_mem. A display engine whose VGA power well was just
 /// enabled raises unclaimed-register errors on 0x3d5 until the MSR has been
@@ -1653,6 +1731,7 @@ pub(crate) fn npk_vga_msr_touch(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Config dwords a driver must not write: they decide where the device sits
 /// in physical memory (BARs, expansion ROM, a bridge's windows) or where its
 /// interrupts go (MSI address and data, MSI-X control). The kernel sizes and
@@ -1679,6 +1758,7 @@ fn ext_write_refused(dev: pci::PciAddr, offset: u16) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 fn config_write_refused(dev: pci::PciAddr, dword: u8) -> bool {
     let header = pci::read8(dev, 0x0E) & 0x7F;
     let fixed = match header {
@@ -1702,6 +1782,7 @@ fn config_write_refused(dev: pci::PciAddr, dword: u8) -> bool {
     false
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) if h.is_pci => h,
@@ -1735,6 +1816,7 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
     // Without a PCI device there is no config address.
     let hw = match ctx.hw.as_mut() { Some(h) if h.is_pci => h, _ => return -1 };
@@ -1748,6 +1830,7 @@ pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Register I/O APIC input `gsi` for this driver — the interrupt line of a
 /// device that is not on PCI (e.g. a GPIO controller for I2C touchpads,
 /// found in its ACPI `_CRS`). `flags`: bit 0 level-triggered, bit 1 active-low.
@@ -1771,6 +1854,7 @@ pub(crate) fn npk_irq_register_gsi(ctx: &mut HostState, gsi: i32, flags: i32) ->
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_sci_arm(gpe) -> vector | -1`: the AML driver takes the ACPI SCI for
 /// its EC's GPE. Same ownership as `npk_irq_register_gsi` — the vector is
 /// this module's, and `npk_wait(WAIT_IRQ)` arms it. Once per boot.
@@ -1812,6 +1896,7 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_sci_service() -> mask`: ack the SCI sources (see `sci::service`).
 pub(crate) fn npk_sci_service(ctx: &mut HostState) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_sci_service") {
@@ -1820,6 +1905,7 @@ pub(crate) fn npk_sci_service(ctx: &mut HostState) -> i32 {
     crate::sci::service() as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_acpi_video_notify(event) -> 0 | -1`: the AML driver heard a
 /// `Notify` on an ACPI video output. Linux' `acpi_video_device_notify`
 /// turns 0x86/0x87 into KEY_BRIGHTNESSUP/DOWN, and the desktop steps the
@@ -1837,6 +1923,7 @@ pub(crate) fn npk_acpi_video_notify(ctx: &mut HostState, event: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_acpi_proc_caps() -> caps | -1`: the capabilities for the
 /// processors' `_OSC`/`_PDC` (see `acpi_processor::proc_cap_bits`).
 /// HARDWARE-gated.
@@ -1847,6 +1934,7 @@ pub(crate) fn npk_acpi_proc_caps(ctx: &mut HostState) -> i32 {
     crate::drivers::acpi_processor::proc_cap_bits() as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_acpi_cst(ptr, count) -> usable states | -1`: a processor's `_CST`
 /// entries for MWAIT idle (see `acpi_processor::take_cst`). HARDWARE-gated.
 pub(crate) fn npk_acpi_cst(mem: &mut [u8], ctx: &mut HostState, ptr: i32, count: i32) -> i32 {
@@ -1870,11 +1958,13 @@ pub(crate) fn npk_acpi_cst(mem: &mut [u8], ctx: &mut HostState, ptr: i32, count:
     crate::drivers::acpi_processor::take_cst(&cst) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Is `vector` the one this module's driver registered?
 fn owns_vector(ctx: &HostState, vector: i32) -> bool {
     matches!(ctx.hw.as_ref(), Some(h) if h.irq_vector != 0 && h.irq_vector as i32 == vector)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_irq_arm(ctx: &mut HostState, vector: i32) -> i64 {
     // Arming re-routes the device's MSI to the calling core — only for the
     // module that owns it.
@@ -1882,12 +1972,14 @@ pub(crate) fn npk_irq_arm(ctx: &mut HostState, vector: i32) -> i64 {
     crate::irq::arm(vector as crate::irq::Irq) as i64
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_irq_wait(ctx: &mut HostState, vector: i32, since: i64, timeout_ms: i32) -> i32 {
     if !owns_vector(ctx, vector) || since < 0 { return -1; }
     let t = if timeout_ms <= 0 { 1000 } else { timeout_ms as u64 };
     if crate::irq::wait(vector as crate::irq::Irq, since as u64, t) { 1 } else { 0 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) if h.is_pci => h,
@@ -1991,6 +2083,7 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
 /// the ACPI tables.
 static PLATFORM_MMIO: spin::Mutex<Option<Vec<(u64, u64)>>> = spin::Mutex::new(None);
 
+#[cfg(target_arch = "x86_64")]
 /// Why page `a` must not be mapped for a module, or `None` if it may.
 /// One rule for every mapping path: a BAR the module can rewrite is no
 /// more trustworthy than an address it names.
@@ -2013,6 +2106,7 @@ fn mmio_refusal(a: u64) -> Option<&'static str> {
 /// The most pages one `npk_mmio_map_phys` maps outside a firmware region.
 const MMIO_MAP_PAGES_UNDECLARED: i32 = 16;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_mmio_map_phys") {
@@ -2178,29 +2272,35 @@ fn hw_addr(regions: &[(u64, usize)], handle: i32, offset: i32, width: usize) -> 
     Some(HwAddr(base + off as u64))
 }
 
+#[cfg(target_arch = "x86_64")]
 fn mmio_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
     hw_addr(&ctx.hw.as_ref()?.mmio_maps, handle, offset, width)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn dma_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
     hw_addr(&ctx.hw.as_ref()?.dma_allocs, handle, offset, width)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     mmio_at(ctx, handle, offset, 4).map_or(-1, |a| a.read::<u32>() as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write32(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     let Some(a) = mmio_at(ctx, handle, offset, 4) else { return -1 };
     a.write(value as u32);
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_read16(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     if offset & 1 != 0 { return -1; }
     mmio_at(ctx, handle, offset, 2).map_or(-1, |a| a.read::<u16>() as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     if offset & 1 != 0 { return -1; }
     let Some(a) = mmio_at(ctx, handle, offset, 2) else { return -1 };
@@ -2213,16 +2313,19 @@ pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, va
 // like REG_SYS_FUNC_EN+1 mean a single byte. A 32-bit RMW also touches
 // three neighbouring bytes, which differs on registers with read side
 // effects. Linux chooses the width deliberately; we follow it.
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_read8(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     mmio_at(ctx, handle, offset, 1).map_or(-1, |a| a.read::<u8>() as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write8(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     let Some(a) = mmio_at(ctx, handle, offset, 1) else { return -1 };
     a.write(value as u8);
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Two 32-bit accesses, low half first: not every device decodes a 64-bit
 /// transaction.
 pub(crate) fn npk_mmio_read64(ctx: &mut HostState, handle: i32, offset: i32) -> i64 {
@@ -2231,6 +2334,7 @@ pub(crate) fn npk_mmio_read64(ctx: &mut HostState, handle: i32, offset: i32) -> 
     ((hi.read::<u32>() as u64) << 32 | lo.read::<u32>() as u64) as i64
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write64(ctx: &mut HostState, handle: i32, offset: i32, value: i64) -> i32 {
     let (Some(lo), Some(hi)) = (mmio_at(ctx, handle, offset, 8), mmio_at(ctx, handle, offset.wrapping_add(4), 4))
         else { return -1 };
@@ -2239,6 +2343,7 @@ pub(crate) fn npk_mmio_write64(ctx: &mut HostState, handle: i32, offset: i32, va
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// One 64-bit read, as Linux `readq`. `npk_mmio_read64` is two 32-bit reads
 /// (low, then high), which is what iwlwifi's `iwl_read64` does; a GPU's
 /// page-table entries are read in one access.
@@ -2247,6 +2352,7 @@ pub(crate) fn npk_mmio_readq(ctx: &mut HostState, handle: i32, offset: i32) -> i
     mmio_at(ctx, handle, offset, 8).map_or(-1, |a| a.read::<u64>() as i64)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// One 64-bit write, as Linux `writeq`: the device never sees half of the
 /// value. i915 writes GGTT entries this way.
 pub(crate) fn npk_mmio_writeq(ctx: &mut HostState, handle: i32, offset: i32, value: i64) -> i32 {
@@ -2256,6 +2362,7 @@ pub(crate) fn npk_mmio_writeq(ctx: &mut HostState, handle: i32, offset: i32, val
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// DMA allocations and pages a module may hold. A GPU driver binds every
 /// buffer the compositor hands it through its own page tables, one page
 /// per 2 MB bound, and keeps a compute heap, scene and blur buffers; the
@@ -2272,6 +2379,7 @@ fn dma_caps(hw: &HwDriverState) -> (usize, usize) {
 /// BD has a 32-bit address field), as Linux's default mask.
 const DMA_LIMIT_DEFAULT: u64 = 0x1_0000_0000;
 
+#[cfg(target_arch = "x86_64")]
 /// `dma_set_mask(DMA_BIT_MASK(bits))`: the device reaches `bits` of
 /// address, so its later buffers may lie anywhere below `1 << bits`. 0, or
 /// -1 for a width outside 32..=64.
@@ -2282,6 +2390,7 @@ pub(crate) fn npk_dma_set_mask(ctx: &mut HostState, bits: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// A handle for the new buffer `phys`: a slot `npk_dma_free` emptied, else
 /// a new one.
 fn dma_slot(hw: &mut HwDriverState, phys: u64, pages: usize) -> usize {
@@ -2297,6 +2406,7 @@ fn dma_slot(hw: &mut HwDriverState, phys: u64, pages: usize) -> usize {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `dma_free_coherent`: the driver's buffer `handle` goes back. Behind an
 /// IOMMU the device loses it first; the handle is then empty and every
 /// access through it fails. 0, or -1 for a handle that holds nothing.
@@ -2313,6 +2423,7 @@ pub(crate) fn npk_dma_free(ctx: &mut HostState, handle: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) => h,
@@ -2339,6 +2450,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     handle as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Like `npk_dma_alloc`, but the driver chooses the upper limit.
 ///
 /// `allocate_contiguous_below` searches top-down, so a 4 GB limit always
@@ -2383,6 +2495,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     handle as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_phys_addr(ctx: &mut HostState, handle: i32) -> i64 {
     let hw = match ctx.hw.as_ref() {
         Some(h) => h,
@@ -2393,10 +2506,12 @@ pub(crate) fn npk_dma_phys_addr(ctx: &mut HostState, handle: i32) -> i64 {
     hw.dma_allocs[h].0 as i64
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     dma_at(ctx, handle, offset, 4).map_or(-1, |a| a.read::<u32>() as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_write32(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     let Some(a) = dma_at(ctx, handle, offset, 4) else { return -1 };
     a.write(value as u32);
@@ -2408,6 +2523,7 @@ pub(crate) fn npk_memory_fence(_ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The NIC's own driver: a hardware module that registered as the network
 /// device. Only it may move frames and wifi commands for that device; any
 /// other module with driver state (an ACPI or input driver) may not.
@@ -2415,18 +2531,21 @@ fn is_netdev(ctx: &HostState) -> bool {
     ctx.hw.as_ref().is_some_and(|h| h.registered_as_netdev)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_netdev_set_link(ctx: &mut HostState, up: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
     crate::netdev::set_wasm_nic_link(up != 0);
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_netdev_set_link_state(ctx: &mut HostState, carrier: i32, dormant: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
     crate::netdev::set_wasm_nic_link_state(carrier != 0, dormant != 0);
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Every entry below `base` on an external volume, as relative paths,
 /// folders before what they hold. Bounded like one listing.
 fn ext_tree(base: &str, out: &mut alloc::vec::Vec<u8>) -> bool {
@@ -2491,6 +2610,7 @@ fn journal_refusal(ctx: &HostState, want: capability::Rights, name: &str, call: 
     crate::audit::denied(&ctx.cap_id, want, &what, why);
 }
 
+#[cfg(target_arch = "x86_64")]
 /// May the module of `ctx` read file `name`? The rule of `npk_fetch` and
 /// `npk_file_*`: another module's private area is closed, even with global
 /// READ; the module's own area is open even without READ
@@ -2524,6 +2644,7 @@ fn read_allowed(ctx: &HostState, name: &str, call: &str) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_fetch(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let name = match read_str(mem, name_ptr, name_len) {
         Some(s) => s,
@@ -2592,6 +2713,7 @@ fn read_mem(mem: &[u8], ptr: i32, len: i32) -> Option<&[u8]> {
     Some(&mem[start..end])
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_status(ctx: &mut HostState) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2604,6 +2726,7 @@ pub(crate) fn npk_vault_status(ctx: &mut HostState) -> i32 {
     s
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_init(ctx: &mut HostState) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2611,6 +2734,7 @@ pub(crate) fn npk_vault_init(ctx: &mut HostState) -> i32 {
     if crate::security::keyvault::init() { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_set_passphrase(
     mem: &mut [u8], ctx: &mut HostState,
     old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32,
@@ -2630,6 +2754,7 @@ pub(crate) fn npk_vault_set_passphrase(
     if crate::security::keyvault::set_passphrase(old, new) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_unlock(mem: &mut [u8], ctx: &mut HostState, pass_ptr: i32, pass_len: i32) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2638,6 +2763,7 @@ pub(crate) fn npk_vault_unlock(mem: &mut [u8], ctx: &mut HostState, pass_ptr: i3
     if crate::security::keyvault::unlock_user(pass) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_lock(ctx: &mut HostState) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2646,6 +2772,7 @@ pub(crate) fn npk_vault_lock(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_user_set(
     mem: &mut [u8], ctx: &mut HostState,
     name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32,
@@ -2661,6 +2788,7 @@ pub(crate) fn npk_vault_user_set(
     if crate::security::keyvault::user_set(&name, val) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_user_get(
     mem: &mut [u8], ctx: &mut HostState,
     name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32,
@@ -2673,6 +2801,7 @@ pub(crate) fn npk_vault_user_get(
     write_whole(mem, buf_ptr, buf_max, &val)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_user_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2681,6 +2810,7 @@ pub(crate) fn npk_vault_user_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
     write_whole(mem, buf_ptr, buf_max, joined.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_system_set(
     mem: &mut [u8], ctx: &mut HostState,
     name_ptr: i32, name_len: i32, val_ptr: i32, val_len: i32,
@@ -2702,6 +2832,7 @@ pub(crate) fn npk_vault_system_set(
     if crate::security::keyvault::system_set(&name, val) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_system_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2710,6 +2841,7 @@ pub(crate) fn npk_vault_system_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr
     write_whole(mem, buf_ptr, buf_max, joined.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_user_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2718,6 +2850,7 @@ pub(crate) fn npk_vault_user_delete(mem: &mut [u8], ctx: &mut HostState, name_pt
     if crate::security::keyvault::user_delete(&name) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_vault_system_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     if !is_vault_module(ctx) {
         return -1;
@@ -2771,6 +2904,7 @@ pub(crate) fn npk_http_last_error(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
 /// A module's private area may hold this share of the store: 1/32.
 const PRIVATE_QUOTA_DIVISOR: u64 = 32;
 
+#[cfg(target_arch = "x86_64")]
 /// How the module of `ctx` may write file `name`, the rule of `npk_store`
 /// and `npk_file_*`: `Some(false)` by capability or as its own settings
 /// file, `Some(true)` only through its private area (the quota applies),
@@ -2873,6 +3007,7 @@ fn private_committed(ctx: &HostState, name: &str) -> u64 {
     crate::npkfs::tree_bytes(&area).saturating_sub(crate::npkfs::tree_bytes(name))
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_store(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     let name = match read_str(mem, name_ptr, name_len) {
@@ -2987,6 +3122,7 @@ fn file_index(ctx: &HostState, handle: i32) -> Option<usize> {
     ctx.files.get(i)?.as_ref().map(|_| i)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_file_open(name_ptr, name_len) -> handle | -1`
 pub(crate) fn npk_file_open(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     let Some(name) = read_str(mem, name_ptr, name_len) else { return -1 };
@@ -3008,6 +3144,7 @@ pub(crate) fn npk_file_open(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
     i as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_file_read(handle, offset, buf_ptr, buf_max) -> n | 0 (end) | -1`
 ///
 /// A stream read: what fits from `offset` on, never past the end of the
@@ -3052,6 +3189,7 @@ pub(crate) fn npk_file_size(ctx: &mut HostState, handle: i32) -> i64 {
     i64::try_from(n).unwrap_or(-1)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_file_create(name_ptr, name_len) -> handle | -1`
 ///
 /// The file appears at `npk_file_close`, whole and at once; until then the
@@ -3078,6 +3216,7 @@ pub(crate) fn npk_file_create(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32
     i as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_file_write(handle, buf_ptr, len) -> len | -1`: append `len` bytes.
 pub(crate) fn npk_file_write(mem: &mut [u8], ctx: &mut HostState,
                              handle: i32, buf_ptr: i32, len: i32) -> i32 {
@@ -3126,6 +3265,7 @@ pub(crate) fn npk_file_write(mem: &mut [u8], ctx: &mut HostState,
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_file_close(handle) -> 0 | -1`. Closing a writer publishes the file;
 /// -1 then means it was not written and the name keeps its old content.
 pub(crate) fn npk_file_close(ctx: &mut HostState, handle: i32) -> i32 {
@@ -3154,6 +3294,7 @@ pub(crate) fn npk_file_close(ctx: &mut HostState, handle: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_file_abort(handle) -> 0 | -1`. Closes without publishing: a
 /// writer's file is not written. For a reader the same as close.
 pub(crate) fn npk_file_abort(ctx: &mut HostState, handle: i32) -> i32 {
@@ -3164,6 +3305,7 @@ pub(crate) fn npk_file_abort(ctx: &mut HostState, handle: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The files a module left open on external drives: their partial copies
 /// go, the names keep what they had.
 pub(crate) fn drop_ext_writers(ctx: &mut HostState) {
@@ -3182,6 +3324,7 @@ fn ext_temp_name(name: &str) -> Option<String> {
     Some(alloc::format!("{}/.{}.npk-part", dir, base))
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_store` on an external drive: written beside, then renamed over.
 fn ext_store(name: &str, data: &[u8]) -> bool {
     let Some(temp) = ext_temp_name(name) else { return false };
@@ -3201,6 +3344,7 @@ fn ext_store(name: &str, data: &[u8]) -> bool {
     true
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_home_dir(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::READ, "npk_home_dir") {
@@ -3222,6 +3366,7 @@ pub(crate) fn npk_launch_arg(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
     write_whole(mem, buf_ptr, buf_max, arg.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_clipboard_set") {
@@ -3233,6 +3378,7 @@ pub(crate) fn npk_clipboard_set(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
     slice.len() as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_clipboard_get(mem: &mut [u8], ctx: &mut HostState, ptr: i32, max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_clipboard_get") {
@@ -3246,6 +3392,7 @@ pub(crate) fn npk_clipboard_get(mem: &mut [u8], ctx: &mut HostState, ptr: i32, m
     write_whole(mem, ptr, max, &text)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_scene_commit") {
@@ -3303,6 +3450,7 @@ pub(crate) fn npk_scene_commit(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
     if result < 0 { result } else { 0 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: i32, ptr: i32, len: i32, width: i32, height: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::CANVAS, "npk_canvas_commit") {
@@ -3326,6 +3474,7 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_canvas_frame(canvas_id, ptr, len, w, h, format)`: a frame shown as
 /// a scene layer over the window (`canvas::commit_frame`): the window is
 /// not rasterized again, only the canvas rect is composed, and the GPU
@@ -3363,6 +3512,7 @@ pub(crate) fn npk_canvas_frame(mem: &mut [u8], ctx: &mut HostState, canvas_id: i
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_canvas_commit_yuv(canvas_id, y_ptr, u_ptr, v_ptr, ys, cs, w, h, flags)`
 ///
 /// Upload a planar 4:2:0 frame (I420) instead of BGRA. `ys`/`cs` are row
@@ -3419,6 +3569,7 @@ pub(crate) fn npk_canvas_commit_yuv(
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_canvas_rect(mem: &mut [u8], ctx: &mut HostState, canvas_id: i32, out_ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_canvas_rect") {
@@ -3440,6 +3591,7 @@ pub(crate) fn npk_canvas_rect(mem: &mut [u8], ctx: &mut HostState, canvas_id: i3
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_canvas_drop(ctx: &mut HostState, canvas_id: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_canvas_drop") {
         return -1;
@@ -3453,6 +3605,7 @@ pub(crate) fn npk_canvas_drop(ctx: &mut HostState, canvas_id: i32) -> i32 {
 const DRAG_MAX_BYTES: usize = 1024 * 1024;
 const DRAG_MAX_PATHS: usize = 16 * 1024;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_drag_start(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_drag_start") {
         return -1;
@@ -3521,6 +3674,7 @@ pub(crate) fn npk_capture_screen(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
 /// of its core.
 const CAPTURE_BAND: usize = 64;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_event_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_event_poll") {
@@ -3610,6 +3764,7 @@ pub(crate) fn npk_app_meta(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
     write_whole(mem, buf_ptr, buf_max, meta)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER | capability::Rights::EXECUTE, "npk_spawn_module") {
@@ -3671,6 +3826,7 @@ pub(crate) fn npk_spawn_module(mem: &mut [u8], ctx: &mut HostState, name_ptr: i3
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32, verb_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     // Launching a microvm hands a guest the network, the user's home and
@@ -3701,6 +3857,7 @@ pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32,
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_bar_state") {
@@ -3717,6 +3874,7 @@ pub(crate) fn npk_bar_state(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, m
     write_whole(mem, buf_ptr, max, s.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_window_titles") {
@@ -3728,6 +3886,7 @@ pub(crate) fn npk_window_titles(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
     write_whole(mem, buf_ptr, max, s.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Copies the `index`-th ACPI table with this signature into module memory.
 ///
 /// `sig` holds the four characters little-endian in an `i32`, as they sit
@@ -3759,6 +3918,7 @@ pub(crate) fn npk_acpi_table(
     write_bytes(mem, buf_ptr, &src[..])
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::HARDWARE, "npk_acpi_dsdt") {
@@ -3773,6 +3933,7 @@ pub(crate) fn npk_acpi_dsdt(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, b
     write_bytes(mem, buf_ptr, &src[..])
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_submit(mem: &mut [u8], ctx: &mut HostState, slot: i32, ptr: i32, len: i32) -> i32 {
     if slot < 0 || ptr < 0 || len < 0 { return -1; }
     let Some(pcm) = guest(mem, ptr, len as usize) else { return -1 };
@@ -3782,6 +3943,7 @@ pub(crate) fn npk_audio_submit(mem: &mut [u8], ctx: &mut HostState, slot: i32, p
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_audio_buffered(slot)` — bytes still sitting in the slot's ring,
 /// or -1 for a closed/invalid slot.
 ///
@@ -3798,6 +3960,7 @@ pub(crate) fn npk_audio_buffered(ctx: &mut HostState, slot: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Drains the mixed output of every slot: the audio driver's side.
 /// Requires `Rights::HARDWARE`; anyone else could record or starve all
 /// playback.
@@ -3811,6 +3974,7 @@ pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], ctx: &mut HostState, ptr: i32, 
     crate::audio::poll_mix(ctx.pid, out) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The PCI class (config 0x0B) of the device this driver owns, if it owns
 /// one.
 fn owned_pci_class(ctx: &HostState) -> Option<u8> {
@@ -3818,6 +3982,7 @@ fn owned_pci_class(ctx: &HostState) -> Option<u8> {
     (pci::owner(hw.pci_addr) == Some(pci::Owner::Module(ctx.pid))).then(|| pci::read8(hw.pci_addr, 0x0b))
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The display driver reports the ELD of `port`'s sink, `len` 0 for none
 /// (`pin_eld_notify` of Linux' audio component). Only the driver of a
 /// display device may.
@@ -3832,6 +3997,7 @@ pub(crate) fn npk_display_audio_set(mem: &mut [u8], ctx: &mut HostState, port: i
     if crate::audio::display_audio_set(port as usize, eld) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The audio driver reads the ELD of `port` (`get_eld`): its length, 0 when
 /// no sink is there, `-(needed + 2)` for a short buffer. Only the driver of
 /// a multimedia device may.
@@ -3849,6 +4015,7 @@ pub(crate) fn npk_display_audio_get(mem: &mut [u8], ctx: &mut HostState, port: i
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// 0 until the display driver reported once, then a count that moves with
 /// every report.
 pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
@@ -3858,6 +4025,7 @@ pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
     crate::audio::display_audio_generation() as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The display driver binds the audio component, says request `done` is
 /// carried out, and learns what is wanted now: `(number << 2) | bits`.
 pub(crate) fn npk_display_audio_serve(ctx: &mut HostState, done: i32) -> i32 {
@@ -3869,6 +4037,7 @@ pub(crate) fn npk_display_audio_serve(ctx: &mut HostState, done: i32) -> i32 {
     crate::audio::display_audio_serve(done as u32) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The audio driver asks for the display's audio power and the codec wake
 /// signal (`bits`): the request's number, -2 while no display driver is
 /// bound, -3 when none will be.
@@ -3886,6 +4055,7 @@ pub(crate) fn npk_display_audio_request(ctx: &mut HostState, bits: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The last request the display driver carried out, -2 while none is bound.
 pub(crate) fn npk_display_audio_done(ctx: &mut HostState) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_done")
@@ -3900,6 +4070,7 @@ pub(crate) fn npk_display_audio_done(ctx: &mut HostState) -> i32 {
 /// allocated run, so a read never crosses into free space.
 const BENCH_WINDOW_BLOCKS: u64 = 2048;
 
+#[cfg(target_arch = "x86_64")]
 /// `testdisk`'s layered measurements, as u64 values into `out`:
 ///
 /// - 0: device sequential read in calls of `a` blocks over `b` blocks of
@@ -3958,6 +4129,7 @@ pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: 
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_fs_list(mem: &mut [u8], ctx: &mut HostState, prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32 {
     if prefix_len > 0 {
         if let Some(prefix) = read_str(mem, prefix_ptr, prefix_len).filter(|p| crate::ext::is_ext(p)) {
@@ -4089,6 +4261,7 @@ pub(crate) fn npk_config_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, 
     write_whole(mem, buf_ptr, buf_max, value.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_setting_get(key, buf)`: a system setting the settings table lets
 /// apps read (docs/spec/SETTINGS.md); RENDER.
 pub(crate) fn npk_setting_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
@@ -4102,6 +4275,7 @@ pub(crate) fn npk_setting_get(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32,
     write_whole(mem, buf_ptr, buf_max, value.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_setting_set(key, value)`: change a system setting the settings
 /// table lets apps write, through the loop's `set` path; SETTINGS.
 pub(crate) fn npk_setting_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32 {
@@ -4123,6 +4297,7 @@ pub(crate) fn npk_setting_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32,
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32, out_ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::READ, "npk_fs_stat") {
@@ -4165,6 +4340,7 @@ pub(crate) fn npk_fs_stat(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, na
     write_bytes(mem, out_ptr, &buf)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_set_wallpaper(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32, width: i32, height: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::WRITE, "npk_set_wallpaper") {
@@ -4187,6 +4363,7 @@ pub(crate) fn npk_set_wallpaper(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_set_theme(mem: &mut [u8], ctx: &mut HostState, ptr: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::WRITE, "npk_set_theme") {
@@ -4203,6 +4380,7 @@ pub(crate) fn npk_set_theme(mem: &mut [u8], ctx: &mut HostState, ptr: i32) -> i3
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_stream_read(mem: &mut [u8], ctx: &mut HostState, idx: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     if !stream_allowed(ctx) { return -1; }
     if buf_len <= 0 { return 0; }
@@ -4219,6 +4397,7 @@ pub(crate) fn npk_stream_read(mem: &mut [u8], ctx: &mut HostState, idx: i32, buf
 /// kernel's reserve; a bigger send is the caller's loop to make.
 const MAX_TCP_SEND: usize = 1024 * 1024;
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     if buf_len <= 0 || buf_len as usize > MAX_TCP_SEND { return -1; }
@@ -4233,6 +4412,7 @@ pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_recv(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     if buf_max <= 0 { return -1; }
@@ -4244,6 +4424,7 @@ pub(crate) fn npk_tcp_recv(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The bytes `off .. off + len` of a module's DMA buffer, as a physical
 /// address, or `None` when the handle is not the module's or the range
 /// leaves the buffer. Negative values are refused before any arithmetic.
@@ -4252,6 +4433,7 @@ fn dma_range(ctx: &HostState, handle: i32, off: i32, len: i32) -> Option<(u64, u
     Some((dma_at(ctx, handle, off, len)?.0, len))
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
     let Some((phys, len)) = dma_range(ctx, handle, dma_off, len) else { return -1 };
     let Some(dst) = guest_mut(mem, wasm_ptr, len) else { return -1 };
@@ -4264,6 +4446,7 @@ pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_write(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
     let Some((phys, len)) = dma_range(ctx, handle, dma_off, len) else { return -1 };
     let Some(src) = guest(mem, wasm_ptr, len) else { return -1 };
@@ -4274,6 +4457,7 @@ pub(crate) fn npk_dma_write(mem: &mut [u8], ctx: &mut HostState, handle: i32, dm
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_netdev_register(mem: &mut [u8], ctx: &mut HostState, mac_ptr: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) => h,
@@ -4298,6 +4482,7 @@ pub(crate) fn npk_netdev_register(mem: &mut [u8], ctx: &mut HostState, mac_ptr: 
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_print(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) {
     if let Some(s) = read_str(mem, ptr, len) {
         if ctx.direct_output {
@@ -4324,6 +4509,7 @@ pub(crate) fn npk_log(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, len: i32) 
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_log_serial(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, len: i32) {
     if let Some(s) = read_str(mem, ptr, len) {
         crate::drivers::serial::capture_fmt(format_args!("{}\n", s));
@@ -4343,6 +4529,7 @@ pub(crate) fn npk_log_serial(mem: &mut [u8], _ctx: &mut HostState, ptr: i32, len
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Fetch a document: the navigation itself, which goes wherever it is
 /// pointed, a home-network address included, as in any browser. Reach is
 /// therefore not applied here. It is applied to everything a page fetches
@@ -4411,6 +4598,7 @@ pub(crate) fn npk_http_request(mem: &mut [u8], ctx: &mut HostState, url_ptr: i32
     write_bytes(mem, buf_ptr, &out)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32, method_len: i32, url_ptr: i32, url_len: i32, hdrs_ptr: i32, hdrs_len: i32, body_ptr: i32, body_len: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
@@ -4524,6 +4712,7 @@ pub(crate) fn npk_http_send(mem: &mut [u8], ctx: &mut HostState, method_ptr: i32
 // the caller's word — so guessing a small integer cannot read another app's
 // document.
 
+#[cfg(target_arch = "x86_64")]
 /// Sets this module's reach context.
 ///
 /// The kernel trusts the module for the document URL but not for its class:
@@ -4552,6 +4741,7 @@ pub(crate) fn npk_net_context(
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Start one request. Returns a handle (>= 1), or -1 with the reason in
 /// `npk_http_last_error`. Same validation as `npk_http_send`: it is the same
 /// request, only nobody waits for it here.
@@ -4630,6 +4820,7 @@ pub(crate) fn npk_http_begin(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Start a batch. Returns a handle (>= 1) or -1; the answer comes back
 /// through `npk_http_take_many`.
 ///
@@ -4642,6 +4833,7 @@ pub(crate) fn npk_http_begin_many(
     npk_http_begin_many_hdr(mem, ctx, urls_ptr, urls_len, 0, 0, out_max)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Like [`npk_http_begin_many`], but with one cookie line per URL, so
 /// subresources of a logged-in page (images, stylesheets, scripts) carry
 /// the session too.
@@ -4710,12 +4902,14 @@ pub(crate) fn npk_http_begin_many_hdr(
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// 1 = an answer is waiting, 0 = still running, -1 = it failed (call
 /// `npk_http_take` for the reason), -2 = no such handle.
 pub(crate) fn npk_http_poll(ctx: &mut HostState, handle: i32) -> i32 {
     crate::intent::fetch::poll(ctx.pid, handle)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Collect a finished single request. Bytes written on success; -1 if the
 /// request failed; -2 if the handle is unknown; -3 while it is still running;
 /// -4 if the body is longer than `buf_max` (it is at most the `buf_max` of
@@ -4746,6 +4940,7 @@ pub(crate) fn npk_http_take(mem: &mut [u8], ctx: &mut HostState, handle: i32, bu
     write_bytes(mem, buf_ptr, &reply.body)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Collect a finished batch: the bodies back to back in `out`, one
 /// little-endian i32 length per URL in `lens` (-1 for one that failed, -2
 /// for one left out because the batch's buffer was full).
@@ -4789,6 +4984,7 @@ pub(crate) fn npk_http_take_many(
     reply.lens.len() as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Stop caring about a handle. Always 0 — a browser cancels on every
 /// navigation and must not have to know which state it caught.
 pub(crate) fn npk_http_cancel(ctx: &mut HostState, handle: i32) -> i32 {
@@ -4796,6 +4992,7 @@ pub(crate) fn npk_http_cancel(ctx: &mut HostState, handle: i32) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_ptr: i32, urls_len: i32, out_ptr: i32, out_max: i32, lens_ptr: i32, lens_max: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if let Err(e) = capability::check_global(&cap_id, capability::Rights::NET) {
@@ -4848,6 +5045,7 @@ pub(crate) fn npk_http_request_many(mem: &mut [u8], ctx: &mut HostState, urls_pt
     urls.len() as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// What a caller may pass on for `path`: READ and WRITE as far as it holds
 /// them itself, globally or through a grant on that path. Opening a file in
 /// another app hands over the user's choice, never more than the caller had.
@@ -4866,6 +5064,7 @@ fn passable_rights(cap: &capability::CapId, path: &str) -> capability::Rights {
     r
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_open(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::EXECUTE, "npk_open") {
@@ -4959,6 +5158,7 @@ fn take_launch_anchor(module: &str) -> Option<(i32, i32, u32, u32)> {
     Some(v.remove(i).1)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_launch_at(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_len: i32,
     arg_ptr: i32, arg_len: i32, anchor: i32) -> i32
 {
@@ -4977,6 +5177,7 @@ pub(crate) fn npk_launch_at(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, a
     r
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_status_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32,
     icon: i32, value: i32, flags: i32, text_ptr: i32, text_len: i32, opens_ptr: i32, opens_len: i32) -> i32
 {
@@ -4995,12 +5196,14 @@ pub(crate) fn npk_status_set(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, 
     if ok { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_status_clear(mem: &mut [u8], ctx: &mut HostState, key_ptr: i32, key_len: i32) -> i32 {
     let Some(key) = read_str(mem, key_ptr, key_len) else { return -1 };
     crate::status::clear(&ctx.module_name, &key);
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_status_list(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::RENDER, "npk_status_list") {
         return -1;
@@ -5080,6 +5283,7 @@ pub(crate) fn npk_launch(mem: &mut [u8], ctx: &mut HostState, app_ptr: i32, app_
     if spawn_on_worker_inner(bytes, module_cap, 255, &app, false, 0, arg) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr: i32, start_len: i32, suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::RENDER, "npk_pick") {
@@ -5177,6 +5381,7 @@ pub(crate) fn npk_pick(mem: &mut [u8], ctx: &mut HostState, mode: i32, start_ptr
 const SCREEN_PICKER_W: u32 = 480;
 const SCREEN_PICKER_H: u32 = 260;
 
+#[cfg(target_arch = "x86_64")]
 /// The screen picker for a guest that asks to share the screen
 /// (`shade::capture`), over the guest's window `requester`. Its window, or
 /// None when it could not be started.
@@ -5221,6 +5426,7 @@ pub(crate) fn open_screen_pick(requester: u32, app: &str) -> Option<u32> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pick_result(mem: &mut [u8], ctx: &mut HostState, path_ptr: i32, path_len: i32) -> i32 {
     let me = ctx.widget_window_id;
     if me == 0 { return -1; }
@@ -5241,6 +5447,7 @@ pub(crate) fn npk_pick_result(mem: &mut [u8], ctx: &mut HostState, path_ptr: i32
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pick_mkdir(mem: &mut [u8], ctx: &mut HostState, path_ptr: i32, path_len: i32) -> i32 {
     let me = ctx.widget_window_id;
     if me == 0 || !crate::shade::widgets::is_open_pick(me) { return -1; }
@@ -5264,6 +5471,7 @@ pub(crate) fn npk_pick_mkdir(mem: &mut [u8], ctx: &mut HostState, path_ptr: i32,
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::WRITE, "npk_fs_delete") {
@@ -5296,6 +5504,7 @@ pub(crate) fn npk_fs_delete(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, 
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Create directory `name`. The parent must exist; an existing entry of
 /// that name is refused. Same rights and areas as `npk_fs_delete`.
 pub(crate) fn npk_fs_mkdir(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, name_len: i32) -> i32 {
@@ -5324,6 +5533,7 @@ pub(crate) fn npk_fs_mkdir(mem: &mut [u8], ctx: &mut HostState, name_ptr: i32, n
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::WRITE, "npk_fs_rename") {
@@ -5370,6 +5580,7 @@ pub(crate) fn npk_fs_rename(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, o
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32 {
     let cap_id = ctx.cap_id;
     if !capability::require(&cap_id, capability::Rights::WRITE, "npk_fs_copy") {
@@ -5406,6 +5617,7 @@ pub(crate) fn npk_fs_copy(mem: &mut [u8], ctx: &mut HostState, old_ptr: i32, old
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_wifi_send_cmd(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     if !is_wifi_manager(ctx) {
         return -1;
@@ -5416,6 +5628,7 @@ pub(crate) fn npk_wifi_send_cmd(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_wifi_poll_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_wifi_manager(ctx) {
         return -1;
@@ -5426,11 +5639,13 @@ pub(crate) fn npk_wifi_poll_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: 
     wifi_poll_into(mem, buf_ptr, max, crate::wifi::poll_event)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_wifi_poll_cmd(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
     wifi_poll_into(mem, buf_ptr, max, crate::wifi::poll_cmd)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_wifi_send_event(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
     match read_bytes(mem, buf_ptr, len) {
@@ -5456,6 +5671,7 @@ fn is_wifi_ui(ctx: &HostState) -> bool {
     ctx.module_name == "link"
 }
 
+#[cfg(target_arch = "x86_64")]
 /// npk_net_info(buf, max) -> len / -1 / `-(needed + 2)`: the interfaces and the IPv4
 /// configuration as `key value` lines (RENDER, like the status list):
 /// `iface <name> <driver> <mac> <up 0|1> <primary 0|1>`, `ipv4 a.b.c.d/p`,
@@ -5483,6 +5699,7 @@ pub(crate) fn npk_net_info(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, ma
     write_whole(mem, buf_ptr, max, t.as_bytes())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// npk_wifi_known(buf, max) -> len / -1 / `-(needed + 2)`: every known
 /// network with its record.
 pub(crate) fn npk_wifi_known(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
@@ -5490,6 +5707,7 @@ pub(crate) fn npk_wifi_known(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, 
     write_whole(mem, buf_ptr, max, &crate::drivers::wifi::known_wire())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// npk_wifi_new_network() -> 0 / -1: the link just came up on a different
 /// network than before; drop the lease and ask for a new one.
 pub(crate) fn npk_wifi_new_network(ctx: &mut HostState) -> i32 {
@@ -5498,11 +5716,13 @@ pub(crate) fn npk_wifi_new_network(ctx: &mut HostState) -> i32 {
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_wifi_poll_request(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_wifi_manager(ctx) { return -1; }
     wifi_poll_into(mem, buf_ptr, max, crate::drivers::wifi::poll_request)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_wifi_publish(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     if !is_wifi_manager(ctx) { return -1; }
     if len < 0 || len as usize > crate::drivers::wifi::STATUS_MAX { return -1; }
@@ -5512,11 +5732,13 @@ pub(crate) fn npk_wifi_publish(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_wifi_status(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_wifi_ui(ctx) { return -1; }
     write_whole(mem, buf_ptr, max, &crate::drivers::wifi::status())
 }
 
+#[cfg(target_arch = "x86_64")]
 /// npk_wifi_request(buf, len) -> 0 / -1. `[op]` or `[op][ssid_len][ssid]`;
 /// CONNECT may append `[psk_len][psk]`, which the kernel stores in the vault;
 /// SET_AUTO appends `[on]`.
@@ -5547,6 +5769,7 @@ pub(crate) fn npk_wifi_request(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32
     if ok { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_driver_report(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     if ctx.hw.is_none() { return -1; }
     if len <= 0 || len as usize > crate::drivers::report::REPORT_MAX { return -1; }
@@ -5560,6 +5783,7 @@ pub(crate) fn npk_driver_report(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i3
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_netdev_submit_rx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
     match read_bytes(mem, buf_ptr, len) {
@@ -5568,6 +5792,7 @@ pub(crate) fn npk_netdev_submit_rx(mem: &mut [u8], ctx: &mut HostState, buf_ptr:
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_netdev_rx_deliver(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, len: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
     match read_bytes(mem, buf_ptr, len) {
@@ -5576,6 +5801,7 @@ pub(crate) fn npk_netdev_rx_deliver(mem: &mut [u8], ctx: &mut HostState, buf_ptr
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     if !is_netdev(ctx) { return -1; }
     // Checked before the dequeue: a frame taken out cannot be put back.
@@ -5589,6 +5815,7 @@ pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     write_bytes(mem, buf_ptr, &frame[..len])
 }
 
+#[cfg(target_arch = "x86_64")]
 /// The display controller this module drives, if it holds one with
 /// HARDWARE: what every `npk_gpudev_*` call requires.
 fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::pci::PciAddr> {
@@ -5602,6 +5829,7 @@ fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::pci::PciAddr> {
     Some(hw.pci_addr)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_register(version) -> 0 | <0`.
 pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5610,6 +5838,7 @@ pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_info(id, out) -> 0 | -1`: `{phys, size: u64, pitch,
 /// width, height, format, offset, pages: u32}`, 40 bytes.
 pub(crate) fn npk_gpudev_bo_info(mem: &mut [u8], ctx: &mut HostState, id: i32, out_ptr: i32) -> i32 {
@@ -5620,6 +5849,7 @@ pub(crate) fn npk_gpudev_bo_info(mem: &mut [u8], ctx: &mut HostState, id: i32, o
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_pages(id, first, out_ptr, max) -> pages | -1`: physical
 /// addresses, 8 bytes each.
 pub(crate) fn npk_gpudev_bo_pages(mem: &mut [u8], ctx: &mut HostState, id: i32, first: i32, out_ptr: i32,
@@ -5632,6 +5862,7 @@ pub(crate) fn npk_gpudev_bo_pages(mem: &mut [u8], ctx: &mut HostState, id: i32, 
     crate::gpu::gpudev::bo_pages(dev, id, first as u32, out)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_job_data(seq, offset, out_ptr, len) -> bytes | -1`.
 pub(crate) fn npk_gpudev_job_data(mem: &mut [u8], ctx: &mut HostState, seq: i32, offset: i32, out_ptr: i32,
                                   len: i32) -> i32 {
@@ -5643,6 +5874,7 @@ pub(crate) fn npk_gpudev_job_data(mem: &mut [u8], ctx: &mut HostState, seq: i32,
     crate::gpu::gpudev::job_data(dev, seq as u32, offset as u32, out)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_bound(id, gpu_addr) -> 0 | -1`.
 pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -> i32 {
     match gpudev_device(ctx) {
@@ -5651,6 +5883,7 @@ pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_gpu_only(id) -> 0 | -1`.
 pub(crate) fn npk_gpudev_bo_gpu_only(ctx: &mut HostState, id: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5659,6 +5892,7 @@ pub(crate) fn npk_gpudev_bo_gpu_only(ctx: &mut HostState, id: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_ready(caps) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, caps: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5667,6 +5901,7 @@ pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, caps: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_poll(buf_ptr, max) -> jobs | -1`, 32 bytes each.
 pub(crate) fn npk_gpudev_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };
@@ -5677,6 +5912,7 @@ pub(crate) fn npk_gpudev_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
     crate::gpu::gpudev::poll(dev, out)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_complete(seq, status) -> 0 | -1`.
 pub(crate) fn npk_gpudev_complete(ctx: &mut HostState, seq: i32, status: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5685,6 +5921,7 @@ pub(crate) fn npk_gpudev_complete(ctx: &mut HostState, seq: i32, status: i32) ->
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_reply(seq, ptr, len) -> 0 | -1`: the reply of `OP_CCMD` job
 /// `seq`, at most `gpudev::MAX_REPLY` bytes, before `npk_gpudev_complete`.
 pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, ptr: i32, len: i32) -> i32 {
@@ -5696,6 +5933,7 @@ pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, pt
     crate::gpu::gpudev::reply(dev, seq as u32, data)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_tt_alloc(client, pages) -> tt | -1`: GTT pages for a guest
 /// client's object.
 pub(crate) fn npk_gpudev_tt_alloc(ctx: &mut HostState, client: i32, pages: i32) -> i32 {
@@ -5706,6 +5944,7 @@ pub(crate) fn npk_gpudev_tt_alloc(ctx: &mut HostState, client: i32, pages: i32) 
     crate::gpu::gpudev::tt_alloc(dev, client as u32, pages as u32)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_tt_buffer(tt) -> id | -1`: the buffer GTT pages `tt` are
 /// read under with `npk_gpudev_bo_pages`.
 pub(crate) fn npk_gpudev_tt_buffer(ctx: &mut HostState, tt: i32) -> i32 {
@@ -5715,6 +5954,7 @@ pub(crate) fn npk_gpudev_tt_buffer(ctx: &mut HostState, tt: i32) -> i32 {
     crate::gpu::gpudev::tt_buffer(tt as u32).map_or(-1, |id| id as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_tt_read(tt, offset, out_ptr, len) -> bytes | -1`: what the
 /// module's GTT pages `tt` hold, for a command stream checked in a copy.
 pub(crate) fn npk_gpudev_tt_read(mem: &mut [u8], ctx: &mut HostState, tt: i32, offset: i64, out_ptr: i32,
@@ -5727,6 +5967,7 @@ pub(crate) fn npk_gpudev_tt_read(mem: &mut [u8], ctx: &mut HostState, tt: i32, o
     crate::gpu::gpudev::tt_read(dev, tt as u32, offset as u64, out)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_tt_free(tt) -> 0 | -1`.
 pub(crate) fn npk_gpudev_tt_free(ctx: &mut HostState, tt: i32) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };
@@ -5736,6 +5977,7 @@ pub(crate) fn npk_gpudev_tt_free(ctx: &mut HostState, tt: i32) -> i32 {
     crate::gpu::gpudev::tt_free(dev, tt as u32)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_capset(ptr, len) -> 0 | -1`: the card's DRM capset, for
 /// native contexts, before `npk_gpudev_ready`.
 pub(crate) fn npk_gpudev_capset(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
@@ -5747,6 +5989,7 @@ pub(crate) fn npk_gpudev_capset(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
     crate::gpu::gpudev::set_capset(dev, data)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_released(id) -> 0 | -1`: the module let go of a GEM object
 /// it kept past its detach.
 pub(crate) fn npk_gpudev_released(ctx: &mut HostState, id: i32) -> i32 {
@@ -5757,6 +6000,7 @@ pub(crate) fn npk_gpudev_released(ctx: &mut HostState, id: i32) -> i32 {
     crate::gpu::gpudev::released(dev, id as u32)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_stats(ptr, len) -> 0 | -1`: the module's cumulative GPU
 /// counters (`gpudev::GPU_STATS_WORDS` little-endian u64s), for `cores`.
 pub(crate) fn npk_gpudev_stats(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
@@ -5771,6 +6015,7 @@ pub(crate) fn npk_gpudev_stats(mem: &mut [u8], ctx: &mut HostState, ptr: i32, le
     crate::gpu::gpudev::stats(dev, words)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_vram(base, size) -> 0 | -1`: the window through which the
 /// CPU reaches all of the card's VRAM, before `npk_gpudev_ready`.
 pub(crate) fn npk_gpudev_vram(ctx: &mut HostState, base: i64, size: i64) -> i32 {
@@ -5781,6 +6026,7 @@ pub(crate) fn npk_gpudev_vram(ctx: &mut HostState, base: i64, size: i64) -> i32 
     crate::gpu::gpudev::set_vram_window(dev, base as u64, size as u64)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_ring(client, ring, submitted, completed) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submitted: i64, completed: i64) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };
@@ -5793,6 +6039,7 @@ pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submi
 // === External volumes: the block handle and the request channel of an
 // `extfs` instance (`storage::ext`) ===
 
+#[cfg(target_arch = "x86_64")]
 fn blk_code(e: crate::ext::BlkError) -> i32 {
     match e {
         crate::ext::BlkError::Range => -1,
@@ -5802,6 +6049,7 @@ fn blk_code(e: crate::ext::BlkError) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_blk_info(mem: &mut [u8], ctx: &mut HostState, out_ptr: i32) -> i32 {
     let Some((role, bs, blocks, ro)) = crate::ext::blk_info(&ctx.cap_id) else { return -1 };
     let mut b = [0u8; 20];
@@ -5812,6 +6060,7 @@ pub(crate) fn npk_blk_info(mem: &mut [u8], ctx: &mut HostState, out_ptr: i32) ->
     write_bytes(mem, out_ptr, &b)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_blk_read(mem: &mut [u8], ctx: &mut HostState, lba: i64, len: i32, buf_ptr: i32) -> i32 {
     let (Ok(lba), Some(n)) = (u64::try_from(lba), glen(len)) else { return -1 };
     if n > crate::ext::MAX_IO { return -1; }
@@ -5822,6 +6071,7 @@ pub(crate) fn npk_blk_read(mem: &mut [u8], ctx: &mut HostState, lba: i64, len: i
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_blk_write(mem: &mut [u8], ctx: &mut HostState, lba: i64, len: i32, buf_ptr: i32) -> i32 {
     let (Ok(lba), Some(n)) = (u64::try_from(lba), glen(len)) else { return -1 };
     if n > crate::ext::MAX_IO { return -1; }
@@ -5832,6 +6082,7 @@ pub(crate) fn npk_blk_write(mem: &mut [u8], ctx: &mut HostState, lba: i64, len: 
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_blk_flush(ctx: &mut HostState) -> i32 {
     match crate::ext::blk_flush(&ctx.cap_id) {
         Ok(()) => 0,
@@ -5839,6 +6090,7 @@ pub(crate) fn npk_blk_flush(ctx: &mut HostState) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ext_parts(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     let Some(n) = glen(len) else { return -1 };
     if n % 16 != 0 || n > 16 * 16 { return -1; }
@@ -5853,6 +6105,7 @@ pub(crate) fn npk_ext_parts(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: 
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ext_mount(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32, label_len: i32, total: i64, free: i64) -> i32 {
     let label = if label_len == 0 { String::new() } else {
         match read_str(mem, label_ptr, label_len) { Some(s) => s, None => return -1 }
@@ -5864,6 +6117,7 @@ pub(crate) fn npk_ext_mount(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32,
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ext_next(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32, timeout_ms: i32) -> i32 {
     let (Some(max), Ok(t)) = (glen(buf_max), u64::try_from(timeout_ms)) else { return -1 };
     if !crate::ext::is_instance(&ctx.cap_id) { return -1; }
@@ -5875,12 +6129,14 @@ pub(crate) fn npk_ext_next(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, bu
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ext_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, status: i32, ptr: i32, len: i32) -> i32 {
     let Some(n) = glen(len) else { return -1 };
     let Some(b) = guest(mem, ptr, n) else { return -1 };
     if crate::ext::reply(&ctx.cap_id, seq as u32, status, b) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ext_volumes(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, buf_max: i32) -> i32 {
     if !ext_allowed(ctx, crate::ext::ROOT, capability::Rights::READ) { return -1; }
     let mut out = alloc::vec::Vec::new();
@@ -5894,6 +6150,7 @@ pub(crate) fn npk_ext_volumes(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
     write_whole(mem, buf_ptr, buf_max, &out)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_ext_eject(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32, label_len: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::EXTERNAL, "npk_ext_eject") { return -1; }
     let Some(label) = read_str(mem, label_ptr, label_len) else { return -1 };
@@ -5902,6 +6159,7 @@ pub(crate) fn npk_ext_eject(mem: &mut [u8], ctx: &mut HostState, label_ptr: i32,
 
 // === USB interfaces for modules (`xhci::usbfn`) ===
 
+#[cfg(target_arch = "x86_64")]
 /// The right a USB class needs: video → CAMERA, audio → MIC. Other
 /// classes have no module path.
 fn usb_class_right(class: u8) -> Option<capability::Rights> {
@@ -5912,6 +6170,7 @@ fn usb_class_right(class: u8) -> Option<capability::Rights> {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn usb_err(e: crate::xhci::usbfn::FnError) -> i32 {
     use crate::xhci::usbfn::FnError::*;
     match e {
@@ -5925,6 +6184,7 @@ fn usb_err(e: crate::xhci::usbfn::FnError) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_usb_claim(class, buf, max)`: claim the interfaces of `class` on the
 /// first free device; the device and configuration descriptors go to
 /// `buf`. Returns the handle (> 0) or an error (< 0).
@@ -5946,6 +6206,7 @@ pub(crate) fn npk_usb_claim(mem: &mut [u8], ctx: &mut HostState, class: i32, buf
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_usb_control(handle, setup, data, len)`: `setup` is the 8-byte
 /// SETUP packet; `data` holds OUT bytes or receives IN bytes. Returns the
 /// bytes moved or an error.
@@ -5974,6 +6235,7 @@ pub(crate) fn npk_usb_control(mem: &mut [u8], ctx: &mut HostState, handle: i32, 
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_usb_set_alt(ctx: &mut HostState, handle: i32, ifnum: i32, alt: i32) -> i32 {
     match crate::xhci::usbfn::set_alt(handle as u32, ctx.pid, ifnum as u8, alt as u8) {
         Ok(()) => 0,
@@ -5981,6 +6243,7 @@ pub(crate) fn npk_usb_set_alt(ctx: &mut HostState, handle: i32, ifnum: i32, alt:
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_usb_stream_open(handle, ep, td_len, count)`: an IN stream on
 /// endpoint `ep`; `td_len` 0 = one service interval (isochronous).
 pub(crate) fn npk_usb_stream_open(ctx: &mut HostState, handle: i32, ep: i32, td_len: i32, count: i32) -> i32 {
@@ -5991,6 +6254,7 @@ pub(crate) fn npk_usb_stream_open(ctx: &mut HostState, handle: i32, ep: i32, td_
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_usb_stream_read(handle, stream, buf, max)`: records of `len: u16,
 /// status: u8, 0` and `len` bytes. Returns the bytes written.
 pub(crate) fn npk_usb_stream_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, sid: i32,
@@ -6007,6 +6271,7 @@ pub(crate) fn npk_usb_stream_read(mem: &mut [u8], ctx: &mut HostState, handle: i
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_usb_stream_close(ctx: &mut HostState, handle: i32, sid: i32) -> i32 {
     match crate::xhci::usbfn::stream_close(handle as u32, ctx.pid, sid as u32) {
         Ok(()) => 0,
@@ -6014,11 +6279,13 @@ pub(crate) fn npk_usb_stream_close(ctx: &mut HostState, handle: i32, sid: i32) -
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_usb_release(ctx: &mut HostState, handle: i32) -> i32 {
     crate::xhci::usbfn::release(handle as u32, ctx.pid);
     0
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_device_register`: an audio driver enters one of its devices.
 /// Cameras are entered by the kernel only.
 pub(crate) fn npk_device_register(mem: &mut [u8], ctx: &mut HostState, kind: i32, rank: i32, id_ptr: i32,
@@ -6036,10 +6303,12 @@ pub(crate) fn npk_device_register(mem: &mut [u8], ctx: &mut HostState, kind: i32
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_device_remove(ctx: &mut HostState, handle: i32) -> i32 {
     if crate::devices::remove(handle as u32, crate::devices::Owner::Module(ctx.pid)) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// Whether the caller's own entry `handle` is the active one of its kind.
 pub(crate) fn npk_device_active(ctx: &mut HostState, handle: i32) -> i32 {
     let mine = crate::devices::get(handle as u32).is_some_and(|e| e.owner == crate::devices::Owner::Module(ctx.pid));
@@ -6050,6 +6319,7 @@ pub(crate) fn npk_device_active(ctx: &mut HostState, handle: i32) -> i32 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_device_list(kind, buf, max)`: the shell's device lists.
 pub(crate) fn npk_device_list(mem: &mut [u8], ctx: &mut HostState, kind: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::SHELL, "npk_device_list") {
@@ -6070,6 +6340,7 @@ pub(crate) fn npk_device_list(mem: &mut [u8], ctx: &mut HostState, kind: i32, bu
     write_whole(mem, buf_ptr, buf_max, &out)
 }
 
+#[cfg(target_arch = "x86_64")]
 /// `npk_device_select(handle)`: the user picks the active one of its kind.
 pub(crate) fn npk_device_select(ctx: &mut HostState, handle: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::SHELL, "npk_device_select") {
@@ -6086,23 +6357,27 @@ fn mic(ctx: &HostState) -> bool {
     ctx.pid != 0 && capability::require(&ctx.cap_id, capability::Rights::MIC, "microphone")
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_capture_device_format(ctx: &mut HostState, rate: i32, encoding: i32, channels: i32) -> i32 {
     if !hardware(ctx) { return -1; }
     let Some(fmt) = audio_format(rate, encoding, channels) else { return -1 };
     if crate::capture::set_device_format(ctx.pid, fmt) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_capture_wanted(ctx: &mut HostState) -> i32 {
     if !hardware(ctx) { return -1; }
     crate::capture::wanted(ctx.pid) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_capture_push(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
     if !hardware(ctx) { return -1; }
     let Some(data) = glen(len).and_then(|n| guest(mem, ptr, n)) else { return -1 };
     crate::capture::push(ctx.pid, data) as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_capture_open(ctx: &mut HostState) -> i32 {
     if !mic(ctx) {
         kprintln!("[npk] WASM: npk_audio_capture_open DENIED");
@@ -6113,11 +6388,13 @@ pub(crate) fn npk_audio_capture_open(ctx: &mut HostState) -> i32 {
     s.map_or(-1, |i| i as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_capture_format(ctx: &mut HostState, stream: i32, rate: i32, encoding: i32, channels: i32) -> i32 {
     let (Ok(i), Some(fmt)) = (usize::try_from(stream), audio_format(rate, encoding, channels)) else { return -1 };
     if crate::capture::set_format(i, Some(ctx.pid), fmt) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_capture_read(mem: &mut [u8], ctx: &mut HostState, stream: i32, ptr: i32, max: i32) -> i32 {
     let Ok(i) = usize::try_from(stream) else { return -1 };
     if max < 0 { return -1; }
@@ -6125,6 +6402,7 @@ pub(crate) fn npk_audio_capture_read(mem: &mut [u8], ctx: &mut HostState, stream
     crate::capture::read(i, Some(ctx.pid), out).map_or(-1, |n| n as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_audio_capture_close(ctx: &mut HostState, stream: i32) -> i32 {
     let Ok(i) = usize::try_from(stream) else { return -1 };
     if !crate::capture::close(i, Some(ctx.pid)) { return -1; }
@@ -6136,12 +6414,14 @@ fn camera_right(ctx: &HostState) -> bool {
     ctx.pid != 0 && capability::require(&ctx.cap_id, capability::Rights::CAMERA, "camera")
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_camera_wanted(ctx: &mut HostState) -> i64 {
     if !camera_right(ctx) { return -1; }
     let (n, w, h) = crate::camfeed::wanted();
     n.min(0xFFFF) as i64 | (w as i64) << 16 | (h as i64) << 32
 }
 
+#[cfg(target_arch = "x86_64")]
 /// A frame from the camera's driver; only the module that holds the
 /// active camera may, so no other module can show a picture as the camera.
 pub(crate) fn npk_camera_push(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32, width: i32, height: i32,
@@ -6152,6 +6432,7 @@ pub(crate) fn npk_camera_push(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len
     if crate::camfeed::push(data, w, h, f) { 0 } else { -1 }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_camera_open(ctx: &mut HostState, width: i32, height: i32) -> i32 {
     if !camera_right(ctx) { return -1; }
     let (Ok(w), Ok(h)) = (u16::try_from(width), u16::try_from(height)) else { return -1 };
@@ -6160,6 +6441,7 @@ pub(crate) fn npk_camera_open(ctx: &mut HostState, width: i32, height: i32) -> i
     r.map_or(-1, |i| i as i32)
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_camera_read(mem: &mut [u8], ctx: &mut HostState, reader: i32, buf_ptr: i32, buf_max: i32,
                               info_ptr: i32) -> i32 {
     let Ok(id) = usize::try_from(reader) else { return -1 };
@@ -6179,6 +6461,7 @@ pub(crate) fn npk_camera_read(mem: &mut [u8], ctx: &mut HostState, reader: i32, 
     got as i32
 }
 
+#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_camera_close(ctx: &mut HostState, reader: i32) -> i32 {
     let Ok(id) = usize::try_from(reader) else { return -1 };
     if !crate::camfeed::close(id, Some(ctx.pid)) { return -1; }

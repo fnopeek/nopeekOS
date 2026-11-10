@@ -43,7 +43,7 @@ const ROOT_CERTS: &[&[u8]] = &[
 /// apps — write access here is the power to mint a MITM anchor for the
 /// whole system, so the guard that protects the module store covers this
 /// path too (`wasm.rs::is_trust_critical_path`).
-pub const STORE_DIR: &str = "sys/certs";
+pub use crate::npkfs::paths::CERT_DIR as STORE_DIR;
 
 /// The anchors added on this machine (`cert add`), kept apart from the
 /// shipped ones so `update` can withdraw those without touching these.

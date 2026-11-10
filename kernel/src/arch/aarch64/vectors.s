@@ -23,11 +23,13 @@
 .balign 0x800
 .global exception_vectors
 exception_vectors:
-    entry 0
+    .balign 0x80
+    b       forge_sync_sp0
     entry 1
     entry 2
     entry 3
-    entry 4
+    .balign 0x80
+    b       forge_sync_spx
     .balign 0x80
     b       irq_entry
     entry 6
@@ -40,6 +42,17 @@ exception_vectors:
     entry 13
     entry 14
     entry 15
+
+/* A synchronous exception at the current EL that is not a forge
+ * guard-page fault (forge.rs) reports as entry 0 or 4 does. */
+.global sync_sp0_report
+sync_sp0_report:
+    mov     x0, #0
+    b       report
+.global sync_spx_report
+sync_spx_report:
+    mov     x0, #4
+    b       report
 
 report:
     mrs     x1, ESR_EL1

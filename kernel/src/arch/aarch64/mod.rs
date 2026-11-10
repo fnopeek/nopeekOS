@@ -6,6 +6,7 @@ pub mod cpu;
 pub mod dma;
 pub mod exceptions;
 pub mod fiber;
+pub mod forge;
 pub mod gic;
 pub mod mmu;
 pub mod paging;

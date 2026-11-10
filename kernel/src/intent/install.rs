@@ -14,7 +14,7 @@ const MODULE_BASE: &str = "/fnopeek/nopeekOS/main/release/modules";
 
 /// Where a module's firmware lives; module writes are refused there
 /// (`wasm::is_trust_critical_path`).
-pub const FIRMWARE_DIR: &str = "sys/firmware";
+pub use crate::npkfs::paths::FIRMWARE_DIR;
 
 /// One `firmware=<path> <size> <sha384>` line of a module's entry.
 #[derive(Clone)]

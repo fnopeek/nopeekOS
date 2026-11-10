@@ -13,11 +13,12 @@
 //! nothing else claims addresses.
 
 use crate::mm::paging::{self, PageFlags};
+use crate::arch::IDENTITY_MAX;
 use crate::memory;
 
 /// The furthest the identity map reaches. Below this RAM is mapped 1:1
 /// through 1 GB huge pages, so this is where free address space starts.
-const REGION_BASE: u64 = paging::IDENTITY_MAX;
+const REGION_BASE: u64 = IDENTITY_MAX;
 
 /// What one instance reserves. A power of two well above `8 GiB + page` keeps
 /// the arithmetic to a shift and leaves the next instance nowhere near.
@@ -86,7 +87,7 @@ fn give_slot(s: u64) {
 }
 
 /// Code goes at the top of the region, far from any instance's memory.
-const CODE_BASE: u64 = REGION_BASE + 1024 * INSTANCE_STRIDE;
+pub(crate) const CODE_BASE: u64 = REGION_BASE + 1024 * INSTANCE_STRIDE;
 #[unsafe(no_mangle)]
 static FORGE_NEXT_CODE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(CODE_BASE);
 
@@ -232,6 +233,7 @@ impl Code {
             }
             off += PAGE;
         }
+        crate::arch::forge::sync_code(base, len);
         Some(Code { base, len })
     }
 
@@ -249,112 +251,26 @@ impl Drop for Code {
 
 // ── faults ────────────────────────────────────────────────────────────
 //
-// A page fault from a guard page and a divide fault are how two of the traps
-// arrive: they are the processor telling us what a check on every single
-// access would otherwise have had to look for. Catching them means pointing
-// the interrupted instruction pointer at a routine that records the reason
-// and unwinds to the entry trampoline.
-//
-// That routine needs nothing but the faulting module's vmctx, and generated
-// code keeps it pinned in r14 the whole time it runs. So one routine per
-// reason serves every module, and the only question a stub asks is whether
-// the fault came from generated code at all: is the instruction pointer
-// inside the code range? Several modules run at once on several cores, and
-// none of them has to announce itself.
-//
-// A fault outside the code range is still a kernel fault.
+// A fault from a guard page (and on x86 a divide fault) is how a trap
+// arrives that a check on every access would otherwise have had to find.
+// The architecture's handler (`arch::forge`) asks only whether the faulting
+// instruction lies in the code range [`CODE_BASE`, `FORGE_NEXT_CODE`) and
+// then points it at a routine that records the reason and unwinds to the
+// entry through the module's pinned vmctx. Several modules run at once on
+// several cores, and none of them has to announce itself. A fault outside
+// the code range is still a kernel fault.
 
-core::arch::global_asm!(
-    r#"
-.globl forge_pf_stub
-forge_pf_stub:
-    push rax
-    mov  rax, {lo}
-    cmp  qword ptr [rsp + 16], rax
-    jb   1f
-    mov  rax, [rip + FORGE_NEXT_CODE]
-    cmp  qword ptr [rsp + 16], rax
-    jae  1f
-    lea  rax, [rip + forge_trap_oob]
-    mov  [rsp + 16], rax
-    pop  rax
-    add  rsp, 8
-    iretq
-1:  pop  rax
-    jmp  page_fault_handler
-
-.globl forge_de_stub
-forge_de_stub:
-    push rax
-    mov  rax, {lo}
-    cmp  qword ptr [rsp + 8], rax
-    jb   2f
-    mov  rax, [rip + FORGE_NEXT_CODE]
-    cmp  qword ptr [rsp + 8], rax
-    jae  2f
-    lea  rax, [rip + forge_trap_div]
-    mov  [rsp + 8], rax
-    pop  rax
-    iretq
-2:  pop  rax
-    jmp  divide_error_handler
-
-forge_trap_oob:
-    mov  eax, {oob}
-    jmp  3f
-forge_trap_div:
-    mov  eax, {div}
-3:  mov  [r14 + {tc}], rax
-    mov  rbp, [r14 + {rbp}]
-    mov  rsp, [r14 + {rsp}]
-    jmp  [r14 + {res}]
-"#,
-    lo = const CODE_BASE,
-    oob = const forge_core::trap::MEMORY_OUT_OF_BOUNDS,
-    div = const forge_core::trap::DIVIDE_ERROR,
-    tc = const vmctx::TRAP_CODE,
-    rbp = const vmctx::TRAP_RBP,
-    rsp = const vmctx::TRAP_RSP,
-    res = const vmctx::TRAP_RESUME,
-);
-
-unsafe extern "C" {
-    pub fn forge_pf_stub();
-    pub fn forge_de_stub();
-}
+#[cfg(target_arch = "x86_64")]
+pub use crate::arch::x86_64::forge::{forge_de_stub, forge_pf_stub};
 
 // ── trap from inside a host function ──────────────────────────────────
 //
 // A wasi function like `proc_exit` must not return, even on a clean exit.
-// Generated code unwinds the same way its own traps do: restore `rsp`/`rbp`
-// from the vmctx and jump back to the entry, dropping any depth of wasm
-// frames. Only the vmctx pointer is needed, and every host function has it in
-// `rdi`. The resume path writes the fuel register back through r14, and a
-// host function may have both registers in use for itself, so both are put
-// back first: r14 to the vmctx, r15 to the budget stored there (the live
-// count is lost with the unwound frames, and the run is over anyway).
-core::arch::global_asm!(
-    r#"
-.globl forge_host_trap
-forge_host_trap:
-    mov  r14, rdi
-    mov  r15, [rdi + {fuel}]
-    mov  [rdi + {tc}], rsi
-    mov  rbp, [rdi + {rbp}]
-    mov  rsp, [rdi + {rsp}]
-    jmp  [rdi + {res}]
-"#,
-    tc = const vmctx::TRAP_CODE,
-    rbp = const vmctx::TRAP_RBP,
-    rsp = const vmctx::TRAP_RSP,
-    res = const vmctx::TRAP_RESUME,
-    fuel = const vmctx::FUEL,
-);
-
-unsafe extern "C" {
-    /// Leaves the module with `code` as trap reason. Never returns.
-    fn forge_host_trap(vm: *const u64, code: u64) -> !;
-}
+// `arch::forge::forge_host_trap` unwinds the way generated code's own traps
+// do: the pinned vmctx and fuel registers put back from the vmctx, then the
+// stack and frame pointers recorded by the entry, then the resume address,
+// dropping any depth of wasm frames.
+use crate::arch::forge::forge_host_trap;
 
 /// End the module run from inside a host function.
 ///
@@ -364,7 +280,7 @@ unsafe extern "C" {
 /// frame that no longer exists.
 ///
 /// The caller must hold nothing that needs cleanup: no Rust frame is unwound
-/// and no `Drop` runs. The `#PF` stub relies on the same guarantee.
+/// and no `Drop` runs. The fault redirect relies on the same guarantee.
 pub unsafe fn host_trap(vm: *const u64, code: u32) -> ! {
     // SAFETY: forwarded to the caller, see above.
     unsafe { forge_host_trap(vm, code as u64) }
@@ -695,12 +611,7 @@ const OFF_FIBER_BUDGET: u64 = 1024 * 1024;
 fn stack_limit() -> u64 {
     match crate::smp::fiber::current_stack_lo() {
         Some(lo) => lo + HOST_STACK_RESERVE,
-        None => {
-            let rsp: u64;
-            // SAFETY: reads the stack pointer, nothing else.
-            unsafe { core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
-            rsp.saturating_sub(OFF_FIBER_BUDGET)
-        }
+        None => crate::arch::forge::stack_pointer().saturating_sub(OFF_FIBER_BUDGET),
     }
 }
 

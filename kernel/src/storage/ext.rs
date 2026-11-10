@@ -26,7 +26,7 @@ use crate::storage::disk;
 /// The namespace's root segment.
 pub use crate::npkfs::paths::EXT_ROOT as ROOT;
 /// The module that parses partition tables and file systems.
-pub const MODULE: &str = "extfs";
+pub use crate::npkfs::paths::EXTFS_MODULE as MODULE;
 
 pub const ROLE_PROBE: u32 = 1;
 pub const ROLE_VOLUME: u32 = 2;
