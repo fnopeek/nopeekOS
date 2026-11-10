@@ -294,6 +294,12 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
 /// directory, the console session's capability, then the intent loop as a
 /// fiber on core 0.
 fn shell() -> ! {
+    // The system config, readable once the disk is unlocked, and what it
+    // sets: the log's verbosity and the module engine.
+    crate::config::load();
+    crate::serial::set_verbose(crate::config::bootlog_verbose());
+    crate::wasm::init();
+    crate::wasm::load_engine_default();
     crate::tls::certstore::load_store();
     crate::intent::setup_home();
     let (vault, root) = crate::capability::Vault::init();

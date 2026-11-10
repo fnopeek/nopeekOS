@@ -630,12 +630,20 @@ fn wasm_worker_task(arg: u64) {
     // Clone engine (Arc internally, cheap)
     let engine = match ENGINE.lock().as_ref().cloned() {
         Some(e) => e,
-        None => { JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release); return; }
+        None => {
+            kprintln!("[npk] WASM: {} not started, the interpreter is not set up", job.name.as_str());
+            JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
+            return;
+        }
     };
 
     let module = match Module::new(&engine, &job.bytes) {
         Ok(m) => m,
-        Err(_) => { JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release); return; }
+        Err(e) => {
+            kprintln!("[npk] WASM: {} not started: {}", job.name.as_str(), e);
+            JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
+            return;
+        }
     };
 
     let core_id = crate::smp::per_core::current_core_id();
@@ -680,7 +688,8 @@ fn wasm_worker_task(arg: u64) {
 
     let instance = match linker.instantiate_and_start(&mut store, &module) {
         Ok(i) => i,
-        Err(_) => {
+        Err(e) => {
+            kprintln!("[npk] WASM: {} not started: {}", name_str, e);
             crate::process::exit(pid);
             JOB_DONE[slot].store(true, core::sync::atomic::Ordering::Release);
             return;
