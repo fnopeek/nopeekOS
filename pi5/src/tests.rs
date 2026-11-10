@@ -6,6 +6,8 @@
 //! The driver functions must repeat Linux access for access; the whole
 //! bring-up, which replaces the PCI core with the share this topology
 //! needs, must leave every register Linux wrote with Linux's final value.
+//! The model behind these runs answers RP1's xHCI capability registers as
+//! the RP1 datasheet (chapter 5) and the xHCI 1.2 layout give them.
 
 use super::*;
 use crate::hw::{Block, Hw};
@@ -247,6 +249,11 @@ fn policy_only(b: Block, off: u64) -> bool {
     b == Block::Pcie && matches!(off, 0x00bc | 0x00be | 0x8080 | 0x803c)
 }
 
+/// The USB controllers' windows in BAR1, which `dwc3_matches_linux` covers.
+fn in_dwc3(b: Block, off: u64) -> bool {
+    b == Block::Rp1Bar1 && (0x20_0000..0x40_0000).contains(&off)
+}
+
 #[test]
 fn bring_up_leaves_linux_state() {
     for (name, evs) in runs() {
@@ -260,7 +267,7 @@ fn bring_up_leaves_linux_state() {
         let mut diff = Vec::new();
         for (&(b, off), &v) in &linux {
             let blk = [Block::Pcie, Block::Rescal, Block::Reset, Block::Mip, Block::Rp1Bar0, Block::Rp1Bar1][b as usize];
-            if policy_only(blk, off) { continue; }
+            if policy_only(blk, off) || in_dwc3(blk, off) { continue; }
             let first_read = evs.iter().find_map(|e| match *e {
                 Ev::Read { b: eb, off: eo, v, .. } if key(eb, eo) == (b, off) => Some(v),
                 _ => None,
@@ -279,5 +286,91 @@ fn bring_up_leaves_linux_state() {
             }
         }
         assert!(diff.is_empty(), "{name}:\n{}", diff.join("\n"));
+    }
+}
+
+/// The accesses inside the `n`th top-level call of `name`, leaving out
+/// those inside calls of `skip`.
+fn segment_nth(evs: &[Ev], name: &str, n: usize, skip: &str) -> Vec<Ev> {
+    let mut seen = 0;
+    let (mut depth, mut skipping) = (0, 0);
+    let mut out = Vec::new();
+    for e in evs {
+        match e {
+            Ev::Enter(f) if f == name => {
+                if depth == 0 { seen += 1; }
+                depth += 1;
+            }
+            Ev::Exit(f) if f == name => {
+                depth -= 1;
+                if depth == 0 && seen == n + 1 { break; }
+            }
+            Ev::Enter(f) if f == skip && depth > 0 => skipping += 1,
+            Ev::Exit(f) if f == skip && depth > 0 => skipping -= 1,
+            Ev::Read { .. } | Ev::Write { .. } if depth > 0 && seen == n + 1 && skipping == 0 => out.push(e.clone()),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Strict, except the xHCI capability reads of `dwc3_get_num_ports`,
+/// which the port makes in its own order; they answer from `caps`.
+struct StrictCaps {
+    strict: Strict,
+    caps: BTreeMap<u64, u32>,
+}
+
+impl Hw for StrictCaps {
+    fn read(&mut self, b: Block, off: u64, w: u8) -> u32 {
+        let rel = off & 0xf_ffff;
+        if b == Block::Rp1Bar1 && (rel == 0x10 || (0x8000..0x8100).contains(&rel)) && self.caps.contains_key(&off) {
+            return self.caps[&off];
+        }
+        self.strict.read(b, off, w)
+    }
+    fn write(&mut self, b: Block, off: u64, w: u8, v: u32) { self.strict.write(b, off, w, v) }
+    fn delay_us(&mut self, _us: u64) {}
+}
+
+/// `usb@200000` of bcm2712-rpi-5-b.dtb.
+const RP1_USB: dwc3::Config = dwc3::Config {
+    dis_rxdet_inp3: true,
+    enh_nak_fs: true,
+    enh_nak_hs: false,
+    parkmode_disable_ss: true,
+    parkmode_disable_hs: false,
+    parkmode_disable_fsls: true,
+    dis_tx_ipgap_linecheck: false,
+    dis_enblslpm: false,
+    dis_u2_freeclk_exists: false,
+    dis_u2_susphy: false,
+    dis_u3_susphy: false,
+    axi_pipe_limit: 8,
+    rx_thr_num_pkt: 0,
+    rx_max_burst: 0,
+    tx_thr_num_pkt: 2,
+    tx_max_burst: 8,
+    tx_thr_num_pkt_prd: 0,
+    tx_max_burst_prd: 0,
+};
+
+/// LINUX_VERSION_CODE of the tree the logs come from.
+const LINUX_GUID: u32 = 0x0006_123e;
+
+#[test]
+fn dwc3_matches_linux() {
+    for (name, evs) in runs() {
+        for (i, base) in [0x20_0000u64, 0x30_0000].into_iter().enumerate() {
+            let mut caps = BTreeMap::new();
+            for e in segment_nth(&evs, "dwc3_get_num_ports", i, "") {
+                if let Ev::Read { off, v, .. } = e { caps.insert(off, v); }
+            }
+            let probe = segment_nth(&evs, "dwc3_probe", i, "dwc3_get_num_ports");
+            let mut hw = StrictCaps { strict: Strict::new(probe), caps };
+            let d = dwc3::probe(&mut hw, base, RP1_USB, LINUX_GUID).unwrap_or_else(|e| panic!("{name} {i}: {e:?}"));
+            hw.strict.done();
+            assert_eq!((d.revision, d.num_usb2_ports, d.num_usb3_ports, d.is_fpga), (0x330b, 1, 1, false), "{name} {i}");
+        }
     }
 }

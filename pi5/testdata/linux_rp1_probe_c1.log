@@ -10,6 +10,8 @@
 } init_mip
 { init_rp1
 } init_rp1
+{ dwc3_driver_init
+} dwc3_driver_init
 == platform devices
 # device_add 1000119500.reset-controller
 PROBE 1000119500.reset-controller driver brcm-rescal-reset
@@ -3856,7 +3858,303 @@ W32 rp1.bar0+0x0003cc <- 0x00000000
 # device_add 1f00178000.pio
 # device_add 1f00188000.dma
 # device_add 1f00200000.usb
+PROBE 1f00200000.usb driver dwc3
+{ dwc3_probe
+{ dwc3_core_probe
+# map 1f00200000.usb [mem 0x1f0020c100-0x1f002fffff flags 0x200]
+MAP 0x1f0020c100 size 0xf3f00
+{ dwc3_get_properties
+} dwc3_get_properties
+{ dwc3_get_software_properties
+} dwc3_get_software_properties
+{ dwc3_get_usb_power_supply
+} dwc3_get_usb_power_supply
+# dma_set_mask 1f00200000.usb 0xffffffffffffffff
+{ dwc3_get_clocks
+} dwc3_get_clocks
+{ dwc3_clk_enable
+} dwc3_clk_enable
+{ dwc3_core_is_valid
+R32 rp1.bar1+0x20c120 = 0x5533330b  ; dwc3.0 +0xc120
+} dwc3_core_is_valid
+{ dwc3_cache_hwparams
+R32 rp1.bar1+0x20c140 = 0x40200049  ; dwc3.0 +0xc140
+R32 rp1.bar1+0x20c144 = 0x0160c93b  ; dwc3.0 +0xc144
+R32 rp1.bar1+0x20c148 = 0x12345678  ; dwc3.0 +0xc148
+R32 rp1.bar1+0x20c14c = 0x04188085  ; dwc3.0 +0xc14c
+R32 rp1.bar1+0x20c150 = 0x43822004  ; dwc3.0 +0xc150
+R32 rp1.bar1+0x20c154 = 0x02142088  ; dwc3.0 +0xc154
+R32 rp1.bar1+0x20c158 = 0x08000020  ; dwc3.0 +0xc158
+R32 rp1.bar1+0x20c15c = 0x04000400  ; dwc3.0 +0xc15c
+R32 rp1.bar1+0x20c600 = 0x0000079a  ; dwc3.0 +0xc600
+} dwc3_cache_hwparams
+# dma_set_mask 1f00200000.usb 0xffffffffffffffff
+{ dwc3_get_num_ports
+MAP 0x1f00200000 size 0x8000
+R32 rp1.bar1+0x200010 = 0x2000000d  ; xhci cap
+R32 rp1.bar1+0x208000 = 0x02000402  ; xhci xcap
+R32 rp1.bar1+0x208000 = 0x02000402  ; xhci xcap
+R32 rp1.bar1+0x208008 = 0x00000101  ; xhci xcap
+R32 rp1.bar1+0x208000 = 0x02000402  ; xhci xcap
+R32 rp1.bar1+0x208010 = 0x03000002  ; xhci xcap
+R32 rp1.bar1+0x208010 = 0x03000002  ; xhci xcap
+R32 rp1.bar1+0x208018 = 0x00000102  ; xhci xcap
+R32 rp1.bar1+0x208010 = 0x03000002  ; xhci xcap
+} dwc3_get_num_ports
+{ dwc3_alloc_event_buffers
+} dwc3_alloc_event_buffers
+{ dwc3_get_extcon
+} dwc3_get_extcon
+{ dwc3_get_dr_mode
+} dwc3_get_dr_mode
+{ dwc3_core_init
+{ dwc3_phy_setup
+{ dwc3_ss_phy_setup
+R32 rp1.bar1+0x20c2c0 = 0x00000000  ; dwc3.0 +0xc2c0
+W32 rp1.bar1+0x20c2c0 <- 0x10000000  ; dwc3.0 +0xc2c0
+} dwc3_ss_phy_setup
+{ dwc3_hs_phy_setup
+R32 rp1.bar1+0x20c200 = 0x00000000  ; dwc3.0 +0xc200
+W32 rp1.bar1+0x20c200 <- 0x00000100  ; dwc3.0 +0xc200
+} dwc3_hs_phy_setup
+} dwc3_phy_setup
+{ dwc3_core_ulpi_init
+} dwc3_core_ulpi_init
+{ dwc3_ulpi_setup
+} dwc3_ulpi_setup
+{ dwc3_core_get_phy
+} dwc3_core_get_phy
+{ dwc3_phy_init
+{ dwc3_enable_susphy
+R32 rp1.bar1+0x20c2c0 = 0x10000000  ; dwc3.0 +0xc2c0
+W32 rp1.bar1+0x20c2c0 <- 0x10020000  ; dwc3.0 +0xc2c0
+R32 rp1.bar1+0x20c200 = 0x00000100  ; dwc3.0 +0xc200
+W32 rp1.bar1+0x20c200 <- 0x00000140  ; dwc3.0 +0xc200
+} dwc3_enable_susphy
+} dwc3_phy_init
+{ dwc3_core_soft_reset
+R32 rp1.bar1+0x20c704 = 0x00000000  ; dwc3.0 +0xc704
+W32 rp1.bar1+0x20c704 <- 0x40000000  ; dwc3.0 +0xc704
+R32 rp1.bar1+0x20c704 = 0x00000000  ; dwc3.0 +0xc704
+} dwc3_core_soft_reset
+W32 rp1.bar1+0x20c128 <- 0x0006123e  ; dwc3.0 +0xc128
+{ dwc3_core_setup_global_control
+R32 rp1.bar1+0x20c110 = 0x00000000  ; dwc3.0 +0xc110
+W32 rp1.bar1+0x20c110 <- 0x00000000  ; dwc3.0 +0xc110
+} dwc3_core_setup_global_control
+{ dwc3_core_num_eps
+} dwc3_core_num_eps
+{ dwc3_set_power_down_clk_scale
+} dwc3_set_power_down_clk_scale
+{ dwc3_frame_length_adjustment
+} dwc3_frame_length_adjustment
+{ dwc3_ref_clk_period
+} dwc3_ref_clk_period
+{ dwc3_set_incr_burst_type
+R32 rp1.bar1+0x20c100 = 0x00000000  ; dwc3.0 +0xc100
+} dwc3_set_incr_burst_type
+{ dwc3_config_soc_bus
+} dwc3_config_soc_bus
+{ dwc3_set_axi_pipe_limit
+R32 rp1.bar1+0x20c104 = 0x00000000  ; dwc3.0 +0xc104
+W32 rp1.bar1+0x20c104 <- 0x00000700  ; dwc3.0 +0xc104
+} dwc3_set_axi_pipe_limit
+{ dwc3_phy_power_on
+} dwc3_phy_power_on
+{ dwc3_event_buffers_setup
+} dwc3_event_buffers_setup
+R32 rp1.bar1+0x20c19c = 0x00000000  ; dwc3.0 +0xc19c
+W32 rp1.bar1+0x20c19c <- 0x00004000  ; dwc3.0 +0xc19c
+R32 rp1.bar1+0x20c11c = 0x00000000  ; dwc3.0 +0xc11c
+W32 rp1.bar1+0x20c11c <- 0x810a8000  ; dwc3.0 +0xc11c
+{ dwc3_config_threshold
+R32 rp1.bar1+0x20c108 = 0x00000000  ; dwc3.0 +0xc108
+W32 rp1.bar1+0x20c108 <- 0x22080000  ; dwc3.0 +0xc108
+} dwc3_config_threshold
+} dwc3_core_init
+{ dwc3_check_params
+{ dwc3_has_imod
+} dwc3_has_imod
+} dwc3_check_params
+{ dwc3_core_init_mode
+{ dwc3_set_prtcap
+R32 rp1.bar1+0x20c110 = 0x00000000  ; dwc3.0 +0xc110
+W32 rp1.bar1+0x20c110 <- 0x00001000  ; dwc3.0 +0xc110
+} dwc3_set_prtcap
+{ dwc3_host_init
+{ dwc3_power_off_all_roothub_ports
+MAP 0x1f00200000 size 0x7fff
+R32 rp1.bar1+0x200000 = 0x01200020  ; xhci cap
+R32 rp1.bar1+0x200004 = 0x02000440  ; xhci cap
+R32 rp1.bar1+0x200420 = 0x00000000
+W32 rp1.bar1+0x200420 <- 0x00000000
+R32 rp1.bar1+0x200430 = 0x00000000
+W32 rp1.bar1+0x200430 <- 0x00000000
+} dwc3_power_off_all_roothub_ports
+{ dwc3_host_get_irq
+{ rp1_irq_xlate
+} rp1_irq_xlate
+{ dwc3_host_fill_xhci_irq_res
+} dwc3_host_fill_xhci_irq_res
+} dwc3_host_get_irq
+# xhci property xhci-sg-trb-cache-size-quirk
+# xhci property write-64-hi-lo-quirk
+# xhci property num-hc-interrupters
+# xhci child xhci-hcd added (not probed)
+} dwc3_host_init
+} dwc3_core_init_mode
+} dwc3_core_probe
+} dwc3_probe
+PROBE-END 1f00200000.usb ret 0
 # device_add 1f00300000.usb
+PROBE 1f00300000.usb driver dwc3
+{ dwc3_probe
+{ dwc3_core_probe
+# map 1f00300000.usb [mem 0x1f0030c100-0x1f003fffff flags 0x200]
+MAP 0x1f0030c100 size 0xf3f00
+{ dwc3_get_properties
+} dwc3_get_properties
+{ dwc3_get_software_properties
+} dwc3_get_software_properties
+{ dwc3_get_usb_power_supply
+} dwc3_get_usb_power_supply
+# dma_set_mask 1f00300000.usb 0xffffffffffffffff
+{ dwc3_get_clocks
+} dwc3_get_clocks
+{ dwc3_clk_enable
+} dwc3_clk_enable
+{ dwc3_core_is_valid
+R32 rp1.bar1+0x30c120 = 0x5533330b  ; dwc3.1 +0xc120
+} dwc3_core_is_valid
+{ dwc3_cache_hwparams
+R32 rp1.bar1+0x30c140 = 0x40200049  ; dwc3.1 +0xc140
+R32 rp1.bar1+0x30c144 = 0x0160c93b  ; dwc3.1 +0xc144
+R32 rp1.bar1+0x30c148 = 0x12345678  ; dwc3.1 +0xc148
+R32 rp1.bar1+0x30c14c = 0x04188085  ; dwc3.1 +0xc14c
+R32 rp1.bar1+0x30c150 = 0x43822004  ; dwc3.1 +0xc150
+R32 rp1.bar1+0x30c154 = 0x02142088  ; dwc3.1 +0xc154
+R32 rp1.bar1+0x30c158 = 0x08000020  ; dwc3.1 +0xc158
+R32 rp1.bar1+0x30c15c = 0x04000400  ; dwc3.1 +0xc15c
+R32 rp1.bar1+0x30c600 = 0x0000079a  ; dwc3.1 +0xc600
+} dwc3_cache_hwparams
+# dma_set_mask 1f00300000.usb 0xffffffffffffffff
+{ dwc3_get_num_ports
+MAP 0x1f00300000 size 0x8000
+R32 rp1.bar1+0x300010 = 0x2000000d  ; xhci cap
+R32 rp1.bar1+0x308000 = 0x02000402  ; xhci xcap
+R32 rp1.bar1+0x308000 = 0x02000402  ; xhci xcap
+R32 rp1.bar1+0x308008 = 0x00000101  ; xhci xcap
+R32 rp1.bar1+0x308000 = 0x02000402  ; xhci xcap
+R32 rp1.bar1+0x308010 = 0x03000002  ; xhci xcap
+R32 rp1.bar1+0x308010 = 0x03000002  ; xhci xcap
+R32 rp1.bar1+0x308018 = 0x00000102  ; xhci xcap
+R32 rp1.bar1+0x308010 = 0x03000002  ; xhci xcap
+} dwc3_get_num_ports
+{ dwc3_alloc_event_buffers
+} dwc3_alloc_event_buffers
+{ dwc3_get_extcon
+} dwc3_get_extcon
+{ dwc3_get_dr_mode
+} dwc3_get_dr_mode
+{ dwc3_core_init
+{ dwc3_phy_setup
+{ dwc3_ss_phy_setup
+R32 rp1.bar1+0x30c2c0 = 0x00000000  ; dwc3.1 +0xc2c0
+W32 rp1.bar1+0x30c2c0 <- 0x10000000  ; dwc3.1 +0xc2c0
+} dwc3_ss_phy_setup
+{ dwc3_hs_phy_setup
+R32 rp1.bar1+0x30c200 = 0x00000000  ; dwc3.1 +0xc200
+W32 rp1.bar1+0x30c200 <- 0x00000100  ; dwc3.1 +0xc200
+} dwc3_hs_phy_setup
+} dwc3_phy_setup
+{ dwc3_core_ulpi_init
+} dwc3_core_ulpi_init
+{ dwc3_ulpi_setup
+} dwc3_ulpi_setup
+{ dwc3_core_get_phy
+} dwc3_core_get_phy
+{ dwc3_phy_init
+{ dwc3_enable_susphy
+R32 rp1.bar1+0x30c2c0 = 0x10000000  ; dwc3.1 +0xc2c0
+W32 rp1.bar1+0x30c2c0 <- 0x10020000  ; dwc3.1 +0xc2c0
+R32 rp1.bar1+0x30c200 = 0x00000100  ; dwc3.1 +0xc200
+W32 rp1.bar1+0x30c200 <- 0x00000140  ; dwc3.1 +0xc200
+} dwc3_enable_susphy
+} dwc3_phy_init
+{ dwc3_core_soft_reset
+R32 rp1.bar1+0x30c704 = 0x00000000  ; dwc3.1 +0xc704
+W32 rp1.bar1+0x30c704 <- 0x40000000  ; dwc3.1 +0xc704
+R32 rp1.bar1+0x30c704 = 0x00000000  ; dwc3.1 +0xc704
+} dwc3_core_soft_reset
+W32 rp1.bar1+0x30c128 <- 0x0006123e  ; dwc3.1 +0xc128
+{ dwc3_core_setup_global_control
+R32 rp1.bar1+0x30c110 = 0x00000000  ; dwc3.1 +0xc110
+W32 rp1.bar1+0x30c110 <- 0x00000000  ; dwc3.1 +0xc110
+} dwc3_core_setup_global_control
+{ dwc3_core_num_eps
+} dwc3_core_num_eps
+{ dwc3_set_power_down_clk_scale
+} dwc3_set_power_down_clk_scale
+{ dwc3_frame_length_adjustment
+} dwc3_frame_length_adjustment
+{ dwc3_ref_clk_period
+} dwc3_ref_clk_period
+{ dwc3_set_incr_burst_type
+R32 rp1.bar1+0x30c100 = 0x00000000  ; dwc3.1 +0xc100
+} dwc3_set_incr_burst_type
+{ dwc3_config_soc_bus
+} dwc3_config_soc_bus
+{ dwc3_set_axi_pipe_limit
+R32 rp1.bar1+0x30c104 = 0x00000000  ; dwc3.1 +0xc104
+W32 rp1.bar1+0x30c104 <- 0x00000700  ; dwc3.1 +0xc104
+} dwc3_set_axi_pipe_limit
+{ dwc3_phy_power_on
+} dwc3_phy_power_on
+{ dwc3_event_buffers_setup
+} dwc3_event_buffers_setup
+R32 rp1.bar1+0x30c19c = 0x00000000  ; dwc3.1 +0xc19c
+W32 rp1.bar1+0x30c19c <- 0x00004000  ; dwc3.1 +0xc19c
+R32 rp1.bar1+0x30c11c = 0x00000000  ; dwc3.1 +0xc11c
+W32 rp1.bar1+0x30c11c <- 0x810a8000  ; dwc3.1 +0xc11c
+{ dwc3_config_threshold
+R32 rp1.bar1+0x30c108 = 0x00000000  ; dwc3.1 +0xc108
+W32 rp1.bar1+0x30c108 <- 0x22080000  ; dwc3.1 +0xc108
+} dwc3_config_threshold
+} dwc3_core_init
+{ dwc3_check_params
+{ dwc3_has_imod
+} dwc3_has_imod
+} dwc3_check_params
+{ dwc3_core_init_mode
+{ dwc3_set_prtcap
+R32 rp1.bar1+0x30c110 = 0x00000000  ; dwc3.1 +0xc110
+W32 rp1.bar1+0x30c110 <- 0x00001000  ; dwc3.1 +0xc110
+} dwc3_set_prtcap
+{ dwc3_host_init
+{ dwc3_power_off_all_roothub_ports
+MAP 0x1f00300000 size 0x7fff
+R32 rp1.bar1+0x300000 = 0x01200020  ; xhci cap
+R32 rp1.bar1+0x300004 = 0x02000440  ; xhci cap
+R32 rp1.bar1+0x300420 = 0x00000000
+W32 rp1.bar1+0x300420 <- 0x00000000
+R32 rp1.bar1+0x300430 = 0x00000000
+W32 rp1.bar1+0x300430 <- 0x00000000
+} dwc3_power_off_all_roothub_ports
+{ dwc3_host_get_irq
+{ rp1_irq_xlate
+} rp1_irq_xlate
+{ dwc3_host_fill_xhci_irq_res
+} dwc3_host_fill_xhci_irq_res
+} dwc3_host_get_irq
+# xhci property xhci-sg-trb-cache-size-quirk
+# xhci property write-64-hi-lo-quirk
+# xhci property num-hc-interrupters
+# xhci child xhci-hcd added (not probed)
+} dwc3_host_init
+} dwc3_core_init_mode
+} dwc3_core_probe
+} dwc3_probe
+PROBE-END 1f00300000.usb ret 0
 # device_add 1f00400000.sram
 # device_add 1f000d0000.gpiomem
 } rp1_probe
