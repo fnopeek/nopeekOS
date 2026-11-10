@@ -5,6 +5,10 @@ pub mod dt;
 #[cfg(target_arch = "aarch64")]
 pub mod simplefb;
 #[cfg(target_arch = "aarch64")]
+pub mod gpio;
+#[cfg(target_arch = "aarch64")]
 pub mod led;
 #[cfg(target_arch = "aarch64")]
 pub mod pi5;
+#[cfg(target_arch = "aarch64")]
+pub mod pi5_sd;

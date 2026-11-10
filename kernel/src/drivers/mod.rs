@@ -19,11 +19,10 @@ pub mod rtl8153;
 pub mod xhci;
 #[cfg(target_arch = "x86_64")]
 pub mod usb_desc;
+pub mod disk;
 #[cfg(target_arch = "x86_64")]
 pub mod usb_storage;
-#[cfg(target_arch = "x86_64")]
 pub mod sdhci;
-#[cfg(target_arch = "x86_64")]
 pub mod mmc_sd;
 #[cfg(target_arch = "x86_64")]
 pub mod keyboard;

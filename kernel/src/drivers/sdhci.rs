@@ -1,11 +1,18 @@
-//! SD host controller (SDHCI) on PCI, after Linux 6.18.60
-//! drivers/mmc/host/sdhci.c, sdhci-pci-core.c and sdhci-pci-o2micro.c.
+//! SD host controller (SDHCI), after Linux 6.18.60
+//! drivers/mmc/host/sdhci.c, sdhci-pci-core.c, sdhci-pci-o2micro.c and
+//! sdhci-brcmstb.c.
 //!
-//! Bound to the O2 Micro SeaBird (1217:8620/8621) with its fixes, and to
-//! QEMU's sdhci-pci (1b36:0007) with none. The card protocol on top is
+//! Bound on PCs to the O2 Micro SeaBird (1217:8620/8621) with its fixes,
+//! and to QEMU's sdhci-pci (1b36:0007) with none; on the Raspberry Pi 5 to
+//! the BCM2712's SD controller (`brcm,bcm2712-sdhci`), whose card power,
+//! signal voltage and card detect are GPIO lines of the board. The card protocol on top is
 //! `mmc_sd`. Requests run to completion polled on the interrupt status
 //! register; the controller signals no interrupt (SIGNAL_ENABLE stays 0).
 
+// The PCI variants' registers stay defined where only BCM2712 is built.
+#![cfg_attr(target_arch = "aarch64", allow(dead_code))]
+
+#[cfg(target_arch = "x86_64")]
 use crate::drivers::pci::{self, PciAddr};
 use crate::hw::{DmaRegion, Mmio};
 use crate::kprintln;
@@ -176,6 +183,8 @@ const SDHCI_QUIRK2_CLEAR_TRANSFERMODE_REG_BEFORE_CMD: u32 = 1 << 2;
 pub const MMC_CAP_4_BIT_DATA: u32 = 1 << 0;
 pub const MMC_CAP_SD_HIGHSPEED: u32 = 1 << 2;
 pub const MMC_CAP_8_BIT_DATA: u32 = 1 << 6;
+#[cfg(target_arch = "aarch64")]
+pub const MMC_CAP_NONREMOVABLE: u32 = 1 << 8;
 pub const MMC_CAP_UHS_SDR12: u32 = 1 << 16;
 pub const MMC_CAP_UHS_SDR25: u32 = 1 << 17;
 pub const MMC_CAP_UHS_SDR50: u32 = 1 << 18;
@@ -340,11 +349,49 @@ pub enum Stop {
     ManualCmd12,
 }
 
+/// The controller's flavour: where Linux has separate `sdhci_ops`.
+#[derive(Clone, Copy)]
+enum Variant {
+    /// `sdhci_pci_ops` without fixes.
+    #[cfg(target_arch = "x86_64")]
+    Plain,
+    /// `sdhci_pci_o2`.
+    #[cfg(target_arch = "x86_64")]
+    O2,
+    /// `sdhci_brcmstb_ops_2712`, with the non-standard `cfg` registers.
+    #[cfg(target_arch = "aarch64")]
+    Bcm2712 { cfg: Mmio },
+}
+
+/// The board's supplies and card detect where they are not the
+/// controller's (Linux `mmc->supply`, `cd-gpios`).
+#[derive(Clone, Copy)]
+pub struct Supplies {
+    /// vmmc: card power on or off; returns once it is stable.
+    pub vmmc: Option<fn(bool)>,
+    /// vqmmc: signal voltage, true = 1.8 V, false = 3.3 V; returns once
+    /// the regulator settled.
+    pub vqmmc: Option<fn(bool)>,
+    /// Card present.
+    pub cd: Option<fn() -> bool>,
+}
+
+impl Supplies {
+    pub const NONE: Supplies = Supplies { vmmc: None, vqmmc: None, cd: None };
+}
+
 pub struct Host {
     regs: Mmio,
+    #[cfg(target_arch = "x86_64")]
     pub pci: PciAddr,
+    #[cfg(target_arch = "x86_64")]
     device: u16,
-    is_o2: bool,
+    variant: Variant,
+    supplies: Supplies,
+    /// `mmc->regulator_enabled`: vmmc is on.
+    vmmc_on: bool,
+    /// MMC_CAP_* the board adds (`mmc_of_parse`).
+    dt_caps: u32,
     pub name: &'static str,
     pub version: u8,
     caps: u32,
@@ -394,12 +441,13 @@ pub fn udelay(us: u64) {
 
 /// `mmc_delay` / `usleep_range`: yields the core when it can.
 pub fn mdelay(ms: u64) {
-    if !crate::smp::fiber::yield_sleep(ms) {
-        crate::time::delay_ms(ms);
-    }
+    #[cfg(target_arch = "x86_64")]
+    if crate::smp::fiber::yield_sleep(ms) { return; }
+    crate::time::delay_ms(ms);
 }
 
 /// Probe the first supported controller.
+#[cfg(target_arch = "x86_64")]
 pub fn probe() -> Option<Host> {
     let table: [(u16, u16, &'static str, bool); 3] = [
         (PCI_VENDOR_ID_O2, PCI_DEVICE_ID_O2_SEABIRD1, "O2 Micro SeaBird", true),
@@ -439,7 +487,9 @@ pub fn probe() -> Option<Host> {
         return None;
     };
     let mut host = Host {
-        regs, pci: addr, device: dev.device_id, is_o2, name,
+        regs, pci: addr, device: dev.device_id, name,
+        variant: if is_o2 { Variant::O2 } else { Variant::Plain },
+        supplies: Supplies::NONE, vmmc_on: false, dt_caps: 0,
         version: 0, caps: 0, caps1: 0, quirks: 0, quirks2: 0,
         flags: SDHCI_SIGNALING_330, mmc_caps: 0, max_clk: 0, clk_mul: 0,
         timeout_clk: 0, max_timeout_count: 0xE, f_min: 0, f_max: 0, ocr_avail: 0,
@@ -478,13 +528,131 @@ pub fn probe() -> Option<Host> {
     Some(host)
 }
 
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_CTRL: u32 = 0x0;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_CTRL_SDCD_N_TEST_EN: u32 = 1 << 31;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_CTRL_SDCD_N_TEST_LEV: u32 = 1 << 30;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_CQ_CAPABILITY: u32 = 0x4c;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_CQ_CAPABILITY_FMUL_SHIFT: u32 = 12;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_SD_PIN_SEL: u32 = 0x44;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_SD_PIN_SEL_MASK: u32 = 0x3;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_SD_PIN_SEL_SD: u32 = 1 << 1;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_MAX_50MHZ_MODE: u32 = 0x1ac;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_MAX_50MHZ_MODE_STRAP_OVERRIDE: u32 = 1 << 31;
+#[cfg(target_arch = "aarch64")]
+const SDIO_CFG_MAX_50MHZ_MODE_ENABLE: u32 = 1 << 0;
+
+#[cfg(target_arch = "aarch64")]
+/// What a `brcm,bcm2712-sdhci` node gives.
+pub struct Bcm2712 {
+    /// The `host` and `cfg` register windows.
+    pub host: Mmio,
+    pub cfg: Mmio,
+    /// The rate of its `clocks`.
+    pub clk_hz: u32,
+    /// MMC_CAP_* from `bus-width`, `sd-uhs-*`, `non-removable`.
+    pub caps: u32,
+    pub supplies: Supplies,
+}
+
+/// `sdhci_brcmstb_probe` for BCM2712: the core's setup with the UHS modes
+/// of the capabilities replaced by those of the device tree.
+#[cfg(target_arch = "aarch64")]
+pub fn probe_bcm2712(p: Bcm2712) -> Option<Host> {
+    let name = "BCM2712 SDHCI";
+    let (Some(adma), Some(buf)) = (DmaRegion::alloc_zeroed_dma32_aligned(1),
+        DmaRegion::alloc_zeroed_dma32_aligned(MAX_REQ / 4096)) else {
+        kprintln!("[npk] sd: no DMA memory below 4 GiB");
+        return None;
+    };
+    let mut host = Host {
+        regs: p.host, name, variant: Variant::Bcm2712 { cfg: p.cfg },
+        supplies: p.supplies, vmmc_on: false, dt_caps: p.caps,
+        version: 0, caps: 0, caps1: 0, quirks: 0, quirks2: 0,
+        flags: SDHCI_SIGNALING_330, mmc_caps: 0, max_clk: 0, clk_mul: 0,
+        timeout_clk: 0, max_timeout_count: 0xE, f_min: 0, f_max: 0, ocr_avail: 0,
+        max_current_330: 0, max_current_300: 0, max_current_180: 0,
+        tuning_mode: 0, ier: 0, pwr: 0, clock: 0, actual_clock: 0,
+        timing: MMC_TIMING_LEGACY, drv_type: 0, reinit_uhs: false,
+        ios: Ios { clock: 0, vdd: 0, power_mode: MMC_POWER_OFF, bus_width: MMC_BUS_WIDTH_1,
+            timing: MMC_TIMING_LEGACY, signal_voltage: MMC_SIGNAL_VOLTAGE_330, drv_type: 0 },
+        adma, buf, dll_adjust_count: 0, tuning_done: false,
+    };
+    host.bcm2712_cfginit(p.cfg, p.clk_hz);
+    if let Err(e) = host.setup_host() {
+        kprintln!("[npk] sd: {} setup failed: {:?}", name, e);
+        return None;
+    }
+    host.init(false);
+    host.set_card_detection(true);
+    kprintln!("[npk] sd: {}, SDHCI spec {}, base {} MHz{}{}", name,
+        match host.version { 0 => "1.00", 1 => "2.00", 2 => "3.00", 3 => "4.00", 4 => "4.10", _ => "4.20" },
+        host.max_clk / 1_000_000,
+        if host.mmc_caps & MMC_CAP_UHS_SDR104 != 0 { ", SDR104" }
+        else if host.mmc_caps & MMC_CAP_UHS_SDR50 != 0 { ", SDR50" } else { "" },
+        if host.flags & SDHCI_USE_ADMA != 0 { ", ADMA2" } else { "" });
+    Some(host)
+}
+
 impl Host {
+    fn is_o2(&self) -> bool {
+        #[cfg(target_arch = "x86_64")]
+        return matches!(self.variant, Variant::O2);
+        #[cfg(not(target_arch = "x86_64"))]
+        false
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    /// `sdhci_brcmstb_cfginit_2712`: the delay line PHY as clock source
+    /// when a mode needs tuning, presence forced for a fixed card, and the
+    /// command queue timer's base clock.
+    fn bcm2712_cfginit(&mut self, cfg: Mmio, clk_hz: u32) {
+        if self.dt_caps & (MMC_CAP_UHS_SDR50 | MMC_CAP_UHS_SDR104) != 0 {
+            let mut reg = cfg.r32(SDIO_CFG_MAX_50MHZ_MODE);
+            reg &= !SDIO_CFG_MAX_50MHZ_MODE_ENABLE;
+            reg |= SDIO_CFG_MAX_50MHZ_MODE_STRAP_OVERRIDE;
+            cfg.w32(SDIO_CFG_MAX_50MHZ_MODE, reg);
+        }
+        if self.dt_caps & MMC_CAP_NONREMOVABLE != 0 {
+            let mut reg = cfg.r32(SDIO_CFG_CTRL);
+            reg &= !SDIO_CFG_CTRL_SDCD_N_TEST_LEV;
+            reg |= SDIO_CFG_CTRL_SDCD_N_TEST_EN;
+            cfg.w32(SDIO_CFG_CTRL, reg);
+        }
+        let base_clk_mhz = (clk_hz / 1_000_000).max(1);
+        cfg.w32(SDIO_CFG_CQ_CAPABILITY, (3 << SDIO_CFG_CQ_CAPABILITY_FMUL_SHIFT) | base_clk_mhz);
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    /// `sdhci_bcm2712_set_clock`: SD pin select (the eMMC timings are not
+    /// driven here), then the standard divider.
+    fn bcm2712_set_clock(&mut self, cfg: Mmio, clock: u32) {
+        self.actual_clock = 0;
+        self.writew(0, SDHCI_CLOCK_CONTROL);
+        let mut reg = cfg.r32(SDIO_CFG_SD_PIN_SEL);
+        reg &= !SDIO_CFG_SD_PIN_SEL_MASK;
+        reg |= SDIO_CFG_SD_PIN_SEL_SD;
+        cfg.w32(SDIO_CFG_SD_PIN_SEL, reg);
+        if clock == 0 { return; }
+        let clk = self.calc_clk(clock);
+        self.enable_clk(clk);
+    }
+
     /// The registers a failed bring-up is judged by.
     pub fn dump_regs(&self) {
         kprintln!("[npk] sd: present {:#010x} clock {:#06x} power {:#04x} host {:#04x} ctrl2 {:#06x} int {:#010x} pci cmd {:#06x}",
             self.readl(SDHCI_PRESENT_STATE), self.readw(SDHCI_CLOCK_CONTROL), self.readb(SDHCI_POWER_CONTROL),
             self.readb(SDHCI_HOST_CONTROL), self.readw(SDHCI_HOST_CONTROL2), self.readl(SDHCI_INT_STATUS),
-            pci::read16(self.pci, 0x04));
+            self.pci_command());
     }
 
     pub fn has_auto_cmd12(&self) -> bool { self.flags & SDHCI_AUTO_CMD12 != 0 }
@@ -497,15 +665,25 @@ impl Host {
     pub fn writew(&self, v: u16, reg: u32) { self.regs.w16(reg, v) }
     pub fn writeb(&self, v: u8, reg: u32) { self.regs.w8(reg, v) }
 
+    fn pci_command(&self) -> u16 {
+        #[cfg(target_arch = "x86_64")]
+        if matches!(self.variant, Variant::Plain | Variant::O2) { return pci::read16(self.pci, 0x04); }
+        0
+    }
+
+    #[cfg(target_arch = "x86_64")]
     fn cfg_read32(&self, off: u16) -> u32 {
         if off < 0x100 { pci::read32(self.pci, off as u8) } else { pci::read32_ext(self.pci, off).unwrap_or(0) }
     }
+    #[cfg(target_arch = "x86_64")]
     fn cfg_write32(&self, off: u16, v: u32) {
         if off < 0x100 { pci::write32(self.pci, off as u8, v) } else { pci::write32_ext(self.pci, off, v); }
     }
+    #[cfg(target_arch = "x86_64")]
     fn cfg_read8(&self, off: u16) -> u8 {
         (self.cfg_read32(off & !3) >> ((off & 3) * 8)) as u8
     }
+    #[cfg(target_arch = "x86_64")]
     fn cfg_write8(&self, off: u16, v: u8) {
         if off < 0x100 { pci::write8(self.pci, off as u8, v) } else { pci::write8_ext(self.pci, off, v); }
     }
@@ -615,6 +793,12 @@ impl Host {
         if self.version >= SDHCI_SPEC_300 {
             self.caps1 = self.readl(SDHCI_CAPABILITIES_1);
         }
+        // sdhci_brcmstb_probe: the UHS modes come from the device tree.
+        #[cfg(target_arch = "aarch64")]
+        if matches!(self.variant, Variant::Bcm2712 { .. }) {
+            self.caps1 &= !(SDHCI_SUPPORT_SDR50 | SDHCI_SUPPORT_SDR104 | SDHCI_SUPPORT_DDR50);
+        }
+        self.mmc_caps |= self.dt_caps;
         if self.version >= SDHCI_SPEC_200 && self.caps & SDHCI_CAN_DO_ADMA2 != 0 {
             self.flags |= SDHCI_USE_ADMA;
         }
@@ -781,8 +965,16 @@ impl Host {
 
     /// `host->ops->set_clock`
     fn set_clock(&mut self, clock: u32) {
-        if self.is_o2 {
+        #[cfg(target_arch = "x86_64")]
+        if self.is_o2() {
             self.o2_set_clock(clock);
+            return;
+        }
+        // The only variant on AArch64 so far.
+        #[cfg(target_arch = "aarch64")]
+        #[allow(irrefutable_let_patterns)]
+        if let Variant::Bcm2712 { cfg } = self.variant {
+            self.bcm2712_set_clock(cfg, clock);
             return;
         }
         self.actual_clock = 0;
@@ -824,7 +1016,16 @@ impl Host {
 
     /// `host->ops->set_power`
     fn set_power(&mut self, mode: u8, vdd: u8) {
-        if self.is_o2 && mode == MMC_POWER_OFF {
+        // sdhci_brcmstb_set_power: mmc_regulator_set_ocr, then the register.
+        if let Some(vmmc) = self.supplies.vmmc {
+            let want = mode != MMC_POWER_OFF && vdd != 0;
+            if want != self.vmmc_on {
+                vmmc(want);
+                self.vmmc_on = want;
+            }
+        }
+        #[cfg(target_arch = "x86_64")]
+        if self.is_o2() && mode == MMC_POWER_OFF {
             // sdhci_pci_o2_set_power: clock source back to the OPE clock.
             self.o2_unlock_wp();
             let v = self.cfg_read32(O2_SD_OUTPUT_CLK_SOURCE_SWITCH) & !O2_SD_SEL_DLL;
@@ -937,7 +1138,12 @@ impl Host {
     /// `mmc->ops->get_cd`
     pub fn get_cd(&mut self) -> bool {
         if self.flags & SDHCI_DEVICE_DEAD != 0 { return false; }
-        if self.is_o2 {
+        // mmc_gpio_get_cd
+        if let Some(cd) = self.supplies.cd {
+            return cd();
+        }
+        #[cfg(target_arch = "x86_64")]
+        if self.is_o2() {
             return self.o2_get_cd();
         }
         self.readl(SDHCI_PRESENT_STATE) & SDHCI_CARD_PRESENT != 0
@@ -956,6 +1162,7 @@ impl Host {
                 if self.flags & SDHCI_SIGNALING_330 == 0 { return Err(Error::Invalid); }
                 ctrl &= !SDHCI_CTRL_VDD_180;
                 self.writew(ctrl, SDHCI_HOST_CONTROL2);
+                if let Some(vqmmc) = self.supplies.vqmmc { vqmmc(false); }
                 mdelay(5);
                 if self.readw(SDHCI_HOST_CONTROL2) & SDHCI_CTRL_VDD_180 == 0 { return Ok(()); }
                 kprintln!("[npk] sd: 3.3V regulator output did not become stable");
@@ -963,6 +1170,7 @@ impl Host {
             }
             MMC_SIGNAL_VOLTAGE_180 => {
                 if self.flags & SDHCI_SIGNALING_180 == 0 { return Err(Error::Invalid); }
+                if let Some(vqmmc) = self.supplies.vqmmc { vqmmc(true); }
                 ctrl |= SDHCI_CTRL_VDD_180;
                 self.writew(ctrl, SDHCI_HOST_CONTROL2);
                 if self.readw(SDHCI_HOST_CONTROL2) & SDHCI_CTRL_VDD_180 != 0 { return Ok(()); }
@@ -1086,11 +1294,11 @@ impl Host {
 
     /// `mmc->ops->execute_tuning`
     pub fn execute_tuning(&mut self, opcode: u8) -> Result<(), Error> {
-        if self.is_o2 {
-            self.o2_execute_tuning(opcode)
-        } else {
-            self.sdhci_execute_tuning(opcode)
+        #[cfg(target_arch = "x86_64")]
+        if self.is_o2() {
+            return self.o2_execute_tuning(opcode);
         }
+        self.sdhci_execute_tuning(opcode)
     }
 
     // ── requests ──────────────────────────────────────────────────────
@@ -1354,7 +1562,10 @@ impl Host {
                 cmd_err = Some(Error::NoMedium);
                 break;
             }
+            #[cfg(target_arch = "x86_64")]
             crate::smp::fiber::spin_or_yield();
+            #[cfg(not(target_arch = "x86_64"))]
+            core::hint::spin_loop();
         }
         self.flags &= !SDHCI_REQ_USE_DMA;
         if let Some(e) = cmd_err {
@@ -1399,7 +1610,10 @@ impl Host {
         }
         r.and(stop_r)
     }
+}
 
+#[cfg(target_arch = "x86_64")]
+impl Host {
     // ── sdhci-pci-o2micro.c ───────────────────────────────────────────
 
     fn o2_unlock_wp(&self) {

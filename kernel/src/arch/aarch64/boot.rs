@@ -269,6 +269,9 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());
     dma_check();
     let keyboard = crate::platform::pi5::init(&fdt);
+    if let Some(id) = crate::platform::pi5_sd::init(&fdt) {
+        crate::platform::pi5_sd::self_test(id);
+    }
     kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
     kprintln!();
     if keyboard {

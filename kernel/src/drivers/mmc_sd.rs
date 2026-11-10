@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 use crate::drivers::sdhci::{self as h, Command, Data, Error, Host, Ios, Stop};
-use crate::drivers::usb_storage::{DiskInfo, Error as DiskError};
+use crate::drivers::disk::{DiskInfo, Error as DiskError};
 use crate::kprintln;
 
 /// Disk ids of SD cards start here; `storage::disk` routes by range.
@@ -183,8 +183,14 @@ fn release(s: Slot) {
 }
 
 /// Find the controller and look for a card. Boot, after the NVMe.
+#[cfg(target_arch = "x86_64")]
 pub fn init() -> bool {
     let Some(host) = h::probe() else { return false };
+    init_host(host)
+}
+
+/// Take a probed controller and look for a card.
+pub fn init_host(host: Host) -> bool {
     *SLOT.lock() = Some(Slot { host, card: None });
     CONTROLLER.store(true, Ordering::Release);
     detect_spawn();
@@ -214,9 +220,13 @@ pub fn poll() {
     if changed { detect_spawn(); }
 }
 
+/// The detection on a worker; where there is no scheduler yet, now.
 fn detect_spawn() {
     if DETECTING.swap(true, Ordering::AcqRel) { return; }
+    #[cfg(target_arch = "x86_64")]
     crate::smp::scheduler::spawn("sd card", detect_task, 0);
+    #[cfg(not(target_arch = "x86_64"))]
+    detect_task(0);
 }
 
 /// `mmc_rescan`: a known card still answering, or a new one initialised.
@@ -250,7 +260,9 @@ fn detect_task(_: u64) {
                 s.card = Some(card);
                 release(s);
                 DETECTING.store(false, Ordering::Release);
+                #[cfg(target_arch = "x86_64")]
                 crate::ext::disk_added(id);
+                let _ = id;
                 return;
             }
             Err(e) => {
@@ -268,6 +280,7 @@ fn drop_disk(why: &str) {
     let gone = DISK.lock().take();
     if let Some(d) = gone {
         kprintln!("[npk] sd: card {} {}", d.id, why);
+        #[cfg(target_arch = "x86_64")]
         crate::ext::disk_gone(d.id);
     }
 }
@@ -1062,6 +1075,7 @@ pub fn flush(id: u32) -> Result<(), DiskError> {
 
 /// Stop the card: power it off and drop the disk.
 pub fn eject(id: u32) -> Result<(), DiskError> {
+    #[cfg(target_arch = "x86_64")]
     crate::ext::disk_gone(id);
     current_disk(id)?;
     let mut s = claim().ok_or(DiskError::Gone)?;
