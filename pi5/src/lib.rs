@@ -4,21 +4,30 @@
 //! complex (`pcie`) with its resets (`reset`), the MSI-X interrupt
 //! peripheral that turns RP1's messages into GIC interrupts (`mip`), the
 //! PCI core's share for one root port and one device (`pci`), and RP1
-//! itself (`rp1`). Every register access goes through [`hw::Hw`], so the
+//! itself (`rp1`). Behind RP1: its USB controllers (`dwc3`) and its
+//! Ethernet (`eth`: clocks `clk_rp1`, the PHY reset line `gpio_rp1`, the MAC
+//! `gem`, the PHY `phy`). Every register access goes through [`hw::Hw`], so the
 //! same code runs on the board and against a recorded Linux run.
 
 #![cfg_attr(not(test), no_std)]
 
+pub mod clk_rp1;
 pub mod dwc3;
+pub mod eth;
+pub mod gem;
+pub mod gpio_rp1;
 pub mod hw;
 pub mod mip;
 pub mod pci;
 pub mod pcie;
+pub mod phy;
 pub mod reset;
 pub mod rp1;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_eth;
 
 /// How far bring-up came.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

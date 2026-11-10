@@ -15,11 +15,13 @@ use crate::hw::{Block, Hw};
 use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Debug, PartialEq)]
-enum Ev {
+pub(crate) enum Ev {
     Read { b: Block, off: u64, w: u8, v: u32 },
     Write { b: Block, off: u64, w: u8, v: u32 },
     Enter(String),
     Exit(String),
+    /// A `#`, `==` or `PROBE` line: the run's steps and the model's view.
+    Note(String),
 }
 
 fn block(name: &str) -> Option<Block> {
@@ -38,9 +40,13 @@ fn num(s: &str) -> u64 {
     u64::from_str_radix(s.trim_start_matches("0x"), 16).expect(s)
 }
 
-fn parse(log: &str) -> Vec<Ev> {
+pub(crate) fn parse(log: &str) -> Vec<Ev> {
     let mut out = Vec::new();
     for line in log.lines() {
+        if line.starts_with('#') || line.starts_with("==") || line.starts_with("PROBE") {
+            out.push(Ev::Note(line.to_string()));
+            continue;
+        }
         let line = line.split(" ;").next().unwrap_or("");
         if let Some(n) = line.strip_prefix("{ ") {
             out.push(Ev::Enter(n.to_string()));
@@ -65,7 +71,7 @@ fn parse(log: &str) -> Vec<Ev> {
 }
 
 /// The accesses inside the first top-level call of `name`.
-fn segment(evs: &[Ev], name: &str) -> Vec<Ev> {
+pub(crate) fn segment(evs: &[Ev], name: &str) -> Vec<Ev> {
     let start = evs.iter().position(|e| *e == Ev::Enter(name.into())).expect(name);
     let mut depth = 0;
     let mut out = Vec::new();
@@ -84,8 +90,8 @@ fn segment(evs: &[Ev], name: &str) -> Vec<Ev> {
 }
 
 /// Plays a recorded sequence back and fails on the first difference.
-struct Strict {
-    evs: VecDeque<Ev>,
+pub(crate) struct Strict {
+    pub(crate) evs: VecDeque<Ev>,
 }
 
 impl Hw for Strict {
@@ -105,8 +111,8 @@ impl Hw for Strict {
 }
 
 impl Strict {
-    fn new(evs: Vec<Ev>) -> Self { Strict { evs: evs.into() } }
-    fn done(&self) {
+    pub(crate) fn new(evs: Vec<Ev>) -> Self { Strict { evs: evs.into() } }
+    pub(crate) fn done(&self) {
         assert!(self.evs.is_empty(), "Linux went on: {:?}", self.evs.front());
     }
 }
@@ -292,7 +298,7 @@ fn bring_up_leaves_linux_state() {
 
 /// The accesses inside the `n`th top-level call of `name`, leaving out
 /// those inside calls of `skip`.
-fn segment_nth(evs: &[Ev], name: &str, n: usize, skip: &str) -> Vec<Ev> {
+pub(crate) fn segment_nth(evs: &[Ev], name: &str, n: usize, skip: &str) -> Vec<Ev> {
     let mut seen = 0;
     let (mut depth, mut skipping) = (0, 0);
     let mut out = Vec::new();
