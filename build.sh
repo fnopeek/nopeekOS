@@ -931,6 +931,9 @@ PARTS
     local part="$PI_SD_IMG@@$((start * 512))"
     mkfs.fat -F 32 -n NOPEEKOS --offset "$start" "$PI_SD_IMG" $((esp / 2)) >/dev/null
     mcopy -i "$part" "$ARM_IMG" ::nopeek.img
+    # The kernel's own small files (the time zone for the clock before
+    # unlock), where the PC's ESP keeps them (storage/fat32.rs).
+    mmd -i "$part" ::EFI ::EFI/NOPEEK
     mcopy -i "$part" "$dir/config.txt" ::config.txt
     mcopy -i "$part" "$PI_FW"/boot/bcm2712*.dtb ::
     mmd -i "$part" ::overlays

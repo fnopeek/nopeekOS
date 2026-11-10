@@ -376,12 +376,20 @@ struct DirScan {
     free: Option<DirEntry>,
 }
 
+/// Where the firmware loads the kernel from on this platform: the
+/// directory below the root (none: the root itself) and the 8.3 name.
+/// UEFI's default boot path on a PC; `kernel=` of the Pi's config.txt.
+#[cfg(target_arch = "x86_64")]
+const BOOT_KERNEL: (Option<&[u8]>, &[u8], &[u8]) = (Some(b"BOOT"), b"BOOTX64", b"EFI");
+#[cfg(target_arch = "aarch64")]
+const BOOT_KERNEL: (Option<&[u8]>, &[u8], &[u8]) = (None, b"NOPEEK", b"IMG");
+
 /// Clusters `write_small_file` must never write or allocate.
 struct Protected {
-    /// BOOTX64.EFI's reserved run: `[start, end)`.
+    /// The boot kernel's reserved run: `[start, end)`.
     run_start: u32,
     run_end: u32,
-    /// Root, /EFI and /EFI/BOOT.
+    /// Root, /EFI and the boot kernel's directory.
     dirs: [u32; 3],
 }
 
@@ -842,10 +850,14 @@ pub fn write_small_file(esp_start: u64, name: &str, data: &[u8]) -> Result<(), &
 
     let root = fs.root_cluster;
     let efi = fs.subdir(root, &make_name(b"EFI", b""))?.ok_or("ESP: no /EFI")?;
-    let boot = fs.subdir(efi, &make_name(b"BOOT", b""))?.ok_or("ESP: no /EFI/BOOT")?;
-    let kernel = fs.scan_dir(boot, &make_name(b"BOOTX64", b"EFI"))?
-        .found.ok_or("ESP: no BOOTX64.EFI")?;
-    if !fs.valid_cluster(kernel.first_cluster) { return Err("ESP: BOOTX64.EFI cluster out of range"); }
+    let (kdir, kname, kext) = BOOT_KERNEL;
+    let boot = match kdir {
+        Some(d) => fs.subdir(efi, &make_name(d, b""))?.ok_or("ESP: no boot kernel directory")?,
+        None => root,
+    };
+    let kernel = fs.scan_dir(boot, &make_name(kname, kext))?
+        .found.ok_or("ESP: no boot kernel")?;
+    if !fs.valid_cluster(kernel.first_cluster) { return Err("ESP: boot kernel cluster out of range"); }
     // Same size rule as `create_esp`, so the bound covers the run it laid down.
     let kernel_clusters = (kernel.size as u64).div_ceil(SECTOR_SIZE as u64 * fs.spc as u64) as u32;
     let run_len = kernel_clusters.saturating_mul(2).max(MIN_KERNEL_RESERVED);
