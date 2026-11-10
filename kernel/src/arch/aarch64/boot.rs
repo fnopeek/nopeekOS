@@ -218,6 +218,46 @@ fn screen_code(fdt: &Fdt) -> u32 {
     }
 }
 
+/// The hardware RNG seeds the CSPRNG; AES-256-GCM and SHA-256 against
+/// known answers, then AES-GCM over 1 MiB, timed.
+fn crypto_check(fdt: &Fdt) {
+    let rng = crate::platform::rng200::init(fdt);
+    crate::csprng::init();
+    kprintln!("[npk] CSPRNG: {}seeded{}; {:016x} {:016x}",
+        if crate::csprng::hardware_seeded() { "hardware-" } else { "jitter-" },
+        if rng { " (RNG200)" } else { ", no RNG200 in the device tree" },
+        crate::csprng::random_u64(), crate::csprng::random_u64());
+
+    // McGrew/Viega, The Galois/Counter Mode of Operation, test case 14.
+    let ct = crate::crypto::aead_encrypt_aes(&[0u8; 32], &[0u8; 12], &[0u8; 16]);
+    let want: [u8; 32] = [
+        0xce, 0xa7, 0x40, 0x3d, 0x4d, 0x60, 0x6b, 0x6e, 0x07, 0x4e, 0xc5, 0xd3, 0xba, 0xf3, 0x9d, 0x18,
+        0xd0, 0xd1, 0xc8, 0xa7, 0x99, 0x99, 0x6b, 0xf0, 0x26, 0x5b, 0x98, 0xb5, 0xd4, 0x8a, 0xb9, 0x19,
+    ];
+    use sha2::Digest;
+    let abc = sha2::Sha256::digest(b"abc");
+    let abc_want: [u8; 32] = [
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+        0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
+    ];
+
+    let key = crate::csprng::random_256();
+    let mut nonce = [0u8; 12];
+    crate::csprng::fill(&mut nonce);
+    let data: alloc::vec::Vec<u8> = (0..1usize << 20).map(|i| i as u8).collect();
+    let t0 = crate::time::uptime_us();
+    let mut buf = crate::crypto::aead_encrypt_aes(&key, &nonce, &data);
+    let t1 = crate::time::uptime_us();
+    let ok = crate::crypto::aead_decrypt_aes_in_place(&key, &nonce, &mut buf).is_some() && buf == data;
+    let t2 = crate::time::uptime_us();
+    let mbs = |us: u64| (1u64 << 20) / us.max(1);
+    kprintln!("[npk] Crypto: AES-256-GCM known answer {}, SHA-256 known answer {}, 1 MiB round trip {}: \
+        {} MB/s encrypt, {} MB/s decrypt",
+        if ct[..] == want[..] { "ok" } else { "WRONG" },
+        if abc[..] == abc_want[..] { "ok" } else { "WRONG" },
+        if ok { "ok" } else { "FAILED" }, mbs(t1 - t0), mbs(t2 - t1));
+}
+
 /// The kernel's entry on AArch64, from `_start` with the MMU on.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb: usize) -> ! {
@@ -268,6 +308,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     let v: alloc::vec::Vec<u64> = (1..=1000).collect();
     kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());
     dma_check();
+    crypto_check(&fdt);
     let keyboard = crate::platform::pi5::init(&fdt);
     if let Some(id) = crate::platform::pi5_sd::init(&fdt) {
         crate::platform::pi5_sd::system_disk(id);

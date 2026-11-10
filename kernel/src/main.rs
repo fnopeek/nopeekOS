@@ -38,12 +38,11 @@ pub use mm::{memory, heap};
 #[cfg(target_arch = "x86_64")]
 pub use mm::paging;
 
-#[cfg(target_arch = "x86_64")]
 mod security;
+pub use security::csprng;
 #[cfg(target_arch = "x86_64")]
-pub use security::{capability, audit, csprng, disk_key};
+pub use security::{capability, audit, disk_key};
 
-#[cfg(target_arch = "x86_64")]
 mod crypto;
 #[cfg(target_arch = "x86_64")]
 pub use crypto::{tls, update_key};

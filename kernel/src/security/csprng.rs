@@ -2,8 +2,9 @@
 //!
 //! Source for capability tokens, the disk data key and all other
 //! security-sensitive randomness. The seed is BLAKE3 over hardware RNG words
-//! (RDSEED, else RDRAND) that pass a health check, TSC jitter and the RTC, so
-//! a broken hardware source cannot make the seed a constant on its own.
+//! (RDSEED, else RDRAND; on the Raspberry Pi 5 the SoC's RNG200) that pass a
+//! health check, counter jitter and the RTC, so a broken hardware source
+//! cannot make the seed a constant on its own.
 //! Re-keys every 64 blocks for forward secrecy; `reseed` mixes in fresh
 //! material before a long-lived key is drawn.
 
@@ -131,6 +132,7 @@ fn chacha20_block(key: &[u8; 32], counter: u32, nonce: &[u8; 12]) -> [u8; 64] {
 
 // === Seeding ===
 
+#[cfg(target_arch = "x86_64")]
 fn has_rdrand() -> bool {
     let ecx: u32;
     // SAFETY: CPUID is always available on x86_64. rbx is saved/restored
@@ -149,6 +151,7 @@ fn has_rdrand() -> bool {
     ecx & (1 << 30) != 0
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rdrand64() -> Option<u64> {
     let val: u64;
     let ok: u8;
@@ -164,6 +167,7 @@ fn rdrand64() -> Option<u64> {
     if ok == 1 { Some(val) } else { None }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
@@ -172,6 +176,7 @@ fn rdtsc() -> u64 {
     ((hi as u64) << 32) | (lo as u64)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn has_rdseed() -> bool {
     let ebx: u32;
     // SAFETY: CPUID leaf 7 subleaf 0 exists on every x86_64 we boot on; rbx
@@ -191,6 +196,7 @@ fn has_rdseed() -> bool {
     ebx & (1 << 18) != 0
 }
 
+#[cfg(target_arch = "x86_64")]
 fn rdseed64() -> Option<u64> {
     let val: u64;
     let ok: u8;
@@ -215,6 +221,7 @@ const HW_WORDS: usize = 8;
 /// that is all zeros or all ones (the AMD erratum returns all ones with CF
 /// set), and a sample in which any word repeats.
 fn hardware_words() -> Option<[u64; HW_WORDS]> {
+    #[cfg(target_arch = "x86_64")]
     let source: fn() -> Option<u64> = if has_rdseed() {
         rdseed64
     } else if has_rdrand() {
@@ -222,6 +229,8 @@ fn hardware_words() -> Option<[u64; HW_WORDS]> {
     } else {
         return None;
     };
+    #[cfg(target_arch = "aarch64")]
+    let source: fn() -> Option<u64> = crate::platform::rng200::read_u64;
     let mut words = [0u64; HW_WORDS];
     for w in words.iter_mut() {
         // RDSEED may run dry for a moment; give it time before giving up.
@@ -249,15 +258,24 @@ fn hardware_words() -> Option<[u64; HW_WORDS]> {
     Some(words)
 }
 
-/// Timing jitter: TSC deltas around memory traffic. A few bits each, but
-/// independent of the hardware RNG.
+/// The fastest counter there is: the TSC; on AArch64 the generic timer,
+/// as Linux's `random_get_entropy` there.
+fn cycles() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    return rdtsc();
+    #[cfg(not(target_arch = "x86_64"))]
+    crate::time::counter()
+}
+
+/// Timing jitter: counter deltas around memory traffic. A few bits each,
+/// but independent of the hardware RNG.
 fn jitter(h: &mut blake3::Hasher) {
     let mut scratch = [0u64; 64];
-    let mut prev = rdtsc();
+    let mut prev = cycles();
     for i in 0..1024usize {
         let slot = (prev as usize ^ i.wrapping_mul(0x9E37_79B9)) % scratch.len();
         scratch[slot] = scratch[slot].wrapping_add(prev).rotate_left(7);
-        let now = rdtsc();
+        let now = cycles();
         h.update(&now.wrapping_sub(prev).to_le_bytes());
         prev = now;
     }
@@ -274,6 +292,7 @@ fn build_seed() -> ([u8; 32], bool) {
         }
     }
     jitter(&mut h);
+    #[cfg(target_arch = "x86_64")]
     if let Some(t) = crate::rtc::read_unix_time() {
         h.update(&t.to_le_bytes());
     }
@@ -301,6 +320,7 @@ pub fn init() {
     let (seed, hw) = build_seed();
     *RNG.lock() = Some(ChaChaRng::new(&seed));
     report(hw);
+    #[cfg(target_arch = "x86_64")]
     if hw {
         let src = if has_rdseed() { "RDSEED" } else { "RDRAND" };
         crate::kdebug!("[npk] CSPRNG: ready ({}-seeded)", src);
