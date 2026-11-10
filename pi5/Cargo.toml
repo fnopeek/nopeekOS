@@ -1,0 +1,10 @@
+[package]
+name = "pi5_core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Raspberry Pi 5 PCIe root complex, MIP and RP1, after Linux"
+
+# no_std rlib. Builds for aarch64-nopeek AND for the std harness.
+[lib]
+crate-type = ["rlib"]

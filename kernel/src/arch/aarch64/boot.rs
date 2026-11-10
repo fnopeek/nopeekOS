@@ -268,6 +268,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     let v: alloc::vec::Vec<u64> = (1..=1000).collect();
     kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());
     dma_check();
+    crate::platform::pi5::init(&fdt);
     kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
     kprintln!();
     if led {

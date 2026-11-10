@@ -262,6 +262,95 @@ impl Fdt {
         }
     }
 
+    /// The node's `reg` entries as written, untranslated (an address a
+    /// device uses, like an MSI target on its bus).
+    pub fn reg_raw(&self, node: &Node, mut f: impl FnMut(u64, u64)) {
+        let Some((o, len)) = self.prop(node, b"reg") else { return };
+        let (ac, sc) = (node.addr_cells, node.size_cells);
+        let entry = 4 * (ac + sc) as usize;
+        if entry == 0 { return; }
+        let mut i = 0;
+        while i + entry <= len {
+            f(self.cells(o + i, ac), self.cells(o + i + 4 * ac as usize, sc));
+            i += entry;
+        }
+    }
+
+    /// A `ranges`-shaped property of `node` (`ranges`, `dma-ranges`), per
+    /// entry: the child bus's flags cell (PCI, three address cells; 0
+    /// otherwise), the child address, the parent address translated to the
+    /// CPU, the size.
+    pub fn ranges(&self, node: &Node, name: &[u8], mut f: impl FnMut(u32, u64, u64, u64)) {
+        let Some((o, len)) = self.prop(node, name) else { return };
+        let (child_ac, child_sc) = self.own_cells(node.offset);
+        let parent_ac = node.addr_cells;
+        let entry = 4 * (child_ac + parent_ac + child_sc) as usize;
+        if entry == 0 { return; }
+        let mut i = 0;
+        while i + entry <= len {
+            let (flags, child) = if child_ac == 3 {
+                (self.u32_at(o + i), self.cells(o + i + 4, 2))
+            } else {
+                (0, self.cells(o + i, child_ac))
+            };
+            let parent = self.cells(o + i + 4 * child_ac as usize, parent_ac);
+            let size = self.cells(o + i + 4 * (child_ac + parent_ac) as usize, child_sc);
+            if let Some(cpu) = self.translate(node, parent) { f(flags, child, cpu, size); }
+            i += entry;
+        }
+    }
+
+    /// The node whose `phandle` is `ph`.
+    pub fn find_phandle(&self, ph: u32) -> Option<Node> {
+        let mut found = None;
+        self.walk(|n| {
+            if self.prop_u32(n, b"phandle") == Some(ph) {
+                found = Some(*n);
+                return false;
+            }
+            true
+        });
+        found
+    }
+
+    /// The `i`th cell of a property.
+    pub fn prop_cell(&self, node: &Node, name: &[u8], i: usize) -> Option<u32> {
+        let (o, len) = self.prop(node, name)?;
+        if 4 * (i + 1) > len { return None; }
+        Some(self.u32_at(o + 4 * i))
+    }
+
+    /// The raw bytes of a property into `out` (`of_property_read_u8_array`);
+    /// None unless it holds exactly `out.len()` bytes or more.
+    pub fn prop_bytes(&self, node: &Node, name: &[u8], out: &mut [u8]) -> Option<()> {
+        let (o, len) = self.prop(node, name)?;
+        if len < out.len() { return None; }
+        for (i, b) in out.iter_mut().enumerate() { *b = self.byte_at(o + i); }
+        Some(())
+    }
+
+    /// The position of `s` in the string-list property `name`.
+    pub fn prop_str_index(&self, node: &Node, name: &[u8], s: &[u8]) -> Option<usize> {
+        let (o, len) = self.prop(node, name)?;
+        let (mut i, mut idx) = (0, 0);
+        while i < len {
+            let l = self.str_len(o + i);
+            if l == s.len() && s.iter().enumerate().all(|(k, &b)| self.byte_at(o + i + k) == b) {
+                return Some(idx);
+            }
+            i += l + 1;
+            idx += 1;
+        }
+        None
+    }
+
+    /// The direct children of `node`.
+    pub fn children(&self, node: &Node, mut f: impl FnMut(&Node) -> bool) {
+        self.walk(|n| {
+            if n.ancestors().last() == Some(&node.offset) { f(n) } else { true }
+        });
+    }
+
     /// The first `reg` entry.
     pub fn reg0(&self, node: &Node) -> Option<(u64, u64)> {
         let mut r = None;

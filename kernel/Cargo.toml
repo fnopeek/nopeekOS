@@ -21,6 +21,10 @@ net_core = { path = "../net" }
 
 bitflags = "2.13"     # Flag-basierte Enums
 
+# The Raspberry Pi 5's PCIe root complex, MIP and RP1, host-testable.
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+pi5_core = { path = "../pi5" }
+
 [dependencies.wasmi]
 version = "1.1"
 default-features = false

@@ -555,6 +555,7 @@ dependencies = [
  "net_core",
  "p256",
  "p384",
+ "pi5_core",
  "postcard",
  "rsa",
  "serde",
@@ -598,6 +599,10 @@ dependencies = [
  "primeorder",
  "sha2",
 ]
+
+[[package]]
+name = "pi5_core"
+version = "0.1.0"
 
 [[package]]
 name = "polyval"

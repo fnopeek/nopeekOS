@@ -55,6 +55,15 @@ pub fn counter_to_ns(cycles: u64) -> u64 {
     cycles.saturating_mul(1_000_000_000) / freq
 }
 
+/// Busy-wait for at least `us` microseconds.
+#[cfg(target_arch = "aarch64")]
+pub fn delay_us(us: u64) {
+    let target = counter() + (us * counter_hz()).div_ceil(1_000_000);
+    while counter() < target {
+        core::hint::spin_loop();
+    }
+}
+
 /// Busy-wait for approximately `ms` milliseconds.
 pub fn delay_ms(ms: u64) {
     let per_ms = counter_hz() / 1000;

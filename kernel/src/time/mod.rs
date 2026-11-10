@@ -8,5 +8,7 @@ pub mod wall;
 pub mod zone;
 
 pub use clock::{counter, counter_hz, counter_to_ns, delay_ms, init_clock, ticks, uptime_ns, uptime_secs, uptime_us};
+#[cfg(target_arch = "aarch64")]
+pub use clock::delay_us;
 #[cfg(target_arch = "x86_64")]
 pub use wall::*;

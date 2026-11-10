@@ -1,0 +1,3869 @@
+# NR_IRQS: 4352, nr_irqs: 4352, preallocated irqs: 16
+# DT model: / compatible raspberrypi,5-model-b
+{ brcm_rescal_reset_driver_init
+} brcm_rescal_reset_driver_init
+{ brcmstb_reset_driver_init
+} brcmstb_reset_driver_init
+{ brcm_pcie_driver_init
+} brcm_pcie_driver_init
+{ init_mip
+} init_mip
+{ init_rp1
+} init_rp1
+== platform devices
+# device_add 1000119500.reset-controller
+PROBE 1000119500.reset-controller driver brcm-rescal-reset
+{ brcm_rescal_reset_probe
+# map 1000119500.reset-controller [mem 0x1000119500-0x100011950f flags 0x200]
+MAP 0x1000119500 size 0x10
+} brcm_rescal_reset_probe
+PROBE-END 1000119500.reset-controller ret 0
+# device_add 1001504318.reset-controller
+PROBE 1001504318.reset-controller driver brcmstb-reset
+{ brcmstb_reset_probe
+# map 1001504318.reset-controller [mem 0x1001504318-0x1001504347 flags 0x200]
+MAP 0x1001504318 size 0x30
+} brcmstb_reset_probe
+PROBE-END 1001504318.reset-controller ret 0
+# device_add 1000130000.msi-controller
+PROBE 1000130000.msi-controller driver mip_msi
+{ mip_msi_probe
+{ mip_parse_dt
+} mip_parse_dt
+MAP 0x1000130000 size 0xc0
+{ mip_init_domains
+W32 mip0+0x40 <- 0x00000000
+W32 mip0+0x50 <- 0x00000000
+W32 mip0+0x60 <- 0xffffffff
+W32 mip0+0x70 <- 0xffffffff
+W32 mip0+0x20 <- 0xffffffff
+W32 mip0+0x30 <- 0xffffffff
+} mip_init_domains
+} mip_msi_probe
+PROBE-END 1000130000.msi-controller ret 0
+# device_add 1000120000.pcie
+PROBE 1000120000.pcie driver brcm-pcie
+{ brcm_pcie_probe
+# info 1000120000.pcie: host bridge /axi/pcie@1000120000 ranges:
+# info 1000120000.pcie:      MEM 0x1f00000000..0x1ffffffffb -> 000000000000
+# info 1000120000.pcie:      MEM 0x1c00000000..0x1effffffff -> 0x0400000000
+# info 1000120000.pcie:   IB MEM 0x1f00000000..0x1f003fffff -> 000000000000
+# info 1000120000.pcie:   IB MEM 000000000000..0x0fffffffff -> 0x1000000000
+# info 1000120000.pcie:   IB MEM 0x1000130000..0x1000130fff -> 0xfffffff000
+{ brcm_pcie_init_debugfs
+} brcm_pcie_init_debugfs
+# map 1000120000.pcie [mem 0x1000120000-0x100012930f flags 0x200]
+MAP 0x1000120000 size 0x9310
+{ brcm_rescal_reset_xlate
+} brcm_rescal_reset_xlate
+{ brcm_pcie_bridge_sw_init_set_generic
+{ brcmstb_reset_deassert
+W32 bcm_reset+0x1c <- 0x00001000  ; SW_INIT_CLEAR bank 1
+DELAY usleep_range 100 us
+} brcmstb_reset_deassert
+} brcm_pcie_bridge_sw_init_set_generic
+{ brcm_rescal_reset_set
+R32 rescal+0x0 = 0x00000000  ; RESCAL_START
+W32 rescal+0x0 <- 0x00000001  ; RESCAL_START
+R32 rescal+0x0 = 0x00000001  ; RESCAL_START
+R32 rescal+0x8 = 0x00000001  ; RESCAL_STATUS  [rescal STATUS done, guess 7]
+R32 rescal+0x0 = 0x00000001  ; RESCAL_START
+W32 rescal+0x0 <- 0x00000000  ; RESCAL_START
+} brcm_rescal_reset_set
+{ brcm_pcie_setup
+{ brcm_pcie_bridge_sw_init_set_generic
+{ brcmstb_reset_assert
+W32 bcm_reset+0x18 <- 0x00001000  ; SW_INIT_SET bank 1
+} brcmstb_reset_assert
+} brcm_pcie_bridge_sw_init_set_generic
+DELAY usleep_range 100 us
+{ brcm_pcie_bridge_sw_init_set_generic
+{ brcmstb_reset_deassert
+W32 bcm_reset+0x1c <- 0x00001000  ; SW_INIT_CLEAR bank 1
+DELAY usleep_range 100 us
+} brcmstb_reset_deassert
+} brcm_pcie_bridge_sw_init_set_generic
+R32 pcie2+0x4304 = 0x08000000
+W32 pcie2+0x4304 <- 0x00000000
+DELAY usleep_range 100 us
+R32 pcie2+0x4008 = 0x00000000  ; PCIE_MISC_MISC_CTRL
+W32 pcie2+0x4008 <- 0x00203480  ; PCIE_MISC_MISC_CTRL
+{ brcm_pcie_get_inbound_wins
+{ add_inbound_win
+} add_inbound_win
+{ add_inbound_win
+} add_inbound_win
+{ add_inbound_win
+} add_inbound_win
+} brcm_pcie_get_inbound_wins
+{ set_inbound_win_registers
+{ brcm_bar_reg_offset
+} brcm_bar_reg_offset
+{ brcm_pcie_encode_ibar_size
+} brcm_pcie_encode_ibar_size
+W32 pcie2+0x402c <- 0x00000007  ; PCIE_MISC_RC_BAR1_CONFIG_LO
+W32 pcie2+0x4030 <- 0x00000000
+{ brcm_ubus_reg_offset
+} brcm_ubus_reg_offset
+W32 pcie2+0x40ac <- 0x00000001  ; PCIE_MISC_UBUS_BAR1_CONFIG_REMAP
+W32 pcie2+0x40b0 <- 0x0000001f
+{ brcm_bar_reg_offset
+} brcm_bar_reg_offset
+{ brcm_pcie_encode_ibar_size
+} brcm_pcie_encode_ibar_size
+W32 pcie2+0x4034 <- 0x00000015
+W32 pcie2+0x4038 <- 0x00000010
+{ brcm_ubus_reg_offset
+} brcm_ubus_reg_offset
+W32 pcie2+0x40b4 <- 0x00000001
+W32 pcie2+0x40b8 <- 0x00000000
+{ brcm_bar_reg_offset
+} brcm_bar_reg_offset
+{ brcm_pcie_encode_ibar_size
+} brcm_pcie_encode_ibar_size
+W32 pcie2+0x403c <- 0xfffff01c
+W32 pcie2+0x4040 <- 0x000000ff
+{ brcm_ubus_reg_offset
+} brcm_ubus_reg_offset
+W32 pcie2+0x40bc <- 0x00130001
+W32 pcie2+0x40c0 <- 0x00000010
+} set_inbound_win_registers
+{ brcm_pcie_rc_mode
+R32 pcie2+0x4068 = 0x00000080  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_rc_mode
+R32 pcie2+0x4008 = 0x00203480  ; PCIE_MISC_MISC_CTRL
+W32 pcie2+0x4008 <- 0x00203480  ; PCIE_MISC_MISC_CTRL
+R32 pcie2+0x04dc = 0x00000c43  ; PCIE_RC_CFG_PRIV1_LINK_CAPABILITY
+W32 pcie2+0x04dc <- 0x00000843  ; PCIE_RC_CFG_PRIV1_LINK_CAPABILITY
+R32 pcie2+0x043c = 0x00000000  ; PCIE_RC_CFG_PRIV1_ID_VAL3
+W32 pcie2+0x043c <- 0x00060400  ; PCIE_RC_CFG_PRIV1_ID_VAL3
+{ brcm_pcie_set_outbound_win
+W32 pcie2+0x400c <- 0x00000000  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LO
+W32 pcie2+0x4010 <- 0x00000000  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_HI
+R32 pcie2+0x4070 = 0x00000000  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT
+W32 pcie2+0x4070 <- 0xfff00000  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_LIMIT
+R32 pcie2+0x4080 = 0x00000000  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI
+W32 pcie2+0x4080 <- 0x0000001f  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_BASE_HI
+R32 pcie2+0x4084 = 0x00000000  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI
+W32 pcie2+0x4084 <- 0x0000001f  ; PCIE_MISC_CPU_2_PCIE_MEM_WIN0_LIMIT_HI
+} brcm_pcie_set_outbound_win
+{ brcm_pcie_set_outbound_win
+W32 pcie2+0x4014 <- 0x00000000
+W32 pcie2+0x4018 <- 0x00000004
+R32 pcie2+0x4074 = 0x00000000
+W32 pcie2+0x4074 <- 0xfff00000
+R32 pcie2+0x4088 = 0x00000000
+W32 pcie2+0x4088 <- 0x0000001c
+R32 pcie2+0x408c = 0x00000000
+W32 pcie2+0x408c <- 0x0000001e
+} brcm_pcie_set_outbound_win
+R32 pcie2+0x0188 = 0x00000000  ; PCIE_RC_CFG_VENDOR_VENDOR_SPECIFIC_REG1
+W32 pcie2+0x0188 <- 0x00000000  ; PCIE_RC_CFG_VENDOR_VENDOR_SPECIFIC_REG1
+{ brcm_pcie_post_setup_bcm2712
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x0000001f  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x0000001f  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x80001600  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x00001600  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x00000016  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x00000016  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x800050b9  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x000050b9  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x00000017  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x00000017  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x8000bda1  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x0000bda1  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x00000018  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x00000018  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x80000094  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x00000094  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x00000019  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x00000019  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x800097b4  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x000097b4  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x0000001b  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x0000001b  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x80005030  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x00005030  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x0000001c  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x0000001c  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x80005030  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x00005030  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+{ brcm_pcie_mdio_write
+{ brcm_pcie_mdio_form_pkt
+} brcm_pcie_mdio_form_pkt
+W32 pcie2+0x1100 <- 0x0000001e  ; PCIE_RC_DL_MDIO_ADDR
+R32 pcie2+0x1100 = 0x0000001e  ; PCIE_RC_DL_MDIO_ADDR
+W32 pcie2+0x1104 <- 0x80000007  ; PCIE_RC_DL_MDIO_WR_DATA
+R32 pcie2+0x1104 = 0x00000007  ; PCIE_RC_DL_MDIO_WR_DATA  [MDIO write done, guess 6]
+} brcm_pcie_mdio_write
+DELAY usleep_range 100 us
+R32 pcie2+0x184c = 0x00000000  ; PCIE_RC_PL_PHY_CTL_15
+W32 pcie2+0x184c <- 0x00000012  ; PCIE_RC_PL_PHY_CTL_15
+R32 pcie2+0x40a4 = 0x00000000  ; PCIE_MISC_UBUS_CTRL
+W32 pcie2+0x40a4 <- 0x00082000  ; PCIE_MISC_UBUS_CTRL
+W32 pcie2+0x4170 <- 0xffffffff  ; PCIE_MISC_AXI_READ_ERROR_DATA
+W32 pcie2+0x40a8 <- 0x0b2d0000  ; PCIE_MISC_UBUS_TIMEOUT
+W32 pcie2+0x405c <- 0x0aba0000  ; PCIE_MISC_RC_CONFIG_RETRY_TIMEOUT
+R32 pcie2+0x416c = 0x00000000  ; PCIE_MISC_AXI_INTF_CTRL
+W32 pcie2+0x416c <- 0x00003800  ; PCIE_MISC_AXI_INTF_CTRL
+R32 pcie2+0x416c = 0x00002800  ; PCIE_MISC_AXI_INTF_CTRL
+W32 pcie2+0x416c <- 0x0000280f  ; PCIE_MISC_AXI_INTF_CTRL
+R32 pcie2+0x40a0 = 0x00000000  ; PCIE_MISC_CTRL_1
+W32 pcie2+0x40a0 <- 0x00000000  ; PCIE_MISC_CTRL_1
+R32 pcie2+0x40a0 = 0x00000000  ; PCIE_MISC_CTRL_1
+W32 pcie2+0x40a0 <- 0x00000020  ; PCIE_MISC_CTRL_1
+W32 pcie2+0x4168 <- 0xbbaa9888  ; PCIE_MISC_VDM_PRIORITY_TO_QOS_MAP_LO
+W32 pcie2+0x4164 <- 0xbbaa9888  ; PCIE_MISC_VDM_PRIORITY_TO_QOS_MAP_HI
+W32 pcie2+0x0a0c <- 0x00000000  ; PCIE_RC_TL_VDM_CTL1
+R32 pcie2+0x0a20 = 0x00000000  ; PCIE_RC_TL_VDM_CTL0
+W32 pcie2+0x0a20 <- 0x00070000  ; PCIE_RC_TL_VDM_CTL0
+} brcm_pcie_post_setup_bcm2712
+} brcm_pcie_setup
+R32 pcie2+0x406c = 0x00000304  ; PCIE_MISC_REVISION
+# device_add pci0002:00
+# device_add 0002:00
+{ brcm_pcie_add_bus
+} brcm_pcie_add_bus
+# info 1000120000.pcie: PCI host bridge to bus 0002:00
+# info 0002:00: root bus resource [bus 0x0-0xff flags 0x1000]
+# info 0002:00: root bus resource [mem 0x1f00000000-0x1ffffffffb flags 0x200] (bus address [0000000000-0xfffffffb])
+# info 0002:00: root bus resource [mem 0x1c00000000-0x1effffffff flags 0x2200] (bus address [0x400000000-0x6ffffffff])
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0000 = 0x271214e4  ; rc-cfg +0x000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x000e = 0x01  ; rc-cfg +0x00e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ae = 0x0042  ; rc-cfg +0x0ae
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ca = 0x0001  ; rc-cfg +0x0ca
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00c8 = 0x0000  ; rc-cfg +0x0c8
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x00c8 <- 0x0010  ; rc-cfg +0x0c8
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00b0 = 0x00008002  ; rc-cfg +0x0b0
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00b8 = 0x00000843  ; rc-cfg +0x0b8  [LNKCAP mirrors PRIV1_LINK_CAPABILITY, guess 2]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0008 = 0x06040000  ; rc-cfg +0x008  [class mirrors PRIV1_ID_VAL3, guess 2]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0000 = 0x271214e4  ; rc-cfg +0x000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00d8 = 0x0000000e  ; rc-cfg +0x0d8
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00b8 = 0x00000843  ; rc-cfg +0x0b8  [LNKCAP mirrors PRIV1_LINK_CAPABILITY, guess 2]
+# info 0002:00:00.0: [14e4:2712] type 01 class 0x060400 PCIe Root Port
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0004 = 0x0000  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x0004 <- 0x0400  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0004 = 0x0400  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x0004 <- 0x0000  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x003d = 0x00  ; rc-cfg +0x03d
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0004 = 0x0000  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0010 = 0x00000000  ; rc-cfg +0x010
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0010 <- 0xffffffff  ; rc-cfg +0x010
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0010 = 0x00000000  ; rc-cfg +0x010
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0010 <- 0x00000000  ; rc-cfg +0x010
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0014 = 0x00000000  ; rc-cfg +0x014
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0014 <- 0xffffffff  ; rc-cfg +0x014
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0014 = 0x00000000  ; rc-cfg +0x014
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0014 <- 0x00000000  ; rc-cfg +0x014
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0038 = 0x00000000  ; rc-cfg +0x038
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0038 <- 0xfffff800  ; rc-cfg +0x038
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0038 = 0x00000000  ; rc-cfg +0x038
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0038 <- 0x00000000  ; rc-cfg +0x038
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0010 = 0x00000000  ; rc-cfg +0x010
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0014 = 0x00000000  ; rc-cfg +0x014
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0038 = 0x00000000  ; rc-cfg +0x038
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0018 = 0x00000000  ; rc-cfg +0x018
+# info 0002:00:00.0: PCI bridge to [bus 0x0-0x0 flags 0x1000]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x001c = 0x0000  ; rc-cfg +0x01c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x001c <- 0xe0f0  ; rc-cfg +0x01c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x001c = 0x0000  ; rc-cfg +0x01c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x001c <- 0x0000  ; rc-cfg +0x01c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0020 = 0x0000  ; rc-cfg +0x020
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0022 = 0x0000  ; rc-cfg +0x022
+# info 0002:00:00.0:   bridge window [mem 0x1f00000000-0x1f000fffff flags 0x200]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0024 = 0x00010001  ; rc-cfg +0x024
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0028 = 0x00000000  ; rc-cfg +0x028
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0028 <- 0xffffffff  ; rc-cfg +0x028
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0028 = 0xffffffff  ; rc-cfg +0x028
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0028 <- 0x00000000  ; rc-cfg +0x028
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0024 = 0x0001  ; rc-cfg +0x024
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0026 = 0x0001  ; rc-cfg +0x026
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0028 = 0x00000000  ; rc-cfg +0x028
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x002c = 0x00000000  ; rc-cfg +0x02c
+# info 0002:00:00.0:   bridge window [mem 0x1f00000000-0x1f000fffff flags 0x102201]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00b0 = 0x00008002  ; rc-cfg +0x0b0
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00b4 = 0x2810  ; rc-cfg +0x0b4
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00d0 = 0x00000000  ; rc-cfg +0x0d0
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00d0 = 0x00000000  ; rc-cfg +0x0d0
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x003e = 0x0000  ; rc-cfg +0x03e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x003e <- 0x0002  ; rc-cfg +0x03e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x004a = 0x4803  ; rc-cfg +0x04a
+# info 0002:00:00.0: PME# supported from D0 D3hot
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x004c = 0x0008  ; rc-cfg +0x04c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x004c <- 0x8008  ; rc-cfg +0x04c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x004c = 0x0008  ; rc-cfg +0x04c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x004c = 0x0008  ; rc-cfg +0x04c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x004c = 0x0008  ; rc-cfg +0x04c
+# device_add 0002:00:00.0
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0018 = 0x00000000  ; rc-cfg +0x018
+# info 0002:00:00.0: bridge configuration invalid ([bus 00-00]), reconfiguring
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x003e = 0x0002  ; rc-cfg +0x03e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x003e <- 0x0002  ; rc-cfg +0x03e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0018 <- 0x00000000  ; rc-cfg +0x018
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x001e <- 0xffff  ; rc-cfg +0x01e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x003e <- 0x0002  ; rc-cfg +0x03e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0018 = 0x00000000  ; rc-cfg +0x018
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x003e = 0x0002  ; rc-cfg +0x03e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x003e <- 0x0002  ; rc-cfg +0x03e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x0006 <- 0xffff  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00b8 = 0x00000843  ; rc-cfg +0x0b8  [LNKCAP mirrors PRIV1_LINK_CAPABILITY, guess 2]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00be = 0x1000  ; rc-cfg +0x0be  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00de = 0x0000  ; rc-cfg +0x0de
+# device_add 0002:01
+{ brcm_pcie_add_bus
+{ brcm_pcie_start_link
+{ brcm_pcie_set_gen
+R16 pcie2+0x00dc = 0x0003  ; rc-cfg +0x0dc
+R32 pcie2+0x04dc = 0x00000843  ; PCIE_RC_CFG_PRIV1_LINK_CAPABILITY
+W32 pcie2+0x04dc <- 0x00000842  ; PCIE_RC_CFG_PRIV1_LINK_CAPABILITY
+W16 pcie2+0x00dc <- 0x0002  ; rc-cfg +0x0dc
+} brcm_pcie_set_gen
+{ brcm_pcie_stats_trigger
+R32 pcie2+0x1940 = 0x00000000  ; PCIE_RC_PL_STATS_CTRL
+W32 pcie2+0x1940 <- 0x00000000  ; PCIE_RC_PL_STATS_CTRL
+W32 pcie2+0x1940 <- 0x00000001  ; PCIE_RC_PL_STATS_CTRL
+} brcm_pcie_stats_trigger
+R32 pcie2+0x4304 = 0x00000000
+W32 pcie2+0x4304 <- 0x00000000
+{ brcm_pcie_perst_set_7278
+R32 pcie2+0x4064 = 0x00000000  ; PCIE_MISC_PCIE_CTRL
+W32 pcie2+0x4064 <- 0x00000004  ; PCIE_MISC_PCIE_CTRL
+} brcm_pcie_perst_set_7278
+DELAY msleep 100000 us
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+{ brcm_config_clkreq
+R32 pcie2+0x4304 = 0x00000000
+{ brcm_extend_rbus_timeout
+} brcm_extend_rbus_timeout
+W32 pcie2+0x4304 <- 0x00200000
+# info 1000120000.pcie: clkreq-mode set to default
+} brcm_config_clkreq
+R16 pcie2+0x00be = 0x3042  ; rc-cfg +0x0be  [LNKSTA from link state, guess 1]
+# info 1000120000.pcie: link up, 5.0 GT/s PCIe x4 (!SSC)
+{ brcm_pcie_stats_capture
+R32 pcie2+0x1944 = 0x00000000  ; PCIE_RC_PL_STATS_TXTLP_LO
+R32 pcie2+0x1948 = 0x00000000  ; PCIE_RC_PL_STATS_TXTLP_HI
+R32 pcie2+0x195c = 0x00000000  ; PCIE_RC_PL_STATS_RXTLP_LO
+R32 pcie2+0x1960 = 0x00000000  ; PCIE_RC_PL_STATS_RXTLP_HI
+R32 pcie2+0x194c = 0x00000000  ; PCIE_RC_PL_STATS_TXDLLP_LO
+R32 pcie2+0x1950 = 0x00000000  ; PCIE_RC_PL_STATS_TXDLLP_HI
+R32 pcie2+0x1964 = 0x00000000  ; PCIE_RC_PL_STATS_RXDLLP_LO
+R32 pcie2+0x1968 = 0x00000000  ; PCIE_RC_PL_STATS_RXDLLP_HI
+R32 pcie2+0x1974 = 0x00000000  ; PCIE_RC_PL_STATS_RXPL_ERR
+R32 pcie2+0x1978 = 0x00000000  ; PCIE_RC_PL_STATS_RXDL_ERR
+R32 pcie2+0x197c = 0x00000000  ; PCIE_RC_PL_STATS_RXTL_ERR
+R32 pcie2+0x19b0 = 0x00000000  ; PCIE_RC_PL_LTSSM_STATS_3
+R32 pcie2+0x19b4 = 0x00000000  ; PCIE_RC_PL_LTSSM_STATS_CNT
+} brcm_pcie_stats_capture
+R16 pcie2+0x00ca = 0x0001  ; rc-cfg +0x0ca
+R16 pcie2+0x00c8 = 0x0010  ; rc-cfg +0x0c8
+W16 pcie2+0x00c8 <- 0x0010  ; rc-cfg +0x0c8
+} brcm_pcie_start_link
+} brcm_pcie_add_bus
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0018 <- 0x00ff0100  ; rc-cfg +0x018
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8000 = 0x00011de4  ; cfg 01:00.0 +0x000
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x800e = 0x00  ; cfg 01:00.0 +0x00e
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8072 = 0x0002  ; cfg 01:00.0 +0x072
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8074 = 0x00008001  ; cfg 01:00.0 +0x074
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x807c = 0x00000c42  ; cfg 01:00.0 +0x07c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8008 = 0x02000002  ; cfg 01:00.0 +0x008
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8000 = 0x00011de4  ; cfg 01:00.0 +0x000
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x809c = 0x00000006  ; cfg 01:00.0 +0x09c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x807c = 0x00000c42  ; cfg 01:00.0 +0x07c
+# info 0002:01:00.0: [1de4:0001] type 00 class 0x020000 PCIe Endpoint
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8004 = 0x0000  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8004 <- 0x0400  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8004 = 0x0400  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8004 <- 0x0000  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x803d = 0x01  ; cfg 01:00.0 +0x03d
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x803c = 0x00  ; cfg 01:00.0 +0x03c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8004 = 0x0000  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8010 = 0x00000000  ; cfg 01:00.0 +0x010
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8010 <- 0xffffffff  ; cfg 01:00.0 +0x010
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8010 = 0xffffc000  ; cfg 01:00.0 +0x010
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8010 <- 0x00000000  ; cfg 01:00.0 +0x010
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8014 = 0x00000000  ; cfg 01:00.0 +0x014
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8014 <- 0xffffffff  ; cfg 01:00.0 +0x014
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8014 = 0xffc00000  ; cfg 01:00.0 +0x014
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8014 <- 0x00000000  ; cfg 01:00.0 +0x014
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8018 = 0x00000000  ; cfg 01:00.0 +0x018
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8018 <- 0xffffffff  ; cfg 01:00.0 +0x018
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8018 = 0xffff0000  ; cfg 01:00.0 +0x018
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8018 <- 0x00000000  ; cfg 01:00.0 +0x018
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x801c = 0x00000000  ; cfg 01:00.0 +0x01c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x801c <- 0xffffffff  ; cfg 01:00.0 +0x01c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x801c = 0x00000000  ; cfg 01:00.0 +0x01c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x801c <- 0x00000000  ; cfg 01:00.0 +0x01c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8020 = 0x00000000  ; cfg 01:00.0 +0x020
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8020 <- 0xffffffff  ; cfg 01:00.0 +0x020
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8020 = 0x00000000  ; cfg 01:00.0 +0x020
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8020 <- 0x00000000  ; cfg 01:00.0 +0x020
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8024 = 0x00000000  ; cfg 01:00.0 +0x024
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8024 <- 0xffffffff  ; cfg 01:00.0 +0x024
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8024 = 0x00000000  ; cfg 01:00.0 +0x024
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8024 <- 0x00000000  ; cfg 01:00.0 +0x024
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8030 = 0x00000000  ; cfg 01:00.0 +0x030
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8030 <- 0xfffff800  ; cfg 01:00.0 +0x030
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8030 = 0x00000000  ; cfg 01:00.0 +0x030
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8030 <- 0x00000000  ; cfg 01:00.0 +0x030
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8010 = 0x00000000  ; cfg 01:00.0 +0x010
+# info 0002:01:00.0: BAR 0 [mem 0x1f00000000-0x1f00003fff flags 0x40200]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8014 = 0x00000000  ; cfg 01:00.0 +0x014
+# info 0002:01:00.0: BAR 1 [mem 0x1f00000000-0x1f003fffff flags 0x40200]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8018 = 0x00000000  ; cfg 01:00.0 +0x018
+# info 0002:01:00.0: BAR 2 [mem 0x1f00000000-0x1f0000ffff flags 0x40200]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x801c = 0x00000000  ; cfg 01:00.0 +0x01c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8020 = 0x00000000  ; cfg 01:00.0 +0x020
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8024 = 0x00000000  ; cfg 01:00.0 +0x024
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8030 = 0x00000000  ; cfg 01:00.0 +0x030
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x802c = 0x1de4  ; cfg 01:00.0 +0x02c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x802e = 0x0001  ; cfg 01:00.0 +0x02e
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8078 = 0x2810  ; cfg 01:00.0 +0x078
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00b4 = 0x2810  ; rc-cfg +0x0b4
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8074 = 0x00008001  ; cfg 01:00.0 +0x074
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8078 = 0x2810  ; cfg 01:00.0 +0x078
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8094 = 0x00000000  ; cfg 01:00.0 +0x094
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8094 = 0x00000000  ; cfg 01:00.0 +0x094
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0000  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0000  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8080 <- 0x0000  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b0 = 0x0011  ; cfg 01:00.0 +0x0b0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8052 = 0x0080  ; cfg 01:00.0 +0x052
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b0 = 0x0011  ; cfg 01:00.0 +0x0b0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b2 = 0x003f  ; cfg 01:00.0 +0x0b2
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b0 = 0x0011  ; cfg 01:00.0 +0x0b0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8042 = 0x0003  ; cfg 01:00.0 +0x042
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8044 = 0x0008  ; cfg 01:00.0 +0x044
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8044 = 0x0008  ; cfg 01:00.0 +0x044
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b0 = 0x0011  ; cfg 01:00.0 +0x0b0
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00d0 = 0x00000000  ; rc-cfg +0x0d0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x807c = 0x00000c42  ; cfg 01:00.0 +0x07c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8082 = 0x1042  ; cfg 01:00.0 +0x082
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00be = 0x3042  ; rc-cfg +0x0be  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b0 = 0x0011  ; cfg 01:00.0 +0x0b0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8044 = 0x0008  ; cfg 01:00.0 +0x044
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+# device_add 0002:01:00.0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8074 = 0x00008001  ; cfg 01:00.0 +0x074
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8082 = 0x1042  ; cfg 01:00.0 +0x082
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00be = 0x3042  ; rc-cfg +0x0be  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0000  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0000  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0000  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8080 <- 0x0040  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0000  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x00bc <- 0x0040  ; rc-cfg +0x0bc
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00be = 0x3042  ; rc-cfg +0x0be  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0040  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x00bc <- 0x0060  ; rc-cfg +0x0bc
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00be = 0x3042  ; rc-cfg +0x0be  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x00be <- 0x4000  ; rc-cfg +0x0be
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00be = 0x3042  ; rc-cfg +0x0be  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00de = 0x0000  ; rc-cfg +0x0de
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0060  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0040  ; cfg 01:00.0 +0x080
+# info 0002:01:00.0: ASPM: default states L1
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x00b8 = 0x00000842  ; rc-cfg +0x0b8  [LNKCAP mirrors PRIV1_LINK_CAPABILITY, guess 2]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x807c = 0x00000c42  ; cfg 01:00.0 +0x07c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x807c = 0x00000c42  ; cfg 01:00.0 +0x07c
+# info 0002:01: busn_res: [bus 0x1-0xff flags 0x1000] end is updated to 01
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W8 pcie2+0x001a <- 0x01  ; rc-cfg +0x01a
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x001e <- 0xffff  ; rc-cfg +0x01e
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x003e <- 0x0002  ; rc-cfg +0x03e
+# info 0002:00:00.0: bridge window [mem 0x1f00000000-0x1f004fffff flags 0x200]: assigned
+# info 0002:01:00.0: BAR 1 [mem 0x1f00000000-0x1f003fffff flags 0x40200]: assigned
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8014 <- 0x00000000  ; cfg 01:00.0 +0x014
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8014 = 0x00000000  ; cfg 01:00.0 +0x014
+# info 0002:01:00.0: BAR 2 [mem 0x1f00400000-0x1f0040ffff flags 0x40200]: assigned
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8018 <- 0x00400000  ; cfg 01:00.0 +0x018
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8018 = 0x00400000  ; cfg 01:00.0 +0x018
+# info 0002:01:00.0: BAR 0 [mem 0x1f00410000-0x1f00413fff flags 0x40200]: assigned
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W32 pcie2+0x8010 <- 0x00410000  ; cfg 01:00.0 +0x010
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8010 = 0x00410000  ; cfg 01:00.0 +0x010
+# info 0002:00:00.0: PCI bridge to [bus 0x1-0x1 flags 0x1000]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0030 <- 0x0000ffff  ; rc-cfg +0x030
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x001c <- 0x00f0  ; rc-cfg +0x01c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0030 <- 0x00000000  ; rc-cfg +0x030
+# info 0002:00:00.0:   bridge window [mem 0x1f00000000-0x1f004fffff flags 0x200]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0020 <- 0x00400000  ; rc-cfg +0x020
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x002c <- 0x00000000  ; rc-cfg +0x02c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0024 <- 0x0000fff0  ; rc-cfg +0x024
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x0028 <- 0x00000000  ; rc-cfg +0x028
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W32 pcie2+0x002c <- 0x00000000  ; rc-cfg +0x02c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x003e <- 0x0002  ; rc-cfg +0x03e
+# info 0002:00: resource 4 [mem 0x1f00000000-0x1ffffffffb flags 0x200]
+# info 0002:00: resource 5 [mem 0x1c00000000-0x1effffffff flags 0x2200]
+# info 0002:01: resource 1 [mem 0x1f00000000-0x1f004fffff flags 0x200]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x003d = 0x00  ; rc-cfg +0x03d
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0000 = 0x271214e4  ; rc-cfg +0x000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0004 = 0x00100000  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0008 = 0x06040000  ; rc-cfg +0x008  [class mirrors PRIV1_ID_VAL3, guess 2]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x000c = 0x00010000  ; rc-cfg +0x00c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0010 = 0x00000000  ; rc-cfg +0x010
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0014 = 0x00000000  ; rc-cfg +0x014
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0018 = 0x00010100  ; rc-cfg +0x018
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x001c = 0x00000000  ; rc-cfg +0x01c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0020 = 0x00400000  ; rc-cfg +0x020
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0024 = 0x0001fff1  ; rc-cfg +0x024
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0028 = 0x00000000  ; rc-cfg +0x028
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x002c = 0x00000000  ; rc-cfg +0x02c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0030 = 0x00000000  ; rc-cfg +0x030
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0034 = 0x00000048  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0038 = 0x00000000  ; rc-cfg +0x038
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x003c = 0x00020000  ; rc-cfg +0x03c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00b4 = 0x2810  ; rc-cfg +0x0b4
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0060  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00c8 = 0x0010  ; rc-cfg +0x0c8
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00d4 = 0x0000  ; rc-cfg +0x0d4
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00dc = 0x0002  ; rc-cfg +0x0dc
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0006 = 0x0010  ; rc-cfg +0x006
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x0034 = 0x48  ; rc-cfg +0x034
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0048 = 0xac01  ; rc-cfg +0x048
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00ac = 0x0010  ; rc-cfg +0x0ac
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R32 pcie2+0x0100 = 0x00000000
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8000 = 0x00011de4  ; cfg 01:00.0 +0x000
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8004 = 0x00100000  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8008 = 0x02000002  ; cfg 01:00.0 +0x008
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x800c = 0x00000000  ; cfg 01:00.0 +0x00c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8010 = 0x00410000  ; cfg 01:00.0 +0x010
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8014 = 0x00000000  ; cfg 01:00.0 +0x014
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8018 = 0x00400000  ; cfg 01:00.0 +0x018
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x801c = 0x00000000  ; cfg 01:00.0 +0x01c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8020 = 0x00000000  ; cfg 01:00.0 +0x020
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8024 = 0x00000000  ; cfg 01:00.0 +0x024
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8028 = 0x00000000  ; cfg 01:00.0 +0x028
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x802c = 0x00011de4  ; cfg 01:00.0 +0x02c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8030 = 0x00000000  ; cfg 01:00.0 +0x030
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8034 = 0x00000040  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8038 = 0x00000000  ; cfg 01:00.0 +0x038
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x803c = 0x00000100  ; cfg 01:00.0 +0x03c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8078 = 0x2810  ; cfg 01:00.0 +0x078
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0040  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8098 = 0x0000  ; cfg 01:00.0 +0x098
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80a0 = 0x0000  ; cfg 01:00.0 +0x0a0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8006 = 0x0010  ; cfg 01:00.0 +0x006
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x8034 = 0x40  ; cfg 01:00.0 +0x034
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8040 = 0x5001  ; cfg 01:00.0 +0x040
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8050 = 0x7005  ; cfg 01:00.0 +0x050
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8070 = 0xb010  ; cfg 01:00.0 +0x070
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b0 = 0x0011  ; cfg 01:00.0 +0x0b0
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x8100 = 0x00000000  ; cfg 01:00.0 +0x100
+PROBE 0002:01:00.0 driver rp1
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x803d = 0x01  ; cfg 01:00.0 +0x03d
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x803d = 0x01  ; cfg 01:00.0 +0x03d
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W8 pcie2+0x803c <- 0x10  ; cfg 01:00.0 +0x03c
+{ rp1_probe
+{ dump_bar
+# info 0002:01:00.0: bar0 len 0x4000, start 0x1f00410000, end 0x1f00413fff, flags, 0x40200
+} dump_bar
+{ dump_bar
+# info 0002:01:00.0: bar1 len 0x400000, start 0x1f00000000, end 0x1f003fffff, flags, 0x40200
+} dump_bar
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8044 = 0x0008  ; cfg 01:00.0 +0x044
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x004c = 0x0008  ; rc-cfg +0x04c
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0004 = 0x0000  ; rc-cfg +0x004
+# info 0002:00:00.0: enabling device (0000 -> 0002)
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x0004 <- 0x0002  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R8 pcie2+0x003d = 0x00  ; rc-cfg +0x03d
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x0004 = 0x0002  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x0004 <- 0x0006  ; rc-cfg +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0040  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8080 <- 0x0040  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0060  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x00bc <- 0x0060  ; rc-cfg +0x0bc
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0060  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+W16 pcie2+0x00bc <- 0x0062  ; rc-cfg +0x0bc
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0040  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8080 <- 0x0042  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8080 = 0x0042  ; cfg 01:00.0 +0x080
+{ brcm_pcie_map_bus
+} brcm_pcie_map_bus
+R16 pcie2+0x00bc = 0x0062  ; rc-cfg +0x0bc  [LNKSTA from link state, guess 1]
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8004 = 0x0000  ; cfg 01:00.0 +0x004
+# info 0002:01:00.0: enabling device (0000 -> 0002)
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8004 <- 0x0002  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R8 pcie2+0x803d = 0x01  ; cfg 01:00.0 +0x03d
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8004 = 0x0002  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8004 = 0x0002  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8004 <- 0x0006  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b2 = 0x003f  ; cfg 01:00.0 +0x0b2
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b2 = 0x003f  ; cfg 01:00.0 +0x0b2
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x80b2 <- 0xc03f  ; cfg 01:00.0 +0x0b2
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b2 = 0xc03f  ; cfg 01:00.0 +0x0b2
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R32 pcie2+0x80b4 = 0x00000000  ; cfg 01:00.0 +0x0b4
+MAP 0x1f00410000 size 0x400
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b2 = 0xc03f  ; cfg 01:00.0 +0x0b2
+R32 rp1.bar0+0x00000c = 0x00000000
+R32 rp1.bar0+0x00001c = 0x00000000
+R32 rp1.bar0+0x00002c = 0x00000000
+R32 rp1.bar0+0x00003c = 0x00000000
+R32 rp1.bar0+0x00004c = 0x00000000
+R32 rp1.bar0+0x00005c = 0x00000000
+R32 rp1.bar0+0x00006c = 0x00000000
+R32 rp1.bar0+0x00007c = 0x00000000
+R32 rp1.bar0+0x00008c = 0x00000000
+R32 rp1.bar0+0x00009c = 0x00000000
+R32 rp1.bar0+0x0000ac = 0x00000000
+R32 rp1.bar0+0x0000bc = 0x00000000
+R32 rp1.bar0+0x0000cc = 0x00000000
+R32 rp1.bar0+0x0000dc = 0x00000000
+R32 rp1.bar0+0x0000ec = 0x00000000
+R32 rp1.bar0+0x0000fc = 0x00000000
+R32 rp1.bar0+0x00010c = 0x00000000
+R32 rp1.bar0+0x00011c = 0x00000000
+R32 rp1.bar0+0x00012c = 0x00000000
+R32 rp1.bar0+0x00013c = 0x00000000
+R32 rp1.bar0+0x00014c = 0x00000000
+R32 rp1.bar0+0x00015c = 0x00000000
+R32 rp1.bar0+0x00016c = 0x00000000
+R32 rp1.bar0+0x00017c = 0x00000000
+R32 rp1.bar0+0x00018c = 0x00000000
+R32 rp1.bar0+0x00019c = 0x00000000
+R32 rp1.bar0+0x0001ac = 0x00000000
+R32 rp1.bar0+0x0001bc = 0x00000000
+R32 rp1.bar0+0x0001cc = 0x00000000
+R32 rp1.bar0+0x0001dc = 0x00000000
+R32 rp1.bar0+0x0001ec = 0x00000000
+R32 rp1.bar0+0x0001fc = 0x00000000
+R32 rp1.bar0+0x00020c = 0x00000000
+R32 rp1.bar0+0x00021c = 0x00000000
+R32 rp1.bar0+0x00022c = 0x00000000
+R32 rp1.bar0+0x00023c = 0x00000000
+R32 rp1.bar0+0x00024c = 0x00000000
+R32 rp1.bar0+0x00025c = 0x00000000
+R32 rp1.bar0+0x00026c = 0x00000000
+R32 rp1.bar0+0x00027c = 0x00000000
+R32 rp1.bar0+0x00028c = 0x00000000
+R32 rp1.bar0+0x00029c = 0x00000000
+R32 rp1.bar0+0x0002ac = 0x00000000
+R32 rp1.bar0+0x0002bc = 0x00000000
+R32 rp1.bar0+0x0002cc = 0x00000000
+R32 rp1.bar0+0x0002dc = 0x00000000
+R32 rp1.bar0+0x0002ec = 0x00000000
+R32 rp1.bar0+0x0002fc = 0x00000000
+R32 rp1.bar0+0x00030c = 0x00000000
+R32 rp1.bar0+0x00031c = 0x00000000
+R32 rp1.bar0+0x00032c = 0x00000000
+R32 rp1.bar0+0x00033c = 0x00000000
+R32 rp1.bar0+0x00034c = 0x00000000
+R32 rp1.bar0+0x00035c = 0x00000000
+R32 rp1.bar0+0x00036c = 0x00000000
+R32 rp1.bar0+0x00037c = 0x00000000
+R32 rp1.bar0+0x00038c = 0x00000000
+R32 rp1.bar0+0x00039c = 0x00000000
+R32 rp1.bar0+0x0003ac = 0x00000000
+R32 rp1.bar0+0x0003bc = 0x00000000
+R32 rp1.bar0+0x0003cc = 0x00000000
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00000c <- 0x00000001
+W32 rp1.bar0+0x000000 <- 0xfffff000
+W32 rp1.bar0+0x000004 <- 0x000000ff
+W32 rp1.bar0+0x000008 <- 0x00000000
+W32 rp1.bar0+0x00000c <- 0x00000000
+R32 rp1.bar0+0x000008 = 0x00000000
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00001c <- 0x00000001
+W32 rp1.bar0+0x000010 <- 0xfffff000
+W32 rp1.bar0+0x000014 <- 0x000000ff
+W32 rp1.bar0+0x000018 <- 0x00000001
+W32 rp1.bar0+0x00001c <- 0x00000000
+R32 rp1.bar0+0x000018 = 0x00000001
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00002c <- 0x00000001
+W32 rp1.bar0+0x000020 <- 0xfffff000
+W32 rp1.bar0+0x000024 <- 0x000000ff
+W32 rp1.bar0+0x000028 <- 0x00000002
+W32 rp1.bar0+0x00002c <- 0x00000000
+R32 rp1.bar0+0x000028 = 0x00000002
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00003c <- 0x00000001
+W32 rp1.bar0+0x000030 <- 0xfffff000
+W32 rp1.bar0+0x000034 <- 0x000000ff
+W32 rp1.bar0+0x000038 <- 0x00000003
+W32 rp1.bar0+0x00003c <- 0x00000000
+R32 rp1.bar0+0x000038 = 0x00000003
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00004c <- 0x00000001
+W32 rp1.bar0+0x000040 <- 0xfffff000
+W32 rp1.bar0+0x000044 <- 0x000000ff
+W32 rp1.bar0+0x000048 <- 0x00000004
+W32 rp1.bar0+0x00004c <- 0x00000000
+R32 rp1.bar0+0x000048 = 0x00000004
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00005c <- 0x00000001
+W32 rp1.bar0+0x000050 <- 0xfffff000
+W32 rp1.bar0+0x000054 <- 0x000000ff
+W32 rp1.bar0+0x000058 <- 0x00000005
+W32 rp1.bar0+0x00005c <- 0x00000000
+R32 rp1.bar0+0x000058 = 0x00000005
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00006c <- 0x00000001
+W32 rp1.bar0+0x000060 <- 0xfffff000
+W32 rp1.bar0+0x000064 <- 0x000000ff
+W32 rp1.bar0+0x000068 <- 0x00000006
+W32 rp1.bar0+0x00006c <- 0x00000000
+R32 rp1.bar0+0x000068 = 0x00000006
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00007c <- 0x00000001
+W32 rp1.bar0+0x000070 <- 0xfffff000
+W32 rp1.bar0+0x000074 <- 0x000000ff
+W32 rp1.bar0+0x000078 <- 0x00000007
+W32 rp1.bar0+0x00007c <- 0x00000000
+R32 rp1.bar0+0x000078 = 0x00000007
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00008c <- 0x00000001
+W32 rp1.bar0+0x000080 <- 0xfffff000
+W32 rp1.bar0+0x000084 <- 0x000000ff
+W32 rp1.bar0+0x000088 <- 0x00000008
+W32 rp1.bar0+0x00008c <- 0x00000000
+R32 rp1.bar0+0x000088 = 0x00000008
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00009c <- 0x00000001
+W32 rp1.bar0+0x000090 <- 0xfffff000
+W32 rp1.bar0+0x000094 <- 0x000000ff
+W32 rp1.bar0+0x000098 <- 0x00000009
+W32 rp1.bar0+0x00009c <- 0x00000000
+R32 rp1.bar0+0x000098 = 0x00000009
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000ac <- 0x00000001
+W32 rp1.bar0+0x0000a0 <- 0xfffff000
+W32 rp1.bar0+0x0000a4 <- 0x000000ff
+W32 rp1.bar0+0x0000a8 <- 0x0000000a
+W32 rp1.bar0+0x0000ac <- 0x00000000
+R32 rp1.bar0+0x0000a8 = 0x0000000a
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000bc <- 0x00000001
+W32 rp1.bar0+0x0000b0 <- 0xfffff000
+W32 rp1.bar0+0x0000b4 <- 0x000000ff
+W32 rp1.bar0+0x0000b8 <- 0x0000000b
+W32 rp1.bar0+0x0000bc <- 0x00000000
+R32 rp1.bar0+0x0000b8 = 0x0000000b
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000cc <- 0x00000001
+W32 rp1.bar0+0x0000c0 <- 0xfffff000
+W32 rp1.bar0+0x0000c4 <- 0x000000ff
+W32 rp1.bar0+0x0000c8 <- 0x0000000c
+W32 rp1.bar0+0x0000cc <- 0x00000000
+R32 rp1.bar0+0x0000c8 = 0x0000000c
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000dc <- 0x00000001
+W32 rp1.bar0+0x0000d0 <- 0xfffff000
+W32 rp1.bar0+0x0000d4 <- 0x000000ff
+W32 rp1.bar0+0x0000d8 <- 0x0000000d
+W32 rp1.bar0+0x0000dc <- 0x00000000
+R32 rp1.bar0+0x0000d8 = 0x0000000d
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000ec <- 0x00000001
+W32 rp1.bar0+0x0000e0 <- 0xfffff000
+W32 rp1.bar0+0x0000e4 <- 0x000000ff
+W32 rp1.bar0+0x0000e8 <- 0x0000000e
+W32 rp1.bar0+0x0000ec <- 0x00000000
+R32 rp1.bar0+0x0000e8 = 0x0000000e
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000fc <- 0x00000001
+W32 rp1.bar0+0x0000f0 <- 0xfffff000
+W32 rp1.bar0+0x0000f4 <- 0x000000ff
+W32 rp1.bar0+0x0000f8 <- 0x0000000f
+W32 rp1.bar0+0x0000fc <- 0x00000000
+R32 rp1.bar0+0x0000f8 = 0x0000000f
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00010c <- 0x00000001
+W32 rp1.bar0+0x000100 <- 0xfffff000
+W32 rp1.bar0+0x000104 <- 0x000000ff
+W32 rp1.bar0+0x000108 <- 0x00000010
+W32 rp1.bar0+0x00010c <- 0x00000000
+R32 rp1.bar0+0x000108 = 0x00000010
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00011c <- 0x00000001
+W32 rp1.bar0+0x000110 <- 0xfffff000
+W32 rp1.bar0+0x000114 <- 0x000000ff
+W32 rp1.bar0+0x000118 <- 0x00000011
+W32 rp1.bar0+0x00011c <- 0x00000000
+R32 rp1.bar0+0x000118 = 0x00000011
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00012c <- 0x00000001
+W32 rp1.bar0+0x000120 <- 0xfffff000
+W32 rp1.bar0+0x000124 <- 0x000000ff
+W32 rp1.bar0+0x000128 <- 0x00000012
+W32 rp1.bar0+0x00012c <- 0x00000000
+R32 rp1.bar0+0x000128 = 0x00000012
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00013c <- 0x00000001
+W32 rp1.bar0+0x000130 <- 0xfffff000
+W32 rp1.bar0+0x000134 <- 0x000000ff
+W32 rp1.bar0+0x000138 <- 0x00000013
+W32 rp1.bar0+0x00013c <- 0x00000000
+R32 rp1.bar0+0x000138 = 0x00000013
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00014c <- 0x00000001
+W32 rp1.bar0+0x000140 <- 0xfffff000
+W32 rp1.bar0+0x000144 <- 0x000000ff
+W32 rp1.bar0+0x000148 <- 0x00000014
+W32 rp1.bar0+0x00014c <- 0x00000000
+R32 rp1.bar0+0x000148 = 0x00000014
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00015c <- 0x00000001
+W32 rp1.bar0+0x000150 <- 0xfffff000
+W32 rp1.bar0+0x000154 <- 0x000000ff
+W32 rp1.bar0+0x000158 <- 0x00000015
+W32 rp1.bar0+0x00015c <- 0x00000000
+R32 rp1.bar0+0x000158 = 0x00000015
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00016c <- 0x00000001
+W32 rp1.bar0+0x000160 <- 0xfffff000
+W32 rp1.bar0+0x000164 <- 0x000000ff
+W32 rp1.bar0+0x000168 <- 0x00000016
+W32 rp1.bar0+0x00016c <- 0x00000000
+R32 rp1.bar0+0x000168 = 0x00000016
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00017c <- 0x00000001
+W32 rp1.bar0+0x000170 <- 0xfffff000
+W32 rp1.bar0+0x000174 <- 0x000000ff
+W32 rp1.bar0+0x000178 <- 0x00000017
+W32 rp1.bar0+0x00017c <- 0x00000000
+R32 rp1.bar0+0x000178 = 0x00000017
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00018c <- 0x00000001
+W32 rp1.bar0+0x000180 <- 0xfffff000
+W32 rp1.bar0+0x000184 <- 0x000000ff
+W32 rp1.bar0+0x000188 <- 0x00000018
+W32 rp1.bar0+0x00018c <- 0x00000000
+R32 rp1.bar0+0x000188 = 0x00000018
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00019c <- 0x00000001
+W32 rp1.bar0+0x000190 <- 0xfffff000
+W32 rp1.bar0+0x000194 <- 0x000000ff
+W32 rp1.bar0+0x000198 <- 0x00000019
+W32 rp1.bar0+0x00019c <- 0x00000000
+R32 rp1.bar0+0x000198 = 0x00000019
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001ac <- 0x00000001
+W32 rp1.bar0+0x0001a0 <- 0xfffff000
+W32 rp1.bar0+0x0001a4 <- 0x000000ff
+W32 rp1.bar0+0x0001a8 <- 0x0000001a
+W32 rp1.bar0+0x0001ac <- 0x00000000
+R32 rp1.bar0+0x0001a8 = 0x0000001a
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001bc <- 0x00000001
+W32 rp1.bar0+0x0001b0 <- 0xfffff000
+W32 rp1.bar0+0x0001b4 <- 0x000000ff
+W32 rp1.bar0+0x0001b8 <- 0x0000001b
+W32 rp1.bar0+0x0001bc <- 0x00000000
+R32 rp1.bar0+0x0001b8 = 0x0000001b
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001cc <- 0x00000001
+W32 rp1.bar0+0x0001c0 <- 0xfffff000
+W32 rp1.bar0+0x0001c4 <- 0x000000ff
+W32 rp1.bar0+0x0001c8 <- 0x0000001c
+W32 rp1.bar0+0x0001cc <- 0x00000000
+R32 rp1.bar0+0x0001c8 = 0x0000001c
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001dc <- 0x00000001
+W32 rp1.bar0+0x0001d0 <- 0xfffff000
+W32 rp1.bar0+0x0001d4 <- 0x000000ff
+W32 rp1.bar0+0x0001d8 <- 0x0000001d
+W32 rp1.bar0+0x0001dc <- 0x00000000
+R32 rp1.bar0+0x0001d8 = 0x0000001d
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001ec <- 0x00000001
+W32 rp1.bar0+0x0001e0 <- 0xfffff000
+W32 rp1.bar0+0x0001e4 <- 0x000000ff
+W32 rp1.bar0+0x0001e8 <- 0x0000001e
+W32 rp1.bar0+0x0001ec <- 0x00000000
+R32 rp1.bar0+0x0001e8 = 0x0000001e
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001fc <- 0x00000001
+W32 rp1.bar0+0x0001f0 <- 0xfffff000
+W32 rp1.bar0+0x0001f4 <- 0x000000ff
+W32 rp1.bar0+0x0001f8 <- 0x0000001f
+W32 rp1.bar0+0x0001fc <- 0x00000000
+R32 rp1.bar0+0x0001f8 = 0x0000001f
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00020c <- 0x00000001
+W32 rp1.bar0+0x000200 <- 0xfffff000
+W32 rp1.bar0+0x000204 <- 0x000000ff
+W32 rp1.bar0+0x000208 <- 0x00000020
+W32 rp1.bar0+0x00020c <- 0x00000000
+R32 rp1.bar0+0x000208 = 0x00000020
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00021c <- 0x00000001
+W32 rp1.bar0+0x000210 <- 0xfffff000
+W32 rp1.bar0+0x000214 <- 0x000000ff
+W32 rp1.bar0+0x000218 <- 0x00000021
+W32 rp1.bar0+0x00021c <- 0x00000000
+R32 rp1.bar0+0x000218 = 0x00000021
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00022c <- 0x00000001
+W32 rp1.bar0+0x000220 <- 0xfffff000
+W32 rp1.bar0+0x000224 <- 0x000000ff
+W32 rp1.bar0+0x000228 <- 0x00000022
+W32 rp1.bar0+0x00022c <- 0x00000000
+R32 rp1.bar0+0x000228 = 0x00000022
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00023c <- 0x00000001
+W32 rp1.bar0+0x000230 <- 0xfffff000
+W32 rp1.bar0+0x000234 <- 0x000000ff
+W32 rp1.bar0+0x000238 <- 0x00000023
+W32 rp1.bar0+0x00023c <- 0x00000000
+R32 rp1.bar0+0x000238 = 0x00000023
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00024c <- 0x00000001
+W32 rp1.bar0+0x000240 <- 0xfffff000
+W32 rp1.bar0+0x000244 <- 0x000000ff
+W32 rp1.bar0+0x000248 <- 0x00000024
+W32 rp1.bar0+0x00024c <- 0x00000000
+R32 rp1.bar0+0x000248 = 0x00000024
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00025c <- 0x00000001
+W32 rp1.bar0+0x000250 <- 0xfffff000
+W32 rp1.bar0+0x000254 <- 0x000000ff
+W32 rp1.bar0+0x000258 <- 0x00000025
+W32 rp1.bar0+0x00025c <- 0x00000000
+R32 rp1.bar0+0x000258 = 0x00000025
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00026c <- 0x00000001
+W32 rp1.bar0+0x000260 <- 0xfffff000
+W32 rp1.bar0+0x000264 <- 0x000000ff
+W32 rp1.bar0+0x000268 <- 0x00000026
+W32 rp1.bar0+0x00026c <- 0x00000000
+R32 rp1.bar0+0x000268 = 0x00000026
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00027c <- 0x00000001
+W32 rp1.bar0+0x000270 <- 0xfffff000
+W32 rp1.bar0+0x000274 <- 0x000000ff
+W32 rp1.bar0+0x000278 <- 0x00000027
+W32 rp1.bar0+0x00027c <- 0x00000000
+R32 rp1.bar0+0x000278 = 0x00000027
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00028c <- 0x00000001
+W32 rp1.bar0+0x000280 <- 0xfffff000
+W32 rp1.bar0+0x000284 <- 0x000000ff
+W32 rp1.bar0+0x000288 <- 0x00000028
+W32 rp1.bar0+0x00028c <- 0x00000000
+R32 rp1.bar0+0x000288 = 0x00000028
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00029c <- 0x00000001
+W32 rp1.bar0+0x000290 <- 0xfffff000
+W32 rp1.bar0+0x000294 <- 0x000000ff
+W32 rp1.bar0+0x000298 <- 0x00000029
+W32 rp1.bar0+0x00029c <- 0x00000000
+R32 rp1.bar0+0x000298 = 0x00000029
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002ac <- 0x00000001
+W32 rp1.bar0+0x0002a0 <- 0xfffff000
+W32 rp1.bar0+0x0002a4 <- 0x000000ff
+W32 rp1.bar0+0x0002a8 <- 0x0000002a
+W32 rp1.bar0+0x0002ac <- 0x00000000
+R32 rp1.bar0+0x0002a8 = 0x0000002a
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002bc <- 0x00000001
+W32 rp1.bar0+0x0002b0 <- 0xfffff000
+W32 rp1.bar0+0x0002b4 <- 0x000000ff
+W32 rp1.bar0+0x0002b8 <- 0x0000002b
+W32 rp1.bar0+0x0002bc <- 0x00000000
+R32 rp1.bar0+0x0002b8 = 0x0000002b
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002cc <- 0x00000001
+W32 rp1.bar0+0x0002c0 <- 0xfffff000
+W32 rp1.bar0+0x0002c4 <- 0x000000ff
+W32 rp1.bar0+0x0002c8 <- 0x0000002c
+W32 rp1.bar0+0x0002cc <- 0x00000000
+R32 rp1.bar0+0x0002c8 = 0x0000002c
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002dc <- 0x00000001
+W32 rp1.bar0+0x0002d0 <- 0xfffff000
+W32 rp1.bar0+0x0002d4 <- 0x000000ff
+W32 rp1.bar0+0x0002d8 <- 0x0000002d
+W32 rp1.bar0+0x0002dc <- 0x00000000
+R32 rp1.bar0+0x0002d8 = 0x0000002d
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002ec <- 0x00000001
+W32 rp1.bar0+0x0002e0 <- 0xfffff000
+W32 rp1.bar0+0x0002e4 <- 0x000000ff
+W32 rp1.bar0+0x0002e8 <- 0x0000002e
+W32 rp1.bar0+0x0002ec <- 0x00000000
+R32 rp1.bar0+0x0002e8 = 0x0000002e
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002fc <- 0x00000001
+W32 rp1.bar0+0x0002f0 <- 0xfffff000
+W32 rp1.bar0+0x0002f4 <- 0x000000ff
+W32 rp1.bar0+0x0002f8 <- 0x0000002f
+W32 rp1.bar0+0x0002fc <- 0x00000000
+R32 rp1.bar0+0x0002f8 = 0x0000002f
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00030c <- 0x00000001
+W32 rp1.bar0+0x000300 <- 0xfffff000
+W32 rp1.bar0+0x000304 <- 0x000000ff
+W32 rp1.bar0+0x000308 <- 0x00000030
+W32 rp1.bar0+0x00030c <- 0x00000000
+R32 rp1.bar0+0x000308 = 0x00000030
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00031c <- 0x00000001
+W32 rp1.bar0+0x000310 <- 0xfffff000
+W32 rp1.bar0+0x000314 <- 0x000000ff
+W32 rp1.bar0+0x000318 <- 0x00000031
+W32 rp1.bar0+0x00031c <- 0x00000000
+R32 rp1.bar0+0x000318 = 0x00000031
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00032c <- 0x00000001
+W32 rp1.bar0+0x000320 <- 0xfffff000
+W32 rp1.bar0+0x000324 <- 0x000000ff
+W32 rp1.bar0+0x000328 <- 0x00000032
+W32 rp1.bar0+0x00032c <- 0x00000000
+R32 rp1.bar0+0x000328 = 0x00000032
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00033c <- 0x00000001
+W32 rp1.bar0+0x000330 <- 0xfffff000
+W32 rp1.bar0+0x000334 <- 0x000000ff
+W32 rp1.bar0+0x000338 <- 0x00000033
+W32 rp1.bar0+0x00033c <- 0x00000000
+R32 rp1.bar0+0x000338 = 0x00000033
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00034c <- 0x00000001
+W32 rp1.bar0+0x000340 <- 0xfffff000
+W32 rp1.bar0+0x000344 <- 0x000000ff
+W32 rp1.bar0+0x000348 <- 0x00000034
+W32 rp1.bar0+0x00034c <- 0x00000000
+R32 rp1.bar0+0x000348 = 0x00000034
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00035c <- 0x00000001
+W32 rp1.bar0+0x000350 <- 0xfffff000
+W32 rp1.bar0+0x000354 <- 0x000000ff
+W32 rp1.bar0+0x000358 <- 0x00000035
+W32 rp1.bar0+0x00035c <- 0x00000000
+R32 rp1.bar0+0x000358 = 0x00000035
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00036c <- 0x00000001
+W32 rp1.bar0+0x000360 <- 0xfffff000
+W32 rp1.bar0+0x000364 <- 0x000000ff
+W32 rp1.bar0+0x000368 <- 0x00000036
+W32 rp1.bar0+0x00036c <- 0x00000000
+R32 rp1.bar0+0x000368 = 0x00000036
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00037c <- 0x00000001
+W32 rp1.bar0+0x000370 <- 0xfffff000
+W32 rp1.bar0+0x000374 <- 0x000000ff
+W32 rp1.bar0+0x000378 <- 0x00000037
+W32 rp1.bar0+0x00037c <- 0x00000000
+R32 rp1.bar0+0x000378 = 0x00000037
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00038c <- 0x00000001
+W32 rp1.bar0+0x000380 <- 0xfffff000
+W32 rp1.bar0+0x000384 <- 0x000000ff
+W32 rp1.bar0+0x000388 <- 0x00000038
+W32 rp1.bar0+0x00038c <- 0x00000000
+R32 rp1.bar0+0x000388 = 0x00000038
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00039c <- 0x00000001
+W32 rp1.bar0+0x000390 <- 0xfffff000
+W32 rp1.bar0+0x000394 <- 0x000000ff
+W32 rp1.bar0+0x000398 <- 0x00000039
+W32 rp1.bar0+0x00039c <- 0x00000000
+R32 rp1.bar0+0x000398 = 0x00000039
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0003ac <- 0x00000001
+W32 rp1.bar0+0x0003a0 <- 0xfffff000
+W32 rp1.bar0+0x0003a4 <- 0x000000ff
+W32 rp1.bar0+0x0003a8 <- 0x0000003a
+W32 rp1.bar0+0x0003ac <- 0x00000000
+R32 rp1.bar0+0x0003a8 = 0x0000003a
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0003bc <- 0x00000001
+W32 rp1.bar0+0x0003b0 <- 0xfffff000
+W32 rp1.bar0+0x0003b4 <- 0x000000ff
+W32 rp1.bar0+0x0003b8 <- 0x0000003b
+W32 rp1.bar0+0x0003bc <- 0x00000000
+R32 rp1.bar0+0x0003b8 = 0x0000003b
+{ mip_middle_domain_alloc
+{ mip_alloc_hwirq
+} mip_alloc_hwirq
+} mip_middle_domain_alloc
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0003cc <- 0x00000001
+W32 rp1.bar0+0x0003c0 <- 0xfffff000
+W32 rp1.bar0+0x0003c4 <- 0x000000ff
+W32 rp1.bar0+0x0003c8 <- 0x0000003c
+W32 rp1.bar0+0x0003cc <- 0x00000000
+R32 rp1.bar0+0x0003c8 = 0x0000003c
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x8004 = 0x0006  ; cfg 01:00.0 +0x004
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x8004 <- 0x0406  ; cfg 01:00.0 +0x004
+W32 rp1.bar0+0x00000c <- 0x00000001
+W32 rp1.bar0+0x00001c <- 0x00000001
+W32 rp1.bar0+0x00002c <- 0x00000001
+W32 rp1.bar0+0x00003c <- 0x00000001
+W32 rp1.bar0+0x00004c <- 0x00000001
+W32 rp1.bar0+0x00005c <- 0x00000001
+W32 rp1.bar0+0x00006c <- 0x00000001
+W32 rp1.bar0+0x00007c <- 0x00000001
+W32 rp1.bar0+0x00008c <- 0x00000001
+W32 rp1.bar0+0x00009c <- 0x00000001
+W32 rp1.bar0+0x0000ac <- 0x00000001
+W32 rp1.bar0+0x0000bc <- 0x00000001
+W32 rp1.bar0+0x0000cc <- 0x00000001
+W32 rp1.bar0+0x0000dc <- 0x00000001
+W32 rp1.bar0+0x0000ec <- 0x00000001
+W32 rp1.bar0+0x0000fc <- 0x00000001
+W32 rp1.bar0+0x00010c <- 0x00000001
+W32 rp1.bar0+0x00011c <- 0x00000001
+W32 rp1.bar0+0x00012c <- 0x00000001
+W32 rp1.bar0+0x00013c <- 0x00000001
+W32 rp1.bar0+0x00014c <- 0x00000001
+W32 rp1.bar0+0x00015c <- 0x00000001
+W32 rp1.bar0+0x00016c <- 0x00000001
+W32 rp1.bar0+0x00017c <- 0x00000001
+W32 rp1.bar0+0x00018c <- 0x00000001
+W32 rp1.bar0+0x00019c <- 0x00000001
+W32 rp1.bar0+0x0001ac <- 0x00000001
+W32 rp1.bar0+0x0001bc <- 0x00000001
+W32 rp1.bar0+0x0001cc <- 0x00000001
+W32 rp1.bar0+0x0001dc <- 0x00000001
+W32 rp1.bar0+0x0001ec <- 0x00000001
+W32 rp1.bar0+0x0001fc <- 0x00000001
+W32 rp1.bar0+0x00020c <- 0x00000001
+W32 rp1.bar0+0x00021c <- 0x00000001
+W32 rp1.bar0+0x00022c <- 0x00000001
+W32 rp1.bar0+0x00023c <- 0x00000001
+W32 rp1.bar0+0x00024c <- 0x00000001
+W32 rp1.bar0+0x00025c <- 0x00000001
+W32 rp1.bar0+0x00026c <- 0x00000001
+W32 rp1.bar0+0x00027c <- 0x00000001
+W32 rp1.bar0+0x00028c <- 0x00000001
+W32 rp1.bar0+0x00029c <- 0x00000001
+W32 rp1.bar0+0x0002ac <- 0x00000001
+W32 rp1.bar0+0x0002bc <- 0x00000001
+W32 rp1.bar0+0x0002cc <- 0x00000001
+W32 rp1.bar0+0x0002dc <- 0x00000001
+W32 rp1.bar0+0x0002ec <- 0x00000001
+W32 rp1.bar0+0x0002fc <- 0x00000001
+W32 rp1.bar0+0x00030c <- 0x00000001
+W32 rp1.bar0+0x00031c <- 0x00000001
+W32 rp1.bar0+0x00032c <- 0x00000001
+W32 rp1.bar0+0x00033c <- 0x00000001
+W32 rp1.bar0+0x00034c <- 0x00000001
+W32 rp1.bar0+0x00035c <- 0x00000001
+W32 rp1.bar0+0x00036c <- 0x00000001
+W32 rp1.bar0+0x00037c <- 0x00000001
+W32 rp1.bar0+0x00038c <- 0x00000001
+W32 rp1.bar0+0x00039c <- 0x00000001
+W32 rp1.bar0+0x0003ac <- 0x00000001
+W32 rp1.bar0+0x0003bc <- 0x00000001
+W32 rp1.bar0+0x0003cc <- 0x00000001
+W32 rp1.bar0+0x0003dc <- 0x00000001
+W32 rp1.bar0+0x0003ec <- 0x00000001
+W32 rp1.bar0+0x0003fc <- 0x00000001
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+R16 pcie2+0x80b2 = 0xc03f  ; cfg 01:00.0 +0x0b2
+{ brcm_pcie_map_bus
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+W32 pcie2+0x9000 <- 0x00100000
+} brcm_pcie_map_bus
+W16 pcie2+0x80b2 <- 0x803f  ; cfg 01:00.0 +0x0b2
+{ rp1_reg_read
+MAP 0x1f00000000 size 0x1000
+R32 rp1.bar1+0x000000 = 0x20001927  ; sysinfo CHIP_ID
+} rp1_reg_read
+{ rp1_reg_read
+MAP 0x1f00000000 size 0x1000
+R32 rp1.bar1+0x000004 = 0x00000002  ; sysinfo PLATFORM
+} rp1_reg_read
+# info 0002:01:00.0: chip_id 0x20001927
+MAP 0x1f00108000 size 0x1000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00000c <- 0x00000001
+W32 rp1.bar0+0x000000 <- 0xfffff000
+W32 rp1.bar0+0x000004 <- 0x000000ff
+W32 rp1.bar0+0x000008 <- 0x00000000
+W32 rp1.bar0+0x00000c <- 0x00000000
+R32 rp1.bar0+0x000008 = 0x00000000
+W32 rp1.bar0+0x00000c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00001c <- 0x00000001
+W32 rp1.bar0+0x000010 <- 0xfffff000
+W32 rp1.bar0+0x000014 <- 0x000000ff
+W32 rp1.bar0+0x000018 <- 0x00000001
+W32 rp1.bar0+0x00001c <- 0x00000000
+R32 rp1.bar0+0x000018 = 0x00000001
+W32 rp1.bar0+0x00001c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00002c <- 0x00000001
+W32 rp1.bar0+0x000020 <- 0xfffff000
+W32 rp1.bar0+0x000024 <- 0x000000ff
+W32 rp1.bar0+0x000028 <- 0x00000002
+W32 rp1.bar0+0x00002c <- 0x00000000
+R32 rp1.bar0+0x000028 = 0x00000002
+W32 rp1.bar0+0x00002c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00003c <- 0x00000001
+W32 rp1.bar0+0x000030 <- 0xfffff000
+W32 rp1.bar0+0x000034 <- 0x000000ff
+W32 rp1.bar0+0x000038 <- 0x00000003
+W32 rp1.bar0+0x00003c <- 0x00000000
+R32 rp1.bar0+0x000038 = 0x00000003
+W32 rp1.bar0+0x00003c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00004c <- 0x00000001
+W32 rp1.bar0+0x000040 <- 0xfffff000
+W32 rp1.bar0+0x000044 <- 0x000000ff
+W32 rp1.bar0+0x000048 <- 0x00000004
+W32 rp1.bar0+0x00004c <- 0x00000000
+R32 rp1.bar0+0x000048 = 0x00000004
+W32 rp1.bar0+0x00004c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00005c <- 0x00000001
+W32 rp1.bar0+0x000050 <- 0xfffff000
+W32 rp1.bar0+0x000054 <- 0x000000ff
+W32 rp1.bar0+0x000058 <- 0x00000005
+W32 rp1.bar0+0x00005c <- 0x00000000
+R32 rp1.bar0+0x000058 = 0x00000005
+W32 rp1.bar0+0x00005c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00006c <- 0x00000001
+W32 rp1.bar0+0x000060 <- 0xfffff000
+W32 rp1.bar0+0x000064 <- 0x000000ff
+W32 rp1.bar0+0x000068 <- 0x00000006
+W32 rp1.bar0+0x00006c <- 0x00000000
+R32 rp1.bar0+0x000068 = 0x00000006
+W32 rp1.bar0+0x00006c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00007c <- 0x00000001
+W32 rp1.bar0+0x000070 <- 0xfffff000
+W32 rp1.bar0+0x000074 <- 0x000000ff
+W32 rp1.bar0+0x000078 <- 0x00000007
+W32 rp1.bar0+0x00007c <- 0x00000000
+R32 rp1.bar0+0x000078 = 0x00000007
+W32 rp1.bar0+0x00007c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00008c <- 0x00000001
+W32 rp1.bar0+0x000080 <- 0xfffff000
+W32 rp1.bar0+0x000084 <- 0x000000ff
+W32 rp1.bar0+0x000088 <- 0x00000008
+W32 rp1.bar0+0x00008c <- 0x00000000
+R32 rp1.bar0+0x000088 = 0x00000008
+W32 rp1.bar0+0x00008c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00009c <- 0x00000001
+W32 rp1.bar0+0x000090 <- 0xfffff000
+W32 rp1.bar0+0x000094 <- 0x000000ff
+W32 rp1.bar0+0x000098 <- 0x00000009
+W32 rp1.bar0+0x00009c <- 0x00000000
+R32 rp1.bar0+0x000098 = 0x00000009
+W32 rp1.bar0+0x00009c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000ac <- 0x00000001
+W32 rp1.bar0+0x0000a0 <- 0xfffff000
+W32 rp1.bar0+0x0000a4 <- 0x000000ff
+W32 rp1.bar0+0x0000a8 <- 0x0000000a
+W32 rp1.bar0+0x0000ac <- 0x00000000
+R32 rp1.bar0+0x0000a8 = 0x0000000a
+W32 rp1.bar0+0x0000ac <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000bc <- 0x00000001
+W32 rp1.bar0+0x0000b0 <- 0xfffff000
+W32 rp1.bar0+0x0000b4 <- 0x000000ff
+W32 rp1.bar0+0x0000b8 <- 0x0000000b
+W32 rp1.bar0+0x0000bc <- 0x00000000
+R32 rp1.bar0+0x0000b8 = 0x0000000b
+W32 rp1.bar0+0x0000bc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000cc <- 0x00000001
+W32 rp1.bar0+0x0000c0 <- 0xfffff000
+W32 rp1.bar0+0x0000c4 <- 0x000000ff
+W32 rp1.bar0+0x0000c8 <- 0x0000000c
+W32 rp1.bar0+0x0000cc <- 0x00000000
+R32 rp1.bar0+0x0000c8 = 0x0000000c
+W32 rp1.bar0+0x0000cc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000dc <- 0x00000001
+W32 rp1.bar0+0x0000d0 <- 0xfffff000
+W32 rp1.bar0+0x0000d4 <- 0x000000ff
+W32 rp1.bar0+0x0000d8 <- 0x0000000d
+W32 rp1.bar0+0x0000dc <- 0x00000000
+R32 rp1.bar0+0x0000d8 = 0x0000000d
+W32 rp1.bar0+0x0000dc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000ec <- 0x00000001
+W32 rp1.bar0+0x0000e0 <- 0xfffff000
+W32 rp1.bar0+0x0000e4 <- 0x000000ff
+W32 rp1.bar0+0x0000e8 <- 0x0000000e
+W32 rp1.bar0+0x0000ec <- 0x00000000
+R32 rp1.bar0+0x0000e8 = 0x0000000e
+W32 rp1.bar0+0x0000ec <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0000fc <- 0x00000001
+W32 rp1.bar0+0x0000f0 <- 0xfffff000
+W32 rp1.bar0+0x0000f4 <- 0x000000ff
+W32 rp1.bar0+0x0000f8 <- 0x0000000f
+W32 rp1.bar0+0x0000fc <- 0x00000000
+R32 rp1.bar0+0x0000f8 = 0x0000000f
+W32 rp1.bar0+0x0000fc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00010c <- 0x00000001
+W32 rp1.bar0+0x000100 <- 0xfffff000
+W32 rp1.bar0+0x000104 <- 0x000000ff
+W32 rp1.bar0+0x000108 <- 0x00000010
+W32 rp1.bar0+0x00010c <- 0x00000000
+R32 rp1.bar0+0x000108 = 0x00000010
+W32 rp1.bar0+0x00010c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00011c <- 0x00000001
+W32 rp1.bar0+0x000110 <- 0xfffff000
+W32 rp1.bar0+0x000114 <- 0x000000ff
+W32 rp1.bar0+0x000118 <- 0x00000011
+W32 rp1.bar0+0x00011c <- 0x00000000
+R32 rp1.bar0+0x000118 = 0x00000011
+W32 rp1.bar0+0x00011c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00012c <- 0x00000001
+W32 rp1.bar0+0x000120 <- 0xfffff000
+W32 rp1.bar0+0x000124 <- 0x000000ff
+W32 rp1.bar0+0x000128 <- 0x00000012
+W32 rp1.bar0+0x00012c <- 0x00000000
+R32 rp1.bar0+0x000128 = 0x00000012
+W32 rp1.bar0+0x00012c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00013c <- 0x00000001
+W32 rp1.bar0+0x000130 <- 0xfffff000
+W32 rp1.bar0+0x000134 <- 0x000000ff
+W32 rp1.bar0+0x000138 <- 0x00000013
+W32 rp1.bar0+0x00013c <- 0x00000000
+R32 rp1.bar0+0x000138 = 0x00000013
+W32 rp1.bar0+0x00013c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00014c <- 0x00000001
+W32 rp1.bar0+0x000140 <- 0xfffff000
+W32 rp1.bar0+0x000144 <- 0x000000ff
+W32 rp1.bar0+0x000148 <- 0x00000014
+W32 rp1.bar0+0x00014c <- 0x00000000
+R32 rp1.bar0+0x000148 = 0x00000014
+W32 rp1.bar0+0x00014c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00015c <- 0x00000001
+W32 rp1.bar0+0x000150 <- 0xfffff000
+W32 rp1.bar0+0x000154 <- 0x000000ff
+W32 rp1.bar0+0x000158 <- 0x00000015
+W32 rp1.bar0+0x00015c <- 0x00000000
+R32 rp1.bar0+0x000158 = 0x00000015
+W32 rp1.bar0+0x00015c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00016c <- 0x00000001
+W32 rp1.bar0+0x000160 <- 0xfffff000
+W32 rp1.bar0+0x000164 <- 0x000000ff
+W32 rp1.bar0+0x000168 <- 0x00000016
+W32 rp1.bar0+0x00016c <- 0x00000000
+R32 rp1.bar0+0x000168 = 0x00000016
+W32 rp1.bar0+0x00016c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00017c <- 0x00000001
+W32 rp1.bar0+0x000170 <- 0xfffff000
+W32 rp1.bar0+0x000174 <- 0x000000ff
+W32 rp1.bar0+0x000178 <- 0x00000017
+W32 rp1.bar0+0x00017c <- 0x00000000
+R32 rp1.bar0+0x000178 = 0x00000017
+W32 rp1.bar0+0x00017c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00018c <- 0x00000001
+W32 rp1.bar0+0x000180 <- 0xfffff000
+W32 rp1.bar0+0x000184 <- 0x000000ff
+W32 rp1.bar0+0x000188 <- 0x00000018
+W32 rp1.bar0+0x00018c <- 0x00000000
+R32 rp1.bar0+0x000188 = 0x00000018
+W32 rp1.bar0+0x00018c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00019c <- 0x00000001
+W32 rp1.bar0+0x000190 <- 0xfffff000
+W32 rp1.bar0+0x000194 <- 0x000000ff
+W32 rp1.bar0+0x000198 <- 0x00000019
+W32 rp1.bar0+0x00019c <- 0x00000000
+R32 rp1.bar0+0x000198 = 0x00000019
+W32 rp1.bar0+0x00019c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001ac <- 0x00000001
+W32 rp1.bar0+0x0001a0 <- 0xfffff000
+W32 rp1.bar0+0x0001a4 <- 0x000000ff
+W32 rp1.bar0+0x0001a8 <- 0x0000001a
+W32 rp1.bar0+0x0001ac <- 0x00000000
+R32 rp1.bar0+0x0001a8 = 0x0000001a
+W32 rp1.bar0+0x0001ac <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001bc <- 0x00000001
+W32 rp1.bar0+0x0001b0 <- 0xfffff000
+W32 rp1.bar0+0x0001b4 <- 0x000000ff
+W32 rp1.bar0+0x0001b8 <- 0x0000001b
+W32 rp1.bar0+0x0001bc <- 0x00000000
+R32 rp1.bar0+0x0001b8 = 0x0000001b
+W32 rp1.bar0+0x0001bc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001cc <- 0x00000001
+W32 rp1.bar0+0x0001c0 <- 0xfffff000
+W32 rp1.bar0+0x0001c4 <- 0x000000ff
+W32 rp1.bar0+0x0001c8 <- 0x0000001c
+W32 rp1.bar0+0x0001cc <- 0x00000000
+R32 rp1.bar0+0x0001c8 = 0x0000001c
+W32 rp1.bar0+0x0001cc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001dc <- 0x00000001
+W32 rp1.bar0+0x0001d0 <- 0xfffff000
+W32 rp1.bar0+0x0001d4 <- 0x000000ff
+W32 rp1.bar0+0x0001d8 <- 0x0000001d
+W32 rp1.bar0+0x0001dc <- 0x00000000
+R32 rp1.bar0+0x0001d8 = 0x0000001d
+W32 rp1.bar0+0x0001dc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001ec <- 0x00000001
+W32 rp1.bar0+0x0001e0 <- 0xfffff000
+W32 rp1.bar0+0x0001e4 <- 0x000000ff
+W32 rp1.bar0+0x0001e8 <- 0x0000001e
+W32 rp1.bar0+0x0001ec <- 0x00000000
+R32 rp1.bar0+0x0001e8 = 0x0000001e
+W32 rp1.bar0+0x0001ec <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0001fc <- 0x00000001
+W32 rp1.bar0+0x0001f0 <- 0xfffff000
+W32 rp1.bar0+0x0001f4 <- 0x000000ff
+W32 rp1.bar0+0x0001f8 <- 0x0000001f
+W32 rp1.bar0+0x0001fc <- 0x00000000
+R32 rp1.bar0+0x0001f8 = 0x0000001f
+W32 rp1.bar0+0x0001fc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00020c <- 0x00000001
+W32 rp1.bar0+0x000200 <- 0xfffff000
+W32 rp1.bar0+0x000204 <- 0x000000ff
+W32 rp1.bar0+0x000208 <- 0x00000020
+W32 rp1.bar0+0x00020c <- 0x00000000
+R32 rp1.bar0+0x000208 = 0x00000020
+W32 rp1.bar0+0x00020c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00021c <- 0x00000001
+W32 rp1.bar0+0x000210 <- 0xfffff000
+W32 rp1.bar0+0x000214 <- 0x000000ff
+W32 rp1.bar0+0x000218 <- 0x00000021
+W32 rp1.bar0+0x00021c <- 0x00000000
+R32 rp1.bar0+0x000218 = 0x00000021
+W32 rp1.bar0+0x00021c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00022c <- 0x00000001
+W32 rp1.bar0+0x000220 <- 0xfffff000
+W32 rp1.bar0+0x000224 <- 0x000000ff
+W32 rp1.bar0+0x000228 <- 0x00000022
+W32 rp1.bar0+0x00022c <- 0x00000000
+R32 rp1.bar0+0x000228 = 0x00000022
+W32 rp1.bar0+0x00022c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00023c <- 0x00000001
+W32 rp1.bar0+0x000230 <- 0xfffff000
+W32 rp1.bar0+0x000234 <- 0x000000ff
+W32 rp1.bar0+0x000238 <- 0x00000023
+W32 rp1.bar0+0x00023c <- 0x00000000
+R32 rp1.bar0+0x000238 = 0x00000023
+W32 rp1.bar0+0x00023c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00024c <- 0x00000001
+W32 rp1.bar0+0x000240 <- 0xfffff000
+W32 rp1.bar0+0x000244 <- 0x000000ff
+W32 rp1.bar0+0x000248 <- 0x00000024
+W32 rp1.bar0+0x00024c <- 0x00000000
+R32 rp1.bar0+0x000248 = 0x00000024
+W32 rp1.bar0+0x00024c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00025c <- 0x00000001
+W32 rp1.bar0+0x000250 <- 0xfffff000
+W32 rp1.bar0+0x000254 <- 0x000000ff
+W32 rp1.bar0+0x000258 <- 0x00000025
+W32 rp1.bar0+0x00025c <- 0x00000000
+R32 rp1.bar0+0x000258 = 0x00000025
+W32 rp1.bar0+0x00025c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00026c <- 0x00000001
+W32 rp1.bar0+0x000260 <- 0xfffff000
+W32 rp1.bar0+0x000264 <- 0x000000ff
+W32 rp1.bar0+0x000268 <- 0x00000026
+W32 rp1.bar0+0x00026c <- 0x00000000
+R32 rp1.bar0+0x000268 = 0x00000026
+W32 rp1.bar0+0x00026c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00027c <- 0x00000001
+W32 rp1.bar0+0x000270 <- 0xfffff000
+W32 rp1.bar0+0x000274 <- 0x000000ff
+W32 rp1.bar0+0x000278 <- 0x00000027
+W32 rp1.bar0+0x00027c <- 0x00000000
+R32 rp1.bar0+0x000278 = 0x00000027
+W32 rp1.bar0+0x00027c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00028c <- 0x00000001
+W32 rp1.bar0+0x000280 <- 0xfffff000
+W32 rp1.bar0+0x000284 <- 0x000000ff
+W32 rp1.bar0+0x000288 <- 0x00000028
+W32 rp1.bar0+0x00028c <- 0x00000000
+R32 rp1.bar0+0x000288 = 0x00000028
+W32 rp1.bar0+0x00028c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00029c <- 0x00000001
+W32 rp1.bar0+0x000290 <- 0xfffff000
+W32 rp1.bar0+0x000294 <- 0x000000ff
+W32 rp1.bar0+0x000298 <- 0x00000029
+W32 rp1.bar0+0x00029c <- 0x00000000
+R32 rp1.bar0+0x000298 = 0x00000029
+W32 rp1.bar0+0x00029c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002ac <- 0x00000001
+W32 rp1.bar0+0x0002a0 <- 0xfffff000
+W32 rp1.bar0+0x0002a4 <- 0x000000ff
+W32 rp1.bar0+0x0002a8 <- 0x0000002a
+W32 rp1.bar0+0x0002ac <- 0x00000000
+R32 rp1.bar0+0x0002a8 = 0x0000002a
+W32 rp1.bar0+0x0002ac <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002bc <- 0x00000001
+W32 rp1.bar0+0x0002b0 <- 0xfffff000
+W32 rp1.bar0+0x0002b4 <- 0x000000ff
+W32 rp1.bar0+0x0002b8 <- 0x0000002b
+W32 rp1.bar0+0x0002bc <- 0x00000000
+R32 rp1.bar0+0x0002b8 = 0x0000002b
+W32 rp1.bar0+0x0002bc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002cc <- 0x00000001
+W32 rp1.bar0+0x0002c0 <- 0xfffff000
+W32 rp1.bar0+0x0002c4 <- 0x000000ff
+W32 rp1.bar0+0x0002c8 <- 0x0000002c
+W32 rp1.bar0+0x0002cc <- 0x00000000
+R32 rp1.bar0+0x0002c8 = 0x0000002c
+W32 rp1.bar0+0x0002cc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002dc <- 0x00000001
+W32 rp1.bar0+0x0002d0 <- 0xfffff000
+W32 rp1.bar0+0x0002d4 <- 0x000000ff
+W32 rp1.bar0+0x0002d8 <- 0x0000002d
+W32 rp1.bar0+0x0002dc <- 0x00000000
+R32 rp1.bar0+0x0002d8 = 0x0000002d
+W32 rp1.bar0+0x0002dc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002ec <- 0x00000001
+W32 rp1.bar0+0x0002e0 <- 0xfffff000
+W32 rp1.bar0+0x0002e4 <- 0x000000ff
+W32 rp1.bar0+0x0002e8 <- 0x0000002e
+W32 rp1.bar0+0x0002ec <- 0x00000000
+R32 rp1.bar0+0x0002e8 = 0x0000002e
+W32 rp1.bar0+0x0002ec <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0002fc <- 0x00000001
+W32 rp1.bar0+0x0002f0 <- 0xfffff000
+W32 rp1.bar0+0x0002f4 <- 0x000000ff
+W32 rp1.bar0+0x0002f8 <- 0x0000002f
+W32 rp1.bar0+0x0002fc <- 0x00000000
+R32 rp1.bar0+0x0002f8 = 0x0000002f
+W32 rp1.bar0+0x0002fc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00030c <- 0x00000001
+W32 rp1.bar0+0x000300 <- 0xfffff000
+W32 rp1.bar0+0x000304 <- 0x000000ff
+W32 rp1.bar0+0x000308 <- 0x00000030
+W32 rp1.bar0+0x00030c <- 0x00000000
+R32 rp1.bar0+0x000308 = 0x00000030
+W32 rp1.bar0+0x00030c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00031c <- 0x00000001
+W32 rp1.bar0+0x000310 <- 0xfffff000
+W32 rp1.bar0+0x000314 <- 0x000000ff
+W32 rp1.bar0+0x000318 <- 0x00000031
+W32 rp1.bar0+0x00031c <- 0x00000000
+R32 rp1.bar0+0x000318 = 0x00000031
+W32 rp1.bar0+0x00031c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00032c <- 0x00000001
+W32 rp1.bar0+0x000320 <- 0xfffff000
+W32 rp1.bar0+0x000324 <- 0x000000ff
+W32 rp1.bar0+0x000328 <- 0x00000032
+W32 rp1.bar0+0x00032c <- 0x00000000
+R32 rp1.bar0+0x000328 = 0x00000032
+W32 rp1.bar0+0x00032c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00033c <- 0x00000001
+W32 rp1.bar0+0x000330 <- 0xfffff000
+W32 rp1.bar0+0x000334 <- 0x000000ff
+W32 rp1.bar0+0x000338 <- 0x00000033
+W32 rp1.bar0+0x00033c <- 0x00000000
+R32 rp1.bar0+0x000338 = 0x00000033
+W32 rp1.bar0+0x00033c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00034c <- 0x00000001
+W32 rp1.bar0+0x000340 <- 0xfffff000
+W32 rp1.bar0+0x000344 <- 0x000000ff
+W32 rp1.bar0+0x000348 <- 0x00000034
+W32 rp1.bar0+0x00034c <- 0x00000000
+R32 rp1.bar0+0x000348 = 0x00000034
+W32 rp1.bar0+0x00034c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00035c <- 0x00000001
+W32 rp1.bar0+0x000350 <- 0xfffff000
+W32 rp1.bar0+0x000354 <- 0x000000ff
+W32 rp1.bar0+0x000358 <- 0x00000035
+W32 rp1.bar0+0x00035c <- 0x00000000
+R32 rp1.bar0+0x000358 = 0x00000035
+W32 rp1.bar0+0x00035c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00036c <- 0x00000001
+W32 rp1.bar0+0x000360 <- 0xfffff000
+W32 rp1.bar0+0x000364 <- 0x000000ff
+W32 rp1.bar0+0x000368 <- 0x00000036
+W32 rp1.bar0+0x00036c <- 0x00000000
+R32 rp1.bar0+0x000368 = 0x00000036
+W32 rp1.bar0+0x00036c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00037c <- 0x00000001
+W32 rp1.bar0+0x000370 <- 0xfffff000
+W32 rp1.bar0+0x000374 <- 0x000000ff
+W32 rp1.bar0+0x000378 <- 0x00000037
+W32 rp1.bar0+0x00037c <- 0x00000000
+R32 rp1.bar0+0x000378 = 0x00000037
+W32 rp1.bar0+0x00037c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00038c <- 0x00000001
+W32 rp1.bar0+0x000380 <- 0xfffff000
+W32 rp1.bar0+0x000384 <- 0x000000ff
+W32 rp1.bar0+0x000388 <- 0x00000038
+W32 rp1.bar0+0x00038c <- 0x00000000
+R32 rp1.bar0+0x000388 = 0x00000038
+W32 rp1.bar0+0x00038c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x00039c <- 0x00000001
+W32 rp1.bar0+0x000390 <- 0xfffff000
+W32 rp1.bar0+0x000394 <- 0x000000ff
+W32 rp1.bar0+0x000398 <- 0x00000039
+W32 rp1.bar0+0x00039c <- 0x00000000
+R32 rp1.bar0+0x000398 = 0x00000039
+W32 rp1.bar0+0x00039c <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0003ac <- 0x00000001
+W32 rp1.bar0+0x0003a0 <- 0xfffff000
+W32 rp1.bar0+0x0003a4 <- 0x000000ff
+W32 rp1.bar0+0x0003a8 <- 0x0000003a
+W32 rp1.bar0+0x0003ac <- 0x00000000
+R32 rp1.bar0+0x0003a8 = 0x0000003a
+W32 rp1.bar0+0x0003ac <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0003bc <- 0x00000001
+W32 rp1.bar0+0x0003b0 <- 0xfffff000
+W32 rp1.bar0+0x0003b4 <- 0x000000ff
+W32 rp1.bar0+0x0003b8 <- 0x0000003b
+W32 rp1.bar0+0x0003bc <- 0x00000000
+R32 rp1.bar0+0x0003b8 = 0x0000003b
+W32 rp1.bar0+0x0003bc <- 0x00000000
+{ mip_compose_msi_msg
+} mip_compose_msi_msg
+W32 rp1.bar0+0x0003cc <- 0x00000001
+W32 rp1.bar0+0x0003c0 <- 0xfffff000
+W32 rp1.bar0+0x0003c4 <- 0x000000ff
+W32 rp1.bar0+0x0003c8 <- 0x0000003c
+W32 rp1.bar0+0x0003cc <- 0x00000000
+R32 rp1.bar0+0x0003c8 = 0x0000003c
+W32 rp1.bar0+0x0003cc <- 0x00000000
+# device_add 1f00008000.mailbox
+# device_add 1f00018000.clocks
+# device_add 1f000c8000.adc
+# device_add 1f000d0000.gpio
+# device_add 1f00100000.ethernet
+# device_add 1f00178000.pio
+# device_add 1f00188000.dma
+# device_add 1f00200000.usb
+# device_add 1f00300000.usb
+# device_add 1f00400000.sram
+# device_add 1f000d0000.gpiomem
+} rp1_probe
+PROBE-END 0002:01:00.0 ret 0
+{ brcm_pcie_link_up
+R32 pcie2+0x4068 = 0x000000b0  ; PCIE_MISC_PCIE_STATUS  [PCIE_STATUS, guess 1]
+} brcm_pcie_link_up
+} brcm_pcie_probe
+PROBE-END 1000120000.pcie ret 0
+== end
