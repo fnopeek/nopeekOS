@@ -7,7 +7,8 @@
 //! exactly the trade the guard page and the bare `idiv` were chosen for.
 //!
 //! Catching them means pointing the interrupted context at the module's trap
-//! routine with the reason in `rax`. Everything after that is the routine's
+//! routine with the reason in `rax` (`x0` on AArch64, where only the guard
+//! page faults: division is checked in code). Everything after that is the routine's
 //! ordinary work. The kernel's #PF and #DE handlers do the same, against the
 //! same trap routine and the same instance context — the only difference is
 //! that they read the interrupted registers out of a trap frame rather than a
@@ -30,11 +31,44 @@ fn ours(rip: u64) -> bool {
     base != 0 && rip >= base && rip < base + len
 }
 
+/// The interrupted program counter.
+///
+/// # Safety
+/// `uc` must be the `ucontext_t` of a signal handler.
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn pc(uc: *mut libc::c_void) -> u64 {
+    // SAFETY: the caller passes a live `ucontext_t`.
+    unsafe { (*(uc as *mut libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize] as u64 }
+}
+
+/// # Safety
+/// As `pc`.
+#[cfg(target_arch = "x86_64")]
+unsafe fn set_pc(uc: *mut libc::c_void, v: u64) {
+    // SAFETY: the caller passes a live `ucontext_t`.
+    unsafe { (*(uc as *mut libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize] = v as i64 };
+}
+
+/// # Safety
+/// As above.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn pc(uc: *mut libc::c_void) -> u64 {
+    // SAFETY: the caller passes a live `ucontext_t`.
+    unsafe { (*(uc as *mut libc::ucontext_t)).uc_mcontext.pc }
+}
+
+/// # Safety
+/// As above.
+#[cfg(target_arch = "aarch64")]
+unsafe fn set_pc(uc: *mut libc::c_void, v: u64) {
+    // SAFETY: the caller passes a live `ucontext_t`.
+    unsafe { (*(uc as *mut libc::ucontext_t)).uc_mcontext.pc = v };
+}
+
 extern "C" fn on_fault(sig: i32, _info: *mut libc::siginfo_t, uc: *mut libc::c_void) {
     // SAFETY: the third argument of a `SA_SIGINFO` handler is a `ucontext_t`.
     unsafe {
-        let uc = uc as *mut libc::ucontext_t;
-        let rip = (*uc).uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
+        let rip = pc(uc);
         if !ours(rip) {
             // Not ours. Put the default back and return, so the fault happens
             // again and ends the process the way it should.
@@ -50,7 +84,7 @@ extern "C" fn on_fault(sig: i32, _info: *mut libc::siginfo_t, uc: *mut libc::c_v
         } else {
             PF_ENTRY.load(Ordering::Relaxed)
         };
-        (*uc).uc_mcontext.gregs[libc::REG_RIP as usize] = entry as i64;
+        set_pc(uc, entry);
     }
 }
 

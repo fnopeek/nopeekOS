@@ -37,6 +37,7 @@ impl Exec {
         }
         // SAFETY: `ptr` is a fresh writable mapping of at least `code.len()`.
         unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), ptr as *mut u8, code.len()) };
+        sync_icache(ptr as u64, code.len());
         // W^X: writable while filling, executable afterwards, never both.
         // SAFETY: same mapping, same length.
         if unsafe { libc::mprotect(ptr, len, libc::PROT_READ | libc::PROT_EXEC) } != 0 {
@@ -90,6 +91,38 @@ impl Drop for Exec {
         unsafe { libc::munmap(self.ptr, self.len) };
     }
 }
+
+/// Make code written as data visible to instruction fetch: clean the data
+/// cache to the point of unification, invalidate the instruction cache, then
+/// synchronise (Arm ARM B2.4.4). x86 keeps them coherent itself.
+#[cfg(target_arch = "aarch64")]
+fn sync_icache(start: u64, len: usize) {
+    let ctr: u64;
+    // SAFETY: CTR_EL0 is readable at EL0 under Linux.
+    unsafe { std::arch::asm!("mrs {}, ctr_el0", out(reg) ctr, options(nomem, nostack)) };
+    let dline = 4u64 << ((ctr >> 16) & 0xf);
+    let iline = 4u64 << (ctr & 0xf);
+    let end = start + len as u64;
+    let mut a = start & !(dline - 1);
+    while a < end {
+        // SAFETY: a cache maintenance operation on our own mapped range.
+        unsafe { std::arch::asm!("dc cvau, {}", in(reg) a, options(nostack)) };
+        a += dline;
+    }
+    // SAFETY: a barrier.
+    unsafe { std::arch::asm!("dsb ish", options(nostack)) };
+    let mut a = start & !(iline - 1);
+    while a < end {
+        // SAFETY: as above.
+        unsafe { std::arch::asm!("ic ivau, {}", in(reg) a, options(nostack)) };
+        a += iline;
+    }
+    // SAFETY: barriers.
+    unsafe { std::arch::asm!("dsb ish", "isb", options(nostack)) };
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn sync_icache(_start: u64, _len: usize) {}
 
 /// One wasm page.
 pub(crate) const PAGE: usize = 64 * 1024;
@@ -297,13 +330,18 @@ impl Inst {
     pub(crate) fn set_stack_budget(&mut self, bytes: u64) {
         let rsp: u64;
         // SAFETY: reads the stack pointer, nothing else.
+        #[cfg(target_arch = "x86_64")]
         unsafe { std::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
+        // SAFETY: as above.
+        #[cfg(target_arch = "aarch64")]
+        unsafe { std::arch::asm!("mov {}, sp", out(reg) rsp, options(nomem, nostack, preserves_flags)) };
         self.ctx[forge_core::vmctx::STACK_LIMIT as usize / 8] = rsp - bytes;
     }
 }
 
 /// Change every register native code may change (SysV caller-saved), so
 /// generated code that expects one to survive a native call is caught.
+#[cfg(target_arch = "x86_64")]
 #[inline(always)]
 pub(crate) fn clobber() {
     // SAFETY: writes only registers it declares clobbered.
@@ -321,6 +359,40 @@ pub(crate) fn clobber() {
             out("xmm4") _, out("xmm5") _, out("xmm6") _, out("xmm7") _,
             out("xmm8") _, out("xmm9") _, out("xmm10") _, out("xmm11") _,
             out("xmm12") _, out("xmm13") _, out("xmm14") _, out("xmm15") _,
+            options(nostack),
+        );
+    }
+}
+
+/// The same under AAPCS64: x0-x17, v0-v7, v16-v31, and the upper halves of
+/// v8-v15 (only their low 64 bits are callee-saved). x18 is the platform's.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+pub(crate) fn clobber() {
+    // SAFETY: writes only registers it declares clobbered.
+    unsafe {
+        std::arch::asm!(
+            "mov x0, #-1", "mov x1, #-1", "mov x2, #-1", "mov x3, #-1", "mov x4, #-1",
+            "mov x5, #-1", "mov x6, #-1", "mov x7, #-1", "mov x8, #-1", "mov x9, #-1",
+            "mov x10, #-1", "mov x11, #-1", "mov x12, #-1", "mov x13, #-1", "mov x14, #-1",
+            "mov x15, #-1", "mov x16, #-1", "mov x17, #-1",
+            "movi v0.2d, #-1", "movi v1.2d, #-1", "movi v2.2d, #-1", "movi v3.2d, #-1",
+            "movi v4.2d, #-1", "movi v5.2d, #-1", "movi v6.2d, #-1", "movi v7.2d, #-1",
+            "mov v8.d[1], x0", "mov v9.d[1], x0", "mov v10.d[1], x0", "mov v11.d[1], x0",
+            "mov v12.d[1], x0", "mov v13.d[1], x0", "mov v14.d[1], x0", "mov v15.d[1], x0",
+            "movi v16.2d, #-1", "movi v17.2d, #-1", "movi v18.2d, #-1", "movi v19.2d, #-1",
+            "movi v20.2d, #-1", "movi v21.2d, #-1", "movi v22.2d, #-1", "movi v23.2d, #-1",
+            "movi v24.2d, #-1", "movi v25.2d, #-1", "movi v26.2d, #-1", "movi v27.2d, #-1",
+            "movi v28.2d, #-1", "movi v29.2d, #-1", "movi v30.2d, #-1", "movi v31.2d, #-1",
+            out("x0") _, out("x1") _, out("x2") _, out("x3") _, out("x4") _, out("x5") _,
+            out("x6") _, out("x7") _, out("x8") _, out("x9") _, out("x10") _, out("x11") _,
+            out("x12") _, out("x13") _, out("x14") _, out("x15") _, out("x16") _, out("x17") _,
+            out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _, out("v5") _,
+            out("v6") _, out("v7") _, out("v8") _, out("v9") _, out("v10") _, out("v11") _,
+            out("v12") _, out("v13") _, out("v14") _, out("v15") _, out("v16") _, out("v17") _,
+            out("v18") _, out("v19") _, out("v20") _, out("v21") _, out("v22") _, out("v23") _,
+            out("v24") _, out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _,
+            out("v30") _, out("v31") _,
             options(nostack),
         );
     }
@@ -1665,6 +1737,212 @@ const CASES: &[Case] = &[
          local.get 1 i32.const 16 i32.add global.set $sp", params: 1 },
 ];
 
+/// Run `f` of `wasm` under forge: the result, or `None` on a trap, with the
+/// trap code.
+fn forge_run(wasm: &[u8], args: &[u32; 3]) -> Option<(Option<u32>, u32)> {
+    let m = forge_core::compile(wasm).ok()?;
+    if m.funcs.iter().any(|o| matches!(o, forge_core::codegen::Outcome::Unsupported(_))) {
+        return None;
+    }
+    let fidx = m.plan.exports.iter().find(|(n, _)| n == "f").map(|(_, i)| *i)?;
+    let off = m.offset_of(fidx)?;
+    let exec = Exec::new(&m.code)?;
+    exec.arm_traps(&m);
+    let inst = Inst::new(&m, exec.base())?;
+    let r = exec.call_entry(m.entry_offset, off, inst.ptr(), args[0], args[1], args[2]);
+    let t = inst.trap_code();
+    Some(((t == forge_core::trap::NONE).then_some(r), t))
+}
+
+/// The paths where the code depends on a size: frame slots beyond an
+/// instruction's offset, memory offsets that do not fit one, functions too
+/// large for a short conditional branch, arguments beyond the registers,
+/// overlapping copies in both directions. Each against wasmi, and each trap
+/// for its reason.
+fn edges() -> bool {
+    use forge_core::trap::*;
+    let mut ok = true;
+    let mut same = |what: &str, src: &str, np: usize, want_trap: &[(usize, u32)]| {
+        let wasm = match wat::parse_str(src) {
+            Ok(w) => w,
+            Err(e) => {
+                println!("  edge {what}: wat {e}");
+                ok = false;
+                return;
+            }
+        };
+        for (k, a) in ARGS.iter().enumerate() {
+            let want = under_wasmi(&wasm, &a[..np]);
+            let Some((got, t)) = forge_run(&wasm, a) else {
+                println!("  edge {what}: forge could not run it");
+                ok = false;
+                return;
+            };
+            let code = want_trap.iter().find(|(i, _)| *i == k).map(|(_, c)| *c).unwrap_or(NONE);
+            if got != want || t != code {
+                println!("  edge {what} args {:?}: wasmi {want:?} forge {got:?} trap {}", &a[..np], name(t));
+                ok = false;
+            }
+        }
+    };
+
+    let locals = "i64 ".repeat(6000);
+    same("big frame", &format!("(module (func (export \"f\") (param i32 i32) (result i32) (local {locals}) \
+        local.get 0 i64.extend_i32_u local.set 5999 local.get 1 i64.extend_i32_s local.set 3000 \
+        local.get 5999 local.get 3000 i64.mul local.get 5998 i64.add i32.wrap_i64))"), 2, &[]);
+    let flocals = "f64 ".repeat(5000);
+    same("big frame f64", &format!("(module (func (export \"f\") (param i32 i32) (result i32) (local {flocals}) \
+        local.get 0 f64.convert_i32_u local.set 4999 local.get 1 f64.convert_i32_s local.set 2600 \
+        local.get 4999 local.get 2600 f64.add i32.trunc_sat_f64_s))"), 2, &[]);
+
+    for (off, ty) in [(1u32, "i32.load"), (2, "i64.load"), (4, "i32.load"), (3, "i32.load16_u"),
+                      (16383, "i32.load"), (65532, "i32.load"), (65528, "i64.load"), (65535, "i32.load8_s"),
+                      (4100, "f32.load"), (32760, "f64.load"), (32767, "f64.load")] {
+        let src = format!("(module (memory 1) (data (i32.const 0) \"\\01\\02\\03\\04\\05\\06\\07\\08\") \
+            (func (export \"f\") (param i32) (result i32) \
+            i32.const 65520 i64.const 0x1122334455667788 i64.store \
+            i32.const 65528 i64.const 0x99aabbccddeeff00 i64.store \
+            i32.const 0 {ty} offset={off} {}))",
+            match ty { "i64.load" => "i32.wrap_i64", "f32.load" => "i32.reinterpret_f32", "f64.load" => "i64.reinterpret_f64 i32.wrap_i64", _ => "" });
+        same(&format!("load offset {off}"), &src, 1, &[]);
+        let st = format!("(module (memory 1) (func (export \"f\") (param i32) (result i32) \
+            i32.const 0 local.get 0 {} offset={off} i32.const 0 i32.load offset={}))",
+            match ty { "i64.load" => "i64.extend_i32_u i64.store", "f32.load" => "f32.reinterpret_i32 f32.store",
+                       "f64.load" => "i64.extend_i32_u f64.reinterpret_i64 f64.store", "i32.load16_u" => "i32.store16",
+                       "i32.load8_s" => "i32.store8", _ => "i32.store" },
+            off.min(65532));
+        same(&format!("store offset {off}"), &st, 1, &[]);
+    }
+    // Beyond the end through the offset, and at the top of the reservation.
+    let oob = |ty: &str, off: u64| format!("(module (memory 1) (func (export \"f\") (param i32) (result i32) \
+        local.get 0 {ty} offset={off} drop i32.const 1))");
+    let all_oob: Vec<(usize, u32)> = (0..ARGS.len()).map(|k| (k, MEMORY_OUT_OF_BOUNDS)).collect();
+    same("i64 load at the top", &oob("i64.load", 0xffff_ffff), 1, &all_oob);
+    same("i32 load offset 65536", &oob("i32.load", 65536), 1, &all_oob);
+    same("f64 load offset 2^31", &oob("f64.load", 0x8000_0000), 1, &all_oob);
+    // Straddles the end: the access starts inside and ends outside.
+    same("straddle", "(module (memory 1) (func (export \"f\") (param i32) (result i32) \
+        i32.const 65533 i32.load))", 1, &all_oob);
+
+    // Nine integer arguments: two go on the stack, also to a native callee's
+    // side of the convention through the same code.
+    same("nine ints", "(module \
+        (func $g (param i32 i32 i32 i32 i32 i32 i32 i32 i64) (result i64) \
+          local.get 0 local.get 7 i32.sub i64.extend_i32_u local.get 8 i64.mul \
+          local.get 6 i64.extend_i32_u i64.add) \
+        (func (export \"f\") (param i32 i32) (result i32) \
+          local.get 0 i32.const 2 i32.const 3 i32.const 4 i32.const 5 i32.const 6 \
+          local.get 1 local.get 1 i32.const 7 i32.mul local.get 0 i64.extend_i32_s call $g i32.wrap_i64))", 2, &[]);
+    same("ten mixed", "(module \
+        (func $g (param f32 i32 f64 i32 i32 i32 i32 i32 i32 i32 f64 f64 f64 f64 f64 f64 f64 f32) (result i32) \
+          local.get 9 local.get 1 i32.sub local.get 17 local.get 0 f32.sub i32.trunc_sat_f32_s i32.add \
+          local.get 16 i32.trunc_sat_f64_s i32.add) \
+        (func (export \"f\") (param i32 i32) (result i32) \
+          f32.const 1.5 local.get 0 f64.const 2 i32.const 3 i32.const 4 i32.const 5 i32.const 6 i32.const 7 i32.const 8 \
+          local.get 1 f64.const 1 f64.const 2 f64.const 3 f64.const 4 f64.const 5 f64.const 6 \
+          local.get 0 f64.convert_i32_s local.get 1 f32.convert_i32_u call $g))", 2, &[]);
+
+    // memory.copy forward, backward and onto itself, lengths around a word.
+    for (dst, src) in [(3, 0), (0, 3), (8, 0), (0, 8), (5, 5), (20, 1), (1, 20)] {
+        let copy = format!("(module (memory 1) \
+            (data (i32.const 0) \"0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ\") \
+            (func (export \"f\") (param i32 i32) (result i32) \
+            i32.const {dst} i32.const {src} local.get 0 local.get 1 i32.xor i32.const 47 i32.and memory.copy \
+            i32.const 0 i64.load i32.const 9 i64.load i64.const 7 i64.rotl i64.xor \
+            i32.const 21 i64.load i64.const 13 i64.rotl i64.xor i32.const 37 i64.load i64.const 29 i64.rotl i64.xor \
+            i32.const 54 i64.load i64.const 31 i64.rotl i64.xor i32.wrap_i64))");
+        same(&format!("copy {dst}<-{src}"), &copy, 2, &[]);
+    }
+    same("fill", "(module (memory 1) (func (export \"f\") (param i32 i32) (result i32) \
+        i32.const 5 local.get 1 local.get 0 i32.const 63 i32.and memory.fill \
+        i32.const 0 i64.load i32.const 9 i64.load i64.const 7 i64.rotl i64.xor \
+        i32.const 21 i64.load i64.const 13 i64.rotl i64.xor i32.const 37 i64.load i64.const 29 i64.rotl i64.xor \
+        i32.const 61 i64.load i64.const 31 i64.rotl i64.xor i32.wrap_i64))", 2, &[]);
+
+    // A function longer than a conditional branch reaches on A64 (1 MiB):
+    // the division's trap stub and the block end both lie past it.
+    let body = "local.get 1 i32.const 3 i32.mul local.get 0 i32.xor local.set 1 ".repeat(90_000);
+    let far = format!("(module (func (export \"f\") (param i32 i32) (result i32) \
+        i32.const 1000 local.get 0 i32.div_u drop \
+        (block local.get 0 i32.const 1 i32.eq br_if 0 {body}) \
+        local.get 1 local.get 0 i32.eq if (result i32) i32.const 7 else local.get 1 end))");
+    let div0: Vec<(usize, u32)> = ARGS.iter().enumerate().filter(|(_, a)| a[0] == 0).map(|(k, _)| (k, DIVIDE_ERROR)).collect();
+    same("far branches", &far, 2, &div0);
+    if let Ok(w) = wat::parse_str(&far) {
+        if let Ok(m) = forge_core::compile(&w) {
+            println!("  edge far branches: {} B code", m.code.len());
+        }
+    }
+    // Index 3 takes the default past the body; 0..2 land before it.
+    let sw = format!("(module (func (export \"f\") (param i32 i32) (result i32) \
+        (block $end (block $mid local.get 0 i32.const 3 i32.and br_table $mid $end $mid) \
+        {body} local.get 1 return) i32.const 99))");
+    same("far br_table", &sw, 2, &[]);
+
+    if ok {
+        println!("  edges ok");
+    }
+    ok
+}
+
+/// The kernel's on-device cases (`kernel/src/forge_tests.rs`, written by
+/// `gentests` from runs on x86), run here and compared with what they
+/// recorded: result and trap code. Read as text, so the harness takes the
+/// file as it is.
+pub fn kernel_cases() -> bool {
+    const SRC: &str = include_str!("../../../kernel/src/forge_tests.rs");
+    let mut blobs: std::collections::BTreeMap<&str, Vec<u8>> = Default::default();
+    let mut cur: Option<(&str, Vec<u8>)> = None;
+    let mut cases = Vec::new();
+    for l in SRC.lines() {
+        let l = l.trim();
+        if let Some(rest) = l.strip_prefix("pub const ").and_then(|r| r.strip_suffix(": &[u8] = &[")) {
+            cur = Some((rest, Vec::new()));
+        } else if l == "];" {
+            if let Some((n, b)) = cur.take() {
+                blobs.insert(n, b);
+            }
+        } else if let Some((_, b)) = cur.as_mut() {
+            b.extend(l.split(',').filter_map(|x| u8::from_str_radix(x.trim().trim_start_matches("0x"), 16).ok()));
+        } else if let Some(body) = l.strip_prefix("Case { ").and_then(|r| r.strip_suffix(" },")) {
+            let field = |k: &str| {
+                body.split(", ").find_map(|kv| kv.strip_prefix(k).and_then(|v| v.strip_prefix(": "))).unwrap_or("")
+            };
+            cases.push((
+                field("wasm"),
+                field("arg").parse::<u32>().unwrap_or(0),
+                field("want").parse::<u32>().unwrap_or(0),
+                field("trap").parse::<u32>().unwrap_or(0),
+                field("fuel").parse::<i64>().unwrap_or(-1),
+            ));
+        }
+    }
+    let mut ok = !cases.is_empty();
+    for (name, arg, want, trap, fuel) in &cases {
+        let Some(wasm) = blobs.get(name) else {
+            println!("  {name:<18} no module");
+            ok = false;
+            continue;
+        };
+        let got = oneshot(wasm, *arg, if *fuel < 0 { None } else { Some(*fuel) });
+        let verdict = if got == Some((*want, *trap)) { "ok" } else { ok = false; "DIFFERS" };
+        println!("  {name:<18} arg {arg:<8} want ({want}, {trap}) got {got:?} {verdict}");
+    }
+    println!("{} kernel cases: {}", cases.len(), if ok { "all match" } else { "MISMATCH" });
+    ok
+}
+
+/// The module text of every case, as `run` builds it.
+pub fn case_sources() -> Vec<String> {
+    CASES
+        .iter()
+        .map(|c| {
+            let ps = "(param i32)".repeat(c.params);
+            format!("(module {} (func (export \"f\") {ps} (result i32) {}))", c.decl, c.body)
+        })
+        .collect()
+}
+
 pub fn run() -> bool {
     let mut fails = 0u32;
     let mut checks = 0u32;
@@ -1760,7 +2038,7 @@ pub fn run() -> bool {
         }
     }
 
-    let traps = traps_report_themselves() && imported_storage_is_refused();
+    let traps = traps_report_themselves() && imported_storage_is_refused() && edges();
     println!(
         "\n{} Faelle, {checks} Vergleiche, {fails} abweichend\n\
          Traps: {} — Wachseite, Tabelle, Signatur, Bulk-Raender, Division, \

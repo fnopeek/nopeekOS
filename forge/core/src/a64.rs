@@ -328,6 +328,11 @@ impl Asm {
             | ((amount & 7) << 10) | (r(n) << 5) | r(d));
     }
 
+    pub fn sub_ext(&mut self, wide: bool, d: R, n: R, m: R, ext: Ext, amount: u32) {
+        self.emit(sf(wide) | (0b1001011001 << 21) | (r(m) << 16) | ((ext as u32) << 13)
+            | ((amount & 7) << 10) | (r(n) << 5) | r(d));
+    }
+
     /// `add`/`sub`/`adds`/`subs` with a 12-bit immediate, optionally `lsl #12`.
     /// Register 31 is `sp` in `d` (unless setting flags) and in `n`.
     fn addsub_imm(&mut self, wide: bool, op: u32, s: u32, d: R, n: R, imm12: u32, lsl12: bool) {

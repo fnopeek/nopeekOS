@@ -1121,7 +1121,17 @@ pub fn run(args: &[String]) -> bool {
                 let hi = (lo + per).min(start + count);
                 let mut next = lo;
                 while next < hi {
-                    let mut child = Command::new(&exe)
+                    // FORGE_RUNNER (e.g. `qemu-aarch64`) runs each worker
+                    // through an emulator, for a host without binfmt.
+                    let mut cmd = match std::env::var_os("FORGE_RUNNER") {
+                        Some(r) => {
+                            let mut c = Command::new(r);
+                            c.arg(&exe);
+                            c
+                        }
+                        None => Command::new(&exe),
+                    };
+                    let mut child = cmd
                         .args(["--fuzz", "--worker", &next.to_string(), &(hi - next).to_string()])
                         .stdout(Stdio::piped())
                         .stderr(Stdio::null())
@@ -1142,7 +1152,7 @@ pub fn run(args: &[String]) -> bool {
                     let mut last = None;
                     let mut hung = false;
                     loop {
-                        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+                        match rx.recv_timeout(std::time::Duration::from_secs(if std::env::var_os("FORGE_RUNNER").is_some() { 60 } else { 5 })) {
                             Ok(l) => {
                                 if let Some(s) = l.strip_prefix("S ") {
                                     last = s.parse::<u64>().ok();
@@ -1210,6 +1220,11 @@ pub fn run(args: &[String]) -> bool {
         t0.elapsed().as_secs_f64()
     );
     bad.is_empty()
+}
+
+/// The module the fuzzer writes for `seed`.
+pub fn module_wat(seed: u64) -> String {
+    Gen::new(seed).module()
 }
 
 pub fn one(seed: u64) -> bool {

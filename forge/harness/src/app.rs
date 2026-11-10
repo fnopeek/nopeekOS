@@ -33,25 +33,36 @@ extern "C" fn h_print(ctx: *const u64, ptr: u32, len: u32) {
     }
 }
 
-/// The TSC rate in MHz, measured once against the host clock.
+/// The cycle counter: the TSC on x86, the virtual counter on AArch64.
+pub(crate) fn cycles() -> u64 {
+    // SAFETY: rdtsc has no preconditions.
+    #[cfg(target_arch = "x86_64")]
+    return unsafe { core::arch::x86_64::_rdtsc() };
+    #[cfg(target_arch = "aarch64")]
+    {
+        let v: u64;
+        // SAFETY: CNTVCT_EL0 is readable at EL0 under Linux.
+        unsafe { std::arch::asm!("mrs {}, cntvct_el0", out(reg) v, options(nomem, nostack)) };
+        v
+    }
+}
+
+/// The counter's rate in MHz, measured once against the host clock.
 fn tsc_mhz() -> u64 {
     static MHZ: OnceLock<u64> = OnceLock::new();
     *MHZ.get_or_init(|| {
         let t = std::time::Instant::now();
-        // SAFETY: rdtsc has no preconditions.
-        let a = unsafe { core::arch::x86_64::_rdtsc() };
+        let a = cycles();
         while t.elapsed().as_millis() < 100 {}
-        // SAFETY: as above.
-        let b = unsafe { core::arch::x86_64::_rdtsc() };
-        (b - a) / t.elapsed().as_micros() as u64
+        let b = cycles();
+        ((b - a) / t.elapsed().as_micros().max(1) as u64).max(1)
     })
 }
 
 extern "C" fn h_sys_info(_ctx: *const u64, key: u32) -> u64 {
     match key & 0xff {
         10 => tsc_mhz(),
-        // SAFETY: rdtsc has no preconditions.
-        19 => unsafe { core::arch::x86_64::_rdtsc() },
+        19 => cycles(),
         _ => 0,
     }
 }
@@ -100,7 +111,7 @@ pub fn run(args: &[String]) -> bool {
             _ => None,
         })
         .collect();
-    eprintln!("forge: {compile:.1} ms, {} B x86, {} refused {:?}", m.code.len(), refused.len(), refused);
+    eprintln!("forge: {compile:.1} ms, {} B {:?}, {} refused {:?}", m.code.len(), forge_core::Arch::NATIVE, refused.len(), refused);
     let Some(fidx) = m.plan.exports.iter().find(|(n, _)| n == "_start").map(|(_, i)| *i) else {
         eprintln!("no _start");
         return false;
@@ -138,7 +149,13 @@ pub fn dump(args: &[String]) -> bool {
             return false;
         }
     };
-    let m = match forge_core::compile(&wasm) {
+    // FORGE_ARCH=a64 dumps the AArch64 code on any host.
+    let arch = match std::env::var("FORGE_ARCH").as_deref() {
+        Ok("a64") => forge_core::Arch::A64,
+        Ok("x64") => forge_core::Arch::X64,
+        _ => forge_core::Arch::NATIVE,
+    };
+    let m = match forge_core::compile_for(&wasm, arch) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("compile: {e}");
@@ -161,6 +178,10 @@ pub fn dump(args: &[String]) -> bool {
             return false;
         }
         println!("== function {fi}: {} bytes", end - off);
+        if arch == forge_core::Arch::A64 {
+            disasm_a64(&m.code[off..end]);
+            continue;
+        }
         let out = std::process::Command::new("objdump")
             .args(["-D", "-b", "binary", "-mi386:x86-64", "-M", "intel", "--no-show-raw-insn"])
             .arg(&tmp)
@@ -173,6 +194,31 @@ pub fn dump(args: &[String]) -> bool {
     }
     let _ = std::fs::remove_file(&tmp);
     true
+}
+
+/// One line per word through `llvm-mc --disassemble`, offset first.
+fn disasm_a64(code: &[u8]) {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let text: String = code.iter().map(|b| format!("0x{b:02x} ")).collect();
+    let Ok(mut child) = Command::new("llvm-mc")
+        .args(["--disassemble", "-triple=aarch64"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    if let Some(mut i) = child.stdin.take() {
+        let _ = i.write_all(text.as_bytes());
+    }
+    if let Ok(o) = child.wait_with_output() {
+        let lines = String::from_utf8_lossy(&o.stdout);
+        for (k, l) in lines.lines().filter(|l| !l.trim_start().starts_with('.')).enumerate() {
+            println!("{:6x}: {}", 4 * k, l.trim());
+        }
+    }
 }
 
 /// Print one function's wasm operators with their offset in the body.

@@ -1,4 +1,4 @@
-//! forge — WASM to x86-64, single pass, at `install` time.
+//! forge — WASM to x86-64 or AArch64, single pass, at `install` time.
 //!
 //! Decoding and validation come from wasmparser, which the kernel already
 //! carries through wasmi (`no_std`, `validate`, no serde, no hashbrown).
@@ -23,6 +23,7 @@ use alloc::collections::BTreeSet;
 
 pub mod a64;
 pub mod codegen;
+pub mod codegen_a64;
 pub mod x64;
 
 /// Byte offsets inside the instance context, which generated code reaches
@@ -417,15 +418,37 @@ impl CompiledModule {
     }
 }
 
-/// Validate and generate. A function that meets an opcode the generator does
-/// not emit comes back as `Unsupported(name)` — never as wrong code.
+/// The instruction set code is generated for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Arch {
+    X64,
+    A64,
+}
+
+impl Arch {
+    /// The processor this crate is built for.
+    pub const NATIVE: Arch = if cfg!(target_arch = "aarch64") { Arch::A64 } else { Arch::X64 };
+}
+
+/// Validate and generate for `Arch::NATIVE`. A function that meets an opcode
+/// the generator does not emit comes back as `Unsupported(name)` — never as
+/// wrong code.
 pub fn compile(wasm: &[u8]) -> Result<CompiledModule, Error> {
-    let mut lk = Linker::new(wasm.len());
+    compile_for(wasm, Arch::NATIVE)
+}
+
+/// Validate and generate for `arch`.
+pub fn compile_for(wasm: &[u8], arch: Arch) -> Result<CompiledModule, Error> {
+    let mut lk = Linker::new(wasm.len(), arch);
     let (plan, funcs) = walk(wasm, Some(&mut lk))?;
     let l = lk.finish(&plan, &funcs);
     // Calls and fault entries are rel32; beyond 2 GiB they would wrap.
     if l.code.len() > i32::MAX as usize {
         return Err(reject("generated code exceeds 2 GiB"));
+    }
+    // A64 calls and branches to the routines reach ±128 MiB.
+    if l.out_of_range {
+        return Err(reject("generated code exceeds 128 MiB"));
     }
     Ok(CompiledModule {
         plan,
@@ -450,6 +473,8 @@ struct Linked {
     trap_routine: usize,
     pf_entry: usize,
     de_entry: usize,
+    /// A64 only: a call or a trap branch did not reach its target.
+    out_of_range: bool,
 }
 
 /// Places functions as they come out of the generator, instead of collecting
@@ -474,6 +499,7 @@ struct Linker {
     refuel: usize,
     pf_entry: usize,
     de_entry: usize,
+    arch: Arch,
 }
 
 /// Nonzero: shift each function by a pseudo-random amount below 128 bytes,
@@ -487,7 +513,10 @@ impl Linker {
     /// one and a half and two and a half times the whole module's bytes, so
     /// twice is a guess that usually holds and never costs more than one
     /// growth if it does not.
-    fn new(wasm_len: usize) -> Linker {
+    fn new(wasm_len: usize, arch: Arch) -> Linker {
+        if arch == Arch::A64 {
+            return Linker::new_a64(wasm_len);
+        }
         let mut code: Vec<u8> = Vec::with_capacity(wasm_len * 2 + 4096);
 
         let entry_offset = 0usize;
@@ -539,6 +568,52 @@ impl Linker {
             refuel,
             pf_entry,
             de_entry,
+            arch,
+        }
+    }
+
+    /// The A64 routines: entry, trap routine, refuel, and the two fault
+    /// entries. A64 needs no native-call routine: the float homes d8-d15 are
+    /// callee-saved under AAPCS64.
+    fn new_a64(wasm_len: usize) -> Linker {
+        let mut code: Vec<u8> = Vec::with_capacity(wasm_len * 4 + 4096);
+        let mut a = a64::Asm::new();
+        codegen_a64::emit_entry(&mut a);
+        code.extend_from_slice(&a.buf);
+
+        let trap_routine = code.len();
+        let mut a = a64::Asm::new();
+        codegen_a64::emit_trap_routine(&mut a);
+        code.extend_from_slice(&a.buf);
+
+        let refuel = code.len();
+        let mut a = a64::Asm::new();
+        codegen_a64::emit_refuel(&mut a);
+        code.extend_from_slice(&a.buf);
+
+        let fault_entry = |code: &mut Vec<u8>, reason: u32| -> usize {
+            let at = code.len();
+            let mut a = a64::Asm::new();
+            let b = codegen_a64::emit_fault_entry(&mut a, reason);
+            code.extend_from_slice(&a.buf);
+            codegen_a64::patch_branch(code, at + b, trap_routine);
+            at
+        };
+        let pf_entry = fault_entry(&mut code, trap::MEMORY_OUT_OF_BOUNDS);
+        let de_entry = fault_entry(&mut code, trap::DIVIDE_ERROR);
+
+        Linker {
+            code,
+            offsets: Vec::new(),
+            relocs: Vec::new(),
+            trap_relocs: Vec::new(),
+            entry_offset: 0,
+            trap_routine,
+            native_call: trap_routine,
+            refuel,
+            pf_entry,
+            de_entry,
+            arch: Arch::A64,
         }
     }
 
@@ -558,9 +633,16 @@ impl Linker {
                 h = (h ^ (h >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
                 h = (h ^ (h >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
                 h ^= h >> 31;
-                // Never executed; `int3` makes a stray jump into it stop.
-                for _ in 0..h % 128 {
-                    self.code.push(0xCC);
+                // Never executed; `int3` (or `brk`) makes a stray jump into
+                // it stop.
+                if self.arch == Arch::A64 {
+                    for _ in 0..(h % 128) / 4 {
+                        self.code.extend_from_slice(&0xd420_0000u32.to_le_bytes());
+                    }
+                } else {
+                    for _ in 0..h % 128 {
+                        self.code.push(0xCC);
+                    }
                 }
             }
         }
@@ -581,6 +663,9 @@ impl Linker {
     }
 
     fn finish(mut self, plan: &ModulePlan, _funcs: &[codegen::Outcome]) -> Linked {
+        if self.arch == Arch::A64 {
+            return self.finish_a64(plan);
+        }
         // Where a call to a function the generator refused lands. It reports
         // itself like any other trap instead of faulting.
         let trap = self.code.len();
@@ -622,6 +707,44 @@ impl Linker {
             trap_routine: self.trap_routine,
             pf_entry: self.pf_entry,
             de_entry: self.de_entry,
+            out_of_range: false,
+        }
+    }
+
+    /// As `finish`, with `b`/`bl` instead of rel32.
+    fn finish_a64(mut self, plan: &ModulePlan) -> Linked {
+        let mut ok = true;
+        let trap = self.code.len();
+        let mut a = a64::Asm::new();
+        let b = codegen_a64::emit_fault_entry(&mut a, trap::UNCOMPILED);
+        self.code.extend_from_slice(&a.buf);
+        ok &= codegen_a64::patch_branch(&mut self.code, trap + b, self.trap_routine);
+
+        for at in &self.trap_relocs {
+            ok &= codegen_a64::patch_branch(&mut self.code, *at, self.trap_routine);
+        }
+        let n_imported = plan.imported_funcs.len() as u32;
+        for (at, target) in &self.relocs {
+            let dst = match *target {
+                codegen::NATIVE_CALL => self.native_call,
+                codegen::REFUEL => self.refuel,
+                t => t
+                    .checked_sub(n_imported)
+                    .and_then(|d| self.offsets.get(d as usize).copied().flatten())
+                    .unwrap_or(trap),
+            };
+            ok &= codegen_a64::patch_branch(&mut self.code, *at, dst);
+        }
+
+        Linked {
+            code: self.code,
+            offsets: self.offsets,
+            trap_offset: trap,
+            entry_offset: self.entry_offset,
+            trap_routine: self.trap_routine,
+            pf_entry: self.pf_entry,
+            de_entry: self.de_entry,
+            out_of_range: !ok,
         }
     }
 }
@@ -783,7 +906,7 @@ fn walk(
             allocs = fv.into_allocations();
 
             if let Some(l) = lk.as_deref_mut() {
-                let mut o = generate_one(&plan, &fp, &body, &ops_buf);
+                let mut o = generate_one(&plan, &fp, &body, &ops_buf, l.arch);
                 // Straight into the module buffer, and the function's own
                 // buffer goes back to the heap right away.
                 l.push(&mut o);
@@ -803,6 +926,7 @@ fn generate_one(
     fp: &FuncPlan,
     body: &FunctionBody<'_>,
     ops: &[Operator<'_>],
+    arch: Arch,
 ) -> codegen::Outcome {
     let ordinal = fp.func_index as usize - plan.imported_funcs.len();
     let Some(&ti) = plan.funcs.get(ordinal) else {
@@ -829,7 +953,10 @@ fn generate_one(
         globals: &plan.global_types,
         table_len: plan.table.map(|(min, _)| min).unwrap_or(0),
     };
-    codegen::compile_func(params, results, &decls, ops, &m)
+    match arch {
+        Arch::X64 => codegen::compile_func(params, results, &decls, ops, &m),
+        Arch::A64 => codegen_a64::compile_func(params, results, &decls, ops, &m),
+    }
 }
 
 fn walk_body<'a, T: wasmparser::WasmModuleResources>(

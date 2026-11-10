@@ -8,6 +8,8 @@
 //!   forge_harness --app <file.wasm>           an SDK app's _start (fbench)
 //!   forge_harness --dump <file> [func]        disassemble generated code
 //!   forge_harness --run <wasm> [page w h n]   run it, and time it
+//!   forge_harness --codehash <file.wasm>...   hash of the generated code
+//!   forge_harness --kernel-cases              the kernel's on-device cases
 
 mod app;
 mod bench;
@@ -67,6 +69,14 @@ fn main() {
     if args.first().map(|a| a == "--fuzz-one").unwrap_or(false) {
         let seed = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(0);
         std::process::exit(if fuzz::one(seed) { 0 } else { 1 });
+    }
+    if args.first().map(|a| a == "--codehash").unwrap_or(false) {
+        args.remove(0);
+        codehash(&args);
+        return;
+    }
+    if args.first().map(|a| a == "--kernel-cases").unwrap_or(false) {
+        std::process::exit(if selftest::kernel_cases() { 0 } else { 1 });
     }
     if args.first().map(|a| a == "--selftest").unwrap_or(false) {
         std::process::exit(if selftest::run() { 0 } else { 1 });
@@ -265,8 +275,9 @@ fn report_roadmap(f: &str) {
         .sum();
     println!("  uebersetzt in {compile_ms:.0} ms");
     println!(
-        "  erzeugt: {} B x86 fuer {} wasm-Instruktionen ({:.1} B je Instruktion)",
+        "  erzeugt: {} B {:?} fuer {} wasm-Instruktionen ({:.1} B je Instruktion)",
         m.code.len(),
+        forge_core::Arch::NATIVE,
         wasm_code,
         if wasm_code > 0 { m.code.len() as f64 / wasm_code as f64 } else { 0.0 }
     );
@@ -347,4 +358,44 @@ fn report_roadmap(f: &str) {
 
 fn pct(a: u64, b: u64) -> f64 {
     if b == 0 { 0.0 } else { 100.0 * a as f64 / b as f64 }
+}
+
+/// FNV-1a over the generated code of every given module, of the fuzzer's
+/// first 3000 modules and of the self-test's cases: a refactor that must not
+/// change the output proves it by an unchanged hash.
+fn codehash(files: &[String]) {
+    fn fnv(h: &mut u64, b: &[u8]) {
+        for x in b {
+            *h ^= *x as u64;
+            *h = h.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+    let one = |wasm: &[u8]| -> u64 {
+        let mut h = 0xcbf2_9ce4_8422_2325u64;
+        match forge_core::compile(wasm) {
+            Ok(m) => fnv(&mut h, &m.code),
+            Err(e) => fnv(&mut h, e.to_string().as_bytes()),
+        }
+        h
+    };
+    for f in files {
+        match std::fs::read(f) {
+            Ok(b) => println!("{:016x} {f}", one(&b)),
+            Err(e) => println!("{f}: {e}"),
+        }
+    }
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for seed in 0..3000 {
+        if let Ok(w) = wat::parse_str(fuzz::module_wat(seed)) {
+            fnv(&mut h, &one(&w).to_le_bytes());
+        }
+    }
+    println!("{h:016x} fuzz 0..3000");
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for src in selftest::case_sources() {
+        if let Ok(w) = wat::parse_str(&src) {
+            fnv(&mut h, &one(&w).to_le_bytes());
+        }
+    }
+    println!("{h:016x} selftest cases");
 }

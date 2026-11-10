@@ -25,7 +25,7 @@ static LAYOUT: std::sync::Mutex<Option<Layout>> = std::sync::Mutex::new(None);
 
 extern "C" fn on_prof(_sig: i32, _info: *mut libc::siginfo_t, uc: *mut libc::c_void) {
     // SAFETY: the third argument of a `SA_SIGINFO` handler is a `ucontext_t`.
-    let rip = unsafe { (*(uc as *mut libc::ucontext_t)).uc_mcontext.gregs[libc::REG_RIP as usize] as u64 };
+    let rip = unsafe { crate::faults::pc(uc) };
     let i = N.fetch_add(1, Ordering::Relaxed);
     if i < CAP {
         SAMPLES[i].store(rip, Ordering::Relaxed);

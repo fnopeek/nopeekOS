@@ -143,6 +143,9 @@ fn data_processing_register() {
         c.case(&format!("uxth {}, {}", w(d), w(5)), |a| a.uxt(R(d), X5, 16));
         c.case(&format!("add {}, {}, {}, uxtw", xs(d), x(27), w(3)), |a| a.add_ext(true, R(d), X27, X3, Ext::Uxtw, 0));
         c.case(&format!("add {}, {}, {}, uxtw #3", xs(d), xs(31), w(3)), |a| a.add_ext(true, R(d), SP, X3, Ext::Uxtw, 3));
+        c.case(&format!("sub {}, {}, {}, uxtw", xs(d), x(27), w(3)), |a| a.sub_ext(true, R(d), X27, X3, Ext::Uxtw, 0));
+        c.case(&format!("sub {}, {}, {}", xs(d), xs(31), x(16)), |a| a.sub_ext(true, R(d), SP, X16, Ext::Uxtx, 0));
+        c.case(&format!("add {}, {}, {}", xs(d), xs(31), x(16)), |a| a.add_ext(true, R(d), SP, X16, Ext::Uxtx, 0));
     }
     c.check();
 }
@@ -257,6 +260,8 @@ fn loads_stores() {
             let uname = name.replacen("str", "stur", 1);
             c.case(&format!("{uname} {tt}, [x2, #-8]"), |a| a.stur(m, R(t), X2, -8));
             c.case(&format!("{name} {tt}, [x27, w6, uxtw]"), |a| a.str_reg(m, R(t), X27, X6, Ext::Uxtw, false));
+            c.case(&format!("{name} {tt}, [x16, x17]"), |a| a.str_reg(m, R(t), X16, X17, Ext::Uxtx, false));
+            c.case(&format!("{name} {tt}, [sp, x17]"), |a| a.str_reg(m, R(t), SP, X17, Ext::Uxtx, false));
         }
     }
     for &off in &[-512i32, -16, 0, 504] {
@@ -348,9 +353,19 @@ fn floating_point() {
         }
         c.case(&format!("ldr {d}, [x27, w6, uxtw]"), |a| a.fldr_reg(fw, vd, X27, X6, Ext::Uxtw));
         c.case(&format!("str {d}, [x27, w6, uxtw]"), |a| a.fstr_reg(fw, vd, X27, X6, Ext::Uxtw));
+        c.case(&format!("ldr {d}, [x29, x17]"), |a| a.fldr_reg(fw, vd, FP, X17, Ext::Uxtx));
+        c.case(&format!("str {d}, [x16, x17]"), |a| a.fstr_reg(fw, vd, X16, X17, Ext::Uxtx));
+        let z = if fw == Fw::D { "xzr" } else { "wzr" };
+        c.case(&format!("fmov {d}, {z}"), |a| a.fmov_from_gpr(fw, vd, ZR));
     }
     c.case("fcvt d0, s17", |a| a.fcvt(Fw::S, V(0), V(17)));
     c.case("fcvt s0, d17", |a| a.fcvt(Fw::D, V(0), V(17)));
+    c.case("stp x29, x30, [sp]", |a| a.stp(FP, LR, SP, 0));
+    c.case("ldp x29, x30, [sp]", |a| a.ldp(FP, LR, SP, 0));
+    c.case("ldrsw x17, [x16, w8, uxtw #2]", |a| a.ldr_reg(Mem::SwX, X17, X16, X8, Ext::Uxtw, true));
+    c.case("ldr x16, [x16, w8, uxtw #3]", |a| a.ldr_reg(Mem::X, X16, X16, X8, Ext::Uxtw, true));
+    c.case("ldr w16, [x16, w8, uxtw #2]", |a| a.ldr_reg(Mem::W, X16, X16, X8, Ext::Uxtw, true));
+    c.case("ldr x0, [x29, x17]", |a| a.ldr_reg(Mem::X, X0, FP, X17, Ext::Uxtx, false));
     c.case("cnt v3.8b, v4.8b", |a| a.cnt_8b(V(3), V(4)));
     c.case("addv b3, v4.8b", |a| a.addv_8b(V(3), V(4)));
     c.check();
