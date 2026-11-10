@@ -930,7 +930,6 @@ start=$((start + esp)), size=$npk, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, na
 PARTS
     local part="$PI_SD_IMG@@$((start * 512))"
     mkfs.fat -F 32 -n NOPEEKOS --offset "$start" "$PI_SD_IMG" $((esp / 2)) >/dev/null
-    mcopy -i "$part" "$ARM_IMG" ::nopeek.img
     # The kernel's own small files (the time zone for the clock before
     # unlock), where the PC's ESP keeps them (storage/fat32.rs).
     mmd -i "$part" ::EFI ::EFI/NOPEEK
@@ -940,6 +939,9 @@ PARTS
     for o in overlay_map.dtb vc4-kms-v3d-pi5.dtbo; do
         [ -f "$PI_FW/boot/overlays/$o" ] && mcopy -i "$part" "$PI_FW/boot/overlays/$o" ::overlays/
     done
+    # The kernel last: the clusters after it stay free as the run an
+    # update rewrites it into (fat32.rs MIN_KERNEL_RESERVED).
+    mcopy -i "$part" "$ARM_IMG" ::nopeek.img
     rm -rf "$dir"
     ok "Pi 5 SD image: $PI_SD_IMG"
 }
