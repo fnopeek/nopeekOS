@@ -188,9 +188,10 @@ const IRQ_TYPE_EDGE_RISING: u32 = 1;
 const IRQ_TYPE_LEVEL_HIGH: u32 = 4;
 
 /// The interrupt of RP1 child `node` (`interrupts` = line, type), as
-/// `request_irq` would make it: `rp1_irq_xlate`, the line's SPI through the
-/// MIP, `rp1_irq_set_type`, `rp1_irq_activate`. None without RP1, for an
-/// unknown type, or if the GIC refuses the SPI.
+/// `request_irq` makes it (`__setup_irq`): `rp1_irq_xlate`, the line's SPI
+/// through the MIP, `rp1_irq_set_type`, `rp1_irq_activate`, then
+/// `irq_startup`'s `rp1_unmask_irq`. None without RP1, for an unknown type,
+/// or if the GIC refuses the SPI.
 fn rp1_irq(fdt: &Fdt, node: &Node) -> Option<(crate::irq::Irq, u32, u32)> {
     let (rp1, b0, b1) = RP1_IRQS.rp1.get()?;
     let line = fdt.prop_cell(node, b"interrupts", 0)?;
@@ -203,6 +204,7 @@ fn rp1_irq(fdt: &Fdt, node: &Node) -> Option<(crate::irq::Irq, u32, u32)> {
     let irq = crate::irq::register_chained(&RP1_CHIP, line, intid)?;
     RP1_IRQS.level[line as usize].store(trigger == pi5_core::rp1::Trigger::Level, core::sync::atomic::Ordering::Relaxed);
     rp1.irq_enable(&mut Bars(*b0, *b1), line, trigger);
+    rp1.irq_unmask(&mut Bars(*b0, *b1), line);
     Some((irq, line, intid))
 }
 

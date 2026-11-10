@@ -92,9 +92,10 @@ pub fn register_spi(intid: u32, edge: bool) -> Option<Irq> {
 
 /// Line `line` of `chip`, which arrives as the edge-triggered SPI `intid`.
 /// The SPI stays enabled, as Linux starts a chained handler's parent at
-/// once; the line is masked at `chip` until the driver `arm`s it.
+/// once. The caller then configures and starts the line at `chip`, as
+/// `__setup_irq` does; until the driver's fiber exists a first interrupt
+/// is counted and masks the line, and the first `arm` unmasks it.
 pub fn register_chained(chip: &'static &'static dyn Chained, line: u32, intid: u32) -> Option<Irq> {
-    chip.mask(line);
     gic::mask(intid);
     if !gic::set_type(intid, true) {
         crate::kprintln!("[npk] irq: INTID {} does not take an edge trigger", intid);

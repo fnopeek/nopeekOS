@@ -1,0 +1,10 @@
+[package]
+name = "xhci_core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "xHCI start, interrupt handler and event ring, after Linux"
+
+# no_std rlib. Builds for the kernel targets AND for the std harness.
+[lib]
+crate-type = ["rlib"]

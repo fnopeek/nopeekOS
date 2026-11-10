@@ -39,35 +39,9 @@ const BAR0_MAP: u64 = 64 * 1024;
 
 // Interrupter 0 register set (from the runtime base), 32 bytes.
 const IR0:    u32 = 0x20;
-const IR_LEN: u64 = 0x20;
 
 // === Operational register offsets (from oper_base) ===
-const OP_USBCMD:  u32 = 0x00;
 const OP_USBSTS:  u32 = 0x04;
-#[allow(dead_code)]
-const OP_DNCTRL:  u32 = 0x14;
-const OP_CRCR:    u32 = 0x18;
-const OP_DCBAAP:  u32 = 0x30;
-const OP_CONFIG:  u32 = 0x38;
-
-// USBCMD bits
-const CMD_RUN:  u32 = 1 << 0;
-const CMD_HCRST: u32 = 1 << 1;
-const CMD_INTE: u32 = 1 << 2; // interrupter enable
-/// `XHCI_IRQS`: the interrupt enables `xhci_quiesce` clears.
-const XHCI_IRQS: u32 = CMD_INTE | (1 << 3) | (1 << 10);
-
-// USBSTS bits
-const STS_HCH: u32 = 1 << 0;  // HC Halted
-const STS_FATAL: u32 = 1 << 2; // host system error
-const STS_EINT: u32 = 1 << 3; // event interrupt (write 1 to clear)
-const STS_HCE: u32 = 1 << 12; // host controller error
-/// IMAN: Interrupt Pending (write 1 to clear), Interrupt Enable.
-const IMAN_IP: u32 = 1 << 0;
-const IMAN_IE: u32 = 1 << 1;
-/// `XHCI_MAX_HALT_USEC`.
-const MAX_HALT_US: u64 = 32_000;
-const STS_CNR: u32 = 1 << 11; // Controller Not Ready
 
 // PORTSC bits
 const PORTSC_CCS:   u32 = 1 << 0;  // Current Connect Status
@@ -156,14 +130,9 @@ const USB_SET_FEATURE:    u8 = 3;
 const USB_SET_INTERFACE:  u8 = 11;
 
 const NUM_CMD_TRBS: usize = 32;
-/// Event ring: `ERST_DEFAULT_SEGS` segments of `TRBS_PER_SEGMENT`, or as
-/// many as ERST Max allows (`xhci_alloc_interrupter`), one after the other
-/// in memory so the dequeue pointer walks them as one ring. An
-/// isochronous stream raises up to 8000 events a second.
-const ERST_DEFAULT_SEGS: usize = 2;
-const EVT_SEG_TRBS: usize = 256;
-/// Most events one `drain` takes: the largest ring.
-const NUM_EVT_TRBS: usize = ERST_DEFAULT_SEGS * EVT_SEG_TRBS;
+/// Event ring segments (`xhci_core::event_ring_segments`), one after the
+/// other in memory so the dequeue pointer walks them as one ring.
+const EVT_SEG_TRBS: usize = xhci_core::TRBS_PER_SEGMENT;
 const NUM_TR_TRBS:  usize = 64;
 
 // HID usage code to ASCII table (keyboard page, US layout base)
@@ -494,7 +463,6 @@ struct XhciState {
     ctrl: CtrlId,
     mmio: Mmio,
     oper: Mmio,         // operational registers
-    rt: Mmio,           // runtime registers
     db: Mmio,           // doorbell array
     ctx_size: usize,    // 32 or 64
     max_ports: u32,
@@ -505,10 +473,10 @@ struct XhciState {
     cmd_cycle: u32,
     cmd_enqueue: usize,
     evt_ring: DmaRegion,
-    evt_cycle: u32,
-    evt_dequeue: usize,
-    /// Entries of the event ring, all segments.
-    evt_trbs: usize,
+    /// The event ring's cursor.
+    evt: xhci_core::EventRing,
+    /// Operational and interrupter 0 registers in the window.
+    layout: xhci_core::Layout,
     input_ctx: DmaRegion,
     /// Data stage of control transfers, `MAX_CONTROL_LEN` bytes.
     data_buf: DmaRegion,
@@ -547,13 +515,8 @@ struct XhciState {
     /// The interrupt whose thread services this controller (`irq_thread`);
     /// 0 when another path drains it.
     irq: crate::irq::Irq,
-    /// The interrupter's IMAN.IP clears itself when the interrupt is sent
-    /// (`ir->ip_autoclear`: MSI and MSI-X), else `xhci_irq` clears it.
-    ip_autoclear: bool,
-    /// Halted after a host controller or system error, or gone: nothing
-    /// but the event handler busy flag is touched any more
-    /// (`XHCI_STATE_HALTED`).
-    halted: bool,
+    /// The interrupt side: IP autoclear, halted.
+    intr: xhci_core::Intr,
 }
 
 /// How a controller reports its events.
@@ -678,13 +641,11 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
         Ok(m) => m,
         Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return None; }
     };
-    bring_up(CtrlId::Pci(dev.addr), mmio, Quirks::default(), |oper| {
+    bring_up(CtrlId::Pci(dev.addr), mmio, Quirks::default(), || {
         // Interrupter 0 by MSI-X to core 0. Without MSI-X the timer tick
         // drains the event ring.
         if pci::program_msix(dev.addr, 0, crate::interrupts::XHCI_VECTOR,
                              crate::interrupts::current_apic_id()) {
-            oper.w32(OP_USBSTS, STS_EINT);
-            oper.w32(OP_USBCMD, oper.r32(OP_USBCMD) | CMD_INTE);
             crate::kdebug!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
             Events::Msi
         } else {
@@ -706,14 +667,7 @@ pub fn attach_platform(phys: u64, len: u64, dma_bus_off: u64, quirks: Quirks, ir
         Ok(m) => m,
         Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return false; }
     };
-    let events = |oper: Mmio| match irq {
-        Some(_) => {
-            oper.w32(OP_USBSTS, STS_EINT);
-            oper.w32(OP_USBCMD, oper.r32(OP_USBCMD) | CMD_INTE);
-            Events::Line
-        }
-        None => Events::Polled,
-    };
+    let events = || if irq.is_some() { Events::Line } else { Events::Polled };
     let Some(mut state) = bring_up(CtrlId::Mmio(phys), mmio, quirks, events) else { return false };
     enumerate_root_ports(&mut state);
     let keyboard = state.hid.iter().any(|h| h.running && h.keyboard);
@@ -755,7 +709,7 @@ fn irq_thread(phys: u64) {
 /// power and settle the ports. Returns the running state with no device
 /// enumerated yet; every device slot the controller has is enabled
 /// (`xhci_init`: `HCS_MAX_SLOTS`).
-fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> Events) -> Option<XhciState> {
+fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce() -> Events) -> Option<XhciState> {
     let map_size = mmio.len();
 
     // Read capability registers
@@ -763,7 +717,7 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
     let hcsparams1 = mmio.r32(CAP_HCSPARAMS1);
     let hcsparams2 = mmio.r32(CAP_HCSPARAMS2);
     // HCS_ERST_MAX: ERST Max in bits 7..4, as a power of two.
-    let evt_segs = ERST_DEFAULT_SEGS.min(1 << ((hcsparams2 >> 4) & 0xF));
+    let evt_segs = xhci_core::event_ring_segments(hcsparams2);
     let hccparams1 = mmio.r32(CAP_HCCPARAMS1);
     let dboff = mmio.r32(CAP_DBOFF) & 0xFFFF_FFFC;
     let rtsoff = mmio.r32(CAP_RTSOFF) & 0xFFFF_FFE0;
@@ -778,7 +732,6 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
         return None;
     }
     let oper = mmio.sub(caplength, map_size - caplength as u64);
-    let rt = mmio.sub(rtsoff, map_size - rtsoff as u64);
     let db = mmio.sub(dboff, map_size - dboff as u64);
 
     crate::kdebug!("[npk] xhci: ports={} slots={} ctx={}B", max_ports, max_slots, ctx_size);
@@ -789,22 +742,15 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
         bios_handoff(mmio, xecp_off);
     }
 
-    // Halt controller
-    let cmd_val = oper.r32(OP_USBCMD);
-    oper.w32(OP_USBCMD, cmd_val & !CMD_RUN);
-    if !wait_for(oper, OP_USBSTS, STS_HCH, STS_HCH) {
-        kprintln!("[npk] xhci: halt timeout");
+    // xhci_gen_setup: halt, then reset.
+    let layout = xhci_core::Layout { op: caplength, ir0: rtsoff + IR0 };
+    let mut intr = xhci_core::Intr::default();
+    if let Err(e) = xhci_core::halt(&mut Win(mmio), &layout, &mut intr) {
+        kprintln!("[npk] xhci: halt failed ({:?})", e);
         return None;
     }
-
-    // Reset controller
-    oper.w32(OP_USBCMD, CMD_HCRST);
-    if !wait_for(oper, OP_USBCMD, CMD_HCRST, 0) {
-        kprintln!("[npk] xhci: reset timeout (CMD)");
-        return None;
-    }
-    if !wait_for(oper, OP_USBSTS, STS_CNR, 0) {
-        kprintln!("[npk] xhci: reset timeout (CNR)");
+    if let Err(e) = xhci_core::reset(&mut Win(mmio), &layout, xhci_core::XHCI_RESET_LONG_USEC) {
+        kprintln!("[npk] xhci: reset failed ({:?})", e);
         return None;
     }
 
@@ -851,45 +797,43 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
         crate::kdebug!("[npk] xhci: {} scratchpad buffers", num_scratchpad);
     }
 
-    // Program controller
-    oper.w32(OP_CONFIG, max_slots); // MaxSlotsEn
-    oper.w64_lo_hi(OP_DCBAAP, dcbaa.bus());
-    oper.w64_lo_hi(OP_CRCR, cmd_ring.bus() | 1); // cycle bit = 1
+    // xhci_init, then xhci_run up to xhci_run_finished.
+    let evt = xhci_core::EventRing::new(evt_ring.bus(), evt_segs);
+    xhci_core::init(&mut Win(mmio), &layout, &xhci_core::Init {
+        max_slots,
+        cmd_ring: cmd_ring.bus(),
+        cmd_cycle: 1,
+        dcbaa: dcbaa.bus(),
+        erst: evt_seg_table.bus(),
+        erst_entries: evt_segs as u32,
+        event_ring: evt,
+        write_64_hi_lo: quirks.write_64_hi_lo,
+    });
+    xhci_core::run(&mut Win(mmio), &layout);
 
-    // Program Event Ring (interrupter 0)
-    let ir0 = rt.sub(IR0, IR_LEN);
-    ir0.w32(0x08u32, evt_segs as u32);              // ERSTSZ
-    ir0.w64_lo_hi(0x18u32, evt_ring.bus());        // ERDP
-    // ERSTBA, after ERSTSZ (xhci_set_hc_event_deq / xhci_add_interrupter).
-    if quirks.write_64_hi_lo {
-        ir0.w32(0x14u32, (evt_seg_table.bus() >> 32) as u32);
-        ir0.w32(0x10u32, evt_seg_table.bus() as u32);
-    } else {
-        ir0.w64_lo_hi(0x10u32, evt_seg_table.bus());
+    // xhci_run_finished: interrupts on before the controller starts (xHCI
+    // 4.2 and 5.5.2). USBCMD.INTE when events come by interrupt, then the
+    // interrupter's IE, which the event ring needs even when polled
+    // (xhci_enable_interrupter: IP is not written, the read flushes).
+    let events = irq();
+    if events == Events::Polled {
+        NEEDS_POLL.store(true, Ordering::Relaxed);
     }
-    // Enable interrupter (for event ring to work, even in polling mode)
-    ir0.w32(0x00u32, ir0.r32(0x00u32) | IMAN_IE);
-
-    // Start controller
-    oper.w32(OP_USBCMD, CMD_RUN);
-    if !wait_for(oper, OP_USBSTS, STS_HCH, 0) {
-        kprintln!("[npk] xhci: start failed");
+    intr.ip_autoclear = events == Events::Msi;
+    if let Err(e) = xhci_core::run_finished(&mut Win(mmio), &layout, &mut intr, events != Events::Polled) {
+        kprintln!("[npk] xhci: start failed ({:?})", e);
         return None;
     }
     crate::kdebug!("[npk] xhci: controller running");
     if let Some(start) = quirks.plat_start {
         start();
     }
-    let events = irq(oper);
-    if events == Events::Polled {
-        NEEDS_POLL.store(true, Ordering::Relaxed);
-    }
 
     let state = XhciState {
         ctrl,
-        mmio, oper, rt, db, ctx_size, max_ports, hci_version,
+        mmio, oper, db, ctx_size, max_ports, hci_version,
         dcbaa, cmd_ring, cmd_cycle: 1, cmd_enqueue: 0,
-        evt_ring, evt_cycle: 1, evt_dequeue: 0, evt_trbs: evt_segs * EVT_SEG_TRBS,
+        evt_ring, evt, layout,
         input_ctx, data_buf,
         devs: Vec::new(), hid: Vec::new(), free_pages: Vec::new(), port_changes: [0; 4], last_cc: 0,
         last_fail: ("", 0), failed: Vec::new(), nic: None, msc: Vec::new(),
@@ -899,8 +843,7 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
         fn_devs: Vec::new(),
         cams: Vec::new(),
         irq: 0,
-        ip_autoclear: events == Events::Msi,
-        halted: false,
+        intr,
     };
 
     // Power on all ports
@@ -2868,17 +2811,6 @@ fn alloc_dma(pages: usize, _name: &str) -> Option<DmaRegion> {
     DmaRegion::alloc_zeroed(pages).map(|r| r.with_bus_offset(dma_bus_off()))
 }
 
-
-fn wait_for(base: Mmio, reg: u32, mask: u32, expected: u32) -> bool {
-    // Tick-based timeout (500ms) — CPU-speed independent
-    let deadline = crate::time::ticks() + 50; // 50 ticks = 500ms at 100Hz
-    loop {
-        if base.r32(reg) & mask == expected { return true; }
-        if crate::time::ticks() >= deadline { return false; }
-        core::hint::spin_loop();
-    }
-}
-
 fn portsc_off(port: u32) -> u32 {
     0x400 + port * 0x10
 }
@@ -4579,68 +4511,52 @@ fn nic_bulk_in_on(state: &mut XhciState, buf: &mut [u8]) -> usize {
     n_copy
 }
 
-/// Linux `xhci_irq` with `xhci_handle_events` for interrupter 0: whether
-/// the controller raised the interrupt, its errors, the acknowledge of
-/// USBSTS and IMAN, then every event.
-fn xhci_irq(s: &mut XhciState) {
-    let status = s.oper.r32(OP_USBSTS);
-    if status == u32::MAX {
-        // xhci_hc_died: the controller is gone.
-        if !s.halted {
-            kprintln!("[npk] xhci {}: controller not responding", s.ctrl);
-            s.halted = true;
-        }
-        return;
-    }
-    if status & STS_EINT == 0 {
-        return;
-    }
-    if status & STS_HCE != 0 {
-        kprintln!("[npk] xhci {}: host controller error", s.ctrl);
-        xhci_halt(s);
-        return;
-    }
-    if status & STS_FATAL != 0 {
-        kprintln!("[npk] xhci {}: host system error", s.ctrl);
-        xhci_halt(s);
-        return;
-    }
-    // Clear the status first, so interrupts of other interrupters can
-    // come; write 1 to clear.
-    s.oper.w32(OP_USBSTS, status | STS_EINT);
-    let ir0 = s.rt.sub(IR0, IR_LEN);
-    // xhci_clear_interrupt_pending, the read flushing the write.
-    if !s.ip_autoclear {
-        ir0.w32(0x00u32, ir0.r32(0x00u32) | IMAN_IP);
-        ir0.r32(0x00u32);
-    }
-    if s.halted {
-        // Halted: only the event handler busy flag is cleared (RW1C),
-        // ERDP read as `lo_hi_readq`.
-        let erdp = ir0.r32(0x18u32) as u64 | (ir0.r32(0x1cu32) as u64) << 32;
-        ir0.w64_lo_hi(0x18u32, erdp | (1 << 3));
-        return;
-    }
-    drain(s);
+/// The register window as `xhci_core` sees it.
+struct Win(Mmio);
+
+impl xhci_core::Regs for Win {
+    fn r32(&mut self, off: u32) -> u32 { self.0.r32(off) }
+    fn w32(&mut self, off: u32, v: u32) { self.0.w32(off, v) }
+    fn delay_us(&mut self, us: u64) { crate::time::delay_us(us) }
 }
 
-/// `xhci_halt`: `xhci_quiesce` (interrupts and, unless halted already, the
-/// run bit off), then wait for HCHalted.
-fn xhci_halt(s: &mut XhciState) {
-    let mut mask = !XHCI_IRQS;
-    if s.oper.r32(OP_USBSTS) & STS_HCH == 0 {
-        mask &= !CMD_RUN;
+/// The event ring's memory as `xhci_core` sees it.
+struct EvtMem(DmaRegion);
+
+impl xhci_core::EventMem for EvtMem {
+    fn r32(&self, off: usize) -> u32 { self.0.r32(off) }
+}
+
+/// Linux `xhci_irq` for interrupter 0 (`xhci_core::irq`), each event to
+/// its device, the errors reported.
+fn xhci_irq(s: &mut XhciState) {
+    let (mmio, layout, mem) = (s.mmio, s.layout, EvtMem(s.evt_ring));
+    let (mut intr, mut ring) = (s.intr, s.evt);
+    let was_halted = intr.halted;
+    let r = xhci_core::irq(&mut Win(mmio), &layout, &mut intr, &mut ring, &mem, |e| handle_event(s, e));
+    s.intr = intr;
+    s.evt = ring;
+    match r {
+        xhci_core::Irq::None | xhci_core::Irq::Handled => {}
+        xhci_core::Irq::Died if !was_halted => kprintln!("[npk] xhci {}: controller not responding", s.ctrl),
+        xhci_core::Irq::Died => {}
+        xhci_core::Irq::HostControllerError => kprintln!("[npk] xhci {}: host controller error", s.ctrl),
+        xhci_core::Irq::HostSystemError => kprintln!("[npk] xhci {}: host system error", s.ctrl),
     }
-    s.oper.w32(OP_USBCMD, s.oper.r32(OP_USBCMD) & mask);
-    let t0 = crate::time::uptime_us();
-    while s.oper.r32(OP_USBSTS) & STS_HCH == 0 {
-        if crate::time::uptime_us() - t0 > MAX_HALT_US {
-            kprintln!("[npk] xhci {}: halt failed", s.ctrl);
-            break;
-        }
-        core::hint::spin_loop();
+}
+
+/// `xhci_handle_event_trb`'s dispatch for the events this driver takes
+/// from the ring outside a waiter.
+fn handle_event(state: &mut XhciState, e: &xhci_core::Event) {
+    let e = Evt::from(e);
+    if e.trb_type == EVT_TRANSFER {
+        // An event owned by no device here would belong to a waiting
+        // control transfer, which is not running here: it is orphaned.
+        // Drop it rather than give it to the wrong device.
+        dispatch_transfer(state, &e);
+    } else if e.trb_type == EVT_PORT_STATUS {
+        note_port_change(state, &e);
     }
-    s.halted = true;
 }
 
 /// The xHCI MSI-X interrupt: `xhci_irq` for every controller. `try_lock`:
@@ -4702,43 +4618,22 @@ struct Evt {
     residual: u32,
 }
 
-/// Take the next event and advance the dequeue cursor.
-///
-/// Does not write ERDP; `flush_erdp` does that once per pass, since an MMIO
-/// write per event is expensive.
-fn next_event(state: &mut XhciState) -> Option<Evt> {
-    // The cycle bit first, then the rest (`xhci_handle_event`: read the
-    // flags, `rmb()`, then the event): read the other way round, an event
-    // the controller is writing gives the old pointer with the new cycle
-    // bit, and its completion goes to a TRB of the ring's last lap.
-    let off = state.evt_dequeue * 16;
-    let control = state.evt_ring.r32(off + 12);
-    if control & TRB_CYCLE != state.evt_cycle {
-        return None;
+impl From<&xhci_core::Event> for Evt {
+    fn from(e: &xhci_core::Event) -> Evt {
+        Evt { trb_type: e.trb_type(), cc: e.cc(), param: e.param(), control: e.control(), residual: e.residual() }
     }
-    fence(Ordering::Acquire);
-    let param = state.evt_ring.r32(off) as u64 | (state.evt_ring.r32(off + 4) as u64) << 32;
-    let status = state.evt_ring.r32(off + 8);
-    state.evt_dequeue += 1;
-    if state.evt_dequeue >= state.evt_trbs {
-        state.evt_dequeue = 0;
-        state.evt_cycle ^= 1;
-    }
-    Some(Evt {
-        trb_type: control & (0x3F << 10),
-        cc: (status >> 24) & 0xFF,
-        param,
-        control,
-        residual: status & 0x00FF_FFFF,
-    })
 }
 
-/// Write the event ring dequeue pointer and clear Event Handler Busy. Must
-/// run at least once per pass that took events, or the controller reports
-/// no further events.
+/// Take the next event and advance the dequeue cursor, for a waiter that
+/// looks for its own completion. Does not write ERDP; `flush_erdp` does.
+fn next_event(state: &mut XhciState) -> Option<Evt> {
+    state.evt.take(&EvtMem(state.evt_ring)).as_ref().map(Evt::from)
+}
+
+/// The dequeue pointer written and Event Handler Busy cleared, after a
+/// waiter took events.
 fn flush_erdp(state: &XhciState) {
-    let erdp = state.evt_ring.bus() + (state.evt_dequeue * 16) as u64;
-    state.rt.sub(IR0, IR_LEN).w64_lo_hi(0x18u32, erdp | (1 << 3));
+    xhci_core::update_erst_dequeue(&mut Win(state.mmio), &state.layout, &state.evt, true);
 }
 
 /// Whether TRB address `a` lies in the transfer ring starting at `base`.
@@ -4841,29 +4736,14 @@ fn dispatch_transfer(state: &mut XhciState, e: &Evt) -> bool {
     false
 }
 
-/// Take and dispatch all pending events. The single drain used by every
-/// caller (IRQ, tick, main loop, NIC paths).
+/// Take and dispatch all pending events outside the interrupt
+/// (`xhci_core::take_events`): polling, and the paths that wait for a
+/// transfer of their own.
 fn drain(state: &mut XhciState) {
-    let mut any = false;
-    for _ in 0..NUM_EVT_TRBS {
-        let e = match next_event(state) {
-            Some(e) => e,
-            None => break,
-        };
-        any = true;
-        if e.trb_type == EVT_TRANSFER {
-            // An event owned by no device here would belong to a waiting
-            // control transfer, which is not running here: it is orphaned.
-            // Drop it rather than give it to the wrong device.
-            dispatch_transfer(state, &e);
-        } else if e.trb_type == EVT_PORT_STATUS {
-            note_port_change(state, &e);
-        }
-        let _ = e.control;
-    }
-    if any {
-        flush_erdp(state);
-    }
+    let (mmio, layout, mem) = (state.mmio, state.layout, EvtMem(state.evt_ring));
+    let mut ring = state.evt;
+    xhci_core::take_events(&mut Win(mmio), &layout, &mut ring, &mem, |e| handle_event(state, e));
+    state.evt = ring;
 }
 
 /// Drain events from the main loop. Needed only early in boot, before the

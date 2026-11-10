@@ -562,6 +562,7 @@ dependencies = [
  "sha2",
  "spin 0.12.3",
  "wasmi",
+ "xhci_core",
 ]
 
 [[package]]
@@ -934,6 +935,10 @@ dependencies = [
  "hybrid-array",
  "primefield",
 ]
+
+[[package]]
+name = "xhci_core"
+version = "0.1.0"
 
 [[package]]
 name = "zeroize"

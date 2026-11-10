@@ -375,3 +375,41 @@ fn dwc3_matches_linux() {
         }
     }
 }
+
+/// Run E: the DWC3's xHCI interrupt requested and taken through RP1, the
+/// unmodified rp1 irq chip and PCI MSI code against the same model.
+fn run_e() -> [(&'static str, Vec<Ev>); 2] {
+    [("C1", parse(include_str!("../../xhci/testdata/linux_xhci_irq_c1.log"))),
+     ("D0", parse(include_str!("../../xhci/testdata/linux_xhci_irq_d0.log")))]
+}
+
+/// RP1 as `rp1_probe` left it: the MSI-X table at the start of BAR0.
+fn rp1_of_run_e() -> rp1::Rp1 {
+    rp1::Rp1 { chip_id: rp1::RP1_C0_CHIP_ID, fpga: false,
+        msix: pci::MsixTable { block: Block::Rp1Bar0, base: 0 } }
+}
+
+/// `request_irq` of usb@200000's line 31, edge-rising: `rp1_irq_set_type`
+/// and `rp1_irq_activate` are `irq_enable`, `rp1_unmask_irq` is
+/// `irq_unmask`; in the interrupt `rp1_mask_irq` is `irq_mask`.
+#[test]
+fn rp1_irq_chip_matches_linux() {
+    const LINE: u32 = 31;
+    for (name, evs) in run_e() {
+        let r = rp1_of_run_e();
+        let mut want = segment(&evs, "rp1_irq_set_type");
+        want.extend(segment(&evs, "rp1_irq_activate"));
+        let mut hw = Strict::new(want);
+        r.irq_enable(&mut hw, LINE, rp1::Trigger::Edge);
+        hw.done();
+
+        let mut hw = Strict::new(segment(&evs, "rp1_unmask_irq"));
+        r.irq_unmask(&mut hw, LINE);
+        hw.done();
+
+        let mut hw = Strict::new(segment(&evs, "rp1_mask_irq"));
+        r.irq_mask(&mut hw, LINE);
+        hw.done();
+        let _ = name;
+    }
+}

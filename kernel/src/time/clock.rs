@@ -56,7 +56,6 @@ pub fn counter_to_ns(cycles: u64) -> u64 {
 }
 
 /// Busy-wait for at least `us` microseconds.
-#[cfg(target_arch = "aarch64")]
 pub fn delay_us(us: u64) {
     let target = counter() + (us * counter_hz()).div_ceil(1_000_000);
     while counter() < target {
