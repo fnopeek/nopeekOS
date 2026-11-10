@@ -2700,12 +2700,11 @@ fn hid_stop(h: &mut HidIntf) {
     if h.kbd.repeat_key != 0 && REPEAT_KEY.load(Ordering::Relaxed) == h.kbd.repeat_key {
         REPEAT_KEY.store(0, Ordering::Relaxed);
     }
-    #[cfg(target_arch = "x86_64")]
     if h.keyboard && h.input.modifiers() != 0 {
-        crate::keyboard::set_super(false);
-        crate::keyboard::set_shift(false);
-        crate::keyboard::set_ctrl(false);
-        crate::keyboard::set_alt(false);
+        crate::input::set_super(false);
+        crate::input::set_shift(false);
+        crate::input::set_ctrl(false);
+        crate::input::set_alt(false);
     }
     if h.pointer && h.input.buttons != 0 {
         inject_pointer(MouseEvent { buttons: 0, dx: 0, dy: 0, scroll: 0, hscroll: 0 }, true);
@@ -4763,17 +4762,11 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
     let alt_gr = (modifiers & 0x40) != 0; // Right Alt (AltGr)
     let super_held = (modifiers & 0x88) != 0; // L/R GUI (Super)
 
-    // Update shared modifier state (used by shade compositor)
-    #[cfg(target_arch = "x86_64")]
-    {
-        crate::keyboard::set_super(super_held);
-        crate::keyboard::set_shift(shift);
-        crate::keyboard::set_ctrl(ctrl);
-        crate::keyboard::set_alt(alt);
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = (alt, super_held);
+    // The shared modifier state every reader takes its events with.
+    crate::input::set_super(super_held);
+    crate::input::set_shift(shift);
+    crate::input::set_ctrl(ctrl);
+    crate::input::set_alt(alt);
     // Use cached layout (IRQ-safe, no allocation)
     let is_de = is_de_layout();
 
@@ -4898,13 +4891,9 @@ fn take_tail() -> Option<u8> {
     crate::arch::without_interrupts(|| UTF8_TAIL.lock().take())
 }
 
-/// Whether keys map through the de_CH layout. Where the `keyboard` setting
-/// is not ported (it lives in `config`), its default.
+/// Whether keys map through the de_CH layout (the `keyboard` setting).
 fn is_de_layout() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    return crate::keyboard::is_de_layout();
-    #[cfg(not(target_arch = "x86_64"))]
-    true
+    crate::input::is_de_layout()
 }
 
 /// HID code to the first byte of the character; the rest goes to

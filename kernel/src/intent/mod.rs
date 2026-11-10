@@ -907,10 +907,7 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // Read keyboard input as KeyEvent (or serial fallback).
         // When shade is active, USB keyboard is the only input — serial is
         // skipped entirely to avoid cross-consumption races between sources.
-        #[cfg(target_arch = "x86_64")]
-        let keyed = crate::keyboard::read_event();
-        #[cfg(not(target_arch = "x86_64"))]
-        let keyed = crate::serial::key().map(serial_key_event);
+        let keyed = crate::input::read_event();
         let event = if let Some(evt) = keyed {
             evt
         } else if shade_active() {

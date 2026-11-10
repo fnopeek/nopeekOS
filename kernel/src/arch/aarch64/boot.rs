@@ -298,6 +298,7 @@ fn shell() -> ! {
     // sets: the log's verbosity and the module engine.
     crate::config::load();
     crate::serial::set_verbose(crate::config::bootlog_verbose());
+    crate::input::cache_layout();
     crate::wasm::init();
     crate::wasm::load_engine_default();
     crate::tls::certstore::load_store();

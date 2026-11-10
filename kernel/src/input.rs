@@ -318,3 +318,19 @@ static PASTE: spin::Mutex<alloc::collections::VecDeque<u8>> =
 pub fn inject_paste(bytes: &[u8]) {
     PASTE.lock().extend(bytes.iter().copied());
 }
+
+/// The configured layout, cached: this is read in interrupt context, where
+/// `config::get` (a lock and an allocation) must not run.
+static IS_DE_LAYOUT: AtomicBool = AtomicBool::new(true);
+
+/// Re-read the `keyboard` setting. Called after the configuration loads and
+/// whenever the setting changes.
+pub fn cache_layout() {
+    let is_de = !matches!(crate::config::get("keyboard").as_deref(), Some("us"));
+    IS_DE_LAYOUT.store(is_de, Ordering::Relaxed);
+}
+
+/// Whether keys map through the German (de_CH) layout. IRQ-safe.
+pub fn is_de_layout() -> bool {
+    IS_DE_LAYOUT.load(Ordering::Relaxed)
+}
