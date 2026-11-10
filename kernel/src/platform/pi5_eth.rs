@@ -28,9 +28,6 @@ const RX_BACKLOG: usize = 1000;
 const NAPI_WEIGHT: usize = 64;
 /// `PHY_STATE_TIME`.
 const PHY_POLL_US: u64 = 1_000_000;
-/// When the first link-up reports what arrived: proof that RP1's line
-/// reaches the fiber.
-const REPORT_AFTER_US: u64 = 5_000_000;
 /// The flag cell of a `gpios` specifier.
 const GPIO_ACTIVE_LOW: u32 = 1;
 
@@ -224,8 +221,6 @@ fn eth_fiber(irq: u64) {
     let mut fired = false;
     let mut next_poll = crate::time::uptime_us();
     let mut lpi_due: Option<u64> = None;
-    let mut report_at: Option<u64> = None;
-    let mut frames = 0u64;
     loop {
         let since = crate::irq::arm(irq);
         let now = crate::time::uptime_us();
@@ -238,11 +233,7 @@ fn eth_fiber(irq: u64) {
                 if i.hresp { eth.gem.hresp_error_task(regs, bufs); }
                 if i.tx { while eth.gem.tx_poll(regs, bufs, NAPI_WEIGHT).1 {} }
                 if i.rx {
-                    loop {
-                        let (n, again) = eth.gem.rx_poll(regs, bufs, NAPI_WEIGHT);
-                        frames += n as u64;
-                        if !again { break; }
-                    }
+                    while eth.gem.rx_poll(regs, bufs, NAPI_WEIGHT).1 {}
                     rx = true;
                 }
             }
@@ -251,22 +242,16 @@ fn eth_fiber(irq: u64) {
                 match eth.poll_link(regs, bufs) {
                     Ok(Some(Event::Up(l))) => {
                         LINK.store(true, Ordering::Release);
-                        report_at = Some(now + REPORT_AFTER_US);
-                        kprintln!("[npk] eth: link up, {} Mbit/s {}-duplex{}", l.speed,
+                        crate::kdebug!("[npk] eth: link up, {} Mbit/s {}-duplex{}", l.speed,
                             if l.full_duplex { "full" } else { "half" }, if l.tx_lpi { ", EEE" } else { "" });
                     }
                     Ok(Some(Event::Down)) => {
                         LINK.store(false, Ordering::Release);
-                        kprintln!("[npk] eth: link down");
+                        crate::kdebug!("[npk] eth: link down");
                     }
                     Ok(None) => {}
                     Err(e) => kprintln!("[npk] eth: PHY: {:?}", e),
                 }
-            }
-            if report_at.is_some_and(|t| now >= t) {
-                report_at = None;
-                kprintln!("[npk] eth: {} interrupts, {} frames received since open",
-                    crate::irq::fired_count(irq), frames);
             }
             if lpi_due.is_some_and(|t| now >= t) {
                 lpi_due = None;
@@ -282,7 +267,7 @@ fn eth_fiber(irq: u64) {
         if rx {
             crate::net::poll_rx_only();
         }
-        let due = [lpi_due, report_at].into_iter().flatten().fold(next_poll, u64::min);
+        let due = lpi_due.map_or(next_poll, |t| t.min(next_poll));
         let ms = due.saturating_sub(crate::time::uptime_us()).div_ceil(1000).max(1);
         fired = crate::irq::wait(irq, since, ms);
     }
