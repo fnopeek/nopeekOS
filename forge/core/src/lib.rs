@@ -12,6 +12,8 @@
 #![no_std]
 
 extern crate alloc;
+#[cfg(test)]
+extern crate std;
 
 use alloc::format;
 use alloc::string::{String, ToString};
@@ -19,6 +21,7 @@ use alloc::vec::Vec;
 #[cfg(feature = "census")]
 use alloc::collections::BTreeSet;
 
+pub mod a64;
 pub mod codegen;
 pub mod x64;
 
