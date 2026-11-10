@@ -1219,7 +1219,6 @@ fn cleanup_instance_state(state: &mut HostState) {
     // buffers until the next boot.
     #[cfg(target_arch = "x86_64")]
     crate::intent::fetch::release_owner(state.pid);
-    #[cfg(target_arch = "x86_64")]
     for h in state.tcp_handles.drain(..).flatten() {
         let _ = crate::net::tcp::close(h);
     }

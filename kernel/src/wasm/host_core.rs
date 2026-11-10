@@ -881,7 +881,6 @@ fn follow_core(ctx: &mut HostState) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_sleep(ctx: &mut HostState, ms: i32) -> i32 {
     if ms <= 0 || ms > 60000 { return -1; }
 
@@ -897,7 +896,7 @@ pub(crate) fn npk_sleep(ctx: &mut HostState, ms: i32) -> i32 {
     let freq = crate::time::counter_hz();
     let target = crate::time::counter() + (ms as u64) * (freq / 1000);
     while crate::time::counter() < target {
-        crate::interrupts::halt_until(Some(target), crate::smp::per_core::WAKE_NPK_SLEEP);
+        crate::smp::per_core::halt_until(Some(target), crate::smp::per_core::WAKE_NPK_SLEEP);
     }
 
     0
@@ -1068,7 +1067,7 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
         if crate::smp::fiber::wait(sig, deadline).is_none() {
             // Not in a fiber: halt in place, looking again every 10 ms.
             let recheck = crate::time::counter() + freq / 100;
-            crate::interrupts::halt_until(
+            crate::smp::per_core::halt_until(
                 Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
         }
     };
@@ -1122,7 +1121,7 @@ pub(crate) fn npk_input_wait(ctx: &mut HostState, timeout_ms: i32) -> i32 {
         if crate::smp::fiber::wait(crate::smp::fiber::SIG_EVENT, deadline).is_none() {
             // Not in a fiber (a one-shot on Core 0): halt in place.
             let recheck = crate::time::counter() + freq / 100;
-            crate::interrupts::halt_until(
+            crate::smp::per_core::halt_until(
                 Some(deadline.min(recheck)), crate::smp::per_core::WAKE_NPK_SLEEP);
         }
     };
@@ -1250,7 +1249,6 @@ fn journal_url(cap: &crate::capability::CapId, url: &str) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// The TCP owner a module's connections are charged to. A run without a
 /// process entry (pid 0) is still a module, never the kernel.
 fn tcp_owner(ctx: &HostState) -> crate::net::tcp::Owner {
@@ -1434,7 +1432,6 @@ pub(crate) fn npk_tls_close(ctx: &mut HostState, handle: i32) -> i32 {
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_connect(ctx: &mut HostState, ip_packed: i32, port: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     let ip = [
@@ -1466,14 +1463,12 @@ fn own_tcp(ctx: &HostState, fd: i32) -> Option<usize> {
     *ctx.tcp_handles.get(usize::try_from(fd).ok()?)?
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_status(ctx: &mut HostState, handle: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     let Some(h) = own_tcp(ctx, handle) else { return -1 };
     crate::net::tcp::connect_status(h)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_close(ctx: &mut HostState, handle: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     if let Some(h) = own_tcp(ctx, handle) {
@@ -4397,7 +4392,6 @@ pub(crate) fn npk_stream_read(mem: &mut [u8], ctx: &mut HostState, idx: i32, buf
 /// kernel's reserve; a bigger send is the caller's loop to make.
 const MAX_TCP_SEND: usize = 1024 * 1024;
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_len: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     if buf_len <= 0 || buf_len as usize > MAX_TCP_SEND { return -1; }
@@ -4412,7 +4406,6 @@ pub(crate) fn npk_tcp_send(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_tcp_recv(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf_ptr: i32, buf_max: i32) -> i32 {
     if !net_allowed(ctx) { return -1; }
     if buf_max <= 0 { return -1; }

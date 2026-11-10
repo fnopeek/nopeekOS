@@ -1105,7 +1105,6 @@ host_imports! {
     // apps multiplex over a few workers instead of each pinning a core.
     // The fiber resumes once the deadline
     // passes.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_sleep(ms: i32) -> i32;
 
     // npk_input_poll() -> key or -1 — non-blocking read from per-app buffer
@@ -1200,27 +1199,22 @@ host_imports! {
     // `npk_tcp_status` until it answers; `npk_tcp_send` refuses until then.
     // A module is a fiber, so blocking here would stall every other fiber
     // on its worker core, drivers included.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_tcp_connect(ip_packed: i32, port: i32) -> i32;
 
     // npk_tcp_status(handle) -> 1 established, 0 still handshaking, -1 failed.
     // The polling half of the non-blocking connect above. The module sleeps
     // between calls; Core 0's run loop drives the stack meanwhile.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_tcp_status(handle: i32) -> i32;
 
     // npk_tcp_send(handle, buf_ptr, buf_len) -> 0 ok, -2 retry later, -1 error
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_tcp_send(handle: i32, buf_ptr: i32, buf_len: i32) -> i32;
 
     // npk_tcp_recv(handle, buf_ptr, buf_max) -> bytes read (0 = none available), -1 on error
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_tcp_recv(handle: i32, buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_tcp_close(handle) -> 0. Sends the FIN and returns; the graceful
     // wait is the kernel's job, not a module's, since spinning here would
     // freeze the worker core.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_tcp_close(handle: i32) -> i32;
 
     // npk_debug_target_ip() -> packed IP (0 if unset)
