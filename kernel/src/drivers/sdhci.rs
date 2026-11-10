@@ -1235,7 +1235,9 @@ impl Host {
         let b = SDHCI_DEFAULT_BOUNDARY_ARG;
         self.writew(sdhci_make_blksz(b, 64), SDHCI_BLOCK_SIZE);
         self.writew(SDHCI_TRNS_READ, SDHCI_TRANSFER_MODE);
-        if self.wait_inhibit(SDHCI_CMD_INHIBIT | SDHCI_DATA_INHIBIT).is_err() {
+        // sdhci_send_command: CMD19 carries no `data` and no busy, so only
+        // the command line must be free (`sdhci_data_line_cmd` is false).
+        if self.wait_inhibit(SDHCI_CMD_INHIBIT).is_err() {
             self.tuning_done = false;
             return;
         }
