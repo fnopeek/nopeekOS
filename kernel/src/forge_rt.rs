@@ -525,7 +525,10 @@ impl Instance {
                     crate::kprintln!("[npk] forge: import {}::{} declared with the wrong signature", module, name);
                     unresolved += 1;
                 }
-                (None, _) => unresolved += 1,
+                (None, _) => {
+                    crate::kprintln!("[npk] forge: import {}::{} has no host function here", module, name);
+                    unresolved += 1;
+                }
             }
         }
 

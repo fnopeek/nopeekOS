@@ -19,9 +19,7 @@ use super::{
     fsck_sys_info, append_entry, is_trust_critical_path, spawn_on_worker, picker_module_name,
     TERM_IDX_ACTIVE, PICKER_W, PICKER_H,
 };
-use crate::{kprintln, capability};
-#[cfg(target_arch = "x86_64")]
-use crate::kprint;
+use crate::{kprint, kprintln, capability};
 #[cfg(target_arch = "x86_64")]
 use crate::drivers::pci;
 use alloc::vec::Vec;
@@ -4480,18 +4478,20 @@ pub(crate) fn npk_netdev_register(mem: &mut [u8], ctx: &mut HostState, mac_ptr: 
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_print(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) {
     if let Some(s) = read_str(mem, ptr, len) {
         if ctx.direct_output {
             let idx = ctx.terminal_idx;
+            #[cfg(target_arch = "x86_64")]
             if idx != TERM_IDX_ACTIVE && (idx as usize) < MAX_APP_BUFS {
                 // Write to specific terminal (worker-core safe)
                 crate::shade::terminal::write_idx(idx as usize, &s);
-            } else {
-                // Fallback: write to active terminal via kprint
-                kprint!("{}", s);
+                return;
             }
+            // The active terminal, or the console where there are no
+            // terminals.
+            let _ = idx;
+            kprint!("{}", s);
         } else {
             ctx.output.push_str(&s);
         }

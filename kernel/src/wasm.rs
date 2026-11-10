@@ -314,6 +314,12 @@ static JOB_DONE: [core::sync::atomic::AtomicBool; MAX_WASM_JOBS] =
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering as AtOrd};
 
 const APP_KEY_BUF_SIZE: usize = 32;
+/// What forge compiles modules to, for the log.
+#[cfg(target_arch = "x86_64")]
+const CODE_ARCH: &str = "x86";
+#[cfg(target_arch = "aarch64")]
+const CODE_ARCH: &str = "A64";
+
 const MAX_APP_BUFS: usize = 256;
 /// `terminal_idx` sentinel for "whatever terminal is focused". Spawn paths that
 /// have no window of their own pass it (drivers from autostart, sandboxed
@@ -799,7 +805,7 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
         kprintln!("[npk] forge: {}: {} imports unresolved, the module will stall",
             name_str, open);
     }
-    crate::kdebug!("[npk] forge: {} compiled in {} ms ({} B x86)", name_str, compile_ms, m.code.len());
+    crate::kdebug!("[npk] forge: {} compiled in {} ms ({} B {})", name_str, compile_ms, m.code.len(), CODE_ARCH);
 
     inst.set_fuel(INTERACTIVE_FUEL as i64);
     crate::process::set_memory(pid, inst.memory_size() as u32);
@@ -1131,7 +1137,7 @@ pub fn execute_wasi_forge(
     }
     inst.set_fuel(fuel.min(i64::MAX as u64) as i64);
 
-    crate::kdebug!("[npk]   forge: compile {} ms ({} B x86)", compile_ms, m.code.len());
+    crate::kdebug!("[npk]   forge: compile {} ms ({} B {})", compile_ms, m.code.len(), CODE_ARCH);
     let t_r = crate::time::ticks();
     let fg = foreground(fuel);
     let (_ret, trap) = inst.call(entry, 0, 0, 0);

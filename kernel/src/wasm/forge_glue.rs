@@ -155,7 +155,6 @@ host_imports! {
 
     // npk_print(ptr, len) — write to output buffer or directly to terminal.
     // Routed through one place so npk_print and wasi fd_write cannot drift.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_print(ptr: i32, len: i32);
 
     // npk_log(ptr, len) — write to serial console (no cap needed, output only)
