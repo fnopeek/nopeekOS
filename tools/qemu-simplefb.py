@@ -80,7 +80,7 @@ if a.led:
     k = dts.index("{", root)
     k = dts.rindex("\n", 0, k)
     dts = dts[:k] + leds + dts[k:]
-    a.until = "heartbeat"
+    a.until = "screen code"
 i = dts.index("chosen {") + len("chosen {")
 j = dts.index("\n\t};", i)
 dts = dts[:i] + props + dts[i:j] + node + dts[j:]

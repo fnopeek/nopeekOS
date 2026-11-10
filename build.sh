@@ -888,7 +888,8 @@ fetch_pi_firmware() {
     git clone -q --depth 1 --filter=blob:none --sparse \
         https://github.com/raspberrypi/firmware.git "$PI_FW"
     git -C "$PI_FW" sparse-checkout set --no-cone '/boot/bcm2712*' \
-        '/boot/overlays/overlay_map.dtb' '/boot/LICENCE.broadcom'
+        '/boot/overlays/overlay_map.dtb' '/boot/overlays/vc4-kms-v3d-pi5.dtbo' \
+        '/boot/LICENCE.broadcom'
 }
 
 build_pi_sd() {
@@ -904,6 +905,10 @@ arm_64bit=1
 kernel=nopeek.img
 # A bare-metal kernel: no check for a Linux-matching device tree.
 os_check=0
+# The display setup Raspberry Pi OS boots with: only on the KMS path does
+# the firmware hand its framebuffer over as a simple-framebuffer node.
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
 # Firmware framebuffer at 32 bpp; the kernel also draws on 16 bpp.
 framebuffer_depth=32
 framebuffer_ignore_alpha=1
@@ -921,7 +926,9 @@ CFG
     mcopy -i "$part" "$dir/config.txt" ::config.txt
     mcopy -i "$part" "$PI_FW"/boot/bcm2712*.dtb ::
     mmd -i "$part" ::overlays
-    [ -f "$PI_FW/boot/overlays/overlay_map.dtb" ] && mcopy -i "$part" "$PI_FW/boot/overlays/overlay_map.dtb" ::overlays/
+    for o in overlay_map.dtb vc4-kms-v3d-pi5.dtbo; do
+        [ -f "$PI_FW/boot/overlays/$o" ] && mcopy -i "$part" "$PI_FW/boot/overlays/$o" ::overlays/
+    done
     rm -rf "$dir"
     ok "Pi 5 SD image: $PI_SD_IMG"
 }

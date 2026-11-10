@@ -202,6 +202,22 @@ fn dma_check() {
         crate::memory::stats() == free0, if ok { "ok" } else { "MISMATCH" });
 }
 
+/// What the screen path found, as a count of flashes for a board whose
+/// screen stays dark (see `led::code`).
+fn screen_code(fdt: &Fdt) -> u32 {
+    use crate::platform::simplefb::{self, Error};
+    match simplefb::find(fdt) {
+        None if simplefb::disabled_node(fdt) => 2,
+        None => 1,
+        Some(Err(Error::Incomplete)) => 3,
+        Some(Err(Error::Format(_))) => 4,
+        Some(Err(Error::NoMemory)) => 5,
+        Some(Err(Error::TooSmall)) => 6,
+        Some(Ok(_)) if !crate::framebuffer::is_available() => 7,
+        Some(Ok(_)) => 8,
+    }
+}
+
 /// The kernel's entry on AArch64, from `_start` with the MMU on.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb: usize) -> ! {
@@ -255,8 +271,9 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
     kprintln!();
     if led {
-        kprintln!("[npk] AArch64 bring-up reached its end. Activity LED: heartbeat.");
-        crate::platform::led::heartbeat(100, 900)
+        let code = screen_code(&fdt);
+        kprintln!("[npk] AArch64 bring-up reached its end. Activity LED: screen code {}.", code);
+        crate::platform::led::code(code)
     }
     kprintln!("[npk] AArch64 bring-up reached its end. Halting.");
     crate::arch::halt_forever()

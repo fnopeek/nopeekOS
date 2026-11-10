@@ -75,13 +75,16 @@ pub fn set(on: bool) {
     rmw(GIO_DATA, BIT.load(Ordering::Relaxed), level);
 }
 
-/// Blink forever, `on_ms` on and `off_ms` off: a heartbeat that says the
-/// kernel reached its end and still runs.
-pub fn heartbeat(on_ms: u64, off_ms: u64) -> ! {
+/// Blink forever in groups of `n` short flashes with a pause between: a
+/// number to read off the board when nothing else gives output.
+pub fn code(n: u32) -> ! {
     loop {
-        set(true);
-        crate::time::delay_ms(on_ms);
-        set(false);
-        crate::time::delay_ms(off_ms);
+        for _ in 0..n {
+            set(true);
+            crate::time::delay_ms(200);
+            set(false);
+            crate::time::delay_ms(300);
+        }
+        crate::time::delay_ms(3000);
     }
 }

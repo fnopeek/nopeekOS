@@ -80,6 +80,19 @@ fn by_phandle(fdt: &Fdt, ph: u32) -> Option<Node> {
     found
 }
 
+/// Is there a `simple-framebuffer` node with a `status` other than okay?
+pub fn disabled_node(fdt: &Fdt) -> bool {
+    let mut found = false;
+    fdt.walk(|n| {
+        if fdt.prop_has_str(n, b"compatible", b"simple-framebuffer") && !fdt.is_enabled(n) {
+            found = true;
+            return false;
+        }
+        true
+    });
+    found
+}
+
 /// The firmware framebuffer, if the device tree has one.
 pub fn find(fdt: &Fdt) -> Option<Result<Mode, Error>> {
     let n = node(fdt)?;
