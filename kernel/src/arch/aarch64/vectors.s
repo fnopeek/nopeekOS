@@ -8,7 +8,9 @@
  * An IRQ taken at the current EL saves the interrupted context (general
  * registers, the full SIMD/FP file, ELR and SPSR), runs aarch64_irq and
  * returns to it. Every other entry reports its kind and the syndrome
- * registers through aarch64_exception, which never returns.
+ * registers through aarch64_exception, which never returns, on the core's
+ * fault stack (`fault_stacks`, 16 KiB each, by TPIDR_EL1): the
+ * interrupted stack may be the one that just ran into its guard page.
  */
 
 .macro entry kind
@@ -46,6 +48,13 @@ report:
     mrs     x4, SPSR_EL1
     mov     x5, sp
     mov     x6, x30
+    mrs     x7, TPIDR_EL1
+    and     x7, x7, #15
+    add     x7, x7, #1
+    adrp    x8, fault_stacks
+    add     x8, x8, :lo12:fault_stacks
+    add     x8, x8, x7, lsl #14
+    mov     sp, x8
     bl      aarch64_exception
 1:  wfe
     b       1b

@@ -348,6 +348,117 @@ fn set_blocks(lo: u64, hi: u64, kind: u64) -> bool {
     true
 }
 
+/// The 4 KiB granule above the identity map (`paging`): L1, L2 and L3
+/// tables allocated as needed below the live root, page descriptors with
+/// the block attributes' meaning.
+pub mod page {
+    use super::*;
+
+    /// Page descriptor bits besides the address: what `paging::PageFlags`
+    /// asks for.
+    pub const PAGE: u64 = VALID | TABLE | AF | SH_INNER;
+    pub const ATTR_NORMAL_IDX: u64 = ATTR_NORMAL << 2;
+    pub const ATTR_DEVICE_IDX: u64 = ATTR_DEVICE << 2;
+    pub const ATTR_NC_IDX: u64 = ATTR_NC << 2;
+    /// AP[2]: read-only.
+    pub const RO: u64 = 1 << 7;
+    /// AP[1]: EL0 may access.
+    pub const EL0: u64 = 1 << 6;
+    pub const PXN_BIT: u64 = PXN;
+    pub const UXN_BIT: u64 = UXN;
+    const ADDR: u64 = 0x0000_ffff_ffff_f000;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Error {
+        /// Inside the identity map, or past the 48-bit range.
+        OutOfRange,
+        NoMemory,
+        AlreadyMapped,
+        NotMapped,
+    }
+
+    /// The next-level table under `*e`, made when `make`.
+    ///
+    /// # Safety
+    /// `e` points at a descriptor of the live map; REMAP is held.
+    unsafe fn next(e: *mut u64, make: bool) -> Result<*mut u64, Error> {
+        // SAFETY: the caller's contract; tables are identity-mapped frames.
+        unsafe {
+            let d = core::ptr::read_volatile(e);
+            if d & VALID != 0 {
+                if d & TABLE == 0 { return Err(Error::OutOfRange); }
+                return Ok((d & ADDR) as *mut u64);
+            }
+            if !make { return Err(Error::NotMapped); }
+            let f = crate::memory::allocate_frame().ok_or(Error::NoMemory)?;
+            core::ptr::write_bytes(f as *mut u8, 0, 4096);
+            // The zeroed table is visible to the walker before it is linked.
+            core::arch::asm!("dsb ishst", options(nostack));
+            core::ptr::write_volatile(e, f | TABLE | VALID);
+            Ok(f as *mut u64)
+        }
+    }
+
+    /// The L3 entry of `va`, its tables made when `make`.
+    fn walk(va: u64, make: bool) -> Result<*mut u64, Error> {
+        if va < IDENTITY_MAX || va >= 1 << 48 { return Err(Error::OutOfRange); }
+        let idx = |shift: u32| ((va >> shift) & 511) as usize;
+        // SAFETY: TABLES.l0 is the live root; entries above 0 belong to this
+        // module alone, changed under REMAP, which the callers hold.
+        unsafe {
+            let l0 = core::ptr::addr_of_mut!(TABLES.l0.0) as *mut u64;
+            let l1 = next(l0.add(idx(39)), make)?;
+            let l2 = next(l1.add(idx(30)), make)?;
+            let l3 = next(l2.add(idx(21)), make)?;
+            Ok(l3.add(idx(12)))
+        }
+    }
+
+    /// Map the page at `va` to the frame `pa` with `attrs`.
+    pub fn map(va: u64, pa: u64, attrs: u64) -> Result<(), Error> {
+        let _g = REMAP.lock();
+        let e = walk(va, true)?;
+        // SAFETY: an L3 entry of the live map, under REMAP.
+        unsafe {
+            if core::ptr::read_volatile(e) & VALID != 0 { return Err(Error::AlreadyMapped); }
+            core::ptr::write_volatile(e, (pa & ADDR) | attrs);
+            core::arch::asm!("dsb ishst", "isb", options(nostack));
+        }
+        Ok(())
+    }
+
+    /// Unmap the page at `va` and drop it from every core's TLB (Linux
+    /// `flush_tlb_kernel_range`); returns the frame it mapped.
+    pub fn unmap(va: u64) -> Result<u64, Error> {
+        let _g = REMAP.lock();
+        let e = walk(va, false)?;
+        // SAFETY: as in `map`; the TLBI is broadcast to the inner
+        // shareable domain, all cores.
+        unsafe {
+            let d = core::ptr::read_volatile(e);
+            if d & VALID == 0 { return Err(Error::NotMapped); }
+            core::ptr::write_volatile(e, 0);
+            core::arch::asm!("dsb ishst", options(nostack));
+            if crate::arch::exception_level() == 2 {
+                core::arch::asm!("tlbi vae2is, {}", in(reg) (va >> 12) & 0xfff_ffff_ffff, options(nostack));
+            } else {
+                core::arch::asm!("tlbi vaae1is, {}", in(reg) (va >> 12) & 0xfff_ffff_ffff, options(nostack));
+            }
+            core::arch::asm!("dsb ish", "isb", options(nostack));
+            Ok(d & ADDR)
+        }
+    }
+
+    /// The frame and offset `va` maps to.
+    pub fn translate(va: u64) -> Option<u64> {
+        let _g = REMAP.lock();
+        let e = walk(va, false).ok()?;
+        // SAFETY: as in `map`.
+        let d = unsafe { core::ptr::read_volatile(e) };
+        (d & VALID != 0).then_some((d & ADDR) | (va & 0xfff))
+    }
+}
+
 /// Why a device window cannot be used.
 #[derive(Clone, Copy, Debug)]
 pub enum MapError {

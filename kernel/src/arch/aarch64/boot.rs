@@ -218,6 +218,39 @@ fn screen_code(fdt: &Fdt) -> u32 {
     }
 }
 
+/// A kernel stack in 4 KiB pages above the identity map: its pages map,
+/// hold what is written, its guard page stays unmapped, and dropping it
+/// unmaps everything and gives the frames back (the page tables a first
+/// stack made stay, as on x86).
+fn stack_check() {
+    drop(crate::mm::stack::KernelStack::new(4096));
+    let free0 = crate::memory::stats();
+    let Some(st) = crate::mm::stack::KernelStack::new(64 * 1024) else {
+        kprintln!("[npk] Kernel stacks: allocation failed");
+        return;
+    };
+    let (lo, top) = (st.lo(), st.top());
+    let mut ok = true;
+    let mut a = lo;
+    while a < top {
+        // SAFETY: lo..top is the stack's mapping, owned here.
+        unsafe { core::ptr::write_volatile(a as *mut u64, a ^ 0x5a5a) };
+        a += 4096;
+    }
+    let mut a = lo;
+    while a < top {
+        // SAFETY: as above.
+        ok &= unsafe { core::ptr::read_volatile(a as *const u64) } == a ^ 0x5a5a;
+        ok &= crate::paging::translate(a).is_some();
+        a += 4096;
+    }
+    let guard_unmapped = crate::paging::translate(lo - 4096).is_none() && crate::mm::stack::is_guard(lo - 4096);
+    drop(st);
+    let gone = crate::paging::translate(lo).is_none();
+    kprintln!("[npk] Kernel stacks (4 KiB pages @ {:#x}): data {}, guard page unmapped {}, unmapped after drop {}, frames back {}",
+        lo, if ok { "ok" } else { "WRONG" }, guard_unmapped, gone, crate::memory::stats() == free0);
+}
+
 /// The hardware RNG seeds the CSPRNG; AES-256-GCM and SHA-256 against
 /// known answers, then AES-GCM over 1 MiB, timed.
 fn crypto_check(fdt: &Fdt) {
@@ -309,6 +342,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     kprintln!("[npk] Heap online: sum 1..1000 = {}", v.iter().sum::<u64>());
     dma_check();
     crypto_check(&fdt);
+    stack_check();
     let keyboard = crate::platform::pi5::init(&fdt);
     if let Some(id) = crate::platform::pi5_sd::init(&fdt) {
         crate::platform::pi5_sd::system_disk(id);

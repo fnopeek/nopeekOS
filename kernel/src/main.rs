@@ -34,9 +34,7 @@ pub use drivers::{usb_storage, keyboard, rtc, blkdev, netdev, acpi, smbus, batte
 pub use drivers::wifi;
 
 mod mm;
-pub use mm::{memory, heap};
-#[cfg(target_arch = "x86_64")]
-pub use mm::paging;
+pub use mm::{memory, heap, paging};
 
 mod security;
 pub use security::csprng;

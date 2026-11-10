@@ -7,6 +7,7 @@ pub mod dma;
 pub mod exceptions;
 pub mod gic;
 pub mod mmu;
+pub mod paging;
 pub mod time;
 pub mod timer;
 

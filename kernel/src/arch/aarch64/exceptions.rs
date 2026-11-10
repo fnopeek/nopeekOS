@@ -6,6 +6,14 @@ unsafe extern "C" {
     static exception_vectors: u8;
 }
 
+/// Where `report` runs, one per core (TPIDR_EL1 index): never the stack
+/// that faulted, which may have just hit its guard page.
+#[repr(C, align(16))]
+struct FaultStacks([[u8; 16 * 1024]; super::cores::MAX_CORES]);
+
+#[unsafe(export_name = "fault_stacks")]
+static mut FAULT_STACKS: FaultStacks = FaultStacks([[0; 16 * 1024]; super::cores::MAX_CORES]);
+
 /// Point VBAR at the vector table. With VHE this is VBAR_EL2.
 pub fn init() {
     // SAFETY: the table is 2 KiB aligned code in the kernel image; taking
@@ -44,8 +52,10 @@ fn class(ec: u64) -> &'static str {
 #[unsafe(no_mangle)]
 extern "C" fn aarch64_exception(kind: u64, esr: u64, elr: u64, far: u64, spsr: u64, sp: u64, lr: u64) -> ! {
     let ec = (esr >> 26) & 0x3f;
+    let guard = matches!(ec, 0x24 | 0x25) && crate::mm::stack::is_guard(far);
     crate::fatal::die(format_args!(
-        "{} exception from {}: {} (EC {:#x})\n[npk] ESR {:#x}  ELR {:#x}  FAR {:#x}\n[npk] SPSR {:#x}  SP {:#x}  LR {:#x}",
+        "{} exception from {}: {} (EC {:#x}){}\n[npk] ESR {:#x}  ELR {:#x}  FAR {:#x}\n[npk] SPSR {:#x}  SP {:#x}  LR {:#x}",
         KIND[(kind & 3) as usize], FROM[((kind >> 2) & 3) as usize], class(ec), ec,
+        if guard { ", stack overflow into the guard page" } else { "" },
         esr, elr, far, spsr, sp, lr))
 }
