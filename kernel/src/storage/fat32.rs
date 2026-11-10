@@ -4,7 +4,7 @@
 //! OTA update, and keeps small files in `/EFI/NOPEEK` that must be readable
 //! before npkFS is unlocked. Everything read back from the ESP is untrusted.
 
-use crate::nvme;
+use crate::blkdev;
 
 const SECTOR_SIZE: usize = 512;
 const RESERVED_SECTORS: u32 = 32;
@@ -29,7 +29,7 @@ const ATTR_LFN: u8 = 0x0F;
 pub const SMALL_FILE_MAX: usize = 512;
 
 struct Fat32Writer {
-    /// Absolute start sector on NVMe
+    /// Absolute start sector on the system disk
     part_start: u64,
     /// Total sectors in partition
     total_sectors: u32,
@@ -59,9 +59,9 @@ impl Fat32Writer {
         }
     }
 
-    /// Write a sector at absolute NVMe position
+    /// Write a sector at an absolute position on the system disk
     fn write_sector(&self, rel_sector: u32, data: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
-        nvme::write_sector(self.part_start + rel_sector as u64, data)
+        blkdev::write_disk_sector(self.part_start + rel_sector as u64, data)
             .map_err(|_| "FAT32 write error")
     }
 
@@ -145,7 +145,7 @@ impl Fat32Writer {
 
             // Read existing sector
             let mut sec = [0u8; 512];
-            nvme::read_sector(self.part_start + abs_sector as u64, &mut sec)
+            blkdev::read_disk_sector(self.part_start + abs_sector as u64, &mut sec)
                 .map_err(|_| "FAT read")?;
 
             sec[fat_offset..fat_offset + 4].copy_from_slice(&value.to_le_bytes());
@@ -252,7 +252,7 @@ fn make_name(name: &[u8], ext: &[u8]) -> [u8; 11] {
 }
 
 /// Create FAT32 ESP and write the UEFI bootloader.
-/// `part_start`: absolute sector on NVMe where ESP begins
+/// `part_start`: absolute sector on the system disk where the ESP begins
 /// `part_sectors`: size of ESP in sectors
 /// `kernel_efi`: the kernel as a UEFI PE+ application (built by
 ///     `objcopy -O pei-x86-64 --subsystem=efi-app`). UEFI firmware
@@ -335,7 +335,7 @@ pub fn create_esp(
 // ============================================================
 
 struct Fat32Reader {
-    /// Absolute start sector of ESP on NVMe
+    /// Absolute start sector of the ESP on the system disk
     part_start: u64,
     /// Reserved sectors before the first FAT (BPB RsvdSecCnt)
     reserved: u32,
@@ -405,7 +405,7 @@ impl Fat32Reader {
     /// Parse the boot sector (BPB) to initialize the reader.
     fn from_esp(part_start: u64) -> Result<Self, &'static str> {
         let mut bs = [0u8; 512];
-        nvme::read_sector(part_start, &mut bs).map_err(|_| "ESP read error")?;
+        blkdev::read_disk_sector(part_start, &mut bs).map_err(|_| "ESP read error")?;
 
         // Verify FAT32 signature
         if bs[510] != 0x55 || bs[511] != 0xAA { return Err("ESP: bad signature"); }
@@ -454,7 +454,7 @@ impl Fat32Reader {
     }
 
     fn read_sector(&self, rel_sector: u32, buf: &mut [u8; 512]) -> Result<(), &'static str> {
-        nvme::read_sector(self.part_start + rel_sector as u64, buf)
+        blkdev::read_disk_sector(self.part_start + rel_sector as u64, buf)
             .map_err(|_| "FAT32 read error")
     }
 
@@ -471,7 +471,7 @@ impl Fat32Reader {
                 rel_sector, self.total_sectors);
             return Err("ESP write past the end of the partition");
         }
-        nvme::write_sector(self.part_start + rel_sector as u64, buf)
+        blkdev::write_disk_sector(self.part_start + rel_sector as u64, buf)
             .map_err(|_| "FAT32 write error")
     }
 
@@ -757,7 +757,7 @@ pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
     // Update directory entry with new file size
     fs.update_entry_size(dir_sec, dir_off, data.len() as u32)?;
     // Out of the controller's volatile write cache before anyone reboots.
-    nvme::flush().map_err(|_| "ESP flush")?;
+    blkdev::flush().map_err(|_| "ESP flush")?;
 
     Ok(())
 }
@@ -796,9 +796,9 @@ fn short_name(name: &str) -> Option<[u8; 11]> {
 
 const NOPEEK_DIR: [u8; 11] = *b"NOPEEK     ";
 
-/// Absolute start sector of the ESP on the NVMe boot disk, found the same
+/// Absolute start sector of the ESP on the system disk, found the same
 /// way the OTA kernel update finds it (first GPT entry, ESP type GUID).
-/// `None` without NVMe, without GPT, or when the first entry is not an ESP.
+/// `None` without a system disk, without GPT, or when the first entry is not an ESP.
 pub fn esp_start() -> Option<u64> {
     crate::gpt::detect_esp_offset()
 }

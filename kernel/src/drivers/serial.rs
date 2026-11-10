@@ -157,20 +157,6 @@ impl SerialPort {
         if let Some(h) = HOOKS.get() { (h.echo)(byte); }
     }
 
-    /// Blocking read. Polls both serial port and USB keyboard.
-    pub fn read_byte(&self) -> u8 {
-        loop {
-            // Check keyboard first (USB/xHCI — primary on bare metal)
-            if let Some(key) = HOOKS.get().and_then(|h| (h.key)()) {
-                return key;
-            }
-            if self.has_data() {
-                return self.uart.get();
-            }
-            core::hint::spin_loop();
-        }
-    }
-
     pub fn has_data(&self) -> bool {
         self.uart.has_data()
     }
@@ -182,68 +168,6 @@ impl SerialPort {
     /// two input sources don't steal each other's keystrokes.
     pub fn read_serial_raw(&self) -> u8 {
         self.uart.get()
-    }
-
-    /// Read a line with masked echo (shows '*'), returns length.
-    pub fn read_line_masked(&self, buf: &mut [u8]) -> usize {
-        let mut pos = 0;
-        loop {
-            let byte = self.read_byte();
-            match byte {
-                b'\r' | b'\n' => {
-                    self.echo_byte(b'\r');
-                    self.echo_byte(b'\n');
-                    return pos;
-                }
-                0x08 | 0x7F => {
-                    if pos > 0 {
-                        pos -= 1;
-                        self.echo_byte(0x08);
-                        self.echo_byte(b' ');
-                        self.echo_byte(0x08);
-                    }
-                }
-                byte if byte >= 0x20 && byte < 0x7F => {
-                    if pos < buf.len() {
-                        buf[pos] = byte;
-                        pos += 1;
-                        self.echo_byte(b'*');
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    /// Read a line with echo, returns length
-    pub fn read_line(&self, buf: &mut [u8]) -> usize {
-        let mut pos = 0;
-        loop {
-            let byte = self.read_byte();
-            match byte {
-                b'\r' | b'\n' => {
-                    self.echo_byte(b'\r');
-                    self.echo_byte(b'\n');
-                    return pos;
-                }
-                0x08 | 0x7F => {
-                    if pos > 0 {
-                        pos -= 1;
-                        self.echo_byte(0x08);
-                        self.echo_byte(b' ');
-                        self.echo_byte(0x08);
-                    }
-                }
-                byte if byte >= 0x20 && byte < 0x7F => {
-                    if pos < buf.len() {
-                        buf[pos] = byte;
-                        pos += 1;
-                        self.echo_byte(byte);
-                    }
-                }
-                _ => {}
-            }
-        }
     }
 }
 
@@ -288,4 +212,68 @@ macro_rules! kdebug {
             $crate::serial::quiet_line(format_args!("{}\n", format_args!($($arg)*)));
         }
     });
+}
+
+/// Blocking read of one byte from the keyboard hook or the UART. The
+/// console lock is held only to look at the UART, never across the wait:
+/// another core printing meanwhile must not stall, least of all the one
+/// that delivers the keys.
+pub fn read_byte() -> u8 {
+    loop {
+        if let Some(key) = HOOKS.get().and_then(|h| (h.key)()) {
+            return key;
+        }
+        {
+            let s = SERIAL.lock();
+            if s.has_data() {
+                return s.read_serial_raw();
+            }
+        }
+        core::hint::spin_loop();
+    }
+}
+
+fn echo(byte: u8) {
+    SERIAL.lock().echo_byte(byte);
+}
+
+/// Read a line into `buf`, echoing each character (or `*` when `masked`),
+/// up to Enter; returns its length.
+fn read_line_echo(buf: &mut [u8], masked: bool) -> usize {
+    let mut pos = 0;
+    loop {
+        match read_byte() {
+            b'\r' | b'\n' => {
+                echo(b'\r');
+                echo(b'\n');
+                return pos;
+            }
+            0x08 | 0x7F => {
+                if pos > 0 {
+                    pos -= 1;
+                    echo(0x08);
+                    echo(b' ');
+                    echo(0x08);
+                }
+            }
+            byte if (0x20..0x7F).contains(&byte) => {
+                if pos < buf.len() {
+                    buf[pos] = byte;
+                    pos += 1;
+                    echo(if masked { b'*' } else { byte });
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Read a line with echo, returns its length.
+pub fn read_line(buf: &mut [u8]) -> usize {
+    read_line_echo(buf, false)
+}
+
+/// Read a line with masked echo (`*`), returns its length.
+pub fn read_line_masked(buf: &mut [u8]) -> usize {
+    read_line_echo(buf, true)
 }

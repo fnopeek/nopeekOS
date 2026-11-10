@@ -45,7 +45,7 @@ pub fn install_to_nvme() -> Result<(), &'static str> {
 
     kprint!("[npk] Install nopeekOS to NVMe? [y/N] ");
     let mut buf = [0u8; 16];
-    let len = serial::SERIAL.lock().read_line(&mut buf);
+    let len = serial::read_line(&mut buf);
     if len == 0 || (buf[0] != b'y' && buf[0] != b'Y') {
         return Err("Installation cancelled");
     }

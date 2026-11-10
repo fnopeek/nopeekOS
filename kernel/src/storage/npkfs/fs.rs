@@ -527,7 +527,7 @@ pub fn gc() -> Result<GcStats, Error> {
         let ms = |a: u64, b: u64| b.saturating_sub(a) * 1000 / crate::time::counter_hz().max(1);
         crate::kprintln!("[npk] gc: mark {} ms, sweep {} ms, trim {} ms; longest wait for the store {} us, for the disk {} us",
             ms(t_mark, t_sweep), ms(t_sweep, t_trim), ms(t_trim, t_end), storage::take_longest_wait_us(),
-            crate::nvme::take_longest_wait_us());
+            crate::blkdev::take_longest_wait_us());
     }
 
     // Reset pressure — this sweep covered everything orphaned so far.

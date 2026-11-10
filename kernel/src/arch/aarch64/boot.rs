@@ -132,7 +132,7 @@ fn screen(fdt: &Fdt) {
     crate::serial::set_hooks(crate::serial::Hooks {
         write: crate::framebuffer::write_str,
         echo: crate::framebuffer::write_byte,
-        key: || None,
+        key: crate::xhci::poll_keyboard,
         quiet: |_| {},
     });
 }
@@ -349,6 +349,23 @@ fn crypto_check(fdt: &Fdt) {
         if ok { "ok" } else { "FAILED" }, mbs(t1 - t0), mbs(t2 - t1));
 }
 
+/// npkFS on the system disk, then the identity on it: the setup on a
+/// fresh disk, the passphrase on one set up before (kmain's order).
+fn identity() {
+    let mounted = !matches!(crate::npkfs::bring_up(true), crate::npkfs::BroughtUp::NotMounted);
+    if mounted {
+        kprintln!("[npk] npkfs: mounted on the SD card");
+    }
+    if !mounted || !crate::npkfs::has_keyslot() {
+        if !crate::setup::run_fresh_install() {
+            kprintln!("[npk] Setup failed. System halted.");
+            crate::arch::halt_forever()
+        }
+    } else {
+        crate::setup::text_unlock();
+    }
+}
+
 /// The kernel's entry on AArch64, from `_start` with the MMU on.
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb: usize) -> ! {
@@ -404,7 +421,12 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     smp_check(&fdt);
     let keyboard = crate::platform::pi5::init(&fdt);
     if let Some(id) = crate::platform::pi5_sd::init(&fdt) {
-        crate::platform::pi5_sd::system_disk(id);
+        if let Some((off, blocks)) = crate::platform::pi5_sd::system_disk(id) {
+            crate::blkdev::use_sd(id);
+            crate::blkdev::set_partition_offset(off);
+            crate::blkdev::set_partition_size(blocks);
+            identity();
+        }
     }
     kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
     kprintln!();

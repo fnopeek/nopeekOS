@@ -236,50 +236,16 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
                 false
             };
 
-            match npkfs::mount() {
-                Ok(()) => {
+            match npkfs::bring_up(partition_found) {
+                npkfs::BroughtUp::Mounted => {
                     mounted = true;
                     vga::show_status(b"npkFS mounted");
                 }
-                Err(e) if blkdev::is_available() => {
-                    // "mount failed" and "there is no filesystem here" are
-                    // different facts; formatting on the former would destroy
-                    // an installation over one unreadable superblock.
-                    kprintln!("[npk] npkfs: mount failed: {}", e);
-                    let probe = match npkfs::probe_disk() {
-                        Ok(p) => p,
-                        Err(pe) => {
-                            kprintln!("[npk] npkfs: superblock ring unreadable: {}", pe);
-                            npkfs::halt_for_unmountable_disk(&Default::default());
-                        }
-                    };
-                    kprintln!(
-                        "[npk] npkfs: sb ring — {} valid, {} bad csum, {} legacy, {} foreign, {} blank, {} unreadable",
-                        probe.valid, probe.bad_checksum, probe.legacy,
-                        probe.foreign, probe.blank, probe.read_errors,
-                    );
-                    // Format ONLY on a disk that is provably empty where we
-                    // would write: every slot read, every slot zero, and no
-                    // partition table we failed to place ourselves inside of.
-                    let gpt_says_raw = matches!(gpt::has_gpt_header(), Some(false));
-                    if probe.is_pristine() && (partition_found || gpt_says_raw) {
-                        kprintln!("[npk] npkfs: disk is blank — formatting");
-                        match npkfs::mkfs() {
-                            Ok(()) => {
-                                if npkfs::mount().is_ok() {
-                                    mounted = true;
-                                    vga::show_status(b"npkFS formatted");
-                                } else {
-                                    kprintln!("[npk] npkfs: mount after format failed");
-                                }
-                            }
-                            Err(e) => kprintln!("[npk] npkfs: format failed: {}", e),
-                        }
-                    } else {
-                        npkfs::halt_for_unmountable_disk(&probe);
-                    }
+                npkfs::BroughtUp::Formatted => {
+                    mounted = true;
+                    vga::show_status(b"npkFS formatted");
                 }
-                Err(e) => kprintln!("[npk] npkfs: mount failed, no block device: {}", e),
+                npkfs::BroughtUp::NotMounted => {}
             }
         }
     }
@@ -309,7 +275,7 @@ pub unsafe extern "C" fn kernel_main(boot_info: &'static boot_info::BootInfo) ->
             gui::login::run();
         } else {
             // Fallback: text-mode login (serial only, no framebuffer)
-            text_mode_auth();
+            setup::text_unlock();
         }
         vga::show_status(b"Identity verified");
     }
@@ -409,92 +375,3 @@ fn shell_fiber(_: u64) {
     }
 }
 
-/// Text-mode passphrase authentication (fallback when no framebuffer).
-fn text_mode_auth() {
-    kprintln!();
-    kprintln!("[npk] ─────────────────────────────────");
-    kprintln!("[npk]  Identity required.");
-    kprintln!("[npk]  Your passphrase IS your identity.");
-    #[cfg(feature = "installer")]
-    kprintln!("[npk]  Type RESET to wipe and reinstall.");
-    kprintln!("[npk] ─────────────────────────────────");
-    kprintln!();
-
-    let mut attempts: u32 = 0;
-    loop {
-        if attempts > 0 {
-            let delay_secs = 1u64 << attempts.min(5);
-            kprintln!("[npk] Wait {} seconds...", delay_secs);
-            let start = crate::time::ticks();
-            let delay_ticks = delay_secs * 100;
-            while crate::time::ticks() - start < delay_ticks {
-                core::hint::spin_loop();
-            }
-        }
-
-        kprint!("[npk] Passphrase: ");
-        let mut buf = [0u8; 128];
-        let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
-        if len == 0 {
-            kprintln!("[npk] Passphrase cannot be empty.");
-            continue;
-        }
-
-        #[cfg(feature = "installer")]
-        if len == 5 && &buf[..5] == b"RESET" {
-            kprintln!();
-            kprintln!("[npk] !! FACTORY RESET !!");
-            kprintln!("[npk] This will ERASE ALL DATA.");
-            kprint!("[npk] Type YES to confirm: ");
-            let mut confirm = [0u8; 16];
-            let clen = { serial::SERIAL.lock().read_line(&mut confirm) };
-            if clen == 3 && &confirm[..3] == b"YES" {
-                for b in buf.iter_mut() { *b = 0; }
-                if install::has_installer() && nvme::is_available() {
-                    match install::install_to_nvme() {
-                        Ok(()) => {}
-                        Err(e) => {
-                            kprintln!("[npk] Installation failed: {}", e);
-                            kprintln!("[npk] System halted.");
-                            crate::arch::halt_forever()
-                        }
-                    }
-                } else {
-                    kprintln!("[npk] Formatting...");
-                    let _ = npkfs::mkfs();
-                    let _ = npkfs::mount();
-                }
-                kprintln!();
-                if !setup::run_fresh_install() {
-                    kprintln!("[npk] Setup failed. System halted.");
-                    crate::arch::halt_forever()
-                }
-                return;
-            } else {
-                kprintln!("[npk] Reset cancelled.");
-                continue;
-            }
-        }
-
-        let ok = disk_key::unlock(&buf[..len]);
-        for b in buf.iter_mut() { *b = 0; }
-
-        if ok {
-            config::load();
-            serial::set_verbose(config::bootlog_verbose());
-            if let Some(name) = config::get("name") {
-                kprintln!("[npk] Welcome back, {}.", name);
-            } else {
-                kprintln!("[npk] Identity verified.");
-            }
-            return;
-        }
-        kprintln!("[npk] Wrong passphrase.");
-        attempts += 1;
-
-        if attempts >= 10 {
-            kprintln!("[npk] Too many failed attempts. System halted.");
-            crate::arch::halt_forever()
-        }
-    }
-}

@@ -32,6 +32,21 @@ impl Sectors for Nvme {
     }
 }
 
+/// The system disk (`blkdev`), whichever backend serves it.
+pub struct SystemDisk;
+
+impl Sectors for SystemDisk {
+    fn read(&mut self, lba: u64, buf: &mut [u8; 512]) -> Result<(), ()> {
+        crate::blkdev::read_disk_sector(lba, buf).map_err(|_| ())
+    }
+    fn write(&mut self, lba: u64, buf: &[u8; 512]) -> Result<(), ()> {
+        crate::blkdev::write_disk_sector(lba, buf).map_err(|_| ())
+    }
+    fn capacity(&mut self) -> Option<u64> {
+        crate::blkdev::capacity()
+    }
+}
+
 const ESP_TYPE_GUID: [u8; 16] = guid(0xC12A7328, 0xF81F, 0x11D2, 0xBA4B, 0x00A0C93EC93B);
 const DATA_TYPE_GUID: [u8; 16] = guid(0x0FC63DAF, 0x8483, 0x4772, 0x8E79, 0x3D69D8477DE4);
 
@@ -111,11 +126,10 @@ pub fn detect_npkfs_offset() -> Option<u64> {
 /// could not tell "raw disk, offset 0 is ours" from "our partition table is
 /// there but I could not read it" — the second one must never lead to a
 /// format at offset 0, which is where the GPT and the ESP live.
-#[cfg(target_arch = "x86_64")]
 pub fn has_gpt_header() -> Option<bool> {
-    if !crate::nvme::is_available() { return Some(false); }
+    if !crate::blkdev::is_available() { return Some(false); }
     let mut hdr = [0u8; 512];
-    Nvme.read(1, &mut hdr).ok()?;
+    SystemDisk.read(1, &mut hdr).ok()?;
     Some(&hdr[0..8] == b"EFI PART")
 }
 
@@ -190,9 +204,8 @@ fn read_table_at(dev: &mut impl Sectors, lba: u64) -> Option<(Table, [u8; 512], 
 /// both the start and the size of our partition — without the size,
 /// allocations past the partition end land in the backup-GPT region
 /// at the disk tail and hit `BlkError::OutOfRange`.
-#[cfg(target_arch = "x86_64")]
 pub fn detect_npkfs_partition() -> Option<(u64, u64)> {
-    npkfs_partition(&mut Nvme)
+    npkfs_partition(&mut SystemDisk)
 }
 
 /// `detect_npkfs_partition` on any disk.
@@ -212,9 +225,8 @@ pub fn npkfs_partition(dev: &mut impl Sectors) -> Option<(u64, u64)> {
 }
 
 /// Detect existing GPT and return ESP (EFI System Partition) sector offset.
-#[cfg(target_arch = "x86_64")]
 pub fn detect_esp_offset() -> Option<u64> {
-    let t = read_table(&mut Nvme)?;
+    let t = read_table(&mut SystemDisk)?;
     // First partition entry: the ESP.
     if t.entries[0..16] != ESP_TYPE_GUID { return None; }
     let start_lba = read_u64(&t.entries, 32);

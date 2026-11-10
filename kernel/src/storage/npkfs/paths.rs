@@ -28,6 +28,24 @@ use super::types::FsError;
 /// against this returns NotFound; mutations create the real Tree.
 pub const EMPTY_ROOT: [u8; 32] = [0u8; 32];
 
+/// The namespace's root segment for external volumes (`storage::ext`):
+/// never store objects.
+pub const EXT_ROOT: &str = "ext";
+
+/// Root of the per-module private areas.
+///
+/// `priv/<module>/…` is the one place in storage that no capability opens:
+/// elsewhere READ reads and WRITE writes, here the name decides, and the
+/// kernel assigns the name. Not even a module with all rights can enter
+/// another module's private area. This is where state that is itself a
+/// credential (e.g. browser cookies) can persist without being readable by
+/// every app holding READ.
+///
+/// The rule is symmetric (read, write, list, delete, rename, copy); a
+/// boundary in one direction only is none. The file manager does not see
+/// these folders, by design.
+pub const PRIVATE_ROOT: &str = "priv";
+
 #[derive(Debug)]
 pub enum PathError {
     /// Path is empty where it shouldn't be, contains `.`/`..`/empty
@@ -84,7 +102,7 @@ pub fn parse_path(path: &str) -> Result<Vec<&str>, PathError> {
         out.push(s);
     }
     // `ext/` holds external volumes (`storage::ext`), never store objects.
-    if out[0] == crate::ext::ROOT { return Err(PathError::InvalidPath); }
+    if out[0] == EXT_ROOT { return Err(PathError::InvalidPath); }
     Ok(out)
 }
 

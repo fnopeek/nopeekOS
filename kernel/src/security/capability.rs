@@ -349,8 +349,8 @@ pub fn grant_path(cap: CapId, path: &str, rights: Rights) {
 pub fn grant_tree(cap: CapId, dir: &str, rights: Rights) -> bool {
     if !canonical(dir) { return false; }
     let top = dir.split('/').next().unwrap_or("");
-    if top == "sys" || top == ".system" || top == crate::wasm::PRIVATE_ROOT { return false; }
-    if dir == crate::ext::ROOT { return false; }
+    if top == "sys" || top == ".system" || top == crate::npkfs::paths::PRIVATE_ROOT { return false; }
+    if dir == crate::npkfs::paths::EXT_ROOT { return false; }
     push_grant(cap, dir, rights, true);
     audit::granted(&cap, &alloc::format!("{}/", dir), rights);
     true

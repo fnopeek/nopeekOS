@@ -29,7 +29,8 @@ pub use drivers::{serial, framebuffer, xhci};
 #[cfg(target_arch = "x86_64")]
 pub use drivers::{pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
 #[cfg(target_arch = "x86_64")]
-pub use drivers::{usb_storage, keyboard, rtc, blkdev, netdev, acpi, smbus, battery, ec, sci};
+pub use drivers::{usb_storage, keyboard, rtc, netdev, acpi, smbus, battery, ec, sci};
+pub use drivers::blkdev;
 #[cfg(target_arch = "x86_64")]
 pub use drivers::wifi;
 
@@ -37,9 +38,7 @@ mod mm;
 pub use mm::{memory, heap, paging};
 
 mod security;
-pub use security::csprng;
-#[cfg(target_arch = "x86_64")]
-pub use security::{capability, audit, disk_key};
+pub use security::{audit, capability, csprng, disk_key};
 
 mod crypto;
 #[cfg(target_arch = "x86_64")]
@@ -48,7 +47,9 @@ pub use crypto::{tls, update_key};
 mod storage;
 pub use storage::gpt;
 #[cfg(target_arch = "x86_64")]
-pub use storage::{npkfs, fat32, ext};
+pub use storage::ext;
+pub use storage::fat32;
+pub use storage::npkfs;
 
 #[cfg(target_arch = "x86_64")]
 mod gui;
@@ -79,7 +80,6 @@ mod camfeed;
 mod devices;
 #[cfg(target_arch = "x86_64")]
 mod intent;
-#[cfg(target_arch = "x86_64")]
 mod config;
 #[cfg(target_arch = "x86_64")]
 mod settings;
@@ -98,7 +98,6 @@ mod wasm;
 mod wasi;
 #[cfg(target_arch = "x86_64")]
 mod shell;
-#[cfg(target_arch = "x86_64")]
 mod setup;
 #[cfg(target_arch = "x86_64")]
 mod gpu;

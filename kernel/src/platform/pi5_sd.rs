@@ -152,9 +152,8 @@ impl crate::gpt::Sectors for Card {
 }
 
 /// The system disk on the card: the image's npkFS partition grows over the
-/// card on the first boot (`gpt::grow_last_partition`); then a block
-/// inside it is written, read back and restored. The partition's start
-/// and size in 4 KiB blocks.
+/// card on the first boot (`gpt::grow_last_partition`). The partition's
+/// start and size in 4 KiB blocks.
 pub fn system_disk(id: u32) -> Option<(u64, u64)> {
     let sectors = mmc_sd::disks().iter().find(|d| d.id == id)
         .map(|d| d.blocks * d.block_size as u64 / 512)?;
@@ -172,27 +171,5 @@ pub fn system_disk(id: u32) -> Option<(u64, u64)> {
     }
     let (off, blocks) = crate::gpt::npkfs_partition(&mut card)?;
     kprintln!("[npk] sd: npkFS partition at 4K block {}, {} blocks ({} MB)", off, blocks, blocks * 4096 / 1_000_000);
-    block_test(id, off * 8);
     Some((off, blocks))
-}
-
-/// Write a pattern to the first sector at `lba`, read it back, put the
-/// old content back.
-fn block_test(id: u32, lba: u64) {
-    let mut old = [0u8; 512];
-    let mut back = [0u8; 512];
-    let mut pat = [0u8; 512];
-    for (i, b) in pat.iter_mut().enumerate() { *b = (i as u8) ^ 0x5a; }
-    let r = mmc_sd::read(id, lba, &mut old)
-        .and_then(|_| mmc_sd::write(id, lba, &pat))
-        .and_then(|_| mmc_sd::read(id, lba, &mut back));
-    let restored = mmc_sd::write(id, lba, &old).and_then(|_| {
-        let mut again = [0u8; 512];
-        mmc_sd::read(id, lba, &mut again).map(|_| again == old)
-    });
-    match r {
-        Ok(()) => kprintln!("[npk] sd: write/read at LBA {}: {}, old content back: {}",
-            lba, if back == pat { "ok" } else { "MISMATCH" }, matches!(restored, Ok(true))),
-        Err(e) => kprintln!("[npk] sd: write/read at LBA {} failed: {:?}", lba, e),
-    }
 }

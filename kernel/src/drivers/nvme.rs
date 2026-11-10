@@ -6,7 +6,7 @@
 use alloc::vec::Vec;
 use crate::{kprintln, pci};
 use crate::hw::{DmaRegion, Mmio};
-use crate::virtio_blk::BlkError;
+use crate::blkdev::BlkError;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use spin::Mutex;
 

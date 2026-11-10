@@ -118,7 +118,7 @@ pub fn halt_for_unmountable_disk(p: &sb_io::SbProbe) -> ! {
 /// deliberately (installer / explicit intent).
 pub fn mkfs() -> Result<(), FsError> {
     let total_blocks = blkdev::block_count()
-        .ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
+        .ok_or(FsError::Disk(crate::blkdev::BlkError::NotInitialized))?;
     if total_blocks < META_END + 16 {
         kprintln!("[npk] npkfs: disk too small ({} blocks)", total_blocks);
         return Err(FsError::DiskFull);
@@ -206,7 +206,7 @@ pub fn mount() -> Result<(), FsError> {
     // would drive a huge allocation (→ OOM → kernel halt). Reject anything
     // past the real device before any sizing happens.
     let disk_blocks = blkdev::block_count()
-        .ok_or(FsError::Disk(crate::virtio_blk::BlkError::NotInitialized))?;
+        .ok_or(FsError::Disk(crate::blkdev::BlkError::NotInitialized))?;
     if sb.total_blocks > disk_blocks {
         kprintln!("[npk] npkfs: superblock claims {} blocks, device has {} — refusing mount",
             sb.total_blocks, disk_blocks);

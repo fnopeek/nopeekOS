@@ -3,12 +3,14 @@
 //! Runs on first boot (no keyslot in the superblock).
 //! Collects: storage, name, passphrase, timezone, keyboard, language.
 
-use crate::{kprint, kprintln, serial, config, npkfs};
+use crate::{kprint, kprintln, serial, config, disk_key, npkfs};
+#[cfg(feature = "installer")]
+use crate::{install, nvme};
 
 /// Read a line from serial (with echo). Returns trimmed string.
 fn read_line() -> alloc::string::String {
     let mut buf = [0u8; 128];
-    let len = serial::SERIAL.lock().read_line(&mut buf);
+    let len = serial::read_line(&mut buf);
     let s = core::str::from_utf8(&buf[..len]).unwrap_or("").trim();
     alloc::string::String::from(s)
 }
@@ -26,7 +28,7 @@ fn read_line_default(default: &str) -> alloc::string::String {
 /// Read masked passphrase from serial.
 fn read_passphrase() -> (alloc::vec::Vec<u8>, usize) {
     let mut buf = [0u8; 128];
-    let len = serial::SERIAL.lock().read_line_masked(&mut buf);
+    let len = serial::read_line_masked(&mut buf);
     let mut vec = alloc::vec![0u8; len];
     vec.copy_from_slice(&buf[..len]);
     for b in buf.iter_mut() { *b = 0; }
@@ -180,4 +182,95 @@ fn setup_identity_and_settings() -> bool {
     }
 
     true
+}
+
+/// Unlock the disk with the passphrase typed at the console: the login
+/// without a graphical screen.
+pub fn text_unlock() {
+    kprintln!();
+    kprintln!("[npk] ─────────────────────────────────");
+    kprintln!("[npk]  Identity required.");
+    kprintln!("[npk]  Your passphrase IS your identity.");
+    #[cfg(feature = "installer")]
+    kprintln!("[npk]  Type RESET to wipe and reinstall.");
+    kprintln!("[npk] ─────────────────────────────────");
+    kprintln!();
+
+    let mut attempts: u32 = 0;
+    loop {
+        if attempts > 0 {
+            let delay_secs = 1u64 << attempts.min(5);
+            kprintln!("[npk] Wait {} seconds...", delay_secs);
+            let start = crate::time::ticks();
+            let delay_ticks = delay_secs * 100;
+            while crate::time::ticks() - start < delay_ticks {
+                core::hint::spin_loop();
+            }
+        }
+
+        kprint!("[npk] Passphrase: ");
+        let mut buf = [0u8; 128];
+        let len = serial::read_line_masked(&mut buf);
+        if len == 0 {
+            kprintln!("[npk] Passphrase cannot be empty.");
+            continue;
+        }
+
+        #[cfg(feature = "installer")]
+        if len == 5 && &buf[..5] == b"RESET" {
+            kprintln!();
+            kprintln!("[npk] !! FACTORY RESET !!");
+            kprintln!("[npk] This will ERASE ALL DATA.");
+            kprint!("[npk] Type YES to confirm: ");
+            let mut confirm = [0u8; 16];
+            let clen = serial::read_line(&mut confirm);
+            if clen == 3 && &confirm[..3] == b"YES" {
+                for b in buf.iter_mut() { *b = 0; }
+                if install::has_installer() && nvme::is_available() {
+                    match install::install_to_nvme() {
+                        Ok(()) => {}
+                        Err(e) => {
+                            kprintln!("[npk] Installation failed: {}", e);
+                            kprintln!("[npk] System halted.");
+                            crate::arch::halt_forever()
+                        }
+                    }
+                } else {
+                    kprintln!("[npk] Formatting...");
+                    let _ = npkfs::mkfs();
+                    let _ = npkfs::mount();
+                }
+                kprintln!();
+                if !run_fresh_install() {
+                    kprintln!("[npk] Setup failed. System halted.");
+                    crate::arch::halt_forever()
+                }
+                return;
+            } else {
+                kprintln!("[npk] Reset cancelled.");
+                continue;
+            }
+        }
+
+        let ok = disk_key::unlock(&buf[..len]);
+        for b in buf.iter_mut() { *b = 0; }
+
+        if ok {
+            config::load();
+            serial::set_verbose(config::bootlog_verbose());
+            if let Some(name) = config::get("name") {
+                kprintln!("[npk] Welcome back, {}.", name);
+            } else {
+                kprintln!("[npk] Identity verified.");
+            }
+            return;
+        }
+        kprintln!("[npk] Wrong passphrase.");
+        attempts += 1;
+
+        if attempts >= 10 {
+            kprintln!("[npk] Too many failed attempts. System halted.");
+            crate::arch::halt_forever()
+        }
+    }
 }

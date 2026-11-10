@@ -1251,19 +1251,7 @@ pub(crate) fn release_hw(hw: HwDriverState) {
     }
 }
 
-/// Root of the per-module private areas.
-///
-/// `priv/<module>/…` is the one place in storage that no capability opens:
-/// elsewhere READ reads and WRITE writes, here the name decides, and the
-/// kernel assigns the name. Not even a module with all rights can enter
-/// another module's private area. This is where state that is itself a
-/// credential (e.g. browser cookies) can persist without being readable by
-/// every app holding READ.
-///
-/// The rule is symmetric (read, write, list, delete, rename, copy); a
-/// boundary in one direction only is none. The file manager does not see
-/// these folders, by design.
-pub(crate) const PRIVATE_ROOT: &str = "priv";
+pub(crate) use crate::npkfs::paths::PRIVATE_ROOT;
 
 /// The module that owns this path, or `None` if nobody owns it (then
 /// capabilities decide as usual).

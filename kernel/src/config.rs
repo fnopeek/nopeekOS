@@ -109,6 +109,7 @@ pub fn load() {
             bump();
             crate::time::zone::load_from_config();
             // A static address is only known from here on.
+            #[cfg(target_arch = "x86_64")]
             crate::net::dhcp::configure();
         }
         Err(_) => {
@@ -134,8 +135,10 @@ pub fn set(key: &str, value: &str) {
     bump();
     save();
     if key == "bootlog" { crate::serial::set_verbose(bootlog_verbose()); }
+    #[cfg(target_arch = "x86_64")]
     if key == "keyboard" { crate::keyboard::cache_layout(); }
     if key == "timezone" { crate::time::zone::load_from_config(); }
+    #[cfg(target_arch = "x86_64")]
     if key.starts_with("static_") { crate::net::dhcp::configure(); }
 }
 
@@ -144,6 +147,7 @@ pub fn unset(key: &str) -> bool {
     let removed = CONFIG.lock().remove(key);
     if removed { bump(); save(); }
     if key == "bootlog" { crate::serial::set_verbose(false); }
+    #[cfg(target_arch = "x86_64")]
     if key == "keyboard" { crate::keyboard::cache_layout(); }
     if key == "timezone" { crate::time::zone::load_from_config(); }
     removed

@@ -25,7 +25,7 @@ pub fn intent_lock() {
 
             kprint!("[npk] Passphrase: ");
             let mut buf = [0u8; 128];
-            let len = { serial::SERIAL.lock().read_line_masked(&mut buf) };
+            let len = serial::read_line_masked(&mut buf);
             if len == 0 { continue; }
 
             let ok = crate::disk_key::unlock(&buf[..len]);

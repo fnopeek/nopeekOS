@@ -57,7 +57,7 @@ pub const MAX_JOURNAL_ENTRIES: usize = (BLOCK_SIZE - 24) / 16; // 254
 
 #[derive(Debug)]
 pub enum FsError {
-    Disk(crate::virtio_blk::BlkError),
+    Disk(crate::blkdev::BlkError),
     NotFormatted,
     NotMounted,
     Corrupt,
@@ -76,8 +76,8 @@ pub enum FsError {
     OutOfMemory,
 }
 
-impl From<crate::virtio_blk::BlkError> for FsError {
-    fn from(e: crate::virtio_blk::BlkError) -> Self { FsError::Disk(e) }
+impl From<crate::blkdev::BlkError> for FsError {
+    fn from(e: crate::blkdev::BlkError) -> Self { FsError::Disk(e) }
 }
 
 impl core::fmt::Display for FsError {

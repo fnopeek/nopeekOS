@@ -4,6 +4,7 @@
 //! Provides sector-level and block-level (4KB) I/O with TRIM/DISCARD.
 //! SSD-friendly: negotiates DISCARD when available.
 
+use crate::blkdev::BlkError;
 use core::sync::atomic::{fence, Ordering};
 use spin::Mutex;
 use crate::hw::DmaRegion;
@@ -385,30 +386,6 @@ fn status_to_result(status: u8) -> Result<(), BlkError> {
     }
 }
 
-#[derive(Debug)]
-pub enum BlkError {
-    NotInitialized,
-    OutOfRange,
-    QueueFull,
-    IoError,
-    Unsupported,
-    Timeout,
-    Unknown(u8),
-}
-
-impl core::fmt::Display for BlkError {
-    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
-        match self {
-            BlkError::NotInitialized => write!(f, "disk not initialized"),
-            BlkError::OutOfRange => write!(f, "sector out of range"),
-            BlkError::QueueFull => write!(f, "virtqueue full"),
-            BlkError::IoError => write!(f, "I/O error"),
-            BlkError::Unsupported => write!(f, "unsupported operation"),
-            BlkError::Timeout => write!(f, "request timed out"),
-            BlkError::Unknown(s) => write!(f, "unknown status: {}", s),
-        }
-    }
-}
 
 fn align_up(val: usize, align: usize) -> usize {
     (val + align - 1) & !(align - 1)

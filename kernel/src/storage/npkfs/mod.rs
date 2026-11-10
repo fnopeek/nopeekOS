@@ -54,6 +54,63 @@ pub fn mkfs() -> Result<(), FsError> {
     storage::mkfs()
 }
 
+/// What `bring_up` made of the system disk.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BroughtUp {
+    /// An existing npkFS.
+    Mounted,
+    /// A provably blank disk, formatted and mounted.
+    Formatted,
+    /// No disk, or a format that failed.
+    NotMounted,
+}
+
+/// Mount the system disk's npkFS. A disk that does not mount is formatted
+/// only when it is provably blank where npkFS would write: every
+/// superblock slot read and zero, and either the partition table placed
+/// us (`partition_found`) or there is none. Anything else halts with what
+/// the superblock ring holds, since a format over one unreadable
+/// superblock would destroy an installation.
+pub fn bring_up(partition_found: bool) -> BroughtUp {
+    let e = match mount() {
+        Ok(()) => return BroughtUp::Mounted,
+        Err(e) => e,
+    };
+    if !crate::blkdev::is_available() {
+        crate::kprintln!("[npk] npkfs: mount failed, no block device: {}", e);
+        return BroughtUp::NotMounted;
+    }
+    crate::kprintln!("[npk] npkfs: mount failed: {}", e);
+    let probe = match probe_disk() {
+        Ok(p) => p,
+        Err(pe) => {
+            crate::kprintln!("[npk] npkfs: superblock ring unreadable: {}", pe);
+            halt_for_unmountable_disk(&Default::default());
+        }
+    };
+    crate::kprintln!(
+        "[npk] npkfs: sb ring — {} valid, {} bad csum, {} legacy, {} foreign, {} blank, {} unreadable",
+        probe.valid, probe.bad_checksum, probe.legacy,
+        probe.foreign, probe.blank, probe.read_errors,
+    );
+    let gpt_says_raw = matches!(crate::gpt::has_gpt_header(), Some(false));
+    if !(probe.is_pristine() && (partition_found || gpt_says_raw)) {
+        halt_for_unmountable_disk(&probe);
+    }
+    crate::kprintln!("[npk] npkfs: disk is blank — formatting");
+    match mkfs() {
+        Ok(()) if mount().is_ok() => BroughtUp::Formatted,
+        Ok(()) => {
+            crate::kprintln!("[npk] npkfs: mount after format failed");
+            BroughtUp::NotMounted
+        }
+        Err(e) => {
+            crate::kprintln!("[npk] npkfs: format failed: {}", e);
+            BroughtUp::NotMounted
+        }
+    }
+}
+
 /// Mount the disk.
 pub fn mount() -> Result<(), FsError> {
     storage::mount()

@@ -2,9 +2,7 @@
 //!
 //! npkFS (content-addressed, COW B-tree), GPT partition detection, FAT32.
 
-#[cfg(target_arch = "x86_64")]
 pub mod npkfs;
-#[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod fat32;
 #[allow(dead_code)]
