@@ -134,13 +134,141 @@ fn capture_bytes(s: &str) {
     }
 }
 
+/// Whether the console keeps an open input line intact (`set_line_repair`).
+static LINE_REPAIR: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// Keep the line a reader is typing on intact when another writer prints:
+/// the line is blanked before that output and drawn again after it. For a
+/// console whose screen is the UART and the text framebuffer; the desktop's
+/// terminals keep their input line themselves.
+pub fn set_line_repair(on: bool) {
+    LINE_REPAIR.store(on, Ordering::Relaxed);
+}
+
+pub fn line_repair() -> bool {
+    LINE_REPAIR.load(Ordering::Relaxed)
+}
+
+/// Longest open line kept for redrawing, in bytes.
+const LINE_MAX: usize = 1024;
+
+/// The text on the console's current line that is not yet ended by a
+/// newline, and who wrote it: a prompt and what was typed after it.
+struct OpenLine {
+    owner: u64,
+    text: String,
+    /// Columns the line covered before a carriage return, still on screen.
+    covered: usize,
+    /// Blanked for another writer's output, not drawn again yet.
+    hidden: bool,
+}
+
+impl OpenLine {
+    const fn new() -> Self {
+        OpenLine { owner: 0, text: String::new(), covered: 0, hidden: false }
+    }
+
+    /// Follow the owner's own output: what stays on the current line.
+    fn track(&mut self, s: &str) {
+        for c in s.chars() {
+            match c {
+                '\n' => { self.text.clear(); self.covered = 0; }
+                '\r' => { self.covered = self.covered.max(self.text.chars().count()); self.text.clear(); }
+                '\x08' => { self.text.pop(); }
+                c if self.text.len() < LINE_MAX => self.text.push(c),
+                _ => {}
+            }
+        }
+    }
+
+    fn columns(&self) -> usize {
+        self.covered.max(self.text.chars().count())
+    }
+}
+
+/// Who is writing: the running fiber, or the core outside one. A writer in
+/// a `foreign` section counts as someone else.
+fn writer() -> u64 {
+    if !LINE_REPAIR.load(Ordering::Relaxed) { return 0; }
+    let id = crate::smp::fiber::current_stack_lo()
+        .unwrap_or(u64::MAX - crate::smp::per_core::current_core_id() as u64);
+    if FOREIGN.load(Ordering::Relaxed) == id { id ^ (1 << 63) } else { id }
+}
+
+/// The writer whose output in a `foreign` section is not part of its line.
+static FOREIGN: AtomicU64 = AtomicU64::new(0);
+
+/// Run `f`, whose output is not part of the caller's open line: the input
+/// loop's background polls print on behalf of other parts of the kernel.
+pub fn foreign<R>(f: impl FnOnce() -> R) -> R {
+    let me = crate::smp::fiber::current_stack_lo()
+        .unwrap_or(u64::MAX - crate::smp::per_core::current_core_id() as u64);
+    let before = FOREIGN.swap(me, Ordering::Relaxed);
+    let r = f();
+    FOREIGN.store(before, Ordering::Relaxed);
+    r
+}
+
 pub struct SerialPort {
     uart: Uart,
+    line: OpenLine,
 }
 
 impl SerialPort {
     pub const fn new() -> Self {
-        SerialPort { uart: Uart::new() }
+        SerialPort { uart: Uart::new(), line: OpenLine::new() }
+    }
+
+    /// To the UART and the screens only: line repair is not console output
+    /// and stays out of the log and the mirrors' counts.
+    fn screen(&self, s: &str) {
+        for byte in s.bytes() {
+            if byte == b'\n' {
+                self.write_byte(b'\r');
+            }
+            self.write_byte(byte);
+        }
+        if let Some(h) = HOOKS.get() { (h.write)(s); }
+    }
+
+    /// Before output from `who`: blank another writer's open line, or draw
+    /// the owner's line again on a fresh line after a foreign fragment.
+    fn before_output(&mut self, who: u64) {
+        if !LINE_REPAIR.load(Ordering::Relaxed) { return; }
+        if who != self.line.owner {
+            if !self.line.hidden && self.line.columns() > 0 {
+                let blank: String = core::iter::repeat_n(' ', self.line.columns()).collect();
+                self.screen("\r");
+                self.screen(&blank);
+                self.screen("\r");
+                self.line.hidden = true;
+            }
+        } else if self.line.hidden {
+            // Another writer left its line open: end it, as printk ends a
+            // continuation another context interrupts.
+            let text = core::mem::take(&mut self.line.text);
+            self.screen("\n");
+            self.screen(&text);
+            self.line.text = text;
+            self.line.covered = 0;
+            self.line.hidden = false;
+        }
+    }
+
+    /// After output from `who`: the owner's line tracked, or drawn again
+    /// once the foreign output ended its line.
+    fn after_output(&mut self, who: u64, s: &str) {
+        if !LINE_REPAIR.load(Ordering::Relaxed) { return; }
+        if who == self.line.owner || (self.line.columns() == 0 && !self.line.hidden) {
+            self.line.owner = who;
+            self.line.track(s);
+        } else if self.line.hidden && s.ends_with('\n') {
+            let text = core::mem::take(&mut self.line.text);
+            self.screen(&text);
+            self.line.text = text;
+            self.line.covered = 0;
+            self.line.hidden = false;
+        }
     }
 
     pub fn init(&mut self) {
@@ -152,9 +280,13 @@ impl SerialPort {
     }
 
     /// Write byte with framebuffer echo (for read_line echo on headless systems)
-    fn echo_byte(&self, byte: u8) {
+    fn echo_byte(&mut self, byte: u8) {
+        let who = writer();
+        self.before_output(who);
         self.write_byte(byte);
         if let Some(h) = HOOKS.get() { (h.echo)(byte); }
+        let mut b = [0u8; 4];
+        self.after_output(who, (byte as char).encode_utf8(&mut b));
     }
 
     pub fn has_data(&self) -> bool {
@@ -173,6 +305,8 @@ impl SerialPort {
 
 impl fmt::Write for SerialPort {
     fn write_str(&mut self, s: &str) -> fmt::Result {
+        let who = writer();
+        self.before_output(who);
         for byte in s.bytes() {
             if byte == b'\n' {
                 self.write_byte(b'\r');
@@ -182,6 +316,7 @@ impl fmt::Write for SerialPort {
         WRITE_GEN.fetch_add(1, Ordering::Relaxed);
         capture_bytes(s);
         if let Some(h) = HOOKS.get() { (h.write)(s); }
+        self.after_output(who, s);
         Ok(())
     }
 }

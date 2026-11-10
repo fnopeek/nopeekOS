@@ -157,7 +157,8 @@ impl Bitmap {
         None
     }
 
-    /// Free a range of blocks. Queues TRIM for later.
+    /// Free a range of blocks. Queues TRIM for later where the disk takes
+    /// discards.
     ///
     /// The range comes from on-disk extents and journal entries. One that
     /// reaches below the data area or past the end is corrupt and frees
@@ -179,7 +180,9 @@ impl Bitmap {
             }
         }
         if count > 0 {
-            self.trim_pending.push((start, count));
+            if crate::blkdev::has_discard() {
+                self.trim_pending.push((start, count));
+            }
             self.dirty = true;
         }
     }
@@ -223,7 +226,12 @@ impl Bitmap {
     /// list. A block freed and handed out again since holds live data, so
     /// only the parts of each range still free are discarded, as ext4
     /// discards only blocks no new allocation has taken.
+    /// Nothing is sent to a disk without discard support.
     pub fn flush_trims(&mut self) {
+        if !crate::blkdev::has_discard() {
+            self.trim_pending.clear();
+            return;
+        }
         self.trim_pending.sort_by_key(|&(s, _)| s);
         let mut merged: Vec<(u64, u64)> = Vec::new();
         for &(start, count) in &self.trim_pending {
@@ -238,6 +246,10 @@ impl Bitmap {
                     _ => merged.push((run, b - run)),
                 }
             }
+        }
+        if merged.is_empty() {
+            self.trim_pending.clear();
+            return;
         }
         if let Err(e) = crate::blkdev::discard_ranges(&merged) {
             crate::kprintln!("[npk] TRIM of {} range(s) failed: {}", merged.len(), e);

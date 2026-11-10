@@ -60,7 +60,9 @@ const ASSETS: &[AssetSpec] = &[
     AssetSpec { section: "font:LICENSE-Inter",   npkfs_path: "sys/fonts/LICENSE-Inter" },
     AssetSpec { section: "font:LICENSE-IBM-Plex", npkfs_path: "sys/fonts/LICENSE-IBM-Plex" },
     AssetSpec { section: "icons:phosphor",      npkfs_path: "sys/icons/phosphor" },
+    #[cfg(target_arch = "x86_64")]
     AssetSpec { section: "microvm:initramfs",   npkfs_path: "sys/microvm/initramfs.cpio.gz" },
+    #[cfg(target_arch = "x86_64")]
     AssetSpec { section: "microvm:linux-virt",  npkfs_path: "sys/microvm/linux-virt.bzImage" },
     // A Linux app's read-only squashfs image, mounted by PID-1 from
     // /dev/vdb (slot-5 virtio-blk). Fetched over OTA, not bundled into
@@ -70,6 +72,7 @@ const ASSETS: &[AssetSpec] = &[
     // ~50 MB, so it lives on GitHub Releases; the asset manifest carries
     // a `url=` override per entry and `https_get` follows the 302
     // redirect chain to objects.githubusercontent.com.
+    #[cfg(target_arch = "x86_64")]
     AssetSpec { section: "microvm:firefox-sqfs", npkfs_path: "sys/microvm/firefox.sqfs" },
     // CPython's standard library, as one zip. Stored uncompressed on
     // purpose: this interpreter has no zlib, so a deflated zip raises
@@ -525,6 +528,12 @@ struct AssetJob {
 /// Diff release/assets/manifest against npkFS-resident assets. Reads only:
 /// returns the jobs to run, how many were already current, and the shipped
 /// root CAs the manifest no longer lists.
+/// An asset only another architecture uses: the microVM's guest images
+/// are x86-64 guests that run on SVM or VMX.
+fn other_arch_asset(section: &str) -> bool {
+    !cfg!(target_arch = "x86_64") && section.starts_with("microvm:")
+}
+
 fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
     let manifest_path = alloc::format!("{}/assets/manifest", UPDATE_BASE);
     let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, ManifestKind::Assets) {
@@ -561,6 +570,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
             // signed manifest, exactly like the kernel.
             None => match entry.section.strip_prefix("cert:").filter(|n| safe_asset_name(n)) {
                 Some(name) => alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
+                None if other_arch_asset(&entry.section) => continue,
                 None => {
                     kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
                     continue;

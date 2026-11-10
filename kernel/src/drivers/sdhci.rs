@@ -658,6 +658,12 @@ impl Host {
     pub fn has_auto_cmd12(&self) -> bool { self.flags & SDHCI_AUTO_CMD12 != 0 }
     pub fn has_auto_cmd23(&self) -> bool { self.flags & SDHCI_AUTO_CMD23 != 0 }
 
+    /// `mmc->max_busy_timeout` in ms as `sdhci_setup_host` sets it: the
+    /// longest busy wait the data timeout counter can cover.
+    pub fn max_busy_timeout(&self) -> u32 {
+        (1u32 << 27) / self.timeout_clk.max(1)
+    }
+
     pub fn readl(&self, reg: u32) -> u32 { self.regs.r32(reg) }
     pub fn readw(&self, reg: u32) -> u16 { self.regs.r16(reg) }
     pub fn readb(&self, reg: u32) -> u8 { self.regs.r8(reg) }

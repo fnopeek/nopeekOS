@@ -229,6 +229,8 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     crate::heap::init();
     crate::serial::start_capture();
     screen(&fdt);
+    // The UART and the text framebuffer are the shell's only screen.
+    crate::serial::set_line_repair(true);
 
     crate::framebuffer::set_npk_color(RASPBERRY);
     crate::framebuffer::with_text_color(RASPBERRY, || {

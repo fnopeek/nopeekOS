@@ -372,18 +372,25 @@ pub fn is_available() -> bool {
     !matches!(backend(), Backend::None)
 }
 
-/// Whether the disk takes discards. The SD driver does not erase.
+/// Whether the disk takes discards.
 pub fn has_discard() -> bool {
     match backend() {
         #[cfg(target_arch = "x86_64")]
         Backend::Nvme => nvme::has_discard(),
         #[cfg(target_arch = "x86_64")]
         Backend::Virtio => virtio_blk::has_discard(),
-        _ => false,
+        Backend::Sd(id) => crate::drivers::mmc_sd::has_discard(id),
+        Backend::None => false,
     }
 }
 
+/// Discard (start, count) ranges of 4 KiB blocks of the npkFS partition.
+/// A range past the partition's end refuses the whole call.
 pub fn discard_ranges(ranges: &[(u64, u64)]) -> Result<(), BlkError> {
+    let limit = block_count().ok_or(BlkError::NotInitialized)?;
+    if ranges.iter().any(|&(s, c)| s.checked_add(c).is_none_or(|end| end > limit)) {
+        return Err(BlkError::OutOfRange);
+    }
     // Same partition_offset correction as read_block / write_block;
     // without it, TRIM would hit the ESP / GPT area in front of our
     // partition and destroy the bootloader and kernel.
@@ -394,6 +401,12 @@ pub fn discard_ranges(ranges: &[(u64, u64)]) -> Result<(), BlkError> {
         Backend::Nvme => nvme::discard_ranges(&actual),
         #[cfg(target_arch = "x86_64")]
         Backend::Virtio => actual.iter().try_for_each(|&(s, c)| virtio_blk::discard_blocks(s, c)),
-        _ => Err(BlkError::Unsupported),
+        Backend::Sd(id) => {
+            if !crate::drivers::mmc_sd::has_discard(id) { return Err(BlkError::Unsupported); }
+            actual.iter().try_for_each(|&(s, c)| {
+                crate::drivers::mmc_sd::discard(id, s * SECTORS_PER_BLOCK, c * SECTORS_PER_BLOCK).map_err(sd_err)
+            })
+        }
+        Backend::None => Err(BlkError::NotInitialized),
     }
 }

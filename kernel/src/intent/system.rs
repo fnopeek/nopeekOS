@@ -2094,6 +2094,7 @@ pub fn intent_reboot() -> ! {
     kprintln!("[npk] Rebooting...");
     crate::npkfs::sync();
     crate::nvme::shutdown();
+    crate::drivers::mmc_sd::shutdown();
     kprintln!();
     // SAFETY: the machine is being reset: interrupts go off on this core, the
     // port writes hit the chipset reset control (0xCF9) and the i8042 (0x64),
@@ -2124,6 +2125,22 @@ pub fn intent_reboot() -> ! {
 
         loop { core::arch::asm!("hlt"); }
     }
+}
+
+/// Linux `kernel_restart` on arm64: the disk synced and the card shut down
+/// (`device_shutdown`), the other cores stopped (`smp_send_stop`), then the
+/// restart handler, PSCI SYSTEM_RESET.
+#[cfg(target_arch = "aarch64")]
+pub fn intent_reboot() -> ! {
+    kprintln!();
+    kprintln!("[npk] Rebooting...");
+    crate::npkfs::sync();
+    crate::drivers::mmc_sd::shutdown();
+    crate::arch::irq_disable();
+    crate::arch::stop_other_cores();
+    crate::arch::psci::system_reset();
+    kprintln!("[npk] the firmware refused the reset; power the board off and on");
+    crate::arch::halt_forever()
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -2389,6 +2406,7 @@ pub fn intent_halt() -> ! {
     kprintln!("[npk] Shutting down...");
     crate::npkfs::sync();
     crate::nvme::shutdown();
+    crate::drivers::mmc_sd::shutdown();
     kprintln!("[npk] Goodbye.");
     kprintln!();
     // SAFETY: the machine is being powered off: the port writes hit the QEMU
@@ -2414,6 +2432,23 @@ pub fn intent_halt() -> ! {
 
         crate::arch::halt_forever()
     }
+}
+
+/// Linux `kernel_power_off` on arm64: as `intent_reboot`, then
+/// `pm_power_off`, PSCI SYSTEM_OFF.
+#[cfg(target_arch = "aarch64")]
+pub fn intent_halt() -> ! {
+    kprintln!();
+    kprintln!("[npk] Shutting down...");
+    crate::npkfs::sync();
+    crate::drivers::mmc_sd::shutdown();
+    kprintln!("[npk] Goodbye.");
+    kprintln!();
+    crate::arch::irq_disable();
+    crate::arch::stop_other_cores();
+    crate::arch::psci::system_off();
+    kprintln!("[npk] the firmware refused to power off");
+    crate::arch::halt_forever()
 }
 
 /// `brightness [0-100|+N|-N]`: the panel's backlight in percent, set or

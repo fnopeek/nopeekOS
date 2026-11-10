@@ -10,6 +10,7 @@ pub mod forge;
 pub mod gic;
 pub mod mmu;
 pub mod paging;
+pub mod psci;
 pub mod time;
 pub mod timer;
 

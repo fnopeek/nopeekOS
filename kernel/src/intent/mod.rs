@@ -203,7 +203,7 @@ pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
             kprint!("(timeout)");
             break None;
         }
-        crate::xhci::poll_events();
+        crate::serial::foreign(crate::xhci::poll_events);
         let key = read_key().or_else(|| {
             let serial = serial::SERIAL.try_lock()?;
             if serial.has_data() { Some(serial.read_serial_raw()) } else { None }
@@ -793,29 +793,33 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // later in this loop, after this check, and the snapshot is
         // re-taken at the next iteration's top.
         let console_gen = crate::serial::write_gen();
-        crate::net::poll();
-        // Also while waiting for a line: this reader blocks until Enter, and
-        // a link that comes up meanwhile (e.g. WiFi finishing its handshake)
-        // must be noticed without a keystroke. Self-throttled to ~1 Hz.
-        crate::net::tick_link_and_reconfigure();
-        // A running microvm is the foreground task: give it a real time
-        // budget per outer iteration (8 slices, ~24 ms guest), then
-        // input/render/spin. One slice per iteration starves the guest.
-        #[cfg(target_arch = "x86_64")]
-        if crate::microvm::vm_active() {
-            for _ in 0..8 { crate::microvm::vm_poll_slice(); }
-        } else {
-            crate::microvm::vm_poll_slice();
-        }
-        #[cfg(target_arch = "x86_64")]
-        crate::shell::check_and_serve(vault, session_id);
+        crate::serial::foreign(|| {
+            crate::net::poll();
+            // Also while waiting for a line: this reader blocks until Enter,
+            // and a link that comes up meanwhile (e.g. WiFi finishing its
+            // handshake) must be noticed without a keystroke. Self-throttled
+            // to ~1 Hz.
+            crate::net::tick_link_and_reconfigure();
+            // A running microvm is the foreground task: give it a real time
+            // budget per outer iteration (8 slices, ~24 ms guest), then
+            // input/render/spin. One slice per iteration starves the guest.
+            #[cfg(target_arch = "x86_64")]
+            if crate::microvm::vm_active() {
+                for _ in 0..8 { crate::microvm::vm_poll_slice(); }
+            } else {
+                crate::microvm::vm_poll_slice();
+            }
+            #[cfg(target_arch = "x86_64")]
+            crate::shell::check_and_serve(vault, session_id);
+        });
         // Only redraw when the user has typed something: async output would
         // otherwise split the in-progress command. With empty input, redrawing
         // `path> ` between streamed lines is just noise.
         // Serial console only: in shade the live input line is redrawn via
         // rewrite_input, and this kprint would (a) duplicate the prompt and
         // (b) go to the primary debug sink, not the focused loop.
-        if !shade_active()
+        // A console that repairs its open line has drawn it again already.
+        if !shade_active() && !crate::serial::line_repair()
             && session.pos > 0 && crate::serial::write_gen() != console_gen {
             let cwd = get_cwd();
             let path = if cwd.is_empty() { "/" } else { cwd.as_str() };
@@ -2761,6 +2765,18 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "reboot" | "restart" => {
             if require_cap(vault, &session, Rights::EXECUTE, "reboot") {
                 crate::shutdown::request(crate::shutdown::Kind::Restart);
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        "halt" | "shutdown" | "poweroff" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "halt") {
+                system::intent_halt();
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        "reboot" | "restart" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "reboot") {
+                system::intent_reboot();
             }
         }
 
