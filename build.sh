@@ -916,12 +916,20 @@ framebuffer_ignore_alpha=1
 enable_uart=1
 uart_2ndstage=1
 CFG
-    local mb=64 start=2048
+    # The PC's layout (storage/gpt.rs): GPT, the boot partition as ESP at
+    # 2048 (64 MiB, FAT32), then a small npkFS partition the kernel grows
+    # over the card on first boot.
+    local start=2048 esp=131072 npk=65536
+    local sectors=$((start + esp + npk + 34))
     rm -f "$PI_SD_IMG"
-    truncate -s ${mb}M "$PI_SD_IMG"
-    echo "start=$start, type=c, bootable" | sfdisk -q "$PI_SD_IMG"
+    truncate -s $((sectors * 512)) "$PI_SD_IMG"
+    sfdisk -q "$PI_SD_IMG" <<PARTS
+label: gpt
+start=$start, size=$esp, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B, name="EFI System"
+start=$((start + esp)), size=$npk, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="npkFS"
+PARTS
     local part="$PI_SD_IMG@@$((start * 512))"
-    mkfs.fat -F 32 -n NOPEEKOS --offset "$start" "$PI_SD_IMG" $(( (mb * 1024 - start / 2) )) >/dev/null
+    mkfs.fat -F 32 -n NOPEEKOS --offset "$start" "$PI_SD_IMG" $((esp / 2)) >/dev/null
     mcopy -i "$part" "$ARM_IMG" ::nopeek.img
     mcopy -i "$part" "$dir/config.txt" ::config.txt
     mcopy -i "$part" "$PI_FW"/boot/bcm2712*.dtb ::

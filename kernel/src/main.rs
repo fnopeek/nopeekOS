@@ -48,10 +48,10 @@ mod crypto;
 #[cfg(target_arch = "x86_64")]
 pub use crypto::{tls, update_key};
 
-#[cfg(target_arch = "x86_64")]
 mod storage;
+pub use storage::gpt;
 #[cfg(target_arch = "x86_64")]
-pub use storage::{npkfs, fat32, gpt, ext};
+pub use storage::{npkfs, fat32, ext};
 
 #[cfg(target_arch = "x86_64")]
 mod gui;
