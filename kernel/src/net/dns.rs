@@ -308,7 +308,7 @@ fn lookup_until(name: &str, cancellable: bool) -> Option<Outcome> {
         if let Some(o) = with(|r| r.take(q)) {
             return Some(o);
         }
-        if cancellable && crate::intent::cancel_requested() {
+        if cancellable && super::shell_cancel_requested() {
             with(|r| r.cancel(q, &mut out));
             run(out);
             return None;

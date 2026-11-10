@@ -11,6 +11,8 @@ pub mod led;
 #[cfg(target_arch = "aarch64")]
 pub mod pi5;
 #[cfg(target_arch = "aarch64")]
+pub mod pi5_eth;
+#[cfg(target_arch = "aarch64")]
 pub mod pi5_sd;
 #[cfg(target_arch = "aarch64")]
 pub mod rng200;

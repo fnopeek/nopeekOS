@@ -231,6 +231,7 @@ pub fn handle_ipv4(data: &[u8], csum_ok: bool, l2: net_core::ip::PktType) {
     // address first would drop its replies whenever that address moved (DHCP
     // renewal, carrier blink). The tap matches against its own mappings.
     // Cheap no-op when no VM is up.
+    #[cfg(target_arch = "x86_64")]
     if crate::microvm::devices::nat::tap_inbound(&data[..total_len], csum_ok) {
         return;
     }

@@ -73,8 +73,11 @@ pub fn poll() {
     // poll the mouse.
     // Core 0 drains the host NIC even while a microvm runs: the tap consumes
     // whatever it pulls in via the data-plane worker.
+    #[cfg(target_arch = "x86_64")]
     let skip_nic_drain = crate::microvm::vm_active()
         && crate::smp::per_core::current_core_id() == 0;
+    #[cfg(not(target_arch = "x86_64"))]
+    let skip_nic_drain = false;
     if !skip_nic_drain
         && POLLING
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -104,12 +107,13 @@ pub fn poll() {
     // Flush the batched virtio-net TX doorbell once per cycle (send() defers the
     // per-frame notify to avoid a VM-exit per uploaded packet). No-op when no
     // virtio NIC / nothing pending.
-    crate::virtio_net::tx_flush();
+    netdev::tx_flush();
     // Always run (even if we skipped the drain above): progressive shade render
     // + mouse. Internally gated to Core 0, so only Core 0 executes it — no race
     // despite being outside the guard. This is the heartbeat that drives the
     // compositor from the shell-prompt idle loop (read_line_with_tab), which
     // polls net but never renders directly.
+    #[cfg(target_arch = "x86_64")]
     crate::shade::poll_render();
 }
 
@@ -125,6 +129,7 @@ pub fn poll_rx_only() {
     use core::sync::atomic::Ordering::Relaxed;
     let rd = crate::time::counter;
     // `igc_poll` cleans TX before RX: a sender stopped on a full ring goes on.
+    #[cfg(target_arch = "x86_64")]
     crate::microvm::devices::nat::egress_room();
     if POLLING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -174,7 +179,7 @@ pub fn poll_rx_only() {
     // parked on it would never refill the ring this loop is draining.
     crate::smp::fiber::pump_peers();
     let c = rd();
-    crate::virtio_net::tx_flush();
+    netdev::tx_flush();
     PROF_TXFLUSH.fetch_add(rd().wrapping_sub(c), Relaxed);
     // No shade::poll_render() here. poll_rx_only runs only on the worker recv
     // loops (tcp_recv_poll / recv_blocking), where poll_render would only pay
@@ -201,9 +206,7 @@ fn rx_wake() {
         let c = waiting.trailing_zeros() as usize;
         waiting &= waiting - 1;
         if c != me {
-            if let Some(apic) = crate::smp::per_core::core_apic(c) {
-                crate::smp::send_wake_ipi(apic);
-            }
+            crate::smp::per_core::send_wake(c);
         }
     }
 }
@@ -266,7 +269,7 @@ pub fn wasm_deliver_rx(frame: &[u8]) {
         netdev::wasm_nic_submit_rx(frame);
         // Core 0 drains this ring in its loop, which has no periodic tick:
         // wake it.
-        crate::intent::wake_shell();
+        wake_shell();
     }
 }
 
@@ -349,6 +352,7 @@ pub fn tick_link_and_reconfigure() {
     if now < NEXT_LINK_CHECK.load(Ordering::Relaxed) { return; }
     NEXT_LINK_CHECK.store(now + crate::time::counter_hz(), Ordering::Relaxed); // +~1 s
     crate::time::tick();
+    #[cfg(target_arch = "x86_64")]
     crate::intent::http::reap_pools();
 
     netdev::refresh_link_state();
@@ -454,4 +458,19 @@ pub fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
 #[allow(dead_code)]
 pub fn is_up() -> bool {
     netdev::is_available()
+}
+
+/// Let the shell's loop look at what arrived for it; there is no shell
+/// yet on AArch64.
+pub(crate) fn wake_shell() {
+    #[cfg(target_arch = "x86_64")]
+    crate::intent::wake_shell();
+}
+
+/// The shell's cancel request (Ctrl-C), for a blocking network call.
+pub(crate) fn shell_cancel_requested() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return crate::intent::cancel_requested();
+    #[cfg(not(target_arch = "x86_64"))]
+    false
 }

@@ -29,8 +29,8 @@ pub use drivers::{serial, framebuffer, xhci};
 #[cfg(target_arch = "x86_64")]
 pub use drivers::{pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
 #[cfg(target_arch = "x86_64")]
-pub use drivers::{usb_storage, keyboard, rtc, netdev, acpi, smbus, battery, ec, sci};
-pub use drivers::blkdev;
+pub use drivers::{usb_storage, keyboard, rtc, acpi, smbus, battery, ec, sci};
+pub use drivers::{blkdev, netdev};
 #[cfg(target_arch = "x86_64")]
 pub use drivers::wifi;
 
@@ -68,7 +68,6 @@ mod notify;
 #[cfg(target_arch = "x86_64")]
 mod status;
 mod input;
-#[cfg(target_arch = "x86_64")]
 mod net;
 #[cfg(target_arch = "x86_64")]
 mod audio;

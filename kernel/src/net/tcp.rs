@@ -166,7 +166,7 @@ fn connect_with(owner: Owner, remote_ip: [u8; 4], remote_port: u16, cancellable:
             _ => {}
         }
 
-        if cancellable && crate::intent::cancel_requested() {
+        if cancellable && super::shell_cancel_requested() {
             stack().remove(&mut KernelEnv, handle);
             return Err(TcpError::Cancelled);
         }

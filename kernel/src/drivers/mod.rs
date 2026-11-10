@@ -40,7 +40,6 @@ pub use pl011 as uart;
 #[cfg(target_arch = "x86_64")]
 pub mod rtc;
 pub mod blkdev;
-#[cfg(target_arch = "x86_64")]
 pub mod netdev;
 #[cfg(target_arch = "x86_64")]
 pub mod wifi;

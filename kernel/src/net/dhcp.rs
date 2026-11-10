@@ -408,7 +408,7 @@ pub fn deliver(payload: &[u8], to_us: bool) -> bool {
         q.push_back((payload.to_vec(), to_us));
     }
     drop(q);
-    crate::intent::wake_shell();
+    super::wake_shell();
     true
 }
 

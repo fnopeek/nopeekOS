@@ -24,6 +24,7 @@ const NTP_HOSTS: [&str; 4] = ["0.pool.ntp.org", "1.pool.ntp.org", "2.pool.ntp.or
 const AGREE_SECS: u64 = 2;
 
 /// Take the RTC as the starting time. Called once at boot.
+#[cfg(target_arch = "x86_64")]
 pub fn init_from_rtc() -> Option<u64> {
     let t = crate::rtc::read_unix_time()?;
     set(t);
@@ -36,6 +37,7 @@ fn step(unix: u64) {
     let before = now();
     set(unix);
     let first = mark_synced();
+    #[cfg(target_arch = "x86_64")]
     if !crate::rtc::write_unix_time(unix) {
         crate::kprintln!("[npk] time: RTC write failed");
     }

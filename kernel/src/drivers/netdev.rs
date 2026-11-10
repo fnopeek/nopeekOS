@@ -1,8 +1,12 @@
 //! Network Device Abstraction
 //!
-//! Dispatches to Intel NIC, WASM driver NIC, or virtio-net (in that order).
+//! Dispatches to the wired NIC (Intel, RTL8153 or virtio-net on a PC, RP1's
+//! GEM on the Raspberry Pi 5) or the WASM driver NIC (WiFi).
 
+#[cfg(target_arch = "x86_64")]
 use crate::{virtio_net, intel_nic, rtl8153};
+#[cfg(target_arch = "aarch64")]
+use crate::platform::pi5_eth as eth;
 use spin::Mutex;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
@@ -209,6 +213,7 @@ pub fn wasm_nic_dormant() -> bool {
 // a USB control transfer (rtl8153 PHY BMSR) — too costly for the dispatch path,
 // which runs in IRQ context. refresh_link_state() (Core 0, ~1 Hz) reads them
 // into this cache; dispatch + active() read the cache, staying cheap + IRQ-safe.
+#[cfg(target_arch = "x86_64")]
 static INTEL_LINK: AtomicBool = AtomicBool::new(false);
 
 /// Cached NIC preference: true = prefer WiFi (wlan), false = prefer wired (LAN).
@@ -225,9 +230,12 @@ static PREFER_WIFI: AtomicBool = AtomicBool::new(false);
 /// deadlocks Core 0. A USB-LAN NIC's cable state is inferred from presence and
 /// the WiFi link instead; see active().
 pub fn refresh_link_state() {
-    let up = intel_nic::link_up();
-    if INTEL_LINK.swap(up, Ordering::Relaxed) != up {
-        crate::notify::notify(crate::notify::TOPIC_STATUS);
+    #[cfg(target_arch = "x86_64")]
+    {
+        let up = intel_nic::link_up();
+        if INTEL_LINK.swap(up, Ordering::Relaxed) != up {
+            crate::notify::notify(crate::notify::TOPIC_STATUS);
+        }
     }
     PREFER_WIFI.store(
         crate::config::get("net_prefer")
@@ -245,8 +253,37 @@ pub fn refresh_link_state() {
 /// signal), or WiFi associated + keyed. If nothing has a usable link we fall back
 /// to mere presence.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Active { Intel, Rtl, Wasm, Virtio, None }
+pub enum Active {
+    #[cfg(target_arch = "x86_64")]
+    Intel,
+    #[cfg(target_arch = "x86_64")]
+    Rtl,
+    #[cfg(target_arch = "aarch64")]
+    Eth,
+    Wasm,
+    #[cfg(target_arch = "x86_64")]
+    Virtio,
+    None,
+}
 
+/// The Pi's order: the wired GEM when it has a link (or WiFi first when
+/// preferred), else whatever is present.
+#[cfg(target_arch = "aarch64")]
+pub fn active() -> Active {
+    let (eth_up, wifi_up) = (eth::link_up(), wasm_nic_link_up());
+    if PREFER_WIFI.load(Ordering::Relaxed) {
+        if wifi_up { return Active::Wasm; }
+        if eth_up { return Active::Eth; }
+    } else {
+        if eth_up { return Active::Eth; }
+        if wifi_up { return Active::Wasm; }
+    }
+    if eth::is_available() { return Active::Eth; }
+    if wasm_nic_available() { return Active::Wasm; }
+    Active::None
+}
+
+#[cfg(target_arch = "x86_64")]
 pub fn active() -> Active {
     let intel_up = intel_nic::is_available() && INTEL_LINK.load(Ordering::Relaxed);
     let rtl_present = rtl8153::is_available();
@@ -288,6 +325,7 @@ pub fn active_rx_rate() -> u32 {
         // 2x2 HT20 on 2.4 GHz: 144 Mbit gross, about 64 Mbit clean.
         return 8_000_000;
     }
+    #[cfg(target_arch = "x86_64")]
     if rtl8153::is_available() {
         return rtl8153::rx_rate();
     }
@@ -297,6 +335,7 @@ pub fn active_rx_rate() -> u32 {
 
 /// Same answer via `active()`, for reporting only.
 #[allow(dead_code)]
+#[cfg(target_arch = "x86_64")]
 fn active_rx_rate_by_iface() -> u32 {
     match active() {
         // Gigabit copper behind high-speed USB.
@@ -317,9 +356,13 @@ fn active_rx_rate_by_iface() -> u32 {
 /// network to become usable has to look at this, not at the id.
 pub fn active_link_up() -> bool {
     match active() {
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => INTEL_LINK.load(Ordering::Relaxed),
+        #[cfg(target_arch = "aarch64")]
+        Active::Eth => eth::link_up(),
         Active::Wasm => wasm_nic_link_up(),
         // No carrier detect on either — presence is all we have.
+        #[cfg(target_arch = "x86_64")]
         Active::Rtl | Active::Virtio => true,
         Active::None => false,
     }
@@ -330,9 +373,14 @@ pub fn active_link_up() -> bool {
 pub fn active_name() -> &'static str {
     match active() {
         Active::None => "none",
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => "intel",
+        #[cfg(target_arch = "x86_64")]
         Active::Rtl => "usb-lan",
+        #[cfg(target_arch = "aarch64")]
+        Active::Eth => "eth",
         Active::Wasm => "wifi",
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio => "virtio",
     }
 }
@@ -341,10 +389,15 @@ pub fn active_name() -> &'static str {
 pub fn active_id() -> u8 {
     match active() {
         Active::None => 0,
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => 1,
+        #[cfg(target_arch = "x86_64")]
         Active::Rtl => 2,
         Active::Wasm => 3,
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio => 4,
+        #[cfg(target_arch = "aarch64")]
+        Active::Eth => 5,
     }
 }
 
@@ -461,9 +514,16 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
                 Err(NetError::NotInitialized)
             }
         }
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => intel_nic::send(frame),
+        #[cfg(target_arch = "x86_64")]
         Active::Rtl => rtl8153::send(frame),
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None => virtio_net::send(frame),
+        #[cfg(target_arch = "aarch64")]
+        Active::Eth => eth::send(frame),
+        #[cfg(target_arch = "aarch64")]
+        Active::None => Err(NetError::NotInitialized),
     }
     .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); })
 }
@@ -472,6 +532,7 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
 /// again. A card without an interrupt-driven wake says yes at once.
 pub fn tx_room() -> bool {
     match active() {
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => intel_nic::tx_room(),
         _ => true,
     }
@@ -482,8 +543,10 @@ pub fn tx_room() -> bool {
 /// it. Other cards behave as in `send`.
 pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
     match active() {
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None if active_link_up() => virtio_net::try_send(frame)
             .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); }),
+        #[cfg(target_arch = "x86_64")]
         Active::Intel if active_link_up() => intel_nic::try_send(frame)
             .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); }),
         _ => send(frame),
@@ -494,6 +557,7 @@ pub fn try_send(frame: &[u8]) -> Result<(), NetError> {
 /// seed (`CHECKSUM_PARTIAL`): the card inserts the checksum, or, on a card
 /// that cannot, it is computed here first (`skb_checksum_help`).
 pub fn try_send_csum(frame: &mut [u8], l4_off: usize, tcp: bool) -> Result<(), NetError> {
+    #[cfg(target_arch = "x86_64")]
     if matches!(active(), Active::Intel) && active_link_up() && intel_nic::csum_capable() {
         return intel_nic::try_send_csum(frame, super::igc::TxCsum { l4_off, tcp })
             .inspect_err(|_| { TX_ERR.fetch_add(1, Ordering::Relaxed); });
@@ -516,7 +580,9 @@ pub fn checksum_help(frame: &mut [u8], l4_off: usize, csum_off: usize) {
 /// Can the active card segment + checksum a TCPv4 GSO super-frame itself?
 pub fn tso_capable() -> bool {
     match active() {
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => intel_nic::tso_capable(),
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None => virtio_net::tso_capable(),
         _ => false,
     }
@@ -531,7 +597,9 @@ pub fn send_tso(frame: &[u8], mss: u16, l4_off: usize, hdr_len: usize) -> Result
         return Err(NetError::NotInitialized);
     }
     match active() {
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => intel_nic::send_tso(frame, mss, l4_off, hdr_len),
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None => virtio_net::send_tso(frame, mss, l4_off, hdr_len),
         _ => Err(NetError::NotInitialized),
     }
@@ -555,10 +623,17 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
     match active() {
         // Already counted at `wasm_nic_submit_rx` / `note_rx_available`.
         Active::Wasm => WASM_NIC_RX.lock().pop(buf).map(|n| (n, false)),
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => intel_nic::recv(buf).inspect(|_| { bump_rx_seq(); }),
+        #[cfg(target_arch = "x86_64")]
         Active::Rtl => rtl8153::recv(buf).inspect(|_| { bump_rx_seq(); }).map(|n| (n, false)),
         // Sequence comes from the device's own used.idx — see `rx_seq`.
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None => virtio_net::recv(buf).map(|n| (n, false)),
+        #[cfg(target_arch = "aarch64")]
+        Active::Eth => eth::recv(buf).inspect(|_| { bump_rx_seq(); }).map(|n| (n, false)),
+        #[cfg(target_arch = "aarch64")]
+        Active::None => None,
     }
 }
 
@@ -571,6 +646,7 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
 /// Monotonic; only ever compared for inequality against a caller's snapshot.
 static RX_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 64-bit extension of the virtio device's 16-bit RX used.idx.
+#[cfg(target_arch = "x86_64")]
 static VIRTIO_RX_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[inline]
@@ -585,6 +661,7 @@ pub fn note_rx_available(n: u64) { RX_SEQ.fetch_add(n, Ordering::Relaxed); }
 /// Widen the device's wrapping 16-bit used.idx to a monotonic 64-bit count.
 /// A concurrent caller can at worst make this return a value one wrap stale,
 /// which costs one extra poll and never a missed frame.
+#[cfg(target_arch = "x86_64")]
 fn virtio_rx_seq() -> u64 {
     let raw = virtio_net::rx_used_idx() as u64;
     let prev = VIRTIO_RX_SEQ.load(Ordering::Relaxed);
@@ -599,10 +676,12 @@ fn virtio_rx_seq() -> u64 {
 /// NIC, the USB dongle and a WASM-driven card are all polled.
 pub fn rx_wake_vector() -> Option<crate::irq::Irq> {
     match active() {
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None => match virtio_net::rx_irq_vector() {
             0 => None,
             v => Some(v),
         },
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => match intel_nic::rx_irq_vector() {
             0 => None,
             v => Some(v),
@@ -617,6 +696,7 @@ pub fn rx_wake_vector() -> Option<crate::irq::Irq> {
 /// subtracted across a link change.
 pub fn rx_seq() -> u64 {
     match active() {
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None => virtio_rx_seq(),
         _ => RX_SEQ.load(Ordering::Relaxed),
     }
@@ -626,6 +706,7 @@ pub fn rx_seq() -> u64 {
 /// avoid a VM-exit per packet; the other drivers post as they go, so this is a
 /// no-op for them. Card-neutral so the microvm data plane never names a driver.
 pub fn tx_flush() {
+    #[cfg(target_arch = "x86_64")]
     if matches!(active(), Active::Virtio | Active::None) { virtio_net::tx_flush(); }
 }
 
@@ -633,15 +714,26 @@ pub fn tx_flush() {
 pub fn mac() -> Option<[u8; 6]> {
     match active() {
         Active::Wasm => Some(WASM_NIC.lock().mac_addr),
+        #[cfg(target_arch = "x86_64")]
         Active::Intel => intel_nic::mac(),
+        #[cfg(target_arch = "x86_64")]
         Active::Rtl => rtl8153::mac(),
+        #[cfg(target_arch = "x86_64")]
         Active::Virtio => virtio_net::mac(),
+        #[cfg(target_arch = "aarch64")]
+        Active::Eth => eth::mac(),
         Active::None => None,
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn is_available() -> bool {
     intel_nic::is_available() || rtl8153::is_available() || wasm_nic_available() || virtio_net::is_available()
+}
+
+#[cfg(target_arch = "aarch64")]
+pub fn is_available() -> bool {
+    eth::is_available() || wasm_nic_available()
 }
 
 // ── Interface enumeration ──
@@ -666,11 +758,17 @@ pub fn list() -> alloc::vec::Vec<IfaceInfo> {
     // `link_up` is the cached real carrier, so a pulled cable shows down and
     // the WiFi link takes over, matching what the stack does.
     let act = active();
+    #[cfg(target_arch = "aarch64")]
+    if let Some(mac) = eth::mac() {
+        v.push(IfaceInfo { name: "eth", driver: "RP1 GEM", mac, primary: act == Active::Eth, link_up: eth::link_up() });
+    }
+    #[cfg(target_arch = "x86_64")]
     if intel_nic::is_available() {
         if let Some(mac) = intel_nic::mac() {
             v.push(IfaceInfo { name: "eth", driver: "Intel I226-V", mac, primary: act == Active::Intel, link_up: INTEL_LINK.load(Ordering::Relaxed) });
         }
     }
+    #[cfg(target_arch = "x86_64")]
     if rtl8153::is_available() {
         if let Some(mac) = rtl8153::mac() {
             // No safe per-tick USB carrier read (see refresh_link_state); report
@@ -682,6 +780,7 @@ pub fn list() -> alloc::vec::Vec<IfaceInfo> {
         let mac = WASM_NIC.lock().mac_addr;
         v.push(IfaceInfo { name: "wlan", driver: "WiFi (WASM)", mac, primary: act == Active::Wasm, link_up: wasm_nic_link_up() });
     }
+    #[cfg(target_arch = "x86_64")]
     if virtio_net::is_available() {
         if let Some(mac) = virtio_net::mac() {
             v.push(IfaceInfo { name: "eth", driver: "virtio-net", mac, primary: act == Active::Virtio, link_up: true });

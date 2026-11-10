@@ -424,6 +424,14 @@ pub fn wake_idle_workers() {
     }
 }
 
+/// Send the wake to core `c`, halted or not (a waiter in its own idle loop,
+/// e.g. `net::rx_wait`).
+pub fn send_wake(c: usize) {
+    if c < core_count() {
+        hw::send_wake(c);
+    }
+}
+
 /// Wake worker `c` if it is halted in its idle path. The caller has already
 /// published what `c` should find (a queued fiber, inbox work) — `c` sets
 /// IDLE before its last look, so either it sees the work or we see IDLE.
