@@ -54,10 +54,19 @@ const OP_CONFIG:  u32 = 0x38;
 const CMD_RUN:  u32 = 1 << 0;
 const CMD_HCRST: u32 = 1 << 1;
 const CMD_INTE: u32 = 1 << 2; // interrupter enable
+/// `XHCI_IRQS`: the interrupt enables `xhci_quiesce` clears.
+const XHCI_IRQS: u32 = CMD_INTE | (1 << 3) | (1 << 10);
 
 // USBSTS bits
 const STS_HCH: u32 = 1 << 0;  // HC Halted
+const STS_FATAL: u32 = 1 << 2; // host system error
 const STS_EINT: u32 = 1 << 3; // event interrupt (write 1 to clear)
+const STS_HCE: u32 = 1 << 12; // host controller error
+/// IMAN: Interrupt Pending (write 1 to clear), Interrupt Enable.
+const IMAN_IP: u32 = 1 << 0;
+const IMAN_IE: u32 = 1 << 1;
+/// `XHCI_MAX_HALT_USEC`.
+const MAX_HALT_US: u64 = 32_000;
 const STS_CNR: u32 = 1 << 11; // Controller Not Ready
 
 // PORTSC bits
@@ -535,6 +544,27 @@ struct XhciState {
     fn_devs: Vec<usbfn::FnDev>,
     /// Cameras in the device register: slot and handle.
     cams: Vec<(u8, u32)>,
+    /// The interrupt whose thread services this controller (`irq_thread`);
+    /// 0 when another path drains it.
+    irq: crate::irq::Irq,
+    /// The interrupter's IMAN.IP clears itself when the interrupt is sent
+    /// (`ir->ip_autoclear`: MSI and MSI-X), else `xhci_irq` clears it.
+    ip_autoclear: bool,
+    /// Halted after a host controller or system error, or gone: nothing
+    /// but the event handler busy flag is touched any more
+    /// (`XHCI_STATE_HALTED`).
+    halted: bool,
+}
+
+/// How a controller reports its events.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Events {
+    /// No interrupt: the event ring is drained by polling.
+    Polled,
+    /// MSI or MSI-X, which clears IMAN.IP itself.
+    Msi,
+    /// An interrupt line, after which `xhci_irq` clears IMAN.IP.
+    Line,
 }
 
 /// One state per controller. Devices of different kinds (keyboard, mouse,
@@ -656,18 +686,19 @@ fn bring_up_controller(dev: pci::PciDevice) -> Option<XhciState> {
             oper.w32(OP_USBSTS, STS_EINT);
             oper.w32(OP_USBCMD, oper.r32(OP_USBCMD) | CMD_INTE);
             crate::kdebug!("[npk] xhci: events by MSI-X on vector {}", crate::interrupts::XHCI_VECTOR);
-            true
+            Events::Msi
         } else {
-            false
+            Events::Polled
         }
     })
 }
 
 /// A controller whose registers are not a PCI function: a `generic-xhci`
 /// window (`xhci-plat.c`), here the DWC3 hosts inside RP1, which reach RAM
-/// at `dma_bus_off` above its physical address. Events are polled. Returns
-/// whether a keyboard came up.
-pub fn attach_platform(phys: u64, len: u64, dma_bus_off: u64, quirks: Quirks) -> bool {
+/// at `dma_bus_off` above its physical address. With `irq` its events come
+/// by that interrupt and a fiber services them (`irq_thread`); without, by
+/// polling. Returns whether a keyboard came up.
+pub fn attach_platform(phys: u64, len: u64, dma_bus_off: u64, quirks: Quirks, irq: Option<crate::irq::Irq>) -> bool {
     DMA_BUS_OFF.store(dma_bus_off, Ordering::Relaxed);
     // SAFETY: the caller passes the xHCI register window of a device it
     // brought up, from the device tree.
@@ -675,11 +706,48 @@ pub fn attach_platform(phys: u64, len: u64, dma_bus_off: u64, quirks: Quirks) ->
         Ok(m) => m,
         Err(e) => { kprintln!("[npk] xhci: map failed: {:?}", e); return false; }
     };
-    let Some(mut state) = bring_up(CtrlId::Mmio(phys), mmio, quirks, |_| false) else { return false };
+    let events = |oper: Mmio| match irq {
+        Some(_) => {
+            oper.w32(OP_USBSTS, STS_EINT);
+            oper.w32(OP_USBCMD, oper.r32(OP_USBCMD) | CMD_INTE);
+            Events::Line
+        }
+        None => Events::Polled,
+    };
+    let Some(mut state) = bring_up(CtrlId::Mmio(phys), mmio, quirks, events) else { return false };
     enumerate_root_ports(&mut state);
     let keyboard = state.hid.iter().any(|h| h.running && h.keyboard);
-    store_ctrl(state);
+    if let Some(irq) = irq {
+        state.irq = irq;
+        store_ctrl(state);
+        crate::smp::scheduler::spawn_fiber(irq_thread, phys);
+    } else {
+        store_ctrl(state);
+    }
     keyboard
+}
+
+/// The interrupt thread of the controller at `phys`: Linux' `xhci_irq` run
+/// as a threaded handler, in a fiber the interrupt follows. A transfer that
+/// holds the controllers drains the ring itself meanwhile; the acknowledge
+/// waits for it, or the controller would raise no further interrupt.
+fn irq_thread(phys: u64) {
+    let id = CtrlId::Mmio(phys);
+    let Some(irq) = CTRLS.lock().iter().find(|s| s.ctrl == id).map(|s| s.irq) else { return };
+    loop {
+        let since = crate::irq::arm(irq);
+        loop {
+            if let Some(mut g) = CTRLS.try_lock() {
+                if let Some(s) = g.iter_mut().find(|s| s.ctrl == id) {
+                    xhci_irq(s);
+                }
+                break;
+            }
+            crate::smp::fiber::yield_sleep(1);
+        }
+        kick_hotplug();
+        crate::irq::wait_event(irq, since);
+    }
 }
 
 /// Halt and reset the controller, set up command and event rings and the
@@ -687,7 +755,7 @@ pub fn attach_platform(phys: u64, len: u64, dma_bus_off: u64, quirks: Quirks) ->
 /// power and settle the ports. Returns the running state with no device
 /// enumerated yet; every device slot the controller has is enabled
 /// (`xhci_init`: `HCS_MAX_SLOTS`).
-fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> bool) -> Option<XhciState> {
+fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> Events) -> Option<XhciState> {
     let map_size = mmio.len();
 
     // Read capability registers
@@ -800,7 +868,7 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
         ir0.w64_lo_hi(0x10u32, evt_seg_table.bus());
     }
     // Enable interrupter (for event ring to work, even in polling mode)
-    ir0.w32(0x00u32, ir0.r32(0x00u32) | 0x02); // IMAN.IE = 1
+    ir0.w32(0x00u32, ir0.r32(0x00u32) | IMAN_IE);
 
     // Start controller
     oper.w32(OP_USBCMD, CMD_RUN);
@@ -812,7 +880,8 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
     if let Some(start) = quirks.plat_start {
         start();
     }
-    if !irq(oper) {
+    let events = irq(oper);
+    if events == Events::Polled {
         NEEDS_POLL.store(true, Ordering::Relaxed);
     }
 
@@ -829,6 +898,9 @@ fn bring_up(ctrl: CtrlId, mmio: Mmio, quirks: Quirks, irq: impl FnOnce(Mmio) -> 
         #[cfg(target_arch = "x86_64")]
         fn_devs: Vec::new(),
         cams: Vec::new(),
+        irq: 0,
+        ip_autoclear: events == Events::Msi,
+        halted: false,
     };
 
     // Power on all ports
@@ -2423,19 +2495,23 @@ fn hub_port_debounce_root(oper: Mmio, port: u32) -> Option<bool> {
 /// A hotplug task is queued or running.
 static HOTPLUG_RUNNING: AtomicBool = AtomicBool::new(false);
 
-/// From the shell's idle step: hand pending port changes to a worker. The
-/// handling waits on devices for seconds when one misbehaves; the shell's
-/// core must not wait with it. Events of other devices keep flowing: the
-/// waits drain the event ring themselves.
+/// From the shell's idle step: hand pending port changes to a worker.
 #[cfg(target_arch = "x86_64")]
 pub fn hotplug() {
     crate::usb_storage::kick();
+    kick_hotplug();
+}
+
+/// Hand pending port changes to a worker, as Linux kicks its hub work
+/// queue. The handling waits on devices for seconds when one misbehaves;
+/// the caller must not wait with it. Events of other devices keep flowing:
+/// the waits drain the event ring themselves.
+fn kick_hotplug() {
     if !HOTPLUG.load(Ordering::Acquire) { return; }
     if HOTPLUG_RUNNING.swap(true, Ordering::AcqRel) { return; }
     crate::smp::scheduler::spawn("usb hotplug", hotplug_task, 0);
 }
 
-#[cfg(target_arch = "x86_64")]
 fn hotplug_task(_: u64) {
     loop {
         hotplug_pass();
@@ -4503,19 +4579,77 @@ fn nic_bulk_in_on(state: &mut XhciState, buf: &mut [u8]) -> usize {
     n_copy
 }
 
-/// The xHCI MSI-X interrupt: acknowledge like Linux `xhci_irq` (USBSTS.EINT,
-/// then the interrupter's IMAN.IP, both write-1-to-clear) and drain every
-/// controller's event ring. Only EINT is written back, not the whole status
-/// word as Linux does: that would also clear PCD and other bits nothing here
-/// reads by interrupt. `try_lock`: if a transfer on core 0 holds the
-/// controllers, it drains the ring itself.
+/// Linux `xhci_irq` with `xhci_handle_events` for interrupter 0: whether
+/// the controller raised the interrupt, its errors, the acknowledge of
+/// USBSTS and IMAN, then every event.
+fn xhci_irq(s: &mut XhciState) {
+    let status = s.oper.r32(OP_USBSTS);
+    if status == u32::MAX {
+        // xhci_hc_died: the controller is gone.
+        if !s.halted {
+            kprintln!("[npk] xhci {}: controller not responding", s.ctrl);
+            s.halted = true;
+        }
+        return;
+    }
+    if status & STS_EINT == 0 {
+        return;
+    }
+    if status & STS_HCE != 0 {
+        kprintln!("[npk] xhci {}: host controller error", s.ctrl);
+        xhci_halt(s);
+        return;
+    }
+    if status & STS_FATAL != 0 {
+        kprintln!("[npk] xhci {}: host system error", s.ctrl);
+        xhci_halt(s);
+        return;
+    }
+    // Clear the status first, so interrupts of other interrupters can
+    // come; write 1 to clear.
+    s.oper.w32(OP_USBSTS, status | STS_EINT);
+    let ir0 = s.rt.sub(IR0, IR_LEN);
+    // xhci_clear_interrupt_pending, the read flushing the write.
+    if !s.ip_autoclear {
+        ir0.w32(0x00u32, ir0.r32(0x00u32) | IMAN_IP);
+        ir0.r32(0x00u32);
+    }
+    if s.halted {
+        // Halted: only the event handler busy flag is cleared (RW1C),
+        // ERDP read as `lo_hi_readq`.
+        let erdp = ir0.r32(0x18u32) as u64 | (ir0.r32(0x1cu32) as u64) << 32;
+        ir0.w64_lo_hi(0x18u32, erdp | (1 << 3));
+        return;
+    }
+    drain(s);
+}
+
+/// `xhci_halt`: `xhci_quiesce` (interrupts and, unless halted already, the
+/// run bit off), then wait for HCHalted.
+fn xhci_halt(s: &mut XhciState) {
+    let mut mask = !XHCI_IRQS;
+    if s.oper.r32(OP_USBSTS) & STS_HCH == 0 {
+        mask &= !CMD_RUN;
+    }
+    s.oper.w32(OP_USBCMD, s.oper.r32(OP_USBCMD) & mask);
+    let t0 = crate::time::uptime_us();
+    while s.oper.r32(OP_USBSTS) & STS_HCH == 0 {
+        if crate::time::uptime_us() - t0 > MAX_HALT_US {
+            kprintln!("[npk] xhci {}: halt failed", s.ctrl);
+            break;
+        }
+        core::hint::spin_loop();
+    }
+    s.halted = true;
+}
+
+/// The xHCI MSI-X interrupt: `xhci_irq` for every controller. `try_lock`:
+/// if a transfer on core 0 holds the controllers, it drains the ring
+/// itself.
 pub fn msi_irq() {
     if let Some(mut g) = CTRLS.try_lock() {
         for slot in g.iter_mut() {
-            slot.oper.w32(OP_USBSTS, STS_EINT);
-            let ir0 = slot.rt.sub(IR0, IR_LEN);
-            ir0.w32(0x00u32, ir0.r32(0x00u32) | 0x01);
-            drain(slot);
+            xhci_irq(slot);
         }
     } else {
         // Core 0 holds the controllers (a transfer). The controller raises

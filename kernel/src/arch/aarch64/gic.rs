@@ -55,7 +55,7 @@ static SPLIT_EOI: AtomicBool = AtomicBool::new(false);
 const NR_GIC_CPU_IF: usize = 8;
 static CPU_MAP: [AtomicU32; NR_GIC_CPU_IF] = [const { AtomicU32::new(0xff) }; NR_GIC_CPU_IF];
 
-/// Handler per INTID (a `fn()` as usize; 0 = none).
+/// Handler per INTID (a `fn(u32)` taking the INTID, as usize; 0 = none).
 static HANDLERS: [AtomicUsize; MAX_IRQS] = [const { AtomicUsize::new(0) }; MAX_IRQS];
 
 fn rd(base: &AtomicU64, off: u64) -> u32 {
@@ -68,6 +68,14 @@ fn wr(base: &AtomicU64, off: u64, v: u32) {
     // SAFETY: as in `rd`.
     unsafe { core::ptr::write_volatile((base.load(Ordering::Relaxed) + off) as *mut u32, v) }
 }
+
+fn wr8(base: &AtomicU64, off: u64, v: u8) {
+    // SAFETY: as in `rd`; the target registers take byte writes.
+    unsafe { core::ptr::write_volatile((base.load(Ordering::Relaxed) + off) as *mut u8, v) }
+}
+
+/// `irq_controller_lock`: read-modify-write of the configuration words.
+static CONFIG_LOCK: spin::Mutex<()> = spin::Mutex::new(());
 
 fn repeat_byte(b: u8) -> u32 {
     u32::from_ne_bytes([b; 4])
@@ -195,16 +203,56 @@ pub fn irqs() -> u32 {
 
 /// Run `handler` for INTID `irq` and unmask it (gic_unmask_irq). PPIs and
 /// SGIs are banked: their enable reaches only the calling core.
-pub fn enable(irq: u32, handler: fn()) {
-    if irq as usize >= MAX_IRQS { return; }
-    HANDLERS[irq as usize].store(handler as usize, Ordering::Release);
+pub fn enable(irq: u32, handler: fn(u32)) {
+    set_handler(irq, handler);
     unmask(irq);
 }
 
-/// gic_unmask_irq alone, for a banked PPI on a further core.
+/// Run `handler` for INTID `irq`, which stays masked.
+pub fn set_handler(irq: u32, handler: fn(u32)) {
+    if irq as usize >= MAX_IRQS { return; }
+    HANDLERS[irq as usize].store(handler as usize, Ordering::Release);
+}
+
+/// No handler for INTID `irq` any more.
+pub fn clear_handler(irq: u32) {
+    if irq as usize >= MAX_IRQS { return; }
+    HANDLERS[irq as usize].store(0, Ordering::Release);
+}
+
+/// gic_unmask_irq; for a banked PPI, on the calling core.
 pub fn unmask(irq: u32) {
     if irq as usize >= MAX_IRQS { return; }
     wr(&DIST, GIC_DIST_ENABLE_SET + (irq / 32) as u64 * 4, 1 << (irq % 32));
+}
+
+/// gic_mask_irq.
+pub fn mask(irq: u32) {
+    if irq as usize >= MAX_IRQS { return; }
+    wr(&DIST, GIC_DIST_ENABLE_CLEAR + (irq / 32) as u64 * 4, 1 << (irq % 32));
+}
+
+/// gic_set_type: an SPI is level-high or edge-rising (gic_configure_irq).
+/// False if the configuration did not take.
+pub fn set_type(irq: u32, edge: bool) -> bool {
+    if irq < SPI_BASE || irq as usize >= MAX_IRQS { return false; }
+    let confmask = 0x2u32 << ((irq % 16) * 2);
+    let confoff = GIC_DIST_CONFIG + (irq / 16) as u64 * 4;
+    let _g = CONFIG_LOCK.lock();
+    let old = rd(&DIST, confoff);
+    let val = if edge { old | confmask } else { old & !confmask };
+    if val == old { return true; }
+    wr(&DIST, confoff, val);
+    rd(&DIST, confoff) == val
+}
+
+/// gic_set_affinity: deliver SPI `irq` to logical core `core` alone (a
+/// GICv2 SPI has a single target). False for a core past the eight CPU
+/// interfaces.
+pub fn set_affinity(irq: u32, core: usize) -> bool {
+    if irq < SPI_BASE || irq as usize >= MAX_IRQS || core >= NR_GIC_CPU_IF { return false; }
+    wr8(&DIST, GIC_DIST_TARGET + irq as u64, CPU_MAP[core].load(Ordering::Relaxed) as u8);
+    true
 }
 
 /// The SGIs the kernel sends.
@@ -244,9 +292,9 @@ pub fn handle() {
         unsafe { core::arch::asm!("isb", options(nomem, nostack, preserves_flags)) };
         let h = HANDLERS[irq as usize].load(Ordering::Acquire);
         if h != 0 {
-            // SAFETY: only `enable` stores here, always a `fn()`.
-            let f: fn() = unsafe { core::mem::transmute(h) };
-            f();
+            // SAFETY: only `set_handler` stores here, always a `fn(u32)`.
+            let f: fn(u32) = unsafe { core::mem::transmute(h) };
+            f(irq);
         }
         // gic_eoi_irq: deactivate, with the full IAR value for an SGI.
         wr(&CPU, if split { GIC_CPU_DEACTIVATE } else { GIC_CPU_EOI }, if irq < 16 { stat } else { irq });

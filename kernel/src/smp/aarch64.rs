@@ -31,7 +31,7 @@ fn ap_entry(index: usize) -> ! {
 }
 
 /// The wake SGI: taking it is what ends the halt.
-fn wake_handler() {
+fn wake_handler(_irq: u32) {
     if CORE0_TICKLESS.load(Ordering::Relaxed) && cpu::current_core() == 0 {
         per_core::record_wake(0, per_core::WAKE_TIMER);
     }

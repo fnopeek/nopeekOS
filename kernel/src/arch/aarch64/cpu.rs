@@ -107,7 +107,7 @@ pub fn stop_other_cores() {
 }
 
 /// The SGI_STOP handler (Linux IPI_CPU_STOP).
-pub fn stop_handler() {
+pub fn stop_handler(_irq: u32) {
     halt_forever()
 }
 

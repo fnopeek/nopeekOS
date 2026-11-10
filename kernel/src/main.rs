@@ -60,7 +60,6 @@ mod fatal;
 mod time;
 #[cfg(target_arch = "x86_64")]
 mod interrupts;
-#[cfg(target_arch = "x86_64")]
 mod irq;
 #[cfg(target_arch = "x86_64")]
 mod ioapic;

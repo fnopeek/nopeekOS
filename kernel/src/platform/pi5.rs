@@ -133,6 +133,79 @@ impl Hw for Bar1 {
     fn delay_us(&mut self, us: u64) { crate::time::delay_us(us) }
 }
 
+/// RP1's interrupt lines as a controller in front of the GIC
+/// (`rp1_irq_chip`): line `i` is vector `i` of RP1's MSI-X table, which the
+/// MIP turns into an edge-triggered SPI.
+struct Rp1Irqs {
+    rp1: spin::Once<(pi5_core::rp1::Rp1, Mmio, Mmio)>,
+    /// `rp1_level_triggered_irq`.
+    level: [core::sync::atomic::AtomicBool; pi5_core::rp1::RP1_IRQS as usize],
+}
+
+static RP1_IRQS: Rp1Irqs = Rp1Irqs {
+    rp1: spin::Once::new(),
+    level: [const { core::sync::atomic::AtomicBool::new(false) }; pi5_core::rp1::RP1_IRQS as usize],
+};
+static RP1_CHIP: &'static dyn crate::irq::Chained = &RP1_IRQS;
+/// The MIP that RP1's vectors write to, for each line's SPI.
+static MIP: spin::Once<Mip> = spin::Once::new();
+
+/// RP1's BARs alone, for the interrupt chip.
+struct Bars(Mmio, Mmio);
+
+impl Hw for Bars {
+    fn read(&mut self, b: Block, off: u64, _: u8) -> u32 {
+        if b == Block::Rp1Bar0 { self.0.r32(off) } else { self.1.r32(off) }
+    }
+    fn write(&mut self, b: Block, off: u64, _: u8, v: u32) {
+        if b == Block::Rp1Bar0 { self.0.w32(off, v) } else { self.1.w32(off, v) }
+    }
+    fn delay_us(&mut self, us: u64) { crate::time::delay_us(us) }
+}
+
+impl crate::irq::Chained for Rp1Irqs {
+    fn mask(&self, line: u32) {
+        if let Some((rp1, b0, b1)) = self.rp1.get() {
+            rp1.irq_mask(&mut Bars(*b0, *b1), line);
+        }
+    }
+    fn unmask(&self, line: u32) {
+        if let Some((rp1, b0, b1)) = self.rp1.get() {
+            rp1.irq_unmask(&mut Bars(*b0, *b1), line);
+        }
+    }
+    fn handled(&self, line: u32) {
+        let level = self.level.get(line as usize).is_some_and(|l| l.load(core::sync::atomic::Ordering::Relaxed));
+        if let (true, Some((rp1, b0, b1))) = (level, self.rp1.get()) {
+            rp1.irq_ack(&mut Bars(*b0, *b1), line);
+        }
+    }
+}
+
+/// `IRQ_TYPE_EDGE_RISING` and `IRQ_TYPE_LEVEL_HIGH` of a device tree
+/// interrupt specifier.
+const IRQ_TYPE_EDGE_RISING: u32 = 1;
+const IRQ_TYPE_LEVEL_HIGH: u32 = 4;
+
+/// The interrupt of RP1 child `node` (`interrupts` = line, type), as
+/// `request_irq` would make it: `rp1_irq_xlate`, the line's SPI through the
+/// MIP, `rp1_irq_set_type`, `rp1_irq_activate`. None without RP1, for an
+/// unknown type, or if the GIC refuses the SPI.
+fn rp1_irq(fdt: &Fdt, node: &Node) -> Option<(crate::irq::Irq, u32, u32)> {
+    let (rp1, b0, b1) = RP1_IRQS.rp1.get()?;
+    let line = fdt.prop_cell(node, b"interrupts", 0)?;
+    let trigger = match fdt.prop_cell(node, b"interrupts", 1)? {
+        IRQ_TYPE_EDGE_RISING => pi5_core::rp1::Trigger::Edge,
+        IRQ_TYPE_LEVEL_HIGH => pi5_core::rp1::Trigger::Level,
+        _ => return None,
+    };
+    let intid = crate::arch::aarch64::gic::SPI_BASE + MIP.get()?.msi(line)?.spi;
+    let irq = crate::irq::register_chained(&RP1_CHIP, line, intid)?;
+    RP1_IRQS.level[line as usize].store(trigger == pi5_core::rp1::Trigger::Level, core::sync::atomic::Ordering::Relaxed);
+    rp1.irq_enable(&mut Bars(*b0, *b1), line, trigger);
+    Some((irq, line, intid))
+}
+
 /// The DWC3 whose xHCI is being attached, for `plat_start`.
 static STARTING: spin::Mutex<Option<(Mmio, dwc3::Dwc3)>> = spin::Mutex::new(None);
 
@@ -207,7 +280,17 @@ fn usb(fdt: &Fdt, pcie_node: &Node, board: &mut Board, bar1_cpu: u64, dma_off: u
             name, d.revision, d.num_usb2_ports, d.num_usb3_ports);
         *STARTING.lock() = Some((board.bar1, d));
         let quirks = crate::xhci::Quirks { write_64_hi_lo: true, plat_start: Some(dwc3_plat_start) };
-        keyboard |= crate::xhci::attach_platform(cpu, DWC3_XHCI_LEN, dma_off, quirks);
+        let irq = match rp1_irq(fdt, node) {
+            Some((irq, line, intid)) => {
+                kprintln!("[npk] RP1 {}: interrupt line {} -> INTID {} (irq {})", name, line, intid, irq);
+                Some(irq)
+            }
+            None => {
+                kprintln!("[npk] RP1 {}: no interrupt, events are polled", name);
+                None
+            }
+        };
+        keyboard |= crate::xhci::attach_platform(cpu, DWC3_XHCI_LEN, dma_off, quirks, irq);
         *STARTING.lock() = None;
     }
     keyboard
@@ -335,21 +418,26 @@ pub fn init(fdt: &Fdt) -> bool {
     };
     kprintln!("[npk] RP1: chip {:#x}{}, {} MSI-X vectors -> GIC SPI {}+",
         rp1.chip_id, if rp1.fpga { " (FPGA)" } else { "" }, pi5_core::rp1::RP1_IRQS, mip.msi_base);
+    RP1_IRQS.rp1.call_once(|| (rp1, board.bar0, board.bar1));
+    MIP.call_once(|| mip);
 
     let dma_off = inb[..n_in].iter().find(|w| w.cpu == 0).map(|w| w.pci).unwrap_or(0);
     usb(fdt, &node, &mut board, cpu_of(dev.bars[1].bus), dma_off)
 }
 
 /// What there is to do once bring-up ends: show what the USB keyboard
-/// types, poll the controllers (events are not interrupt-driven here yet)
-/// and take ports that change; the activity LED blinks at 1 Hz meanwhile.
+/// types (its controller's interrupt thread fills the key buffer; a
+/// controller without an interrupt is polled here) and blink the activity
+/// LED at 1 Hz.
 pub fn echo_keys(led: bool) -> ! {
     kprintln!("[npk] USB keyboard ready: type, the keys appear below.");
     let mut led_on = false;
     let mut led_at = crate::time::ticks();
     loop {
-        crate::xhci::poll_events();
-        crate::xhci::hotplug_pass();
+        if crate::xhci::needs_poll() {
+            crate::xhci::poll_events();
+            crate::xhci::hotplug_pass();
+        }
         while let Some(b) = crate::xhci::poll_keyboard() {
             match b {
                 b'\r' | b'\n' => crate::framebuffer::write_byte(b'\n'),

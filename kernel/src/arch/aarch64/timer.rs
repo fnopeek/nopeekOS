@@ -60,7 +60,7 @@ fn set_next_event(delta: u64) {
 
 /// timer_handler: the periodic tick re-arms, a one-shot stays masked
 /// until the next `arm_at`.
-fn handler() {
+fn handler(_irq: u32) {
     let c = ctrl();
     if c & ARCH_TIMER_CTRL_IT_STAT == 0 { return; }
     set_ctrl(c | ARCH_TIMER_CTRL_IT_MASK);

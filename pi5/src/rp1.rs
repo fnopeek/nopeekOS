@@ -5,7 +5,7 @@
 
 use crate::hw::{Block, Hw};
 use crate::mip::Mip;
-use crate::pci::{self, Device, MsixMsg};
+use crate::pci::{self, Device, MsixMsg, MsixTable};
 
 pub const PCI_VENDOR_ID_RPI: u16 = 0x1de4;
 pub const PCI_DEVICE_ID_RP1_C0: u16 = 0x0001;
@@ -39,6 +39,8 @@ pub enum Error {
 pub struct Rp1 {
     pub chip_id: u32,
     pub fpga: bool,
+    /// One vector per RP1 interrupt line.
+    pub msix: MsixTable,
 }
 
 /// `rp1_probe` after the PCI core enabled `dev`: MSI-X vectors through the
@@ -47,7 +49,7 @@ pub fn probe(hw: &mut impl Hw, dev: &Device, mip: &Mip) -> Result<Rp1, Error> {
     if dev.bars[1].size <= 0x10000 {
         return Err(Error::NotInitialised(dev.bars[1].size));
     }
-    pci::msix_enable(hw, RP1_IRQS, |i| {
+    let msix = pci::msix_enable(hw, RP1_IRQS, |i| {
         let m = mip.msi(i).unwrap_or(crate::mip::Msi { addr: 0, data: 0, spi: 0 });
         MsixMsg { addr: m.addr, data: m.data }
     }, |bir| match bir {
@@ -60,7 +62,7 @@ pub fn probe(hw: &mut impl Hw, dev: &Device, mip: &Mip) -> Result<Rp1, Error> {
     if chip_id != RP1_C0_CHIP_ID {
         return Err(Error::WrongChip(chip_id));
     }
-    Ok(Rp1 { chip_id, fpga: platform & RP1_PLATFORM_FPGA != 0 })
+    Ok(Rp1 { chip_id, fpga: platform & RP1_PLATFORM_FPGA != 0, msix })
 }
 
 /// Interrupt trigger of an RP1 line, `rp1_irq_set_type`.
@@ -86,5 +88,15 @@ impl Rp1 {
     /// acknowledged so RP1 can send it again.
     pub fn irq_ack(&self, hw: &mut impl Hw, hwirq: u32) {
         hw.w32(Block::Rp1Bar1, RP1_PCIE_APBS_BASE + REG_SET + msix_cfg(hwirq), MSIX_CFG_IACK);
+    }
+
+    /// `rp1_mask_irq`: the line's MSI-X vector masked (`pci_msi_mask_irq`).
+    pub fn irq_mask(&self, hw: &mut impl Hw, hwirq: u32) {
+        self.msix.mask(hw, hwirq);
+    }
+
+    /// `rp1_unmask_irq`.
+    pub fn irq_unmask(&self, hw: &mut impl Hw, hwirq: u32) {
+        self.msix.unmask(hw, hwirq);
     }
 }

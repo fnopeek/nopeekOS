@@ -232,12 +232,37 @@ pub enum MsixError {
     TableBar(u8),
 }
 
+/// Where an enabled device's MSI-X table lies.
+#[derive(Clone, Copy, Debug)]
+pub struct MsixTable {
+    pub block: Block,
+    pub base: u64,
+}
+
+impl MsixTable {
+    fn ctrl(&self, i: u32) -> u64 {
+        self.base + i as u64 * PCI_MSIX_ENTRY_SIZE + PCI_MSIX_ENTRY_VECTOR_CTRL
+    }
+
+    /// `pci_msix_mask`: set the entry's mask bit, then a read of the table
+    /// flushes the write to the device.
+    pub fn mask(&self, hw: &mut impl Hw, i: u32) {
+        hw.w32(self.block, self.ctrl(i), PCI_MSIX_ENTRY_CTRL_MASKBIT);
+        hw.r32(self.block, self.base);
+    }
+
+    /// `pci_msix_unmask`.
+    pub fn unmask(&self, hw: &mut impl Hw, i: u32) {
+        hw.w32(self.block, self.ctrl(i), 0);
+    }
+}
+
 /// `msix_capability_init`: enable with every vector masked, write `n`
 /// messages into the table, INTx off, mask every entry, lift the function
 /// mask; then unmask the `n` vectors, as RP1's chained handlers do when
 /// they are installed. `block` names the register block of a BAR.
 pub fn msix_enable(hw: &mut impl Hw, n: u32, msg: impl Fn(u32) -> MsixMsg,
-    block: impl Fn(u8) -> Option<Block>) -> Result<(), MsixError>
+    block: impl Fn(u8) -> Option<Block>) -> Result<MsixTable, MsixError>
 {
     let dev = Device::ADDR;
     let cap = find_cap(hw, dev, PCI_CAP_ID_MSIX).ok_or(MsixError::NoCapability)?;
@@ -273,5 +298,5 @@ pub fn msix_enable(hw: &mut impl Hw, n: u32, msg: impl Fn(u32) -> MsixMsg,
     for i in 0..n {
         hw.w32(blk, entry(i) + PCI_MSIX_ENTRY_VECTOR_CTRL, 0);
     }
-    Ok(())
+    Ok(MsixTable { block: blk, base })
 }
