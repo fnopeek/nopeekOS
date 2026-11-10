@@ -64,7 +64,6 @@ mod interrupts;
 mod irq;
 #[cfg(target_arch = "x86_64")]
 mod ioapic;
-#[cfg(target_arch = "x86_64")]
 mod notify;
 #[cfg(target_arch = "x86_64")]
 mod status;
@@ -106,7 +105,6 @@ mod setup;
 mod gpu;
 #[cfg(target_arch = "x86_64")]
 mod shade;
-#[cfg(target_arch = "x86_64")]
 mod smp;
 #[cfg(target_arch = "x86_64")]
 mod cpu_errata;
@@ -114,7 +112,6 @@ mod cpu_errata;
 mod cpu_vulns;
 #[cfg(target_arch = "x86_64")]
 mod spec_mitigations;
-#[cfg(target_arch = "x86_64")]
 mod process;
 #[cfg(target_arch = "x86_64")]
 mod tss;

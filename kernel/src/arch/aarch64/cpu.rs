@@ -86,8 +86,30 @@ pub fn mpidr() -> u64 {
     v & 0xff_00ff_ffff
 }
 
-/// The other cores are not started yet; nothing to stop.
-pub fn stop_other_cores() {}
+/// Halt with interrupts masked until one is pending, then take it
+/// (Linux cpu_do_idle, then the unmask that follows it): WFI wakes on a
+/// pending interrupt whatever PSTATE.I says, so one that arrives between
+/// the caller's last look and the WFI ends the wait instead of being lost.
+pub fn wait_for_interrupt() {
+    // SAFETY: the barrier and WFI have no memory effect; interrupts are
+    // unmasked only for the ISB in between, so a pending one runs here and
+    // the caller's masked state is back before it continues.
+    unsafe {
+        core::arch::asm!("dsb sy", "wfi", "msr DAIFClr, #2", "isb", "msr DAIFSet, #2",
+            options(nostack, preserves_flags));
+    }
+}
+
+/// SGI_STOP to every other core; its handler halts. A core running with
+/// interrupts masked stops at its next halt.
+pub fn stop_other_cores() {
+    super::gic::send_sgi_others(super::gic::SGI_STOP);
+}
+
+/// The SGI_STOP handler (Linux IPI_CPU_STOP).
+pub fn stop_handler() {
+    halt_forever()
+}
 
 /// The exception level the kernel runs at (1, or 2 with VHE).
 pub fn exception_level() -> u8 {

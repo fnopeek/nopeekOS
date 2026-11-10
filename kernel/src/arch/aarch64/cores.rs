@@ -14,7 +14,8 @@ const PSCI_RET_SUCCESS: i64 = 0;
 const PSCI_RET_ALREADY_ON: i64 = -4;
 
 pub const MAX_CORES: usize = 16;
-const STACK_PAGES: usize = 64;
+/// 2 MiB, as an x86 AP's: native intents run on this stack.
+const STACK_PAGES: usize = 512;
 
 /// What a starting core needs before its MMU is on: stack, translation
 /// regime and SCTLR, read by `secondary_entry` in boot.s at these offsets.
@@ -36,6 +37,9 @@ unsafe extern "C" {
 }
 
 static ONLINE: AtomicUsize = AtomicUsize::new(1);
+/// Where a started core goes once it can take interrupts, a
+/// `fn(usize) -> !` as usize, entered with them masked.
+static ENTRY: AtomicUsize = AtomicUsize::new(0);
 
 /// Cores running, the boot core included.
 pub fn online() -> usize {
@@ -113,14 +117,17 @@ fn sysreg_state() -> (u64, u64, u64, u64) {
     (mair, tcr, ttbr, sctlr)
 }
 
-/// Start every core the device tree lists; returns how many run.
-pub fn start(fdt: &Fdt) -> usize {
+/// Start every core the device tree lists, each into `entry` with its
+/// logical index (1, 2, ... in the order they came up); returns how many
+/// run, the boot core included.
+pub fn start(fdt: &Fdt, entry: fn(usize) -> !) -> usize {
     super::cpu::set_core_index(0);
+    ENTRY.store(entry as usize, Ordering::Release);
     let Some(c) = conduit(fdt) else { return online() };
     let mut ids = [0u64; MAX_CORES];
     let n = cores(fdt, &mut ids);
     let (mair, tcr, ttbr, sctlr) = sysreg_state();
-    for (i, &id) in ids.iter().enumerate().take(n).skip(1) {
+    for &id in ids.iter().take(n).skip(1) {
         let Some(stack) = crate::memory::allocate_contiguous(STACK_PAGES) else { break };
         // SAFETY: only the boot core writes, and only while no core it
         // started is still reading (each one is waited for below).
@@ -135,7 +142,7 @@ pub fn start(fdt: &Fdt) -> usize {
             core::arch::asm!("dc cvac, {}", "dsb sy", in(reg) b as *const SecondaryBoot as u64, options(nostack));
         }
         let before = online();
-        let r = call(c, PSCI_0_2_FN64_CPU_ON, id, secondary_entry as usize as u64, i as u64);
+        let r = call(c, PSCI_0_2_FN64_CPU_ON, id, secondary_entry as usize as u64, before as u64);
         if r != PSCI_RET_SUCCESS && r != PSCI_RET_ALREADY_ON {
             crate::kprintln!("[npk] PSCI: CPU_ON {:#x} failed ({})", id, r);
             crate::memory::deallocate_contiguous(stack, STACK_PAGES);
@@ -146,7 +153,9 @@ pub fn start(fdt: &Fdt) -> usize {
             core::hint::spin_loop();
         }
         if online() == before {
+            // Its index would be the next core's: start no further one.
             crate::kprintln!("[npk] PSCI: core {:#x} did not come up", id);
+            break;
         }
     }
     online()
@@ -154,15 +163,14 @@ pub fn start(fdt: &Fdt) -> usize {
 
 /// A started core, with its MMU on and its own stack.
 #[unsafe(no_mangle)]
-extern "C" fn secondary_main(_index: usize) -> ! {
+extern "C" fn secondary_main(index: usize) -> ! {
     super::exceptions::init();
     super::gic::cpu_init();
     super::timer::start_this_core();
     ONLINE.fetch_add(1, Ordering::AcqRel);
-    // SAFETY: vectors, GIC interface and timer are in place on this core.
-    unsafe { core::arch::asm!("msr DAIFClr, #2", options(nomem, nostack)) };
-    loop {
-        // SAFETY: waits for an interrupt; nothing else to run yet.
-        unsafe { core::arch::asm!("wfi", options(nomem, nostack)) };
-    }
+    let e = ENTRY.load(Ordering::Acquire);
+    if e == 0 { super::halt_forever(); }
+    // SAFETY: only `start` stores here, always a `fn(usize) -> !`.
+    let entry: fn(usize) -> ! = unsafe { core::mem::transmute(e) };
+    entry(index)
 }

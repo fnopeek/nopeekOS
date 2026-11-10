@@ -7,6 +7,7 @@
 use crate::boot_info::{BootInfo, MemoryRegion, UEFI_CONVENTIONAL_MEMORY, UEFI_LOADER_DATA};
 use crate::kprintln;
 use crate::platform::dt::Fdt;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 const PAGE: u64 = 4096;
 const MAX_REGIONS: usize = 128;
@@ -171,11 +172,68 @@ fn interrupts(fdt: &Fdt) {
     let n = super::timer::fired() - before;
     kprintln!("[npk] GIC: {} lines; timer on INTID {}: {} ticks in 200 ms ({} Hz)",
         super::gic::irqs(), irq, n, super::timer::HZ);
-    let cores = super::cores::start(fdt);
-    let before = super::timer::fired();
-    crate::time::delay_ms(200);
-    let n = super::timer::fired() - before;
-    kprintln!("[npk] Cores online: {} (PSCI); {} ticks in 200 ms across them", cores, n);
+}
+
+static TASK_CORES: AtomicU64 = AtomicU64::new(0);
+static TASKS_DONE: AtomicU64 = AtomicU64::new(0);
+static FIBER_CORES: AtomicU64 = AtomicU64::new(0);
+static FIBERS_DONE: AtomicU64 = AtomicU64::new(0);
+
+const NAPS: u64 = 20;
+const NAP_MS: u64 = 5;
+
+fn native_task(_arg: u64) {
+    TASK_CORES.fetch_or(1 << crate::smp::per_core::current_core_id(), Ordering::Relaxed);
+    crate::time::delay_ms(20);
+    TASKS_DONE.fetch_add(1, Ordering::Release);
+}
+
+/// A fiber that sleeps NAPS times: each wake is the core's one-shot timer
+/// ending its WFI.
+fn napping_fiber(_arg: u64) {
+    for _ in 0..NAPS {
+        FIBER_CORES.fetch_or(1 << crate::smp::per_core::current_core_id(), Ordering::Relaxed);
+        crate::smp::fiber::yield_sleep(NAP_MS);
+    }
+    FIBERS_DONE.fetch_add(1, Ordering::Release);
+}
+
+fn wait_for(counter: &AtomicU64, n: u64, ms: u64) -> Option<u64> {
+    let t0 = crate::time::uptime_us();
+    while counter.load(Ordering::Acquire) < n {
+        if crate::time::uptime_us() - t0 > ms * 1000 { return None; }
+        core::hint::spin_loop();
+    }
+    Some((crate::time::uptime_us() - t0) / 1000)
+}
+
+/// The other cores start into the scheduler: native tasks spread over the
+/// workers, and fibers that sleep wake from their core's halt.
+fn smp_check(fdt: &Fdt) {
+    crate::smp::fiber::self_test();
+    let cores = crate::smp::init(fdt);
+    let workers = crate::smp::scheduler::worker_count() as u64;
+    kprintln!("[npk] Cores online: {} (PSCI), {} workers", cores, workers);
+    if workers == 0 { return; }
+
+    let n = workers * 2;
+    for _ in 0..n {
+        crate::smp::scheduler::spawn("bring-up", native_task, 0);
+    }
+    let t = wait_for(&TASKS_DONE, n, 2000);
+    kprintln!("[npk] Scheduler: {} native tasks of 20 ms {} on cores {:#b}",
+        n, t.map_or("did NOT finish".into(), |ms| alloc::format!("done in {} ms", ms)),
+        TASK_CORES.load(Ordering::Relaxed));
+
+    let halts0: u64 = (1..=workers as usize).map(|c| crate::smp::per_core::halt_snapshot(c).1).sum();
+    for _ in 0..n {
+        crate::smp::scheduler::spawn_fiber(napping_fiber, 0);
+    }
+    let t = wait_for(&FIBERS_DONE, n, 3000);
+    let halts: u64 = (1..=workers as usize).map(|c| crate::smp::per_core::halt_snapshot(c).1).sum::<u64>() - halts0;
+    kprintln!("[npk] Fibers: {} x {} naps of {} ms {} on cores {:#b}, {} halts",
+        n, NAPS, NAP_MS, t.map_or("did NOT finish".into(), |ms| alloc::format!("done in {} ms", ms)),
+        FIBER_CORES.load(Ordering::Relaxed), halts);
 }
 
 /// The coherent DMA zone grows, shares a block, and gives everything back.
@@ -343,6 +401,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     dma_check();
     crypto_check(&fdt);
     stack_check();
+    smp_check(&fdt);
     let keyboard = crate::platform::pi5::init(&fdt);
     if let Some(id) = crate::platform::pi5_sd::init(&fdt) {
         crate::platform::pi5_sd::system_disk(id);

@@ -1,43 +1,22 @@
-//! Per-Core State
-//!
-//! Tracks CPU cores discovered at boot. Dynamically sized — no hardcoded limit.
-//! Scales from 1 (BSP only) to 1024+ cores.
+//! Per-core state and the worker loop: usage accounting, placement of
+//! new work, waking idle cores. What a core is and how it is started,
+//! woken and halted comes from the architecture's half (`super::hw`).
 
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
-use spin::Mutex;
-use crate::hw::Mmio;
-use crate::arch::x86_64::msr;
+use super::hw;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CoreState {
-    Bsp,
-    Online,
-    Failed,
-}
+pub use hw::current_core_id;
+#[cfg(target_arch = "x86_64")]
+pub use hw::{
+    amd_cstate_base, aperf_mperf_now, core_apic, halted_aperf_mperf, has_mwait, has_rapl,
+    intel_model, max_turbo_mhz, min_eff_mhz, pkg_cstate_limit, rapl_core_is_all, rapl_core_raw,
+    rapl_mw, rapl_nj_per_unit, rapl_pkg_raw, residency, sample_aperf_mperf, RESIDENCY_NAMES,
+};
 
-pub struct CoreInfo {
-    /// Sequential index (0 = BSP)
-    #[allow(dead_code)]
-    pub id: u32,
-    /// Hardware APIC ID (may not be sequential)
-    pub apic_id: u32,
-    pub state: CoreState,
-}
-
-pub static CORES: Mutex<Vec<CoreInfo>> = Mutex::new(Vec::new());
 static CORE_COUNT: AtomicUsize = AtomicUsize::new(1);
 
 /// Set to true once scheduler is initialized and APs should start working
 static SCHEDULER_READY: AtomicBool = AtomicBool::new(false);
-
-/// True if CPU supports MONITOR/MWAIT (detected at boot)
-static HAS_MWAIT: AtomicBool = AtomicBool::new(false);
-
-/// True if CPU supports IA32_APERF/IA32_MPERF MSRs (CPUID.06H:ECX[0]).
-/// Intel since Nehalem, AMD since family 10h; absent under `-cpu qemu64`.
-/// Guarded at every rdmsr.
-static HAS_APERFMPERF: AtomicBool = AtomicBool::new(false);
 
 /// Per-core average frequency in MHz (APERF/MPERF ratio)
 static CORE_MHZ: [AtomicU32; 256] = {
@@ -149,72 +128,9 @@ pub fn halt_begin(core_id: usize, t0: u64) {
         // core (`update_core_freq`): APERF/MPERF are core-local MSRs and
         // stand still while the core is halted, so this snapshot is exact
         // until the core runs again.
-        sample_aperf_mperf(core_id);
+        hw::sample_aperf_mperf(core_id);
         HALT_SINCE[core_id].store(t0, Ordering::Relaxed);
     }
-}
-
-/// APERF/MPERF as of the core's last halt entry (see `halt_begin`) or its
-/// last `FREQ_SAMPLE_VECTOR` IPI.
-static RUN_APERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-static RUN_MPERF: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-/// Samples taken per core, so a reader that asked for one sees it arrive.
-static RUN_SAMPLES: [AtomicU64; 256] = [const { AtomicU64::new(0) }; 256];
-
-/// Record the calling core's APERF/MPERF for readers on other cores.
-pub fn sample_aperf_mperf(core_id: usize) {
-    if core_id >= 256 || !HAS_APERFMPERF.load(Ordering::Relaxed) { return; }
-    let (a, m) = read_aperf_mperf();
-    RUN_APERF[core_id].store(a, Ordering::Relaxed);
-    RUN_MPERF[core_id].store(m, Ordering::Relaxed);
-    RUN_SAMPLES[core_id].fetch_add(1, Ordering::Release);
-}
-
-/// APERF/MPERF of every core now, (0, 0) without the MSRs. The caller reads
-/// its own; every other core is asked with `FREQ_SAMPLE_VECTOR`, since a
-/// core that runs without halting takes no other interrupt. A core that has
-/// not answered within a millisecond keeps its last sample.
-pub fn aperf_mperf_now(out: &mut [(u64, u64)]) {
-    if !HAS_APERFMPERF.load(Ordering::Relaxed) {
-        out.fill((0, 0));
-        return;
-    }
-    let me = current_core_id();
-    let n = out.len().min(core_count()).min(256);
-    let mut before = [0u64; 256];
-    for c in 0..n {
-        if c != me {
-            before[c] = RUN_SAMPLES[c].load(Ordering::Acquire);
-            super::send_freq_sample_ipi(CORE_APIC[c].load(Ordering::Relaxed));
-        }
-    }
-    let deadline = crate::time::counter() + crate::time::counter_hz() / 1000;
-    for c in 0..n {
-        if c == me {
-            out[c] = read_aperf_mperf();
-            continue;
-        }
-        while RUN_SAMPLES[c].load(Ordering::Acquire) == before[c]
-            && crate::time::counter() < deadline
-        {
-            core::hint::spin_loop();
-        }
-        out[c] = halted_aperf_mperf(c);
-    }
-}
-
-/// APERF/MPERF of `core_id` as of its last halt entry; (0, 0) without the
-/// MSRs. A reader on another core gets the running cycles up to that halt.
-pub fn halted_aperf_mperf(core_id: usize) -> (u64, u64) {
-    if core_id >= 256 { return (0, 0); }
-    (RUN_APERF[core_id].load(Ordering::Relaxed), RUN_MPERF[core_id].load(Ordering::Relaxed))
-}
-
-fn read_aperf_mperf() -> (u64, u64) {
-    if !HAS_APERFMPERF.load(Ordering::Relaxed) { return (0, 0); }
-    // SAFETY: CPUID.06H:ECX[0] says MSRs 0xE7/0xE8 exist (checked above);
-    // reading them has no side effect.
-    unsafe { (msr::read(0xE8), msr::read(0xE7)) }
 }
 
 /// Cumulative halted TSC for `core_id`, including a halt still in progress.
@@ -318,235 +234,14 @@ pub fn is_active(core_id: usize) -> bool {
     CORE_ACTIVE[core_id].load(Ordering::Relaxed)
 }
 
-/// Platform frequency limits (set once by enable_hwp)
-static MAX_TURBO_MHZ: AtomicU32 = AtomicU32::new(0);
-static MIN_EFF_MHZ: AtomicU32 = AtomicU32::new(0);
-
-pub fn register_bsp(apic_id: u32) {
-    CORES.lock().push(CoreInfo { id: 0, apic_id, state: CoreState::Bsp });
-    map_apic(apic_id, 0);
-    // Detect MONITOR/MWAIT support via CPUID.01H:ECX bit 3
-    let ecx: u32;
-    // SAFETY: CPUID leaf 1 exists everywhere; rbx is reserved by LLVM and
-    // saved by hand.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 1",
-            "cpuid",
-            "mov {0:e}, ecx",
-            "pop rbx",
-            out(reg) ecx,
-            out("eax") _,
-            out("edx") _,
-        );
-    }
-    HAS_MWAIT.store(ecx & (1 << 3) != 0, Ordering::Release);
-
-    // Detect IA32_APERF/IA32_MPERF via CPUID.06H:ECX[0]
-    // Absent on AMD and on KVM guest w/ generic `-cpu qemu64`.
-    let ecx: u32;
-    // SAFETY: CPUID leaf 6 exists on every CPU we boot on; rbx is saved by
-    // hand.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 6",
-            "cpuid",
-            "mov {0:e}, ecx",
-            "pop rbx",
-            out(reg) ecx,
-            out("eax") _,
-            out("edx") _,
-        );
-    }
-    HAS_APERFMPERF.store(ecx & 1 != 0, Ordering::Release);
-    rapl_probe();
-}
-
-// ── RAPL: AMD package and core energy counters ───────────────────────
-//
-// Separates the CPU package's power draw from the rest of the platform.
-// Ported from Linux 6.18. Feature bit from `arch/x86/kernel/cpu/amd.c`:
-//
-//     /* Bit 14 indicates the Runtime Average Power Limit interface. */
-//     if (c->x86_power & BIT(14)) set_cpu_cap(c, X86_FEATURE_RAPL);
-//
-// where `x86_power` = CPUID Fn8000_0007_EDX. MSR numbers from
-// `arch/x86/include/asm/msr-index.h`, the unit field from
-// `arch/x86/events/rapl.c` (`(msr_rapl_power_unit_bits >> 8) & 0x1F`).
-const MSR_AMD_RAPL_POWER_UNIT: u32 = 0xC001_0299;
-const MSR_AMD_CORE_ENERGY_STATUS: u32 = 0xC001_029A;
-const MSR_AMD_PKG_ENERGY_STATUS: u32 = 0xC001_029B;
-// Intel: the MSRs of `arch/x86/events/rapl.c`, on the models its table
-// lists (`model_skl` for Tiger Lake); the core counter is PP0, all cores
-// together.
-const MSR_RAPL_POWER_UNIT: u32 = 0x606;
-const MSR_PKG_ENERGY_STATUS: u32 = 0x611;
-const MSR_PP0_ENERGY_STATUS: u32 = 0x639;
-/// RAPL through the Intel MSRs (else the AMD ones).
-static RAPL_INTEL: AtomicBool = AtomicBool::new(false);
-
-/// The model of an Intel family-6 CPU on bare metal (CPUID leaf 1), else
-/// None.
-pub fn intel_model() -> Option<u32> {
-    let (b, c, d): (u32, u32, u32);
-    let (a1, c1): (u32, u32);
-    // SAFETY: CPUID leaves 0 and 1 exist on every x86-64; rbx is reserved
-    // by LLVM, so it is moved out by hand.
-    unsafe {
-        core::arch::asm!("push rbx", "xor eax, eax", "xor ecx, ecx", "cpuid", "mov {0:e}, ebx", "pop rbx",
-            out(reg) b, out("ecx") c, out("edx") d, out("eax") _);
-        core::arch::asm!("push rbx", "mov eax, 1", "xor ecx, ecx", "cpuid", "pop rbx",
-            out("eax") a1, out("ecx") c1, out("edx") _);
-    }
-    // "GenuineIntel"
-    if (b, d, c) != (0x756E_6547, 0x4965_6E69, 0x6C65_746E) { return None; }
-    // Under a hypervisor these MSRs are its business.
-    if c1 & (1 << 31) != 0 { return None; }
-    if (a1 >> 8) & 0xF != 6 { return None; }
-    Some(((a1 >> 4) & 0xF) | (((a1 >> 16) & 0xF) << 4))
-}
-
-/// `INTEL_TIGERLAKE_L` / `INTEL_TIGERLAKE` (intel-family.h).
-fn intel_tigerlake(model: u32) -> bool {
-    matches!(model, 0x8C | 0x8D)
-}
-
-/// The C-state residency counters turbostat reads on Tiger Lake: package
-/// PC2, PC3, PC6, PC7, PC8, PC9, PC10, then this core's C6 and C7. They
-/// count at the TSC rate.
-pub const RESIDENCY_NAMES: [&str; 9] = ["PC2", "PC3", "PC6", "PC7", "PC8", "PC9", "PC10", "CC6", "CC7"];
-const RESIDENCY_MSRS: [u32; 9] = [0x60D, 0x3F8, 0x3F9, 0x3FA, 0x630, 0x631, 0x632, 0x3FD, 0x3FE];
-
-/// `MSR_PKG_CST_CONFIG_CONTROL` on a CPU with the counters: the deepest
-/// package C-state the firmware allows (turbostat's `hsw_pkg_cstate_limits`
-/// for Tiger Lake) and whether the register is locked.
-pub fn pkg_cstate_limit() -> Option<(&'static str, bool)> {
-    if !intel_model().is_some_and(intel_tigerlake) { return None; }
-    // SAFETY: MSR_PKG_CST_CONFIG_CONTROL exists on every Intel core since
-    // Nehalem, Tiger Lake included; reading it has no side effect.
-    let v = unsafe { msr::read(0xE2) };
-    const HSW: [&str; 16] = ["PC0", "PC2", "PC3", "PC6", "PC7", "PC7S", "PC8", "PC9", "unlimited",
-        "reserved", "reserved", "reserved", "reserved", "reserved", "reserved", "reserved"];
-    Some((HSW[(v & 0xF) as usize], v & (1 << 15) != 0))
-}
-
-/// The residency counters, on a CPU that has them.
-pub fn residency() -> Option<[u64; 9]> {
-    if !intel_model().is_some_and(intel_tigerlake) { return None; }
-    let mut v = [0u64; 9];
-    for (o, &m) in v.iter_mut().zip(RESIDENCY_MSRS.iter()) {
-        // SAFETY: Tiger Lake has every one of these counters (turbostat's
-        // model table); reading them has no side effect.
-        *o = unsafe { msr::read(m) };
-    }
-    Some(v)
-}
-
-static HAS_RAPL: AtomicBool = AtomicBool::new(false);
-/// Nanojoules per counter step. The unit is 2^-ESU joules; in nJ it stays
-/// an integer (ESU 16 -> 15258 nJ), so no floating point is needed.
-static RAPL_NJ_PER_UNIT: AtomicU32 = AtomicU32::new(0);
-
-#[derive(Clone, Copy)]
-enum RaplMsr {
-    PowerUnit,
-    PkgEnergy,
-    CoreEnergy,
-}
-
-/// Low dword of a RAPL MSR, 0 without RAPL. Core-local: measures the core
-/// it runs on.
-fn rapl_read(r: RaplMsr) -> u32 {
-    if !has_rapl() { return 0; }
-    let intel = RAPL_INTEL.load(Ordering::Relaxed);
-    let m = match (r, intel) {
-        (RaplMsr::PowerUnit, false) => MSR_AMD_RAPL_POWER_UNIT,
-        (RaplMsr::PkgEnergy, false) => MSR_AMD_PKG_ENERGY_STATUS,
-        (RaplMsr::CoreEnergy, false) => MSR_AMD_CORE_ENERGY_STATUS,
-        (RaplMsr::PowerUnit, true) => MSR_RAPL_POWER_UNIT,
-        (RaplMsr::PkgEnergy, true) => MSR_PKG_ENERGY_STATUS,
-        (RaplMsr::CoreEnergy, true) => MSR_PP0_ENERGY_STATUS,
-    };
-    // SAFETY: `has_rapl()` (AMD: CPUID 0x80000007:EDX[14]; Intel: a model
-    // of rapl.c's table) says these MSRs exist on every core of this
-    // socket; reading them has no side effect.
-    unsafe { msr::read(m) as u32 }
-}
-
-fn rapl_probe() {
-    let edx: u32;
-    // SAFETY: CPUID 0x80000007 is valid on every x86-64; rbx is reserved by
-    // LLVM, so it is saved by hand.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 0x80000007",
-            "cpuid",
-            "pop rbx",
-            out("edx") edx,
-            out("eax") _,
-            out("ecx") _,
-        );
-    }
-    let intel = intel_model().is_some_and(intel_tigerlake);
-    if edx & (1 << 14) == 0 && !intel { return; }
-    RAPL_INTEL.store(intel, Ordering::Release);
-    HAS_RAPL.store(true, Ordering::Release);
-    // Only read after the feature check; before it this would #GP.
-    let esu = (rapl_read(RaplMsr::PowerUnit) >> 8) & 0x1F;
-    // 2^-ESU joules in nanojoules: 1e9 >> ESU. An absurd ESU (0 or > 30)
-    // would give nonsense, so report no RAPL instead.
-    if esu == 0 || esu > 30 {
-        HAS_RAPL.store(false, Ordering::Release);
-        return;
-    }
-    RAPL_NJ_PER_UNIT.store((1_000_000_000u64 >> esu) as u32, Ordering::Release);
-}
-
-pub fn has_rapl() -> bool { HAS_RAPL.load(Ordering::Acquire) }
-
-/// Nanojoules per counter step (0 = no RAPL).
-pub fn rapl_nj_per_unit() -> u32 { RAPL_NJ_PER_UNIT.load(Ordering::Relaxed) }
-
-/// Raw package energy counter. 32 bits and wraps: always take the
-/// difference of two samples (`wrapping_sub`).
-pub fn rapl_pkg_raw() -> u32 {
-    if !has_rapl() { return 0; }
-    rapl_read(RaplMsr::PkgEnergy)
-}
-
-/// The same for the core this call runs on (Intel: all cores, PP0).
-pub fn rapl_core_raw() -> u32 {
-    if !has_rapl() { return 0; }
-    rapl_read(RaplMsr::CoreEnergy)
-}
-
-/// Milliwatts from a counter delta and a window: mW = nJ / us, so no
-/// conversion constant is needed.
-pub fn rapl_mw(delta_units: u32, window_us: u64) -> u64 {
-    let nj = rapl_nj_per_unit() as u64;
-    if nj == 0 || window_us == 0 { return 0; }
-    (delta_units as u64).saturating_mul(nj) / window_us
-}
-
-pub fn register_ap(apic_id: u32, core_id: u32) {
-    let mut cores = CORES.lock();
-    cores.push(CoreInfo { id: core_id, apic_id, state: CoreState::Online });
-    map_apic(apic_id, core_id);
-    CORE_COUNT.store(cores.len(), Ordering::Release);
-}
-
-pub fn mark_failed(apic_id: u32) {
-    if let Some(c) = CORES.lock().iter_mut().find(|c| c.apic_id == apic_id) {
-        c.state = CoreState::Failed;
-    }
-}
-
 /// Total cores (BSP + online APs)
 pub fn core_count() -> usize {
     CORE_COUNT.load(Ordering::Acquire)
+}
+
+/// Record how many cores run, the boot core included.
+pub fn set_core_count(n: usize) {
+    CORE_COUNT.store(n, Ordering::Release);
 }
 
 /// Signal APs to start their scheduler loops
@@ -567,86 +262,12 @@ pub const NO_DEDICATED_CORE: u32 = u32::MAX;
 /// and the shell for Core 0.
 pub static DEDICATED_VM_CORE: AtomicU32 = AtomicU32::new(NO_DEDICATED_CORE);
 
-/// Master switch for the dedicated-core path. `false` → the microvm
-/// always stays cooperatively time-sliced on Core 0, regardless of core
-/// count. `true` → the vendor and core-count gates below decide.
-/// Only consulted when the vCPU does not run as a pool fiber.
-pub const A2_DEDICATED_CORE_ENABLED: bool = true;
-
-/// Minimum logical cores (incl. BSP) before dedicating one to the
-/// microvm — below this, dedicating would starve the rest, so keep
-/// cooperative Core-0 slicing.
-const MIN_CORES_FOR_DEDICATED: usize = 3;
-
-/// Decide the dedicated VM core from the live core count. Called once
-/// right after `scheduler::init` (so WORKER_COUNT is known). Picks the
-/// highest worker id (= `worker_count`, since worker ids are
-/// `1..=worker_count`) so the low cores keep taking work; Core 0 stays
-/// the IRQ/compositor/intent core regardless.
-pub fn init_dedicated_vm_core(worker_count: usize) {
-    let total = worker_count + 1; // + BSP
-
-    // The dedicated-core path is validated on AMD-SVM only; the VMX
-    // equivalents (VMCS host-state lifecycle, IDT vectoring info, MSR
-    // auto-save/load) are unaudited, so Intel falls back to cooperative
-    // Core-0 slicing. `detect_vendor` is stateless and safe to call before
-    // `microvm::cpu::init`.
-    let vendor = crate::microvm::cpu::detect_vendor();
-    let is_amd = matches!(vendor, crate::microvm::cpu::Vendor::Amd);
-    let is_intel = matches!(vendor, crate::microvm::cpu::Vendor::Intel);
-
-    // vCPU-as-fiber: the guest runs as a normal pool fiber on a dynamic
-    // core, so no core is carved out (a carve-out wastes a core while no VM
-    // runs). See microvm::cpu. On VMX this
-    // is flag-gated; the per-core TSS VMX host-state needs is installed
-    // lazily in vmx::vm_open.
-    let fiber_mode = crate::microvm::cpu::VCPU_AS_FIBER
-        && worker_count >= 1
-        && (is_amd || (is_intel && crate::microvm::cpu::VMX_VCPU_AS_FIBER));
-    crate::microvm::cpu::set_vm_fiber_mode(fiber_mode);
-    if fiber_mode {
-        crate::kdebug!(
-            "[npk] smp: microvm runs as a pool fiber on a dynamic core ({} cores, no carve-out)",
-            total
-        );
-        return;
-    }
-
-    let dedicate = A2_DEDICATED_CORE_ENABLED
-        && is_amd
-        && worker_count >= 1
-        && total >= MIN_CORES_FOR_DEDICATED;
-
-    if dedicate {
-        DEDICATED_VM_CORE.store(worker_count as u32, Ordering::Release);
-        crate::kprintln!(
-            "[npk] smp: core {} dedicated to microvm ({} cores, carved out of work-stealing)",
-            worker_count, total
-        );
-    } else if !is_amd && total >= MIN_CORES_FOR_DEDICATED {
-        crate::kprintln!(
-            "[npk] smp: {} core(s) — A2 disabled (vendor-gated, unvalidated on this CPU) → microvm cooperative on Core 0",
-            total
-        );
-    } else {
-        crate::kprintln!(
-            "[npk] smp: {} core(s) → microvm stays cooperative on Core 0",
-            total
-        );
-    }
-}
-
 /// The dedicated microvm core id, or `None` if cooperative Core-0.
 pub fn dedicated_vm_core() -> Option<usize> {
     match DEDICATED_VM_CORE.load(Ordering::Acquire) {
         NO_DEDICATED_CORE => None,
         c => Some(c as usize),
     }
-}
-
-/// Check if MONITOR/MWAIT is available
-pub fn has_mwait() -> bool {
-    HAS_MWAIT.load(Ordering::Relaxed)
 }
 
 /// Update per-core CPU usage and frequency.
@@ -677,17 +298,8 @@ pub fn update_core_freq(core_id: usize) {
         return;
     }
 
-    // APERF/MPERF are gated by CPUID.06H:ECX[0], absent on KVM guests with
-    // `-cpu qemu64`. Reading them unconditionally raises #GP.
-    let has_apmp = HAS_APERFMPERF.load(Ordering::Relaxed);
-
-    let (aperf, mperf): (u64, u64) = if !has_apmp {
-        (0, 0)
-    } else if core_id == current_core_id() {
-        read_aperf_mperf()
-    } else {
-        (RUN_APERF[core_id].load(Ordering::Relaxed), RUN_MPERF[core_id].load(Ordering::Relaxed))
-    };
+    // (0, 0) where the core has no such counters.
+    let (aperf, mperf) = hw::aperf_mperf_of(core_id);
     let tsc = crate::time::counter();
 
     let halted = halted_tsc(core_id);
@@ -755,150 +367,11 @@ pub fn core_freq_mhz(core_id: usize) -> u32 {
     CORE_MHZ[core_id].load(Ordering::Relaxed)
 }
 
-/// Max turbo frequency in MHz (from HWP capabilities).
-pub fn max_turbo_mhz() -> u32 { MAX_TURBO_MHZ.load(Ordering::Relaxed) }
-
-/// Min efficiency frequency in MHz (from HWP capabilities).
-pub fn min_eff_mhz() -> u32 { MIN_EFF_MHZ.load(Ordering::Relaxed) }
-
 /// Per-core CPU usage in percent (0-100): 100 − halted% over the last
 /// sampling window. Measured, not self-reported.
 pub fn core_usage(core_id: usize) -> u32 {
     if core_id >= 256 { return 0; }
     CORE_USAGE[core_id].load(Ordering::Relaxed)
-}
-
-/// Cached APIC base (MSR 0x1B). Identical on every core and never changes, so
-/// reading it once avoids an `rdmsr` — a VM-exit under virtualization — on every
-/// current_core_id() call (hot: poll loops, idle, core-gating).
-static APIC_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// Read current core's sequential ID via LAPIC.
-pub fn current_core_id() -> usize {
-    use core::sync::atomic::Ordering::Relaxed;
-    let base = APIC_BASE.load(Relaxed);
-    let lapic = if base == 0 {
-        let l = crate::interrupts::lapic_from_msr();
-        APIC_BASE.store(l.base(), Relaxed);
-        l
-    } else {
-        // SAFETY: `APIC_BASE` holds only bases from
-        // `interrupts::lapic_from_msr`, the xAPIC register page.
-        unsafe { Mmio::from_mapped(base, 0x1000) }
-    };
-    // The per-core APIC ID register.
-    let apic_id = lapic.r32(crate::interrupts::LAPIC_ID) >> 24;
-    // An unregistered id reads as core 0.
-    APIC_TO_CORE[(apic_id & 0xFF) as usize].load(Relaxed) as usize
-}
-
-/// xAPIC id → sequential core id, filled once per core at registration.
-///
-/// Lets `current_core_id` avoid a lock on the hottest paths (`poll_rx_only`,
-/// `pump_peers`, every fiber yield). The mapping never changes after boot.
-/// The xAPIC id register holds 8 bits, hence 256 entries.
-static APIC_TO_CORE: [core::sync::atomic::AtomicU16; 256] =
-    [const { core::sync::atomic::AtomicU16::new(0) }; 256];
-
-/// Sequential core id → xAPIC id, the reverse of `APIC_TO_CORE`.
-static CORE_APIC: [AtomicU32; 256] = [const { AtomicU32::new(0) }; 256];
-
-/// The xAPIC id of core `c`, if it is a registered core. Lock-free, for IPI
-/// senders on hot paths.
-pub fn core_apic(c: usize) -> Option<u32> {
-    (c < core_count().min(256)).then(|| CORE_APIC[c].load(Ordering::Relaxed))
-}
-
-fn map_apic(apic_id: u32, core_id: u32) {
-    APIC_TO_CORE[(apic_id & 0xFF) as usize].store(core_id as u16, Ordering::Release);
-    if (core_id as usize) < 256 {
-        CORE_APIC[core_id as usize].store(apic_id, Ordering::Release);
-    }
-}
-
-/// Enable Hardware P-states (HWP / Speed Shift) on the current core.
-/// CPU automatically scales frequency: idle → min, load → turbo.
-/// Returns true if HWP was enabled successfully.
-pub fn enable_hwp() -> bool {
-    // Check HWP support: CPUID.06H:EAX bit 7
-    let eax: u32;
-    // SAFETY: CPUID leaf 6 exists on every CPU we boot on; rbx is saved by
-    // hand.
-    unsafe {
-        core::arch::asm!(
-            "push rbx",
-            "mov eax, 6",
-            "cpuid",
-            "mov {0:e}, eax",
-            "pop rbx",
-            out(reg) eax,
-            out("ecx") _,
-            out("edx") _,
-        );
-    }
-    if eax & (1 << 7) == 0 { return false; }
-
-    // Enable HWP: MSR 0x770 (IA32_PM_ENABLE) = 1
-    // SAFETY: HWP supported (checked above); enabling it only hands
-    // P-state selection to the CPU.
-    unsafe { msr::write(0x770, 1) };
-
-    // Read HWP capabilities: MSR 0x771 (IA32_HWP_CAPABILITIES)
-    // [7:0]=Highest, [15:8]=Guaranteed, [23:16]=Efficient, [31:24]=Lowest
-    // SAFETY: MSR 0x771 exists when HWP is supported; read-only.
-    let cap_lo = unsafe { msr::read(0x771) } as u32;
-    let highest = cap_lo & 0xFF;
-    let lowest = (cap_lo >> 24) & 0xFF;
-
-    // Store platform limits (first caller wins)
-    if MAX_TURBO_MHZ.load(Ordering::Relaxed) == 0 {
-        MAX_TURBO_MHZ.store(highest * 100, Ordering::Relaxed);
-        MIN_EFF_MHZ.store(lowest * 100, Ordering::Relaxed);
-    }
-
-    // Configure HWP request: MSR 0x774 (IA32_HWP_REQUEST)
-    // [7:0]=Min, [15:8]=Max, [23:16]=Desired(0=auto), [31:24]=EPP
-    // EPP range: 0=perf, 128=balanced, 192=power_save, 255=max_power_save
-    //
-    // EPP=0 (max perf): the CPU ramps to turbo on the first instruction of a
-    // burst. Bursty workloads (crypto, I/O batches) last ~10-100 ms, too
-    // short for the firmware heuristics at EPP=192 to ramp up. Battery-
-    // powered targets may prefer 128 or 192; not configurable yet.
-    let hwp_req = (lowest as u32)
-        | ((highest as u32) << 8)
-        | (0u32 << 24);
-    // SAFETY: MSR 0x774 exists when HWP is enabled; min/max come from the
-    // CPU's own capabilities.
-    unsafe { msr::write(0x774, hwp_req as u64) };
-
-    true
-}
-
-/// AMD Zen C-state base address (MSRC001_0073 CStateBaseAddr, bits 15:0):
-/// an I/O read of CStateBaseAddr+n is trapped by the core as a request for
-/// C-state n (ACPI `_CST` lists these ports as SystemIO entries). None off
-/// AMD, before family 17h, under a hypervisor (the MSR is not emulated and
-/// a read would #GP), or when the firmware left it 0 (no trapping).
-pub fn amd_cstate_base() -> Option<u16> {
-    if !matches!(crate::microvm::cpu::detect_vendor(), crate::microvm::cpu::Vendor::Amd) {
-        return None;
-    }
-    let (eax, ecx): (u32, u32);
-    // SAFETY: CPUID leaf 1 exists everywhere; rbx is reserved by LLVM.
-    unsafe {
-        core::arch::asm!("push rbx", "mov eax, 1", "cpuid", "pop rbx",
-            out("eax") eax, out("ecx") ecx, out("edx") _);
-    }
-    if ecx & (1 << 31) != 0 { return None; } // hypervisor
-    let base_fam = (eax >> 8) & 0xF;
-    let family = if base_fam == 0xF { base_fam + ((eax >> 20) & 0xFF) } else { base_fam };
-    if family < 0x17 { return None; }
-    // SAFETY: MSRC001_0073 is architectural on AMD family 17h+ (PPR
-    // Core::X86::Msr::CStateBaseAddr), gated on vendor, family and bare
-    // metal; reading it has no side effect.
-    let lo = unsafe { msr::read(0xC001_0073) } as u32;
-    let base = (lo & 0xFFFF) as u16;
-    if base == 0 || base > 0xFFF8 { None } else { Some(base) }
 }
 
 /// The worker has reached its loop. An AP that never started must not count
@@ -924,7 +397,7 @@ pub fn tsc_offset(c: usize) -> Option<(i64, u64)> {
     }
     let before = WOKE_TSC[c].load(Ordering::Acquire);
     let t_send = crate::time::counter();
-    super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+    hw::send_wake(c);
     for _ in 0..10_000_000u32 {
         let w = WOKE_TSC[c].load(Ordering::Acquire);
         if w != before {
@@ -959,7 +432,7 @@ pub fn wake_core(c: usize) {
         return;
     }
     if IDLE[c].load(Ordering::SeqCst) && current_core_id() != c {
-        super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+        hw::send_wake(c);
     }
 }
 
@@ -983,8 +456,8 @@ pub fn wake_fiber_core(c: usize) {
     }
     // A vCPU core only while the vCPU may be in the guest: between exit and
     // entry it sees `PEER_WAKE` in its last look (`entry_irqs_off`).
-    if IDLE[c].load(Ordering::SeqCst) || crate::microvm::cpu::in_guest(c) {
-        super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+    if IDLE[c].load(Ordering::SeqCst) || hw::in_guest(c) {
+        hw::send_wake(c);
     }
 }
 
@@ -1006,7 +479,7 @@ pub fn peer_wake_pending(c: usize) -> bool {
 pub fn core0_loop() -> ! {
     // No periodic tick from here on: Core 0's LAPIC timer becomes
     // the one-shot deadline timer every worker has.
-    crate::interrupts::make_core0_tickless();
+    hw::make_core0_tickless();
     loop {
         super::fiber::run_core_fibers(0);
         // Self-throttled to 100 ms windows.
@@ -1019,7 +492,7 @@ pub fn core0_loop() -> ! {
         let now = crate::time::counter();
         match super::fiber::earliest_deadline(0) {
             Some(d) if d <= now => {}
-            wake => crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK),
+            wake => hw::halt_until(wake, WAKE_HLT_FALLBACK),
         }
         IDLE[0].store(false, Ordering::Relaxed);
         crate::arch::irq_restore(flags);
@@ -1062,7 +535,7 @@ fn least_loaded(cid: usize) -> bool {
     if workers <= 1 {
         return true;
     }
-    let nic = crate::netdev::wasm_nic_core();
+    let nic = hw::nic_core();
     let vm = DEDICATED_VM_CORE.load(Ordering::Acquire) as usize;
     let mine = core_load(cid);
     for c in 1..=workers.min(255) {
@@ -1070,7 +543,7 @@ fn least_loaded(cid: usize) -> bool {
         // it would make new work wait for that intent to finish.
         if c == cid || Some(c) == nic || c == vm || !IN_LOOP[c].load(Ordering::Acquire)
             || NATIVE_BUSY[c].load(Ordering::Relaxed)
-            || crate::microvm::cpu::is_vcpu_core(c)
+            || hw::is_vcpu_core(c)
         {
             continue;
         }
@@ -1101,9 +574,9 @@ pub fn app_core() -> Option<usize> {
 fn app_core_usable(c: usize) -> bool {
     c != 0 && c < 64
         && driver_cores() & (1 << c) == 0
-        && crate::netdev::wasm_nic_core() != Some(c)
+        && hw::nic_core() != Some(c)
         && DEDICATED_VM_CORE.load(Ordering::Acquire) as usize != c
-        && !crate::microvm::cpu::is_vcpu_core(c)
+        && !hw::is_vcpu_core(c)
 }
 
 /// Whether core `cid` takes new work from the inbox at all.
@@ -1118,9 +591,9 @@ fn app_core_usable(c: usize) -> bool {
 /// `accepts` prefers the least loaded, so the core that wakes most often does
 /// not collect every fiber.
 fn takes_work(cid: usize) -> bool {
-    let nic_core = crate::netdev::wasm_nic_core() == Some(cid)
+    let nic_core = hw::nic_core() == Some(cid)
         && super::scheduler::worker_count() > 1;
-    !nic_core && !crate::microvm::cpu::is_vcpu_core(cid)
+    !nic_core && !hw::is_vcpu_core(cid)
 }
 
 /// Hand an app task to this core's fiber scheduler. It runs on its own stack
@@ -1170,10 +643,10 @@ pub fn invite_stealer(victim: usize) {
     // A core without a vCPU first: it can take any movable fiber.
     let idle = |c: usize| c != victim && c != me && IDLE[c].load(Ordering::SeqCst) && may_steal(c);
     if let Some(c) = (1..=workers)
-        .find(|&c| idle(c) && !crate::microvm::cpu::is_vcpu_core(c))
+        .find(|&c| idle(c) && !hw::is_vcpu_core(c))
         .or_else(|| (1..=workers).find(|&c| idle(c)))
     {
-        super::send_wake_ipi(CORE_APIC[c].load(Ordering::Relaxed));
+        hw::send_wake(c);
     }
 }
 
@@ -1244,44 +717,22 @@ fn can_take(c: usize) -> bool {
 /// core has looked again at least once.
 const INBOX_STARVE_MS: u64 = 20;
 
-/// AP Rust entry — called by trampoline after long mode transition.
-/// Interrupts are disabled (cli from trampoline). IDT is loaded.
-#[unsafe(no_mangle)]
-pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
-    // Own GDT + TSS before anything can fault: the shared IDT sends a
-    // double fault to IST1, which only exists once this core has a TSS.
-    crate::tss::init_core();
-
-    // Enable Local APIC (needed for IPI wakeup fallback)
-    // Each core sees its own LAPIC.
-    let lapic = crate::interrupts::lapic_from_msr();
-    let svr = lapic.r32(crate::interrupts::LAPIC_SVR);
-    lapic.w32(crate::interrupts::LAPIC_SVR, svr | (1 << 8) | crate::interrupts::SPURIOUS_VECTOR as u32);
-
-    crate::cpu_errata::apply();
-    crate::spec_mitigations::apply();
-
-    // Enable HWP on this AP (per-core frequency scaling)
-    enable_hwp();
-
-    // Signal BSP: this AP is alive
-    super::AP_STARTED.fetch_add(1, Ordering::Release);
-
-    // Wait until scheduler is initialized
+/// A started core's scheduler loop, entered from the architecture's AP
+/// entry once the core can take interrupts, with them masked. Waits for
+/// `start_scheduler`, then never returns.
+pub fn worker_loop(core_id: u32) -> ! {
     while !SCHEDULER_READY.load(Ordering::Acquire) {
         core::hint::spin_loop();
     }
 
-    // This core's own LAPIC timer, one-shot to whatever deadline it waits
-    // for: its idle HLT needs its own wake source. Plain HLT VM-exits, so
-    // KVM frees the host core (MWAIT would need cpu-pm=on). New work wakes
-    // it by IPI (`wake_idle_workers`).
-    crate::interrupts::init_worker_timer();
+    // This core's own one-shot timer, armed to whatever deadline it waits
+    // for: its idle halt needs its own wake source. New work wakes it by
+    // IPI (`wake_idle_workers`).
+    hw::init_worker_timer();
     if (core_id as usize) < 256 {
         IN_LOOP[core_id as usize].store(true, Ordering::Release);
     }
 
-    // Enter scheduler loop
     let cid = core_id as usize;
 
     loop {
@@ -1293,12 +744,12 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // default sentinel never matches a real cid.
         if DEDICATED_VM_CORE.load(Ordering::Acquire) == cid as u32 {
             CORE_ACTIVE[cid].store(true, Ordering::Relaxed);
-            crate::microvm::vm_core_serve();
+            hw::vm_core_serve();
             CORE_ACTIVE[cid].store(false, Ordering::Relaxed);
             update_core_freq(cid);
             // Re-check for a pending launch every 10 ms.
             let d = crate::time::counter() + crate::time::counter_hz() / 100;
-            crate::interrupts::halt_until(Some(d), WAKE_HLT_FALLBACK);
+            hw::halt_until(Some(d), WAKE_HLT_FALLBACK);
             continue;
         }
 
@@ -1339,7 +790,7 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
         // Nothing of its own to run: take over a fiber that waits, runnable,
         // behind a busy core. Its scheduler runs it on the next pass.
         if may_steal(cid)
-            && super::fiber::steal_for(cid, crate::microvm::cpu::is_vcpu_core(cid))
+            && super::fiber::steal_for(cid, hw::is_vcpu_core(cid))
         {
             continue;
         }
@@ -1375,12 +826,9 @@ pub extern "C" fn smp_ap_entry(core_id: u32) -> ! {
             let recheck = now + crate::time::counter_hz() / 100;
             wake = Some(wake.map_or(recheck, |d| d.min(recheck)));
         }
-        crate::interrupts::halt_until(wake, WAKE_HLT_FALLBACK);
+        hw::halt_until(wake, WAKE_HLT_FALLBACK);
         IDLE[cid].store(false, Ordering::Relaxed);
         crate::arch::irq_restore(flags);
     }
 }
 
-/// Whether the core energy counter covers all cores (Intel PP0) rather
-/// than the calling one (AMD).
-pub fn rapl_core_is_all() -> bool { RAPL_INTEL.load(Ordering::Relaxed) }

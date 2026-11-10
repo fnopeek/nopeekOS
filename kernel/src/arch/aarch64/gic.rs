@@ -30,6 +30,7 @@ const GIC_DIST_ACTIVE_CLEAR: u64 = 0x380;
 const GIC_DIST_PRI: u64 = 0x400;
 const GIC_DIST_TARGET: u64 = 0x800;
 const GIC_DIST_CONFIG: u64 = 0xc00;
+const GIC_DIST_SOFTINT: u64 = 0xf00;
 const GICD_ENABLE: u32 = 0x1;
 const GICD_DISABLE: u32 = 0x0;
 const GICD_INT_ACTLOW_LVLTRIG: u32 = 0x0;
@@ -48,6 +49,11 @@ static CPU: AtomicU64 = AtomicU64::new(0);
 static IRQS: AtomicU32 = AtomicU32::new(0);
 /// EOImodeNS: priority drop and deactivation are separate writes.
 static SPLIT_EOI: AtomicBool = AtomicBool::new(false);
+
+/// CPU interface bit of each logical core, the SGI target list of
+/// GIC_DIST_SOFTINT (gic_cpu_map); 0xff until the core has read its own.
+const NR_GIC_CPU_IF: usize = 8;
+static CPU_MAP: [AtomicU32; NR_GIC_CPU_IF] = [const { AtomicU32::new(0xff) }; NR_GIC_CPU_IF];
 
 /// Handler per INTID (a `fn()` as usize; 0 = none).
 static HANDLERS: [AtomicUsize; MAX_IRQS] = [const { AtomicUsize::new(0) }; MAX_IRQS];
@@ -125,6 +131,16 @@ fn dist_init() {
 
 /// gic_cpu_config + gic_cpu_init + gic_cpu_if_up, for the calling core.
 pub fn cpu_init() {
+    let cpu = super::cpu::current_core();
+    if cpu < NR_GIC_CPU_IF {
+        let mask = cpumask();
+        CPU_MAP[cpu].store(mask, Ordering::Relaxed);
+        for (i, m) in CPU_MAP.iter().enumerate() {
+            if i != cpu {
+                m.fetch_and(!mask, Ordering::Relaxed);
+            }
+        }
+    }
     let mut i = 0;
     while i < 32 {
         wr(&DIST, GIC_DIST_ACTIVE_CLEAR + (i / 8) as u64, GICD_INT_EN_CLR_X32);
@@ -145,6 +161,7 @@ pub fn cpu_init() {
     }
     let bypass = rd(&CPU, GIC_CPU_CTRL) & GICC_DIS_BYPASS_MASK;
     wr(&CPU, GIC_CPU_CTRL, bypass | mode | GICC_ENABLE);
+    enable(SGI_STOP, super::cpu::stop_handler);
 }
 
 /// Find the GIC in the device tree and bring up its distributor and this
@@ -188,6 +205,29 @@ pub fn enable(irq: u32, handler: fn()) {
 pub fn unmask(irq: u32) {
     if irq as usize >= MAX_IRQS { return; }
     wr(&DIST, GIC_DIST_ENABLE_SET + (irq / 32) as u64 * 4, 1 << (irq % 32));
+}
+
+/// The SGIs the kernel sends.
+pub const SGI_WAKE: u32 = 0;
+pub const SGI_STOP: u32 = 1;
+
+/// gic_ipi_send_mask: SGI `sgi` to logical core `core`. A core past the
+/// eight CPU interfaces of a GICv2 cannot be reached.
+pub fn send_sgi(core: usize, sgi: u32) {
+    if core >= NR_GIC_CPU_IF { return; }
+    let map = CPU_MAP[core].load(Ordering::Relaxed);
+    // SAFETY: a barrier only: stores to Normal memory are visible to the
+    // other core before it sees the SGI.
+    unsafe { core::arch::asm!("dmb ishst", options(nostack, preserves_flags)) };
+    wr(&DIST, GIC_DIST_SOFTINT, map << 16 | sgi);
+}
+
+/// SGI `sgi` to every core but the caller (target list filter 01).
+pub fn send_sgi_others(sgi: u32) {
+    if DIST.load(Ordering::Relaxed) == 0 { return; }
+    // SAFETY: as in `send_sgi`.
+    unsafe { core::arch::asm!("dmb ishst", options(nostack, preserves_flags)) };
+    wr(&DIST, GIC_DIST_SOFTINT, 1 << 24 | sgi);
 }
 
 /// gic_handle_irq: acknowledge and run every pending interrupt.

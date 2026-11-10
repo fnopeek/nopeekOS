@@ -182,6 +182,7 @@ fn alloc_waker(cid: usize, movable: bool) -> Waker {
 
 fn free_waker(w: Waker) {
     crate::notify::forget(w);
+    #[cfg(target_arch = "x86_64")]
     crate::status::forget(w);
     if let Some(slot) = slot(w) {
         slot.signals.store(0, Ordering::Relaxed);
@@ -689,6 +690,7 @@ pub fn yield_ready() -> bool {
 /// snapshots `since` via `irq::arm(vector)` before submitting the device
 /// command. The MSI-X targets this core; the ISR signals the registered
 /// waiter (`irq::set_waiter`), which ends the park.
+#[cfg(target_arch = "x86_64")]
 pub fn irq_wait(vector: crate::irq::Irq, since: u64, timeout_ms: u64) -> bool {
     let Some(w) = current_waker() else { return false };
     let freq = crate::time::counter_hz();

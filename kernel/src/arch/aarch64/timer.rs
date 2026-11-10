@@ -8,7 +8,7 @@
 //! at EL1 they reach the EL1 physical timer and its non-secure PPI.
 
 use crate::platform::dt::Fdt;
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const ARCH_TIMER_CTRL_ENABLE: u64 = 1 << 0;
 const ARCH_TIMER_CTRL_IT_MASK: u64 = 1 << 1;
@@ -25,6 +25,10 @@ static PERIOD: AtomicU64 = AtomicU64::new(0);
 /// The timer's INTID, a PPI: one line, banked per core.
 static IRQ: AtomicU32 = AtomicU32::new(0);
 static FIRED: AtomicU64 = AtomicU64::new(0);
+/// Cores whose timer is a one-shot (`make_oneshot`) instead of the tick.
+static ONESHOT: [AtomicBool; super::cores::MAX_CORES] = [const { AtomicBool::new(false) }; super::cores::MAX_CORES];
+/// What a one-shot fire runs, a `fn()` as usize (0 = nothing).
+static ON_FIRE: AtomicUsize = AtomicUsize::new(0);
 
 fn ctrl() -> u64 {
     let v: u64;
@@ -54,12 +58,23 @@ fn set_next_event(delta: u64) {
     set_ctrl(c);
 }
 
-/// timer_handler, with the periodic tick as its event handler.
+/// timer_handler: the periodic tick re-arms, a one-shot stays masked
+/// until the next `arm_at`.
 fn handler() {
     let c = ctrl();
     if c & ARCH_TIMER_CTRL_IT_STAT == 0 { return; }
     set_ctrl(c | ARCH_TIMER_CTRL_IT_MASK);
     FIRED.fetch_add(1, Ordering::Relaxed);
+    let core = super::cpu::current_core();
+    if core < ONESHOT.len() && ONESHOT[core].load(Ordering::Relaxed) {
+        let f = ON_FIRE.load(Ordering::Acquire);
+        if f != 0 {
+            // SAFETY: only `make_oneshot` stores here, always a `fn()`.
+            let f: fn() = unsafe { core::mem::transmute(f) };
+            f();
+        }
+        return;
+    }
     set_next_event(PERIOD.load(Ordering::Relaxed));
 }
 
@@ -96,6 +111,30 @@ pub fn start_this_core() {
     set_ctrl(ARCH_TIMER_CTRL_IT_MASK);
     super::gic::unmask(irq);
     set_next_event(PERIOD.load(Ordering::Relaxed));
+}
+
+/// Turn the calling core's tick into a one-shot timer, nothing armed:
+/// it fires only at what `arm_at` sets, and each fire runs `on_fire` in
+/// the interrupt.
+pub fn make_oneshot(on_fire: fn()) {
+    let core = super::cpu::current_core();
+    if core >= ONESHOT.len() { return; }
+    ON_FIRE.store(on_fire as usize, Ordering::Release);
+    ONESHOT[core].store(true, Ordering::Relaxed);
+    set_ctrl(ARCH_TIMER_CTRL_IT_MASK);
+    let irq = IRQ.load(Ordering::Relaxed);
+    if irq != 0 { super::gic::unmask(irq); }
+}
+
+/// Fire this core's one-shot at `deadline` in `time::counter` units; a
+/// deadline already past fires at once.
+pub fn arm_at(deadline: u64) {
+    set_next_event(deadline.saturating_sub(super::time::counter()));
+}
+
+/// Take back what `arm_at` set (arch_timer_shutdown: the interrupt off).
+pub fn disarm() {
+    set_ctrl(ctrl() | ARCH_TIMER_CTRL_IT_MASK);
 }
 
 /// Entered from `irq_entry` in vectors.s with the interrupted context saved.
