@@ -76,7 +76,7 @@ pub fn intent_run(args: &str) {
     // everyone). A blocking run would also have `pid: 0`, and
     // `fetch::begin_one` refuses async fetches without a process.
     if declared.contains(capability::Rights::RENDER) {
-        let term_idx = crate::shade::terminal::active_idx();
+        let term_idx = super::active_terminal();
         if !wasm::spawn_on_worker_with_arg(
             wasm_bytes.to_vec(), module_cap, term_idx, module_name, launch_arg)
         {
@@ -113,7 +113,7 @@ pub fn intent_run_background(module_name: &str) {
         Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
     };
 
-    let term_idx = crate::shade::terminal::active_idx();
+    let term_idx = super::active_terminal();
 
     kprint!("[npk] '{}' started background (hash: ", module_name);
     for b in &hash[..4] { kprint!("{:02x}", b); }
@@ -150,7 +150,7 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
     };
 
     // Use current terminal — top takes over this window
-    let term_idx = crate::shade::terminal::active_idx();
+    let term_idx = super::active_terminal();
 
     kprint!("[npk] '{}' started (hash: ", module_name);
     for b in &hash[..4] { kprint!("{:02x}", b); }
@@ -171,6 +171,7 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
 /// Run a WASM driver module with PCI device access.
 /// Usage: driver <module> [bus:dev.func]
 /// If no BDF given, auto-detects by module name.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_run_driver(args: &str) {
     use crate::{wasm, capability};
     use crate::drivers::pci;
@@ -247,12 +248,13 @@ pub fn intent_run_driver(args: &str) {
     for b in &hash[..4] { kprint!("{:02x}", b); }
     kprintln!("...)");
 
-    let term_idx = crate::shade::terminal::active_idx();
+    let term_idx = super::active_terminal();
     if !wasm::spawn_on_worker(wasm_bytes.to_vec(), driver_cap, term_idx, module_name) {
         kprintln!("[npk] Failed to spawn driver '{}'", module_name);
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn parse_bdf(s: &str) -> Option<(u8, u8, u8)> {
     // "6c:00.0" -> (0x6c, 0, 0). Hex to match lspci output.
     let mut parts = s.splitn(2, ':');
@@ -264,6 +266,7 @@ fn parse_bdf(s: &str) -> Option<(u8, u8, u8)> {
     Some((bus, dev, func))
 }
 
+#[cfg(target_arch = "x86_64")]
 fn auto_detect_device(name: &str) -> Option<crate::drivers::pci::PciDevice> {
     use crate::drivers::pci;
     // Prefix-match so chip-specific names (wifi_rtl8822ce, …) all

@@ -106,7 +106,7 @@ import hashlib, os, re, shutil, subprocess, sys
 rel, root = sys.argv[1], sys.argv[2]
 blobs = os.path.join(rel, "blobs")
 os.makedirs(blobs, exist_ok=True)
-manifests = ["manifest", "modules/manifest", "assets/manifest"]
+manifests = ["manifest", "manifest-aarch64", "modules/manifest", "assets/manifest"]
 
 def entries(text):
     """(sha, has_url) per manifest section."""
@@ -134,7 +134,7 @@ for m in manifests:
                           capture_output=True, text=True).stdout
     keep |= {sha for sha, _ in entries(prev)}
 
-files = [os.path.join(rel, "kernel.efi")]
+files = [os.path.join(rel, "kernel.efi"), os.path.join(rel, "kernel-aarch64.img")]
 for d in ("modules", "assets"):
     for dirpath, dirs, names in os.walk(os.path.join(rel, d)):
         dirs[:] = [x for x in dirs if x != "large"]
@@ -1393,6 +1393,23 @@ MANIFEST
             warn "Generate with: openssl ecparam -name secp384r1 -genkey -noout -out update.key"
             warn "Extract pubkey: openssl ec -in update.key -pubout -outform DER -out update.pub"
         fi
+
+        # The AArch64 kernel (the Pi 5's /nopeek.img): same version and
+        # release time, its own manifest kind, so neither kernel can be
+        # offered to the other architecture.
+        build_arm
+        cp "$ARM_IMG" "$RELEASE_DIR/kernel-aarch64.img"
+        ARM_SIZE=$(stat -c%s "$RELEASE_DIR/kernel-aarch64.img")
+        ARM_SHA384=$(openssl dgst -sha384 -hex "$RELEASE_DIR/kernel-aarch64.img" | awk '{print $NF}')
+        cat > "$RELEASE_DIR/manifest-aarch64" <<MANIFEST
+issued=$ISSUED
+version=$VERSION
+disk_format=$DISK_FORMAT
+size=$ARM_SIZE
+sha384=$ARM_SHA384
+MANIFEST
+        [ -f "$KEY_FILE" ] && sign_manifest kernel-aarch64 "$RELEASE_DIR/manifest-aarch64" "$KEY_FILE"
+        ok "Manifest AArch64: v$VERSION, $ARM_SIZE bytes"
 
         # ── Sign system assets (fonts) ───────────────────────────────
         # Copy tracked fonts from sys/fonts/ into release/assets/ and

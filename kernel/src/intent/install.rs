@@ -434,6 +434,7 @@ pub fn intent_uninstall(args: &str) {
     }
 
     // Guard 1: never uninstall the configured launcher.
+    #[cfg(target_arch = "x86_64")]
     if is_active_launcher(name) {
         kprintln!("[npk] Cannot uninstall '{}' — it is the active launcher.", name);
         kprintln!("[npk] Point `sys/config/launcher` to a different module first,");
@@ -497,6 +498,7 @@ fn is_active_picker(name: &str) -> bool {
 }
 
 /// True iff `name` is the active launcher (`sys/config/launcher`).
+#[cfg(target_arch = "x86_64")]
 fn is_active_launcher(name: &str) -> bool {
     crate::shade::launcher_name() == name
 }

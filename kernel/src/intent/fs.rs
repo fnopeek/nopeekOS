@@ -8,6 +8,7 @@ use super::resolve_path;
 /// Name is resolved relative to cwd.
 pub(super) fn fetch_object(name: &str) -> Option<alloc::vec::Vec<u8>> {
     let path = resolve_path(name);
+    #[cfg(target_arch = "x86_64")]
     if crate::ext::is_ext(&path) {
         return match crate::ext::read_all(&path, 64 << 20) {
             Ok(Some(d)) => Some(d),
@@ -331,6 +332,7 @@ pub fn intent_list(args: &str) {
         super::get_cwd()
     };
 
+    #[cfg(target_arch = "x86_64")]
     if crate::ext::is_ext(&resolved) {
         list_ext(&resolved);
         return;
@@ -382,6 +384,7 @@ pub fn intent_list(args: &str) {
 }
 
 /// A folder of an external volume, or the volumes themselves for `ext`.
+#[cfg(target_arch = "x86_64")]
 fn list_ext(path: &str) {
     let entries = match crate::ext::list(path) {
         Ok(Some(v)) => v,
@@ -436,6 +439,7 @@ pub fn intent_fsinfo() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_disk_info() {
     use crate::blkdev;
     match blkdev::capacity() {
@@ -528,6 +532,7 @@ pub fn intent_disk_info() {
 /// Micro-bench BLAKE3 + AES-256-GCM on a 1 MB buffer to confirm the
 /// HW backends (AVX2 / AES-NI) fire at runtime. Returns
 /// `(blake3_mbs, aes_enc_mbs, aes_dec_mbs)`.
+#[cfg(target_arch = "x86_64")]
 pub fn crypto_bench() -> (u64, u64, u64) {
     use crate::time::{counter, counter_hz};
 
@@ -620,6 +625,7 @@ pub fn crypto_bench() -> (u64, u64, u64) {
     (blake3_mbs, aes_enc_mbs, aes_dec_mbs)
 }
 
+#[cfg(target_arch = "x86_64")]
 fn print_crypto_bench() {
     let (b, e, d) = crypto_bench();
     kprintln!("  Crypto:    BLAKE3 {} MB/s | AES-GCM enc {} dec(in-place) {} MB/s",
@@ -631,6 +637,7 @@ fn print_crypto_bench() {
 /// runtime view of the same features. A mismatch — HW reports
 /// pclmulqdq but the crate sees `false` — explains why aes-gcm /
 /// blake3 might pick a soft path in spite of `target-feature = +pclmulqdq`.
+#[cfg(target_arch = "x86_64")]
 fn print_cpu_features() {
     use core::arch::x86_64::__cpuid;
 
@@ -710,6 +717,7 @@ pub fn intent_disk_write(args: &str) {
 }
 
 /// External disks (USB mass storage, SD cards): list, dump a block, measure, eject.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_drives(args: &str) {
     use crate::storage::disk as us;
     let mut it = args.split_whitespace();

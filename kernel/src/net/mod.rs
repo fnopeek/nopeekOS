@@ -352,7 +352,6 @@ pub fn tick_link_and_reconfigure() {
     if now < NEXT_LINK_CHECK.load(Ordering::Relaxed) { return; }
     NEXT_LINK_CHECK.store(now + crate::time::counter_hz(), Ordering::Relaxed); // +~1 s
     crate::time::tick();
-    #[cfg(target_arch = "x86_64")]
     crate::intent::http::reap_pools();
 
     netdev::refresh_link_state();
@@ -460,17 +459,12 @@ pub fn is_up() -> bool {
     netdev::is_available()
 }
 
-/// Let the shell's loop look at what arrived for it; there is no shell
-/// yet on AArch64.
+/// Let the shell's loop look at what arrived for it.
 pub(crate) fn wake_shell() {
-    #[cfg(target_arch = "x86_64")]
     crate::intent::wake_shell();
 }
 
 /// The shell's cancel request (Ctrl-C), for a blocking network call.
 pub(crate) fn shell_cancel_requested() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    return crate::intent::cancel_requested();
-    #[cfg(not(target_arch = "x86_64"))]
-    false
+    crate::intent::cancel_requested()
 }

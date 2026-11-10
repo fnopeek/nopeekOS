@@ -10,9 +10,7 @@ pub mod aead_hw;
 #[cfg(target_arch = "x86_64")]
 pub mod aead_hw_ghash;
 pub mod keyslot;
-#[cfg(target_arch = "x86_64")]
 pub mod tls;
-#[cfg(target_arch = "x86_64")]
 pub mod update_key;
 
 // Re-export aead contents at crypto:: level for backward compat

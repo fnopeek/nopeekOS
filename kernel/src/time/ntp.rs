@@ -91,7 +91,7 @@ pub fn sync_now() -> bool {
 /// The latest time a signed release proved: its `issued=` stamp cannot
 /// predate its signing.
 fn proven_floor() -> u64 {
-    ["kernel", "modules", "assets"].iter()
+    ["kernel", "kernel-aarch64", "modules", "assets"].iter()
         .filter_map(|k| crate::npkfs::fetch(&alloc::format!("sys/ota/issued-{}", k)).ok())
         .filter_map(|(d, _)| core::str::from_utf8(&d).ok()?.trim().parse::<u64>().ok())
         .max()

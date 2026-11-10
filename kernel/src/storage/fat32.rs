@@ -692,28 +692,27 @@ impl Fat32Reader {
     }
 }
 
-/// Overwrite the UEFI boot kernel on the ESP partition.
-/// The kernel lives at `/EFI/BOOT/BOOTX64.EFI` — UEFI firmware
-/// auto-discovers that path, no menu / GRUB indirection. OTA `update`
-/// calls this with the verified new kernel.efi.
+/// Overwrite the boot kernel on the ESP partition (`BOOT_KERNEL`: the
+/// path UEFI finds by itself on a PC, `kernel=` of config.txt on the Pi).
+/// OTA `update` calls this with the verified new kernel.
 pub fn update_kernel(esp_start: u64, data: &[u8]) -> Result<(), &'static str> {
     let fs = Fat32Reader::from_esp(esp_start)?;
 
-    // Navigate: root → /EFI → /EFI/BOOT → BOOTX64.EFI
-    let efi_name = make_name(b"EFI", b"");
-    let (efi_cl, _, _, _) = fs.find_entry(fs.root_cluster, &efi_name)?;
-
-    let boot_name = make_name(b"BOOT", b"");
-    let (boot_cl, _, _, _) = fs.find_entry(efi_cl, &boot_name)?;
-
-    let kernel_name = make_name(b"BOOTX64", b"EFI");
-    let (kernel_cl, old_size, dir_sec, dir_off) = fs.find_entry(boot_cl, &kernel_name)?;
+    let (kdir, kname, kext) = BOOT_KERNEL;
+    let boot_cl = match kdir {
+        Some(d) => {
+            let (efi_cl, _, _, _) = fs.find_entry(fs.root_cluster, &make_name(b"EFI", b""))?;
+            fs.find_entry(efi_cl, &make_name(d, b""))?.0
+        }
+        None => fs.root_cluster,
+    };
+    let (kernel_cl, old_size, dir_sec, dir_off) = fs.find_entry(boot_cl, &make_name(kname, kext))?;
 
     let new_sectors = ((data.len() + 511) / 512) as u32;
     let old_clusters = fs.chain_len(kernel_cl)?;
     let new_clusters = (new_sectors + fs.spc - 1) / fs.spc;
 
-    crate::kprintln!("[npk] ESP: BOOTX64.EFI at cluster {}, {} -> {} bytes ({}/{} clusters)",
+    crate::kprintln!("[npk] ESP: boot kernel at cluster {}, {} -> {} bytes ({}/{} clusters)",
         kernel_cl, old_size, data.len(), new_clusters, old_clusters);
 
     // No fixed limit: the chain grows into free clusters when the image

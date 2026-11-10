@@ -6,8 +6,13 @@ pub fn intent_lock() {
     kprintln!("[npk] System locked.");
     crate::disk_key::lock();
 
-    // Use GUI login screen if framebuffer available
-    if crate::framebuffer::is_available() {
+    // Use GUI login screen if framebuffer available; only x86 has one.
+    #[cfg(target_arch = "x86_64")]
+    let gui = crate::framebuffer::is_available();
+    #[cfg(not(target_arch = "x86_64"))]
+    let gui = false;
+    if gui {
+        #[cfg(target_arch = "x86_64")]
         crate::gui::login::run();
     } else {
         // Fallback: text-mode unlock
@@ -44,7 +49,13 @@ pub fn intent_lock() {
             attempts += 1;
             if attempts >= 10 {
                 kprintln!("[npk] Too many failed attempts.");
+                #[cfg(target_arch = "x86_64")]
                 crate::intent::system::intent_halt();
+                #[cfg(not(target_arch = "x86_64"))]
+                {
+                    kprintln!("[npk] System halted.");
+                    crate::arch::halt_forever()
+                }
             }
         }
     }

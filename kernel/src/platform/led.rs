@@ -31,17 +31,3 @@ pub fn set(on: bool) {
         l.set(on);
     }
 }
-
-/// Blink forever in groups of `n` short flashes with a pause between: a
-/// number to read off the board when nothing else gives output.
-pub fn code(n: u32) -> ! {
-    loop {
-        for _ in 0..n {
-            set(true);
-            crate::time::delay_ms(200);
-            set(false);
-            crate::time::delay_ms(300);
-        }
-        crate::time::delay_ms(3000);
-    }
-}

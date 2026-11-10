@@ -41,7 +41,6 @@ mod security;
 pub use security::{audit, capability, csprng, disk_key};
 
 mod crypto;
-#[cfg(target_arch = "x86_64")]
 pub use crypto::{tls, update_key};
 
 mod storage;
@@ -77,7 +76,6 @@ mod capture;
 mod camfeed;
 #[cfg(target_arch = "x86_64")]
 mod devices;
-#[cfg(target_arch = "x86_64")]
 mod intent;
 mod config;
 #[cfg(target_arch = "x86_64")]

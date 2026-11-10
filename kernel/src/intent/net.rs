@@ -174,6 +174,7 @@ pub fn intent_netstat(args: &str) {
             }
         }
     }
+    #[cfg(target_arch = "x86_64")]
     bridge_report();
     kprintln!();
 }
@@ -214,6 +215,7 @@ fn print_tcp_info(i: &crate::net::tcp::TcpInfo) {
 /// not coming back or the mapping no longer matches. If both climb and the
 /// guest sees nothing, the loss is in delivery, and the `lost` counters name
 /// the cause. Per-second figures need two calls a few seconds apart.
+#[cfg(target_arch = "x86_64")]
 fn bridge_report() {
     let b = crate::microvm::devices::nat::bridge_stats();
     let up = crate::microvm::guest_running();
@@ -328,12 +330,15 @@ fn bridge_report() {
 // `sys/config/<its own name>`). So the read-modify-write lives here, where
 // the capability already exists.
 
+#[cfg(target_arch = "x86_64")]
 const WIFI_CFG: &str = "sys/config/wifi";
 
 /// The keys the wifi stack actually reads; anything else is rejected so a
 /// typo does not write a setting nobody reads.
+#[cfg(target_arch = "x86_64")]
 const WIFI_KEYS: &[&str] = &["band", "bw", "ampdu", "txagg", "roam", "aspm", "debug"];
 
+#[cfg(target_arch = "x86_64")]
 fn wlan_set_usage() {
     kprintln!("[wlan] Usage: wlan set <key> <value> | wlan unset <key>");
     kprintln!("[wlan]   band: 5 | 2.4 | auto");
@@ -352,13 +357,16 @@ fn wlan_set_usage() {
 // read here, masked, and goes straight into the vault.
 
 /// The verbs handled by `intent_wlan_manage`.
+#[cfg(target_arch = "x86_64")]
 pub const WLAN_VERBS: &[&str] = &["scan", "connect", "disconnect", "forget", "auto", "prio", "known"];
 
 /// Whether `verb` changes stored networks (needs WRITE).
+#[cfg(target_arch = "x86_64")]
 pub fn wlan_verb_writes(verb: &str) -> bool {
     matches!(verb, "connect" | "forget" | "auto" | "prio")
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_wlan_manage(args: &str) {
     use crate::drivers::wifi as w;
     let a = args.trim();
@@ -447,6 +455,7 @@ pub fn intent_wlan_manage(args: &str) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
     let a = args.trim();
     let (rest, remove) = if let Some(r) = a.strip_prefix("unset") {
@@ -521,6 +530,7 @@ pub fn intent_wlan_set(args: &str, cap_id: crate::capability::CapId) {
 }
 
 /// The manager's state text, for a person.
+#[cfg(target_arch = "x86_64")]
 fn print_manager_status(st: &str) {
     let mut aps = 0;
     for line in st.lines() {
@@ -569,6 +579,7 @@ fn print_manager_status(st: &str) {
 /// `wlan reset` zeroes the kernel counters so a single speed test can be
 /// measured on its own; the driver's counters are cumulative and it reports
 /// throughput over its own 1-second window regardless.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_wlan(args: &str) {
     if args.trim() == "reset" {
         crate::netdev::wasm_nic_stats_reset();
@@ -833,6 +844,7 @@ fn netstat_counters() {
         }
     }
     // The card's own counters, under the names `ethtool -S` gives them.
+    #[cfg(target_arch = "x86_64")]
     if crate::drivers::igc::is_present() {
         let (missed, xoff, xon) = crate::drivers::igc::link_stats();
         kprintln!();

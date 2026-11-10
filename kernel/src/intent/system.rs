@@ -4,6 +4,7 @@ use crate::{kprint, kprintln};
 use crate::capability::{self, Vault};
 use alloc::string::String;
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_status(vault: &Vault) {
     let (active_caps, max_caps) = vault.stats();
     let (free_frames, free_mb) = crate::memory::stats();
@@ -76,6 +77,7 @@ pub fn intent_status(vault: &Vault) {
 /// (`shade::poll_render`): `halt_until` there froze every window, the
 /// microVM's included, for the whole wait. Now the fiber parks in frame-sized
 /// steps and composites between them. Outside a fiber, halt as before.
+#[cfg(target_arch = "x86_64")]
 fn idle_until(deadline: u64) {
     let step = crate::time::counter_hz() / 60;
     loop {
@@ -91,6 +93,7 @@ fn idle_until(deadline: u64) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_cores() {
     let cores = crate::smp::per_core::core_count().min(256);
     let tsc_hz = crate::time::counter_hz().max(1);
@@ -564,6 +567,7 @@ pub fn intent_history(args: &str) {
 /// that `battery` reports in total.
 ///
 /// The window is spent in `hlt` so it measures idle, not the measurement.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_power(args: &str) {
     if !crate::smp::per_core::has_rapl() {
         kprintln!();
@@ -699,6 +703,7 @@ pub fn intent_power(args: &str) {
 ///   power cstate <n> [us]   idle through CStateBaseAddr+n, only for halts
 ///                           of at least <us> microseconds (default 200)
 ///   power cstate off        back to hlt (C1)
+#[cfg(target_arch = "x86_64")]
 fn power_cstate(arg: &str) {
     kprintln!();
     // Intel: the MWAIT states the firmware's _CST gave (via `acpi`).
@@ -786,6 +791,7 @@ fn power_cstate(arg: &str) {
 /// pack at address 0x0B, and prints the decoded charge + status. Lets us
 /// tell "no controller" from "controller but no battery on the bus" from
 /// "battery present but odd values" without a serial cable.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_battery() {
     const SBS_ADDR: u8 = 0x0B;
     // A notebook whose pack sits behind the EC reports through the firmware
@@ -846,6 +852,7 @@ pub fn intent_battery() {
     intent_ec_battery_dump();
 }
 
+#[cfg(target_arch = "x86_64")]
 fn battery_from_acpi(d: crate::battery::Detail) {
     const UNKNOWN: u32 = 0xFFFF_FFFF;
     let packed = crate::battery::cached();
@@ -894,6 +901,7 @@ fn battery_from_acpi(d: crate::battery::Detail) {
 /// (HP Elite/Dragonfly stores charge as plain EC-RAM
 /// fields: remaining cap, full cap, status — read by the DSDT's _BST). Find
 /// the offset whose byte ≈ the known charge %, and the 16-bit capacity pair.
+#[cfg(target_arch = "x86_64")]
 fn intent_ec_battery_dump() {
     kprintln!();
     kprintln!("  EC RAM dump (0x00..0xFF) — find the battery fields:");
@@ -960,6 +968,7 @@ fn intent_ec_battery_dump() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn dsdt_dump_range(b: &[u8], label: &str, start: usize, count: usize) {
     let end = (start + count).min(b.len());
     kprintln!("  --- {} @ 0x{:x}..0x{:x} ---", label, start, end);
@@ -986,6 +995,7 @@ fn dsdt_dump_range(b: &[u8], label: &str, start: usize, count: usize) {
 }
 
 /// The bytes of a table from `acpi::dsdt` or `acpi::find_table_nth`.
+#[cfg(target_arch = "x86_64")]
 fn acpi_bytes(addr: usize, len: usize) -> &'static [u8] {
     // SAFETY: both return the address and length of a whole ACPI table they
     // have mapped; firmware tables neither move nor change.
@@ -996,6 +1006,7 @@ fn acpi_bytes(addr: usize, len: usize) -> &'static [u8] {
 /// OperationRegion+Field (field NameSegs → EC byte offsets, e.g. BRC/BFC)
 /// and the _BST/_BIF/_BIX methods. Small enough to copy from the console;
 /// from this we map the real remaining/full-charge EC offsets.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_dsdt() {
     let Some((addr, len)) = crate::acpi::dsdt() else {
         kprintln!("[npk] DSDT not found");
@@ -1046,6 +1057,7 @@ pub fn intent_dsdt() {
 /// markers, so the acpi.wasm interpreter dev-harness can reconstruct the exact
 /// bytes the kernel sees (cross-check against Linux's acpidump). Generic ACPI
 /// diagnostic — no device-specific logic.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_dsdt_full() {
     let Some((addr, len)) = crate::acpi::dsdt() else {
         kprintln!("[npk] DSDT not found");
@@ -1083,6 +1095,7 @@ pub fn intent_dsdt_full() {
 /// (`nc -l <port> > tables.bin`). SSDTs are included because CPU `_CST`, the
 /// display's `_BCL`/`_BCM` and more often live there. Paced in small chunks
 /// so the NIC TX ring drains.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_dsdt_send(ip: [u8; 4], port: u16, extra: &[u64]) {
     let Some(dsdt) = crate::acpi::dsdt() else {
         kprintln!("[npk] DSDT not found");
@@ -1141,6 +1154,7 @@ pub fn intent_dsdt_send(ip: [u8; 4], port: u16, extra: &[u64]) {
 /// `ec watch [s]` — read-only look at how firmware events reach us: is ACPI mode on
 /// (PM1_CNT.SCI_EN), which GPE status bits rise, does the EC raise SCI_EVT.
 /// Nothing is written and no event is taken — acpi keeps draining the EC.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_ec_watch(args: &str) {
     use crate::arch::x86_64::{Port, PortRange};
     // SAFETY: the EC status/command port, read only.
@@ -1270,6 +1284,7 @@ pub fn intent_uptime() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_gpu(args: &str) {
     match args.trim() {
         "verify" => {
@@ -1413,6 +1428,7 @@ pub fn intent_gpu(args: &str) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_shade(args: &str) {
     match args.trim() {
         // The window list with its full state (kind, terminal, PID, root
@@ -1631,18 +1647,24 @@ pub fn persist_boot_log() {
     }
 }
 
+/// `uname -m`.
+#[cfg(target_arch = "x86_64")]
+const MACHINE: &str = "x86_64";
+#[cfg(target_arch = "aarch64")]
+const MACHINE: &str = "aarch64";
+
 pub fn intent_uname(args: &str) {
     let all = args.contains("-a") || args.is_empty();
     if all {
-        kprintln!("nopeekOS {} x86_64 release (rustc {})",
-            env!("CARGO_PKG_VERSION"),
+        kprintln!("nopeekOS {} {} release (rustc {})",
+            env!("CARGO_PKG_VERSION"), MACHINE,
             rustc_version());
     } else {
         if args.contains("-s") { kprintln!("nopeekOS"); }
         if args.contains("-r") || args.contains("-v") {
             kprintln!("{}", env!("CARGO_PKG_VERSION"));
         }
-        if args.contains("-m") { kprintln!("x86_64"); }
+        if args.contains("-m") { kprintln!("{}", MACHINE); }
     }
 }
 
@@ -1975,6 +1997,7 @@ pub fn intent_think(args: &str) {
     kprintln!();
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_set(args: &str) {
     let args = args.trim();
     let Some((key, value)) = args.split_once(' ') else {
@@ -2003,6 +2026,7 @@ pub fn intent_set(args: &str) {
 
 /// Honour an explicit mismatch, but say it out loud: a light scheme on a
 /// dark canvas is legible-ish, the other way round is not.
+#[cfg(target_arch = "x86_64")]
 fn note_code_scheme_mismatch(value: &str) {
     use crate::shade::widgets::palette as pal;
     if let (Some(scheme_light), theme_light) =
@@ -2019,6 +2043,7 @@ fn note_code_scheme_mismatch(value: &str) {
 
 /// `unset <key>`: forget a setting. For the glass keys that means "back to
 /// automatic" (`shade glass` shows what automatic chose).
+#[cfg(target_arch = "x86_64")]
 pub fn intent_unset(args: &str) {
     let key = args.trim();
     if key.is_empty() {
@@ -2063,6 +2088,7 @@ pub fn intent_config() {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_reboot() -> ! {
     kprintln!();
     kprintln!("[npk] Rebooting...");
@@ -2100,6 +2126,7 @@ pub fn intent_reboot() -> ! {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_lspci(args: &str) {
     use crate::drivers::pci::{self, PciAddr};
 
@@ -2161,6 +2188,7 @@ pub fn intent_lspci(args: &str) {
 
 /// `mouse [speed <n>] [size <n>]` — show or set pointer speed (25..=600 %) and
 /// cursor size (50..=300 %). Persisted to `mouse_speed` / `mouse_size` config.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_mouse(args: &str) {
     let a = args.trim();
     let (what, key, range) = if let Some(v) = a.strip_prefix("speed") {
@@ -2189,6 +2217,7 @@ pub fn intent_mouse(args: &str) {
 
 /// `usb` / `lsusb`: the devices the running xHCI driver enumerated, and
 /// with a number, that device's descriptors. Nothing is reset or re-read.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_lsusb(args: &str) {
     let a = args.trim();
     if a.is_empty() {
@@ -2201,6 +2230,7 @@ pub fn intent_lsusb(args: &str) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn pci_class_name(cls: u8, sub: u8, prog_if: u8) -> &'static str {
     match (cls, sub, prog_if) {
         (0x00, 0x00, _) => "Legacy device",
@@ -2245,6 +2275,7 @@ fn pci_class_name(cls: u8, sub: u8, prog_if: u8) -> &'static str {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 fn pci_device_name(vendor: u16, device: u16) -> &'static str {
     match (vendor, device) {
         // Intel WiFi
@@ -2352,6 +2383,7 @@ fn pci_device_name(vendor: u16, device: u16) -> &'static str {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn intent_halt() -> ! {
     kprintln!();
     kprintln!("[npk] Shutting down...");
@@ -2386,6 +2418,7 @@ pub fn intent_halt() -> ! {
 
 /// `brightness [0-100|+N|-N]`: the panel's backlight in percent, set or
 /// stepped, through the GPU driver module that drives the display.
+#[cfg(target_arch = "x86_64")]
 pub fn intent_brightness(args: &str) {
     use crate::gpu::gpudev::{backlight, BACKLIGHT_SCALE};
     let a = args.trim();

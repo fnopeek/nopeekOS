@@ -103,7 +103,12 @@ struct Manifest {
 /// manifest cannot stand in for another's.
 #[derive(Clone, Copy)]
 pub(super) enum ManifestKind {
+    /// The x86-64 kernel, `kernel.efi`.
+    #[cfg(target_arch = "x86_64")]
     Kernel,
+    /// The AArch64 kernel, the Pi's `/nopeek.img`.
+    #[cfg(target_arch = "aarch64")]
+    KernelAarch64,
     Modules,
     Assets,
 }
@@ -111,12 +116,23 @@ pub(super) enum ManifestKind {
 impl ManifestKind {
     fn tag(self) -> &'static str {
         match self {
+            #[cfg(target_arch = "x86_64")]
             ManifestKind::Kernel => "kernel",
+            #[cfg(target_arch = "aarch64")]
+            ManifestKind::KernelAarch64 => "kernel-aarch64",
             ManifestKind::Modules => "modules",
             ManifestKind::Assets => "assets",
         }
     }
 }
+
+/// This architecture's kernel manifest below `UPDATE_BASE`, and the kind
+/// its signature names: a kernel is only ever offered to its own
+/// architecture.
+#[cfg(target_arch = "x86_64")]
+const KERNEL_MANIFEST: (&str, ManifestKind) = ("manifest", ManifestKind::Kernel);
+#[cfg(target_arch = "aarch64")]
+const KERNEL_MANIFEST: (&str, ManifestKind) = ("manifest-aarch64", ManifestKind::KernelAarch64);
 
 /// Prefix of every signed manifest message (`build.sh` `sign_manifest`).
 const MANIFEST_SIG_TAG: &str = "nopeekOS-ota-manifest-v1";
@@ -307,8 +323,9 @@ pub fn intent_update(args: &str) {
 fn build_plan() -> Option<Plan> {
     kprintln!("[npk] update — {}{}", UPDATE_HOST, UPDATE_BASE);
 
-    let manifest_path = alloc::format!("{}/manifest", UPDATE_BASE);
-    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, ManifestKind::Kernel) {
+    let (name, kind) = KERNEL_MANIFEST;
+    let manifest_path = alloc::format!("{}/{}", UPDATE_BASE, name);
+    let manifest_data = match fetch_manifest(UPDATE_HOST, &manifest_path, kind) {
         Ok(d) => d,
         Err(e) => { kprintln!("[npk]   ! manifest: {}", e); return None; }
     };

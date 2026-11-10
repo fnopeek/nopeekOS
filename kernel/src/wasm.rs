@@ -178,7 +178,6 @@ pub(crate) struct HostState {
     /// otherwise cannot reach the private network. Only `npk_net_context`
     /// with a private address widens it, and only after the kernel has
     /// resolved that address itself.
-    #[cfg(target_arch = "x86_64")]
     pub(crate) net_reach: crate::intent::http::Reach,
     /// Shade window id owned by this WASM app for widget rendering.
     /// 0 = no widget window yet (first scene_commit allocates one).
@@ -644,7 +643,6 @@ fn wasm_worker_task(arg: u64) {
         limits: guest_limits(),
         output: String::new(),
         cap_id: core::mem::replace(&mut job.cap_id, capability::CAP_NULL),
-        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
@@ -765,7 +763,6 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
         limits: guest_limits(),
         output: String::new(),
         cap_id: core::mem::replace(&mut job.cap_id, capability::CAP_NULL),
-        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         direct_output: true,
         terminal_idx: job.terminal_idx,
@@ -878,7 +875,6 @@ fn execute_inner(
         pid: 0,
         #[cfg(target_arch = "x86_64")]
         hw: None,
-        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -965,7 +961,6 @@ pub fn execute_wasi(
         pid: 0,
         #[cfg(target_arch = "x86_64")]
         hw: None,
-        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -1038,7 +1033,6 @@ fn execute_inner_forge(
         pid: 0,
         #[cfg(target_arch = "x86_64")]
         hw: None,
-        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -1114,7 +1108,6 @@ pub fn execute_wasi_forge(
         pid: 0,
         #[cfg(target_arch = "x86_64")]
         hw: None,
-        #[cfg(target_arch = "x86_64")]
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
         module_name: String::new(),
@@ -1161,23 +1154,17 @@ pub fn execute_wasi_forge(
     }
 }
 
-/// The shell's cancel request (Ctrl-C) for the foreground run; there is no
-/// shell to ask yet on AArch64.
+/// The shell's cancel request (Ctrl-C) for the foreground run.
 fn shell_cancel_requested() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    return crate::intent::cancel_requested();
-    #[cfg(not(target_arch = "x86_64"))]
-    false
+    crate::intent::cancel_requested()
 }
 
 fn shell_clear_cancel() {
-    #[cfg(target_arch = "x86_64")]
     crate::intent::clear_cancel();
 }
 
 /// Let the shell look at a finished run.
 fn wake_shell() {
-    #[cfg(target_arch = "x86_64")]
     crate::intent::wake_shell();
 }
 
@@ -1217,7 +1204,6 @@ fn cleanup_instance_state(state: &mut HostState) {
     crate::drivers::report::clear(&state.module_name);
     // Otherwise an app closed mid-load holds its fetch slots and reserved
     // buffers until the next boot.
-    #[cfg(target_arch = "x86_64")]
     crate::intent::fetch::release_owner(state.pid);
     for h in state.tcp_handles.drain(..).flatten() {
         let _ = crate::net::tcp::close(h);

@@ -214,6 +214,11 @@ macro_rules! kdebug {
     });
 }
 
+/// A key from the keyboard hook, if one is waiting; never the UART.
+pub fn key() -> Option<u8> {
+    HOOKS.get().and_then(|h| (h.key)())
+}
+
 /// Blocking read of one byte from the keyboard hook or the UART. The
 /// console lock is held only to look at the UART, never across the wait:
 /// another core printing meanwhile must not stall, least of all the one

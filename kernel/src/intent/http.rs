@@ -141,6 +141,7 @@ fn do_http_request(args: &str, use_tls: bool) {
         let mut writer: Option<(String, crate::npkfs::fs::StreamingWriter)> = if flags.discard {
             if !flags.silent {
                 kprintln!("[npk] Streaming to RAM (-d, discard) — pure throughput, no disk");
+                #[cfg(target_arch = "x86_64")]
                 if crate::xhci::nic_attached() {
                     kprintln!("[npk] NIC USB link: {}", crate::xhci::nic_link_speed_str());
                     crate::drivers::rtl8153::log_link_diag();
@@ -221,9 +222,12 @@ fn do_http_request(args: &str, use_tls: bool) {
                     kprintln!("[npk]      tcp-wnd: offered={}K  cap={}K  srtt={} ms",
                         wnd / 1024, cap / 1024, srtt);
                     // Bytes discarded by our own rx_desc walker.
-                    let (frames, trunc, discard) = crate::drivers::rtl8153::take_rx_parse_stats();
-                    kprintln!("[npk]      rx-parse: frames={}  truncated_batches={}  DISCARDED={} B",
-                        frames, trunc, discard);
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        let (frames, trunc, discard) = crate::drivers::rtl8153::take_rx_parse_stats();
+                        kprintln!("[npk]      rx-parse: frames={}  truncated_batches={}  DISCARDED={} B",
+                            frames, trunc, discard);
+                    }
                     last_tick = now;
                 }
                 Ok(())
@@ -240,6 +244,7 @@ fn do_http_request(args: &str, use_tls: bool) {
                 kprintln!("[npk] download failed: {}", e);
             }
             // Chip counters are dumped on every exit, failures included.
+            #[cfg(target_arch = "x86_64")]
             if crate::xhci::nic_attached() {
                 crate::drivers::rtl8153::dump_tally("after cancel");
                 crate::drivers::rtl8153::log_link_diag();
@@ -254,6 +259,7 @@ fn do_http_request(args: &str, use_tls: bool) {
         let secs10 = dt * 10 / 100;
         kprintln!("[npk] done: {} KiB in {}.{} s = ~{} Mbit/s (~{} MB/s)",
             total / 1024, secs10 / 10, secs10 % 10, mbps, mbytes_s);
+        #[cfg(target_arch = "x86_64")]
         if crate::xhci::nic_attached() { crate::drivers::rtl8153::dump_tally("after"); }
         if let Some((store_path, w)) = writer {
             match w.finish() {

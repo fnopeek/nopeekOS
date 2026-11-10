@@ -131,7 +131,7 @@ fn intent_python_on(args: &str, vault: &'static spin::Mutex<capability::Vault>, 
         crate::kdebug!("[python] {}", s);
     }
 
-    let term = crate::shade::terminal::active_idx() as u8;
+    let term = super::active_terminal();
     crate::heap::reset_counters();
     let t0 = crate::time::ticks();
     let r = if use_forge {
