@@ -10,7 +10,8 @@ use pi5_core::{dwc3, mip::Mip, pcie};
 const MAX_WINDOWS: usize = 8;
 
 /// The register blocks, mapped.
-struct Board {
+#[derive(Clone, Copy)]
+pub(super) struct Board {
     pcie: Mmio,
     rescal: Mmio,
     reset: Mmio,
@@ -194,6 +195,18 @@ const IRQ_TYPE_LEVEL_HIGH: u32 = 4;
 /// or if the GIC refuses the SPI.
 fn rp1_irq(fdt: &Fdt, node: &Node) -> Option<(crate::irq::Irq, u32, u32)> {
     let (rp1, b0, b1) = RP1_IRQS.rp1.get()?;
+    let (irq, line, intid, trigger) = rp1_irq_map(fdt, node)?;
+    rp1.irq_enable(&mut Bars(*b0, *b1), line, trigger);
+    rp1.irq_unmask(&mut Bars(*b0, *b1), line);
+    Some((irq, line, intid))
+}
+
+/// The part of `rp1_irq` before RP1 itself is touched: `rp1_irq_xlate`,
+/// the line's SPI and its flow, for a driver that enables the line in its
+/// own probe order. Returns the interrupt, the line, the INTID and the
+/// trigger.
+pub(super) fn rp1_irq_map(fdt: &Fdt, node: &Node) -> Option<(crate::irq::Irq, u32, u32, pi5_core::rp1::Trigger)> {
+    RP1_IRQS.rp1.get()?;
     let line = fdt.prop_cell(node, b"interrupts", 0)?;
     let trigger = match fdt.prop_cell(node, b"interrupts", 1)? {
         IRQ_TYPE_EDGE_RISING => pi5_core::rp1::Trigger::Edge,
@@ -203,9 +216,34 @@ fn rp1_irq(fdt: &Fdt, node: &Node) -> Option<(crate::irq::Irq, u32, u32)> {
     let intid = crate::arch::aarch64::gic::SPI_BASE + MIP.get()?.msi(line)?.spi;
     let irq = crate::irq::register_chained(&RP1_CHIP, line, intid)?;
     RP1_IRQS.level[line as usize].store(trigger == pi5_core::rp1::Trigger::Level, core::sync::atomic::Ordering::Relaxed);
-    rp1.irq_enable(&mut Bars(*b0, *b1), line, trigger);
-    rp1.irq_unmask(&mut Bars(*b0, *b1), line);
-    Some((irq, line, intid))
+    Some((irq, line, intid, trigger))
+}
+
+/// RP1 as probed, with the board's register blocks and the offset RP1's
+/// DMA adds to a physical address; None before `init` brought it up.
+pub(super) fn rp1() -> Option<(pi5_core::rp1::Rp1, Board, u64)> {
+    let (rp1, ..) = RP1_IRQS.rp1.get()?;
+    let (board, dma_off) = BOARD.get()?;
+    Some((*rp1, *board, *dma_off))
+}
+
+/// The board's blocks and RP1's DMA offset, once RP1 is probed.
+static BOARD: spin::Once<(Board, u64)> = spin::Once::new();
+
+/// The enabled child of the RP1 node with `compatible`.
+pub(super) fn rp1_child(fdt: &Fdt, compatible: &[u8]) -> Option<Node> {
+    let pcie = rp1_controller(fdt)?;
+    let mut rp1 = None;
+    fdt.children(&pcie, |c| {
+        if fdt.name_is(c, b"rp1") { rp1 = Some(*c); }
+        rp1.is_none()
+    });
+    let mut found = None;
+    fdt.children(&rp1?, |c| {
+        if fdt.prop_has_str(c, b"compatible", compatible) && fdt.is_enabled(c) { found = Some(*c); }
+        found.is_none()
+    });
+    found
 }
 
 /// The DWC3 whose xHCI is being attached, for `plat_start`.
@@ -424,19 +462,22 @@ pub fn init(fdt: &Fdt) -> bool {
     MIP.call_once(|| mip);
 
     let dma_off = inb[..n_in].iter().find(|w| w.cpu == 0).map(|w| w.pci).unwrap_or(0);
+    BOARD.call_once(|| (board, dma_off));
     usb(fdt, &node, &mut board, cpu_of(dev.bars[1].bus), dma_off)
 }
 
 /// What there is to do once bring-up ends: show what the USB keyboard
 /// types (its controller's interrupt thread fills the key buffer; a
-/// controller without an interrupt is polled here) and blink the activity
-/// LED at 1 Hz.
-pub fn echo_keys(led: bool) -> ! {
-    kprintln!("[npk] USB keyboard ready: type, the keys appear below.");
+/// controller without an interrupt is polled here), step the network's
+/// timers and link watch, and blink the activity LED at 1 Hz.
+pub fn run(keyboard: bool, net: bool, led: bool) -> ! {
+    if keyboard {
+        kprintln!("[npk] USB keyboard ready: type, the keys appear below.");
+    }
     let mut led_on = false;
     let mut led_at = crate::time::ticks();
     loop {
-        if crate::xhci::needs_poll() {
+        if keyboard && crate::xhci::needs_poll() {
             crate::xhci::poll_events();
             crate::xhci::hotplug_pass();
         }
@@ -452,6 +493,10 @@ pub fn echo_keys(led: bool) -> ! {
                 0xc0..=0xff => crate::framebuffer::write_byte(b'?'),
                 _ => {}
             }
+        }
+        if net {
+            crate::net::poll();
+            crate::net::tick_link_and_reconfigure();
         }
         if led && crate::time::ticks() >= led_at + 50 {
             led_on = !led_on;

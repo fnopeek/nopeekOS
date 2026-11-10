@@ -631,7 +631,7 @@ pub fn recv(buf: &mut [u8; MTU]) -> Option<(usize, bool)> {
         #[cfg(target_arch = "x86_64")]
         Active::Virtio | Active::None => virtio_net::recv(buf).map(|n| (n, false)),
         #[cfg(target_arch = "aarch64")]
-        Active::Eth => eth::recv(buf).inspect(|_| { bump_rx_seq(); }).map(|n| (n, false)),
+        Active::Eth => eth::recv(buf),
         #[cfg(target_arch = "aarch64")]
         Active::None => None,
     }

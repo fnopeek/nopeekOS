@@ -428,10 +428,11 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
             identity();
         }
     }
+    let net = crate::platform::pi5_eth::init(&fdt);
     kprintln!("[npk] Uptime: {} ms", crate::time::uptime_us() / 1000);
     kprintln!();
-    if keyboard {
-        crate::platform::pi5::echo_keys(led);
+    if keyboard || net {
+        crate::platform::pi5::run(keyboard, net, led);
     }
     if led {
         let code = screen_code(&fdt);
