@@ -1997,7 +1997,6 @@ pub fn intent_think(args: &str) {
     kprintln!();
 }
 
-#[cfg(target_arch = "x86_64")]
 pub fn intent_set(args: &str) {
     let args = args.trim();
     let Some((key, value)) = args.split_once(' ') else {
@@ -2017,6 +2016,7 @@ pub fn intent_set(args: &str) {
         Ok(v) => {
             kprintln!("[npk] {} = {}", key, v);
             if had_panel_override { kprintln!("[npk] cleared shade.bar_opacity"); }
+            #[cfg(target_arch = "x86_64")]
             if key == "code.scheme" { note_code_scheme_mismatch(&v); }
         }
         Err(crate::settings::Error::Invalid(why)) => kprintln!("[npk] {}", why),
@@ -2043,7 +2043,6 @@ fn note_code_scheme_mismatch(value: &str) {
 
 /// `unset <key>`: forget a setting. For the glass keys that means "back to
 /// automatic" (`shade glass` shows what automatic chose).
-#[cfg(target_arch = "x86_64")]
 pub fn intent_unset(args: &str) {
     let key = args.trim();
     if key.is_empty() {
