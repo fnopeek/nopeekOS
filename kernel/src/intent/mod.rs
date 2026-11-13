@@ -2814,7 +2814,19 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         }
         #[cfg(target_arch = "aarch64")]
         "fan" | "temp" => {
-            if require_cap(vault, &session, Rights::READ, "fan") {
+            let arg = args.trim();
+            if !arg.is_empty() {
+                if require_cap(vault, &session, Rights::WRITE, "fan") {
+                    let level = if arg == "auto" { Some(None) } else { arg.parse::<u32>().ok().map(Some) };
+                    match level {
+                        Some(l) if crate::platform::pi5_fan::hold(l) => match l {
+                            Some(l) => kprintln!("[npk] fan held at level {} (`fan auto` returns it to the temperature)", l),
+                            None => kprintln!("[npk] fan follows the temperature"),
+                        },
+                        _ => kprintln!("[npk] fan <0-4> | fan auto"),
+                    }
+                }
+            } else if require_cap(vault, &session, Rights::READ, "fan") {
                 match crate::platform::pi5_fan::status() {
                     Some((t, state, duty, rpm)) => {
                         kprint!("[npk] CPU {}.{} C, fan level {} ({}%)", t / 1000, (t % 1000).abs() / 100,

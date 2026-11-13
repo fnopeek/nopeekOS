@@ -39,6 +39,8 @@ struct Setup {
     hw: FanHw,
     fan: Fan,
     zone: Zone,
+    trips: [Trip; MAX_TRIPS],
+    ntrips: usize,
     slope: i32,
     offset: i32,
     polling_ms: u64,
@@ -48,6 +50,32 @@ static SETUP: spin::Mutex<Option<Setup>> = spin::Mutex::new(None);
 /// Last reading in millidegrees Celsius, `i32::MIN` before one.
 static TEMP: AtomicI32 = AtomicI32::new(i32::MIN);
 static STATE: AtomicU32 = AtomicU32::new(0);
+/// A cooling state held by hand (`fan <level>`), or `AUTO`: the zone's.
+static HELD: AtomicU32 = AtomicU32::new(AUTO);
+const AUTO: u32 = u32::MAX;
+
+/// `fan <level>` holds the fan at a cooling state until `fan auto` (the
+/// thermal zone's mode off and the cooling device's `cur_state` written,
+/// as through sysfs). A critical trip still powers off. False for a level
+/// above the fan's highest.
+pub fn hold(level: Option<u32>) -> bool {
+    let mut g = SETUP.lock();
+    let Some(s) = g.as_mut() else { return false };
+    match level {
+        Some(l) => {
+            if !s.fan.set_cur_state(&mut s.hw, l) { return false; }
+            STATE.store(l, Ordering::Release);
+            HELD.store(l, Ordering::Release);
+        }
+        None => {
+            HELD.store(AUTO, Ordering::Release);
+            // The zone starts over: its instances decide again on the next poll.
+            let trips = s.trips;
+            s.zone = Zone::new(&trips[..s.ntrips]);
+        }
+    }
+    true
+}
 
 /// The CPU temperature in millidegrees Celsius, the fan's cooling state,
 /// its duty (0..=255) and speed in RPM, once the fan runs.
@@ -222,7 +250,7 @@ pub fn init(fdt: &Fdt) -> bool {
     let zone = Zone::new(&ts[..nt]);
     STATE.store(fan.state, Ordering::Release);
     let temp = fan::get_temp(&mut hw, slope, offset);
-    *SETUP.lock() = Some(Setup { hw, fan, zone, slope, offset, polling_ms });
+    *SETUP.lock() = Some(Setup { hw, fan, zone, trips: ts, ntrips: nt, slope, offset, polling_ms });
     match temp {
         Some(t) => kprintln!("[npk] fan: PWM1 channel {} at {} Hz, {} levels, {} trips; CPU {}.{} C",
             channel, clk_rate, nl, nt, t / 1000, (t % 1000).abs() / 100),
@@ -242,8 +270,11 @@ fn fan_fiber(_: u64) {
             let mut critical = None;
             if let Some(t) = fan::get_temp(&mut s.hw, s.slope, s.offset) {
                 TEMP.store(t, Ordering::Release);
-                match s.zone.update(t, s.fan.state) {
+                let action = s.zone.update(t, s.fan.state);
+                let held = HELD.load(Ordering::Acquire) != AUTO;
+                match action {
                     Action::None => {}
+                    Action::Cool(_) if held => {}
                     Action::Cool(state) => {
                         let old = s.fan.state;
                         if s.fan.set_cur_state(&mut s.hw, state) && state != old {
