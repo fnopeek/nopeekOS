@@ -1,0 +1,14 @@
+[package]
+name = "gpu_bcm2712_core"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+description = "Raspberry Pi 5 display (vc4 on BCM2712), after Linux"
+
+# no_std + alloc. Builds for the std test harness and for wasm32.
+[lib]
+crate-type = ["rlib"]
+
+[profile.release]
+opt-level = "s"
+lto = true

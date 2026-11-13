@@ -1,0 +1,24 @@
+//! gpu_bcm2712_core: the Raspberry Pi 5 display after Linux's vc4 driver
+//! (rpi-6.18) and the helpers it binds with.
+//!
+//! no_std + alloc; the same library builds for the std test harness, which
+//! replays a run of the unmodified Linux drivers (`testdata/`), and for
+//! the wasm32 module. Every part repeats Linux's register accesses one for
+//! one; deviations are commented where they occur.
+//!
+//! - [`hw`]: the register blocks, firmware clocks and GIC lines.
+//! - [`irq_brcmstb_l2`]: the three L2 interrupt controllers.
+//! - [`i2c_brcmstb`]: the DDC controllers.
+
+#![cfg_attr(not(test), no_std)]
+
+extern crate alloc;
+
+pub mod drm_edid;
+pub mod hw;
+pub mod i2c_brcmstb;
+pub mod irq_brcmstb_l2;
+pub mod linux;
+
+#[cfg(test)]
+mod tests;
