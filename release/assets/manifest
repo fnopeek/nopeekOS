@@ -1,4 +1,4 @@
-issued=1794592256
+issued=1794593794
 
 [font:ibm-plex-mono]
 size=173052
@@ -511,6 +511,26 @@ sha384=8e8dac710a6cf39659eaad58ce823dff936f28a31d5f2bc68b4df1a283ad275cf4de4f3a2
 [microvm:linux-virt]
 size=9581568
 sha384=d0bc7a43ea61d1d3e132da2574233751ad9f4882e6c3386e03783f9cea61ef6241b72cfada6a977b1612abe7b1796442
+
+[wallpaper:amber-ash-waves.png]
+size=9200314
+sha384=5d7a92c66f463b5d7452e79bc5c18d0c0216732d48c983ee0e9baafc40a8ceb00c66c881bd866216d559b30881e92ef7
+
+[wallpaper:golden-dust-waves.png]
+size=9054927
+sha384=1c5b42d928c5b70bc00305e370b950a8d5349fb69f57a1ef7a8673dea636517ca16faa0108830718867dbfbe18e9649b
+
+[wallpaper:green-gold-waves.png]
+size=9878433
+sha384=98f8de4b186b3f6f87467c79b31552b3db28e9474b5daac58ce6f89f8bcdf0a5e192c43d5d44180332fc2a88e29ea439
+
+[wallpaper:ice-cosmic-waves.png]
+size=9926631
+sha384=c6fa2ff5f402c9dfb6559a0689f4e1bdd1a8d2b00e4abb5369ecddc75bca9efaf9a28ecea170071500d3f0068f9770de
+
+[wallpaper:violet-cosmic-waves.png]
+size=10589151
+sha384=40d6a798db10f6f83e892d2c24bd8ab72cbd917a09541cb454eb94620ad8249571b4d420092cf23d7c6324e295281ea0
 
 [microvm:firefox-sqfs]
 size=623292416
