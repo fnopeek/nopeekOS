@@ -11,12 +11,15 @@
 
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod clk_rp1;
 pub mod dwc3;
 pub mod eth;
 pub mod gem;
 pub mod gpio_rp1;
 pub mod hw;
+pub mod iommu;
 pub mod mip;
 pub mod pci;
 pub mod pcie;
@@ -30,6 +33,8 @@ pub mod vc4_regs;
 mod tests;
 #[cfg(test)]
 mod tests_eth;
+#[cfg(test)]
+mod tests_iommu;
 
 /// How far bring-up came.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -32,6 +32,8 @@ fn block(name: &str) -> Option<Block> {
         "mip0" => Block::Mip,
         "rp1.bar0" => Block::Rp1Bar0,
         "rp1.bar1" => Block::Rp1Bar1,
+        "iommu4" => Block::Iommu,
+        "iommuc" => Block::IommuCache,
         _ => return None,
     })
 }

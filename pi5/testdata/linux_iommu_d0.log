@@ -1,0 +1,732 @@
+# NR_IRQS: 4352, nr_irqs: 4352, preallocated irqs: 16
+== run k: bcm2712-iommu (iommu4 in front of the HVS, iommuc)
+# not created: iommu2 (@5100, hevc/pisp) and iommu5 (@5280, RP1 display); they probe on the Pi too
+# iommu: Default domain type: Translated
+# iommu: DMA domain TLB invalidation policy: strict mode
+== platform devices (DT order)
+# device_add axi:gpu
+# device_add 1000005200.iommu
+# device_add 1000005b00.iommuc
+# device_add 107c580000.hvs
+== builtin drivers (drivers/iommu/Makefile order)
+{ bcm2712_iommu_driver_init
+PROBE 1000005200.iommu driver bcm2712-iommu
+{ bcm2712_iommu_probe
+} bcm2712_iommu_probe
+PROBE-END 1000005200.iommu ret -517
+} bcm2712_iommu_driver_init
+{ bcm2712_iommu_cache_driver_init
+PROBE 1000005b00.iommuc driver bcm2712-iommu-cache
+{ bcm2712_iommu_cache_probe
+# info 1000005b00.iommuc: bcm2712_iommu_cache_probe
+# map 1000005b00.iommuc [mem 0x1000005b00-0x1000005b7f flags 0x200]
+MAP 0x1000005b00 size 0x80
+} bcm2712_iommu_cache_probe
+PROBE-END 1000005b00.iommuc ret 0
+PROBE 1000005200.iommu driver bcm2712-iommu
+{ bcm2712_iommu_probe
+# info 1000005200.iommu: IOVA aperture 0xa00000000..0xa80000000 including DMA offset 0x0
+# map 1000005200.iommu [mem 0x1000005200-0x100000527f flags 0x200]
+MAP 0x1000005200 size 0x80
+{ bcm2712_iommu_init
+R32 iommu4+0x038 = 0x20804774  ; MMMU_DEBUG_INFO
+# info 1000005200.iommu: bcm2712_iommu_init: DEBUG_INFO = 0x20804774
+# dma_set_mask 1000005200.iommu 0x1fffffffff
+W32 iommu4+0x000 <- 0x0810100c  ; MMMU_CTRL
+# model: iommu4 TLB cleared [guess 60]
+R32 iommu4+0x024 = 0x80003ffc  ; MMMU_MISC
+W32 iommu4+0x024 <- 0x00003ffc  ; MMMU_MISC
+W32 iommu4+0x014 <- 0x800000a7  ; MMMU_ADDR_CAP
+W32 iommu4+0x01c <- 0x00000000  ; MMMU_BYPASS_START
+W32 iommu4+0x020 <- 0x800000a0  ; MMMU_BYPASS_END
+{ bcm2712_iommu_get_page
+# iommu page alloc phys 0x40000000 size 0x4000 (Linux page, 16 KiB on the Pi)
+# dma map_single 1000005200.iommu phys 0x40000000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_get_page
+W32 iommu4+0x004 <- 0x0003fff6  ; MMMU_PT_PA_BASE
+{ bcm2712_iommu_get_page
+# iommu page alloc phys 0x40004000 size 0x4000 (Linux page, 16 KiB on the Pi)
+# dma map_single 1000005200.iommu phys 0x40004000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_get_page
+W32 iommu4+0x030 <- 0x80040004  ; MMMU_ILLEGAL_ADR
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x000 <- 0x04090803  ; MMMU_CTRL
+} bcm2712_iommu_init
+{ bcm2712_iommu_of_xlate
+# info axi:gpu: bcm2712_iommu_of_xlate: MMU 1000005200.iommu
+} bcm2712_iommu_of_xlate
+{ bcm2712_iommu_probe_device
+# info axi:gpu: bcm2712_iommu_probe_device: MMU 1000005200.iommu
+} bcm2712_iommu_probe_device
+{ bcm2712_iommu_device_group
+# info axi:gpu: bcm2712_iommu_device_group: MMU 1000005200.iommu
+} bcm2712_iommu_device_group
+# info axi:gpu: Adding to iommu group 0
+{ bcm2712_iommu_of_xlate
+# info 107c580000.hvs: bcm2712_iommu_of_xlate: MMU 1000005200.iommu
+} bcm2712_iommu_of_xlate
+{ bcm2712_iommu_probe_device
+# info 107c580000.hvs: bcm2712_iommu_probe_device: MMU 1000005200.iommu
+} bcm2712_iommu_probe_device
+{ bcm2712_iommu_device_group
+# info 107c580000.hvs: bcm2712_iommu_device_group: MMU 1000005200.iommu
+} bcm2712_iommu_device_group
+# info 107c580000.hvs: Adding to iommu group 0
+{ bcm2712_iommu_domain_alloc
+} bcm2712_iommu_domain_alloc
+# dma-iommu: cookie for the default DMA domain (iommu_get_dma_cookie, not compiled)
+{ bcm2712_iommu_attach_dev
+# info axi:gpu: bcm2712_iommu_attach_dev: MMU 1000005200.iommu
+} bcm2712_iommu_attach_dev
+{ bcm2712_iommu_attach_dev
+# info 107c580000.hvs: bcm2712_iommu_attach_dev: MMU 1000005200.iommu
+} bcm2712_iommu_attach_dev
+# dma-iommu: axi:gpu uses iommu-dma (iommu_setup_dma_ops, not compiled)
+# dma-iommu: 107c580000.hvs uses iommu-dma (iommu_setup_dma_ops, not compiled)
+} bcm2712_iommu_probe
+PROBE-END 1000005200.iommu ret 0
+} bcm2712_iommu_cache_driver_init
+# default domain of axi:gpu and 107c580000.hvs: type 0x3, pgsize_bitmap 0x715000, aperture 0xa00000000..0xa7fffffff
+== run k: scenario
+# step map a: 4 KiB, read/write (DMA_BIDIRECTIONAL): iommu_map(iova 0xa7ffff000, phys 0x40008000, size 0x1000, prot RW)
+{ bcm2712_iommu_map
+{ bcm2712_iommu_get_page
+# iommu page alloc phys 0x4000c000 size 0x4000 (Linux page, 16 KiB on the Pi)
+# dma map_single 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_get_page
+# dma sync_for_cpu 1000005200.iommu phys 0x40000000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x40000000 size 0x4000 to-device (cache clean)
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_map
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7fffc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fffc (iova 0xa7fffc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fffc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+{ bcm2712_iommu_iova_to_phys
+} bcm2712_iommu_iova_to_phys
+# iommu_map ret 0, iova_to_phys(iova + 0x800) = 0x40008800
+# table: top[0x1fc] 0x00000000 -> 0x1004000c (L2 table at phys 0x4000c000, iova 0xa7f000000..)
+# table: top[0x1fd] 0x00000000 -> 0x1004000d (L2 table at phys 0x4000d000, iova 0xa7f400000..)
+# table: top[0x1fe] 0x00000000 -> 0x1004000e (L2 table at phys 0x4000e000, iova 0xa7f800000..)
+# table: top[0x1ff] 0x00000000 -> 0x1004000f (L2 table at phys 0x4000f000, iova 0xa7fc00000..)
+# table: pte iova 0xa7ffff000 x1: 0x00000000 -> 0x30040008 (phys 0x40008000, 4K pages, W)
+# step map b: 64 KiB, 64 KiB-aligned, read-only (DMA_TO_DEVICE: a scanout buffer): iommu_map(iova 0xa7ffe0000, phys 0x40010000, size 0x10000, prot R)
+{ bcm2712_iommu_map
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_map
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7ffe0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffe0 (iova 0xa7ffe0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffe0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7ffe4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffe4 (iova 0xa7ffe4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffe4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7ffe8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffe8 (iova 0xa7ffe8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffe8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7ffec  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffec (iova 0xa7ffec000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffec  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+{ bcm2712_iommu_iova_to_phys
+} bcm2712_iommu_iova_to_phys
+# iommu_map ret 0, iova_to_phys(iova + 0x8000) = 0x40018000
+# table: pte iova 0xa7ffe0000 x16: 0x00000000 -> 0x50040010 +1 each (phys 0x40010000, 64K pages, RO)
+# step map c: 1 MiB, 1 MiB-aligned, read/write: iommu_map(iova 0xa7fe00000, phys 0x40100000, size 0x100000, prot RW)
+{ bcm2712_iommu_map
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_map
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7fe00  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe00 (iova 0xa7fe00000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe00  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe04  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe04 (iova 0xa7fe04000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe04  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe08  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe08 (iova 0xa7fe08000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe08  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe0c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe0c (iova 0xa7fe0c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe0c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe10  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe10 (iova 0xa7fe10000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe10  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe14  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe14 (iova 0xa7fe14000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe14  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe18  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe18 (iova 0xa7fe18000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe18  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe1c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe1c (iova 0xa7fe1c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe1c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe20  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe20 (iova 0xa7fe20000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe20  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe24  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe24 (iova 0xa7fe24000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe24  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe28  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe28 (iova 0xa7fe28000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe28  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe2c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe2c (iova 0xa7fe2c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe2c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe30  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe30 (iova 0xa7fe30000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe30  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe34  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe34 (iova 0xa7fe34000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe34  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe38  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe38 (iova 0xa7fe38000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe38  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe3c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe3c (iova 0xa7fe3c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe3c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe40  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe40 (iova 0xa7fe40000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe40  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe44  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe44 (iova 0xa7fe44000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe44  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe48  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe48 (iova 0xa7fe48000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe48  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe4c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe4c (iova 0xa7fe4c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe4c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe50  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe50 (iova 0xa7fe50000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe50  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe54  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe54 (iova 0xa7fe54000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe54  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe58  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe58 (iova 0xa7fe58000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe58  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe5c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe5c (iova 0xa7fe5c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe5c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe60  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe60 (iova 0xa7fe60000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe60  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe64  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe64 (iova 0xa7fe64000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe64  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe68  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe68 (iova 0xa7fe68000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe68  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe6c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe6c (iova 0xa7fe6c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe6c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe70  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe70 (iova 0xa7fe70000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe70  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe74  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe74 (iova 0xa7fe74000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe74  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe78  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe78 (iova 0xa7fe78000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe78  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe7c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe7c (iova 0xa7fe7c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe7c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe80  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe80 (iova 0xa7fe80000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe80  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe84  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe84 (iova 0xa7fe84000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe84  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe88  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe88 (iova 0xa7fe88000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe88  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe8c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe8c (iova 0xa7fe8c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe8c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe90  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe90 (iova 0xa7fe90000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe90  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe94  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe94 (iova 0xa7fe94000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe94  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe98  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe98 (iova 0xa7fe98000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe98  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe9c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe9c (iova 0xa7fe9c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe9c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fea0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fea0 (iova 0xa7fea0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fea0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fea4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fea4 (iova 0xa7fea4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fea4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fea8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fea8 (iova 0xa7fea8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fea8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feac  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feac (iova 0xa7feac000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feac  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feb0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feb0 (iova 0xa7feb0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feb0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feb4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feb4 (iova 0xa7feb4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feb4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feb8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feb8 (iova 0xa7feb8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feb8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7febc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7febc (iova 0xa7febc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7febc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fec0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fec0 (iova 0xa7fec0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fec0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fec4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fec4 (iova 0xa7fec4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fec4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fec8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fec8 (iova 0xa7fec8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fec8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fecc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fecc (iova 0xa7fecc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fecc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fed0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fed0 (iova 0xa7fed0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fed0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fed4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fed4 (iova 0xa7fed4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fed4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fed8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fed8 (iova 0xa7fed8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fed8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fedc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fedc (iova 0xa7fedc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fedc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fee0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fee0 (iova 0xa7fee0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fee0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fee4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fee4 (iova 0xa7fee4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fee4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fee8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fee8 (iova 0xa7fee8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fee8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feec  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feec (iova 0xa7feec000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feec  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fef0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fef0 (iova 0xa7fef0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fef0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fef4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fef4 (iova 0xa7fef4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fef4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fef8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fef8 (iova 0xa7fef8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fef8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fefc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fefc (iova 0xa7fefc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fefc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+{ bcm2712_iommu_iova_to_phys
+} bcm2712_iommu_iova_to_phys
+# iommu_map ret 0, iova_to_phys(iova + 0x80000) = 0x40180000
+# table: pte iova 0xa7fe00000 x256: 0x00000000 -> 0xb0040100 +1 each (phys 0x40100000, 1M pages, W)
+# step map d: 64 KiB at a physical address only 4 KiB-aligned (no big pages): iommu_map(iova 0xa7fdf0000, phys 0x40201000, size 0x10000, prot RW)
+{ bcm2712_iommu_map
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_map
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7fdf0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdf0 (iova 0xa7fdf0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdf0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fdf4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdf4 (iova 0xa7fdf4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdf4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fdf8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdf8 (iova 0xa7fdf8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdf8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fdfc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdfc (iova 0xa7fdfc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdfc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+{ bcm2712_iommu_iova_to_phys
+} bcm2712_iommu_iova_to_phys
+# iommu_map ret 0, iova_to_phys(iova + 0x8000) = 0x40209000
+# table: pte iova 0xa7fdf0000 x16: 0x00000000 -> 0x30040201 +1 each (phys 0x40201000, 4K pages, W)
+# step map e: 16 MiB (a 3840x2160 RGB565 framebuffer's size class), 4 MiB-aligned: iommu_map(iova 0xa7e000000, phys 0x40400000, size 0x1000000, prot RW)
+{ bcm2712_iommu_map
+{ bcm2712_iommu_get_page
+# iommu page alloc phys 0x41400000 size 0x4000 (Linux page, 16 KiB on the Pi)
+# dma map_single 1000005200.iommu phys 0x41400000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_get_page
+# dma sync_for_cpu 1000005200.iommu phys 0x40000000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x40000000 size 0x4000 to-device (cache clean)
+# dma sync_for_cpu 1000005200.iommu phys 0x41400000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x41400000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_map
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x000 <- 0x04090807  ; MMMU_CTRL
+# model: iommu4 TLB cleared [guess 60]
+R32 iommu4+0x000 = 0x04090803  ; MMMU_CTRL  [TLB_CLEARING done at once, guess 60]
+} bcm2712_iommu_sync_range
+{ bcm2712_iommu_iova_to_phys
+} bcm2712_iommu_iova_to_phys
+# iommu_map ret 0, iova_to_phys(iova + 0x800000) = 0x40c00000
+# table: top[0x1f8] 0x00000000 -> 0x10041400 (L2 table at phys 0x41400000, iova 0xa7e000000..)
+# table: top[0x1f9] 0x00000000 -> 0x10041401 (L2 table at phys 0x41401000, iova 0xa7e400000..)
+# table: top[0x1fa] 0x00000000 -> 0x10041402 (L2 table at phys 0x41402000, iova 0xa7e800000..)
+# table: top[0x1fb] 0x00000000 -> 0x10041403 (L2 table at phys 0x41403000, iova 0xa7ec00000..)
+# table: pte iova 0xa7e000000 x4096: 0x00000000 -> 0xf0040400 +1 each (phys 0x40400000, 4M pages, W)
+# step unmap a: iommu_unmap_fast(iova 0xa7ffff000, size 0x1000) + iommu_iotlb_sync, as dma-iommu's __iommu_dma_unmap (strict mode)
+{ bcm2712_iommu_unmap
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_unmap
+# unmapped 0x1000, gather 0xa7ffff000..0xa7fffffff
+{ bcm2712_iommu_sync
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7fffc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fffc (iova 0xa7fffc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fffc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+} bcm2712_iommu_sync
+# table: pte iova 0xa7ffff000 x1: 0x30040008 -> 0x00000000
+# step unmap b: iommu_unmap_fast(iova 0xa7ffe0000, size 0x10000) + iommu_iotlb_sync, as dma-iommu's __iommu_dma_unmap (strict mode)
+{ bcm2712_iommu_unmap
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_unmap
+# unmapped 0x10000, gather 0xa7ffe0000..0xa7ffeffff
+{ bcm2712_iommu_sync
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7ffe0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffe0 (iova 0xa7ffe0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffe0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7ffe4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffe4 (iova 0xa7ffe4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffe4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7ffe8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffe8 (iova 0xa7ffe8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffe8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7ffec  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7ffec (iova 0xa7ffec000) [guess 61]
+R32 iommu4+0x018 = 0x00a7ffec  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+} bcm2712_iommu_sync
+# table: pte iova 0xa7ffe0000 x16: 0x50040010 +1 each -> 0x00000000
+# step unmap c: iommu_unmap_fast(iova 0xa7fe00000, size 0x100000) + iommu_iotlb_sync, as dma-iommu's __iommu_dma_unmap (strict mode)
+{ bcm2712_iommu_unmap
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_unmap
+# unmapped 0x100000, gather 0xa7fe00000..0xa7fefffff
+{ bcm2712_iommu_sync
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7fe00  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe00 (iova 0xa7fe00000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe00  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe04  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe04 (iova 0xa7fe04000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe04  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe08  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe08 (iova 0xa7fe08000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe08  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe0c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe0c (iova 0xa7fe0c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe0c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe10  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe10 (iova 0xa7fe10000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe10  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe14  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe14 (iova 0xa7fe14000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe14  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe18  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe18 (iova 0xa7fe18000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe18  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe1c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe1c (iova 0xa7fe1c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe1c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe20  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe20 (iova 0xa7fe20000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe20  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe24  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe24 (iova 0xa7fe24000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe24  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe28  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe28 (iova 0xa7fe28000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe28  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe2c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe2c (iova 0xa7fe2c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe2c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe30  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe30 (iova 0xa7fe30000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe30  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe34  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe34 (iova 0xa7fe34000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe34  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe38  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe38 (iova 0xa7fe38000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe38  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe3c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe3c (iova 0xa7fe3c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe3c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe40  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe40 (iova 0xa7fe40000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe40  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe44  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe44 (iova 0xa7fe44000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe44  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe48  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe48 (iova 0xa7fe48000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe48  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe4c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe4c (iova 0xa7fe4c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe4c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe50  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe50 (iova 0xa7fe50000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe50  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe54  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe54 (iova 0xa7fe54000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe54  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe58  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe58 (iova 0xa7fe58000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe58  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe5c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe5c (iova 0xa7fe5c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe5c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe60  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe60 (iova 0xa7fe60000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe60  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe64  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe64 (iova 0xa7fe64000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe64  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe68  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe68 (iova 0xa7fe68000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe68  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe6c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe6c (iova 0xa7fe6c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe6c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe70  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe70 (iova 0xa7fe70000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe70  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe74  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe74 (iova 0xa7fe74000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe74  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe78  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe78 (iova 0xa7fe78000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe78  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe7c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe7c (iova 0xa7fe7c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe7c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe80  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe80 (iova 0xa7fe80000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe80  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe84  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe84 (iova 0xa7fe84000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe84  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe88  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe88 (iova 0xa7fe88000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe88  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe8c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe8c (iova 0xa7fe8c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe8c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe90  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe90 (iova 0xa7fe90000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe90  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe94  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe94 (iova 0xa7fe94000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe94  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe98  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe98 (iova 0xa7fe98000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe98  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fe9c  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fe9c (iova 0xa7fe9c000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fe9c  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fea0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fea0 (iova 0xa7fea0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fea0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fea4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fea4 (iova 0xa7fea4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fea4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fea8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fea8 (iova 0xa7fea8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fea8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feac  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feac (iova 0xa7feac000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feac  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feb0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feb0 (iova 0xa7feb0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feb0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feb4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feb4 (iova 0xa7feb4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feb4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feb8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feb8 (iova 0xa7feb8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feb8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7febc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7febc (iova 0xa7febc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7febc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fec0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fec0 (iova 0xa7fec0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fec0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fec4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fec4 (iova 0xa7fec4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fec4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fec8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fec8 (iova 0xa7fec8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fec8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fecc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fecc (iova 0xa7fecc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fecc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fed0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fed0 (iova 0xa7fed0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fed0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fed4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fed4 (iova 0xa7fed4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fed4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fed8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fed8 (iova 0xa7fed8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fed8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fedc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fedc (iova 0xa7fedc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fedc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fee0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fee0 (iova 0xa7fee0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fee0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fee4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fee4 (iova 0xa7fee4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fee4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fee8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fee8 (iova 0xa7fee8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fee8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7feec  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7feec (iova 0xa7feec000) [guess 61]
+R32 iommu4+0x018 = 0x00a7feec  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fef0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fef0 (iova 0xa7fef0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fef0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fef4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fef4 (iova 0xa7fef4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fef4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fef8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fef8 (iova 0xa7fef8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fef8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fefc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fefc (iova 0xa7fefc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fefc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+} bcm2712_iommu_sync
+# table: pte iova 0xa7fe00000 x256: 0xb0040100 +1 each -> 0x00000000
+# step unmap d: iommu_unmap_fast(iova 0xa7fdf0000, size 0x10000) + iommu_iotlb_sync, as dma-iommu's __iommu_dma_unmap (strict mode)
+{ bcm2712_iommu_unmap
+# dma sync_for_cpu 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x4000c000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_unmap
+# unmapped 0x10000, gather 0xa7fdf0000..0xa7fdfffff
+{ bcm2712_iommu_sync
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x018 <- 0x40a7fdf0  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdf0 (iova 0xa7fdf0000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdf0  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fdf4  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdf4 (iova 0xa7fdf4000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdf4  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fdf8  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdf8 (iova 0xa7fdf8000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdf8  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+W32 iommu4+0x018 <- 0x40a7fdfc  ; MMMU_SHOOT_DOWN
+# model: iommu4 shoot down TLB line of 4 pages at page 0xa7fdfc (iova 0xa7fdfc000) [guess 61]
+R32 iommu4+0x018 = 0x00a7fdfc  ; MMMU_SHOOT_DOWN  [SHOOTING done at once, guess 61]
+} bcm2712_iommu_sync_range
+} bcm2712_iommu_sync
+# table: pte iova 0xa7fdf0000 x16: 0x30040201 +1 each -> 0x00000000
+# step unmap e: iommu_unmap_fast(iova 0xa7e000000, size 0x1000000) + iommu_iotlb_sync, as dma-iommu's __iommu_dma_unmap (strict mode)
+{ bcm2712_iommu_unmap
+# dma sync_for_cpu 1000005200.iommu phys 0x41400000 size 0x4000 to-device (no cache operation for to-device)
+# dma sync_for_device 1000005200.iommu phys 0x41400000 size 0x4000 to-device (cache clean)
+} bcm2712_iommu_unmap
+# unmapped 0x1000000, gather 0xa7e000000..0xa7effffff
+{ bcm2712_iommu_sync
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x000 <- 0x04090807  ; MMMU_CTRL
+# model: iommu4 TLB cleared [guess 60]
+R32 iommu4+0x000 = 0x04090803  ; MMMU_CTRL  [TLB_CLEARING done at once, guess 60]
+} bcm2712_iommu_sync_range
+} bcm2712_iommu_sync
+# table: pte iova 0xa7e000000 x4096: 0xf0040400 +1 each -> 0x00000000
+# step f: iommu_flush_iotlb_all (flush queue / domain-wide flush path)
+{ bcm2712_iommu_sync_all
+{ bcm2712_iommu_sync_range
+{ bcm2712_iommu_cache_flush
+W32 iommuc+0x000 <- 0x00000003  ; MMUC_CONTROL
+# model: iommuc TLB cache flushed [guess 62]
+R32 iommuc+0x000 = 0x80000001  ; MMUC_CONTROL  [FLUSHING done at once, guess 62]
+} bcm2712_iommu_cache_flush
+W32 iommu4+0x000 <- 0x04090807  ; MMMU_CTRL
+# model: iommu4 TLB cleared [guess 60]
+R32 iommu4+0x000 = 0x04090803  ; MMMU_CTRL  [TLB_CLEARING done at once, guess 60]
+} bcm2712_iommu_sync_range
+} bcm2712_iommu_sync_all
+== run k end (0 pages still mapped)

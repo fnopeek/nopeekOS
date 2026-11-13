@@ -18,6 +18,10 @@ pub enum Block {
     Rp1Bar1,
     /// The VideoCore mailbox (`brcm,bcm2835-mbox`).
     Mbox,
+    /// The HVS's IOMMU (`brcm,bcm2712-iommu`, iommu4).
+    Iommu,
+    /// The TLB cache the IOMMUs share (`brcm,bcm2712-iommuc`).
+    IommuCache,
 }
 
 /// MMIO and delays. Widths are 1, 2 or 4 bytes.
