@@ -570,6 +570,12 @@ fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
             // signed manifest, exactly like the kernel.
             None => match entry.section.strip_prefix("cert:").filter(|n| safe_asset_name(n)) {
                 Some(name) => alloc::format!("{}/{}", crate::tls::certstore::STORE_DIR, name),
+                // The wallpapers every install brings, into the user's
+                // wallpaper folder as the installer puts them.
+                None if entry.section.strip_prefix("wallpaper:").is_some_and(safe_asset_name) => {
+                    alloc::format!("{}/pictures/wallpapers/{}", super::home_dir(),
+                        entry.section.strip_prefix("wallpaper:").unwrap_or_default())
+                }
                 None if other_arch_asset(&entry.section) => continue,
                 None => {
                     kprintln!("[npk]   . unknown asset [{}] (skipped)", entry.section);
@@ -659,6 +665,10 @@ fn apply_asset(job: &AssetJob) -> bool {
         // Streaming download: drive bytes straight into npkFS via the
         // ChunkedWriter, hashing SHA-384 incrementally as they pass.
         // Peak RAM is one 16 MiB chunk regardless of asset size.
+        // A wallpaper's folder may not exist yet.
+        if let Some((dir, _)) = spec.npkfs_path.rsplit_once('/') {
+            super::ensure_parents(dir);
+        }
         let mut writer = match crate::npkfs::open_streaming_write(spec.npkfs_path) {
             Ok(w) => w,
             Err(e) => { kprintln!("[npk]   ! asset     npkfs open failed: {:?}", e); return false; }

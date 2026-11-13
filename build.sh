@@ -135,6 +135,9 @@ for m in manifests:
     keep |= {sha for sha, _ in entries(prev)}
 
 files = [os.path.join(rel, "kernel.efi"), os.path.join(rel, "kernel-aarch64.img")]
+wp_dir = os.path.join(root, "assets", "wallpapers")
+if os.path.isdir(wp_dir):
+    files += [os.path.join(wp_dir, n) for n in os.listdir(wp_dir)]
 for d in ("modules", "assets"):
     for dirpath, dirs, names in os.walk(os.path.join(rel, d)):
         dirs[:] = [x for x in dirs if x != "large"]
@@ -1551,6 +1554,22 @@ sha384=${BZIMG_SHA}
                 ok "Signed bzImage: linux-virt.bzImage ($BZIMG_SIZE bytes)"
             fi
         fi
+
+        # The wallpapers a new install brings (assets/wallpapers/): a board
+        # set up without the installer gets them with `update`. Downloaded
+        # from release/blobs like every asset; the blob is the same git
+        # object as the file, so it costs no repo space.
+        for wp in "$PROJECT_DIR/assets/wallpapers/"*; do
+            [ -f "$wp" ] || continue
+            WP_NAME=$(basename "$wp")
+            WP_SIZE=$(stat -c%s "$wp")
+            WP_SHA=$(openssl dgst -sha384 -hex "$wp" 2>/dev/null | awk '{print $NF}')
+            ASSET_MANIFEST="${ASSET_MANIFEST}[wallpaper:${WP_NAME}]
+size=${WP_SIZE}
+sha384=${WP_SHA}
+
+"
+        done
 
         # Pick up any pre-existing url= overrides from a previous
         # `release-large` invocation. The large-asset manifest is
