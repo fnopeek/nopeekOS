@@ -16,3 +16,7 @@ pub mod pi5_eth;
 pub mod pi5_sd;
 #[cfg(target_arch = "aarch64")]
 pub mod rng200;
+#[cfg(target_arch = "aarch64")]
+pub mod rpi_fw;
+#[cfg(target_arch = "aarch64")]
+pub mod pi5_display;

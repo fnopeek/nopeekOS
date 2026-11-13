@@ -29,6 +29,7 @@ impl Board {
             Block::Mip => &self.mip,
             Block::Rp1Bar0 => &self.bar0,
             Block::Rp1Bar1 => &self.bar1,
+            Block::Mbox => unreachable!("the mailbox is not on the PCIe path"),
         }
     }
 }

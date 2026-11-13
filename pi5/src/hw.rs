@@ -16,6 +16,8 @@ pub enum Block {
     Rp1Bar0,
     /// RP1's BAR1: its peripherals.
     Rp1Bar1,
+    /// The VideoCore mailbox (`brcm,bcm2835-mbox`).
+    Mbox,
 }
 
 /// MMIO and delays. Widths are 1, 2 or 4 bytes.

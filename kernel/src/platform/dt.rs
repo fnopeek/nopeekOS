@@ -47,6 +47,19 @@ impl Node {
     }
 }
 
+/// The tree the firmware booted the kernel with; its memory is kept out
+/// of the frame allocator (`boot::holes`).
+static BOOT: spin::Once<Fdt> = spin::Once::new();
+
+/// Keep `fdt` as the boot tree, for parts that look at devices after boot.
+pub fn set_boot(fdt: Fdt) {
+    BOOT.call_once(|| fdt);
+}
+
+pub fn boot() -> Option<Fdt> {
+    BOOT.get().copied()
+}
+
 impl Fdt {
     /// # Safety
     /// `addr` must point at a device tree the firmware left in memory that

@@ -23,6 +23,8 @@ pub mod pcie;
 pub mod phy;
 pub mod reset;
 pub mod rp1;
+pub mod rpi_fw;
+pub mod vc4_regs;
 
 #[cfg(test)]
 mod tests;

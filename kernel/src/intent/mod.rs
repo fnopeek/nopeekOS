@@ -2545,6 +2545,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "gpu" => {
             system::intent_gpu(args);
         }
+        #[cfg(target_arch = "aarch64")]
+        "gpu" => {
+            crate::platform::pi5_display::intent_gpu(args);
+        }
         #[cfg(target_arch = "x86_64")]
         "shade" => {
             system::intent_shade(args);

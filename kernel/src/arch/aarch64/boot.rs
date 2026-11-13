@@ -225,6 +225,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     super::time::calibrate_counter();
     crate::time::init_clock();
     let bi = build_regions(&fdt);
+    crate::platform::dt::set_boot(fdt);
     crate::memory::init(bi);
     crate::heap::init();
     crate::serial::start_capture();
@@ -273,6 +274,9 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     rng(&fdt);
     let cores = crate::smp::init(&fdt);
     kprintln!("[npk] Cores online: {} (PSCI), {} workers", cores, crate::smp::scheduler::worker_count());
+    if !crate::platform::rpi_fw::init(&fdt) {
+        kprintln!("[npk] firmware: no mailbox in the device tree");
+    }
     crate::platform::pi5::init(&fdt);
     crate::platform::pi5_eth::init(&fdt);
     let Some(id) = crate::platform::pi5_sd::init(&fdt) else {
