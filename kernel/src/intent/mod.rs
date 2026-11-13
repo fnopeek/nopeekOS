@@ -721,7 +721,6 @@ fn prev_char_at(buf: &[u8], i: usize) -> usize {
     j
 }
 
-#[cfg(target_arch = "x86_64")]
 fn sync_session_to_terminal(session: &IntentSession) {
     let current = crate::shade::terminal::active_idx();
     if current != session.terminal_idx {
@@ -742,12 +741,10 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
     session.history.reset_cursor();
     // Plain copy of our terminal so we can check the session is still alive
     // after re-entrant compositor calls without touching a freed `session`.
-    #[cfg(target_arch = "x86_64")]
     let term_idx = session.terminal_idx;
 
     loop {
         // Detect focus change (mouse click, shade action, WASM switch)
-        #[cfg(target_arch = "x86_64")]
         if shade_active() {
             // Focus moved to a widget-kind window: return so run_loop
             // enters the widget-focused input branch. Otherwise keys would
@@ -823,7 +820,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         }
 
         // Tick swap animation
-        #[cfg(target_arch = "x86_64")]
         if crate::shade::with_compositor(|comp| comp.tick_animation()).unwrap_or(false) {
             crate::shade::render_frame();
         } else {
@@ -832,7 +828,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             crate::shade::tick_focus_glow();
         }
 
-        #[cfg(target_arch = "x86_64")]
         while let Some(evt) = crate::xhci::poll_mouse() {
             crate::shade::handle_mouse(&evt);
         }
@@ -841,23 +836,19 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // ShadeAction (Mod+Q) close path below is guarded by sync+return, the
         // mouse path is not, so bail before any further deref. run_loop
         // re-acquires a valid session on the next pass (None arm).
-        #[cfg(target_arch = "x86_64")]
         if !session_exists(term_idx) { return None; }
         // Session changes queued by other cores apply at the top of
         // run_loop, where no session is held.
         if !SESSION_OPS.lock().is_empty() {
-            #[cfg(target_arch = "x86_64")]
             sync_session_to_terminal(session);
             return None;
         }
 
-        #[cfg(target_arch = "x86_64")]
         if crate::shade::take_deferred_render() {
             crate::shade::render_frame();
         }
 
         // Shade compositor actions (Mod+key)
-        #[cfg(target_arch = "x86_64")]
         if let Some(action) = crate::shade::input::poll_action() {
             use crate::shade::input::ShadeAction;
             match action {
@@ -932,7 +923,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         };
 
         // Shade keybindings (Mod+key) — consumes the event if matched
-        #[cfg(target_arch = "x86_64")]
         if crate::shade::input::try_keybind_event(&event) {
             continue;
         }
@@ -943,7 +933,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
         // editor); Ctrl+Shift+C then copies it. Any other key drops a stale
         // selection so the next Shift+arrow re-anchors at the caret. Only in
         // shade mode — serial has no selectable grid.
-        #[cfg(target_arch = "x86_64")]
         if shade_active() {
             let dir = if event.modifiers.shift {
                 match event.key {
@@ -976,7 +965,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     session.pos = len;
                     session.cursor = len;
                     if shade_active() {
-                        #[cfg(target_arch = "x86_64")]
                         crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                     } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
                         kprint!("{}", s);
@@ -994,7 +982,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     session.pos = len;
                     session.cursor = len;
                     if shade_active() {
-                        #[cfg(target_arch = "x86_64")]
                         crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                     } else if let Ok(s) = core::str::from_utf8(&session.input_buf[..session.pos]) {
                         kprint!("{}", s);
@@ -1003,7 +990,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     session.pos = 0;
                     session.cursor = 0;
                     if shade_active() {
-                        #[cfg(target_arch = "x86_64")]
                         crate::shade::terminal::rewrite_input(&session.input_buf, 0);
                     }
                 }
@@ -1027,7 +1013,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     session.input_buf.copy_within(end..session.pos, session.cursor);
                     session.pos -= end - session.cursor;
                     if shade_active() {
-                        #[cfg(target_arch = "x86_64")]
                         crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                     }
                 }
@@ -1038,10 +1023,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                 // command output), not the primary debug sink; otherwise
                 // with active != primary the '\n' lands in the primary loop
                 // and prompts stack on one line in the focused loop.
-                #[cfg(target_arch = "x86_64")]
                 crate::shade::terminal::set_output_redirect(session.terminal_idx);
                 kprint!("\n");
-                #[cfg(target_arch = "x86_64")]
                 crate::shade::terminal::clear_output_redirect();
                 session.history.push(&session.input_buf[..session.pos]);
                 return Some(session.pos);
@@ -1053,7 +1036,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     session.pos -= session.cursor - start;
                     session.cursor = start;
                     if shade_active() {
-                        #[cfg(target_arch = "x86_64")]
                         {
                             crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                             crate::shade::terminal::set_cursor_pos(
@@ -1070,10 +1052,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             KeyCode::Tab => {
                 if let Ok(input) = core::str::from_utf8(&session.input_buf[..session.pos]) {
                     // The candidate list belongs to this loop, like a prompt.
-                    #[cfg(target_arch = "x86_64")]
                     crate::shade::terminal::set_output_redirect(session.terminal_idx);
                     let completion = tab_complete(input);
-                    #[cfg(target_arch = "x86_64")]
                     crate::shade::terminal::clear_output_redirect();
                     if let Some(completion) = completion {
                         for cb in completion.as_bytes() {
@@ -1083,7 +1063,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                         }
                         session.cursor = session.pos;
                         if shade_active() {
-                            #[cfg(target_arch = "x86_64")]
                             {
                                 crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                                 crate::shade::terminal::set_cursor_pos(
@@ -1124,10 +1103,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
                     session.input_buf[session.cursor..session.cursor + got].copy_from_slice(ch);
                     session.pos += got;
                     session.cursor += got;
-                    #[cfg(target_arch = "x86_64")]
                     crate::shade::terminal::scroll_reset();
                     if shade_active() {
-                        #[cfg(target_arch = "x86_64")]
                         {
                             crate::shade::terminal::rewrite_input(&session.input_buf, session.pos);
                             crate::shade::terminal::set_cursor_pos(
@@ -1145,7 +1122,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
 
         // Update cursor position for navigation keys (arrows, Home, End)
         if shade_active() {
-            #[cfg(target_arch = "x86_64")]
             {
                 crate::shade::terminal::set_cursor_pos(
                     crate::shade::terminal::current_line_len()
@@ -1323,7 +1299,6 @@ fn maybe_idle_gc() {
     LAST_CHECK.store(now, Ordering::Relaxed);
 
     if !crate::storage::npkfs::is_mounted() { return; }
-    #[cfg(target_arch = "x86_64")]
     if crate::shade::focused_surface_id().is_some() { return; }
     if crate::storage::npkfs::fs::stream_active() { return; }
     if crate::storage::npkfs::fs::gc_pressure()
@@ -1401,14 +1376,14 @@ fn core0_wait() {
         || !shade_active()
         || crate::microvm::vm_active();
     #[cfg(not(target_arch = "x86_64"))]
-    let busy = crate::net::needs_tick()
+    let busy = crate::shade::needs_tick()
+        || crate::net::needs_tick()
         || crate::xhci::repeat_active()
         || crate::xhci::needs_poll()
         || !shade_active();
     let mut d = crate::time::counter() + if busy { freq / 100 } else { freq };
     // A TCP timer due before the second is up is served on time.
     d = d.min(crate::time::counter() + crate::net::timer_park_ms(1000) * (freq / 1000));
-    #[cfg(target_arch = "x86_64")]
     if let Some(due) = crate::shade::surface_due_tsc() {
         d = d.min(due);
     }
@@ -1904,14 +1879,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             // even though the default sink is the primary loop, so prompts and
             // results land in the loop the user is typing in, while background
             // debug still goes to the primary. See terminal::write.
-            #[cfg(target_arch = "x86_64")]
             crate::shade::terminal::set_output_redirect(session.terminal_idx);
             kprint!("{}", p);
-            #[cfg(target_arch = "x86_64")]
             crate::shade::terminal::clear_output_redirect();
             session.prompt_len = p.len();
             if shade_active() {
-                #[cfg(target_arch = "x86_64")]
                 {
                     crate::shade::terminal::set_prompt_len(session.prompt_len);
                     crate::shade::terminal::set_cursor_pos(
@@ -1929,7 +1901,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         } else {
             // Resuming session after focus change — sync prompt_len + cursor
             if shade_active() {
-                #[cfg(target_arch = "x86_64")]
                 {
                     crate::shade::terminal::set_prompt_len(session.prompt_len);
                     crate::shade::terminal::set_cursor_pos(
@@ -1943,7 +1914,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         let line = read_line_with_tab(session, vault, session_id);
 
         if shade_active() {
-            #[cfg(target_arch = "x86_64")]
             crate::shade::render_frame();
         }
 
@@ -1980,7 +1950,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             // terminal's session cleanly, never touching the &mut into
             // SESSIONS that CloseWindow just freed.
             if shade_active() {
-                #[cfg(target_arch = "x86_64")]
                 {
                     sync_session_to_terminal(session);
                     crate::shade::handle_action(crate::shade::input::ShadeAction::CloseWindow);
@@ -2006,14 +1975,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // Core-0 intent output goes to the loop it was typed in (not the
         // primary debug sink). Synchronous, so the redirect is safe to clear
         // right after — no idle in between where background debug would leak.
-        #[cfg(target_arch = "x86_64")]
         crate::shade::terminal::set_output_redirect(term);
         dispatch_intent(input, vault, session_id);
-        #[cfg(target_arch = "x86_64")]
         crate::shade::terminal::clear_output_redirect();
 
         if shade_active() {
-            #[cfg(target_arch = "x86_64")]
             crate::shade::render_frame();
         }
 

@@ -75,6 +75,15 @@ pub fn intent_run(args: &str) {
     // recognised by declaring RENDER itself (the fixed set grants RENDER to
     // everyone). A blocking run would also have `pid: 0`, and
     // `fetch::begin_one` refuses async fetches without a process.
+    // A driver (HARDWARE) never returns: it runs in the background as the
+    // autostart starts it, not as the terminal's foreground app, which
+    // would hold the shell's prompt for good.
+    if declared.contains(capability::Rights::RENDER) && declared.contains(capability::Rights::HARDWARE) {
+        if !wasm::spawn_background_widget_app(wasm_bytes.to_vec(), module_cap, module_name) {
+            kprintln!("[npk] Failed to spawn '{}'", module_name);
+        }
+        return;
+    }
     if declared.contains(capability::Rights::RENDER) {
         let term_idx = super::active_terminal();
         if !wasm::spawn_on_worker_with_arg(
