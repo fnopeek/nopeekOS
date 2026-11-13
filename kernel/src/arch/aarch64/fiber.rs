@@ -11,6 +11,7 @@
 //           in x19 and its argument in x20.
 core::arch::global_asm!(
     r#"
+.pushsection .text, "ax"
 .global fiber_context_switch
 fiber_context_switch:
     sub     sp, sp, #176
@@ -52,6 +53,7 @@ fiber_trampoline:
     bl      fiber_on_exit
 1:  wfi
     b       1b
+.popsection
 "#
 );
 

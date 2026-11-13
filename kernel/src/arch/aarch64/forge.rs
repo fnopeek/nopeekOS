@@ -20,6 +20,7 @@ const EC_DABT_CUR: u32 = 0x25;
 
 core::arch::global_asm!(
     r#"
+.pushsection .text, "ax"
 .macro forge_check not_ours
     msr     TPIDR_EL0, x16
     msr     TPIDRRO_EL0, x17
@@ -72,6 +73,7 @@ forge_host_trap:
     mov     sp, x16
     ldr     x16, [x0, #{res}]
     br      x16
+.popsection
 "#,
     ec = const EC_DABT_CUR,
     lo = const crate::forge_rt::CODE_BASE,

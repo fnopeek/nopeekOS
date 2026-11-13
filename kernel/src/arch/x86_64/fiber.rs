@@ -13,6 +13,7 @@
 //           scheduler.
 core::arch::global_asm!(
     r#"
+.pushsection .text, "ax"
 .global fiber_context_switch
 fiber_context_switch:
     pushq %rbp
@@ -41,6 +42,7 @@ fiber_trampoline:
 .Lfiber_hang:
     hlt
     jmp .Lfiber_hang
+.popsection
 "#,
     options(att_syntax)
 );

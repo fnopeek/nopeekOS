@@ -13,6 +13,7 @@ use crate::forge_rt::CODE_BASE;
 
 core::arch::global_asm!(
     r#"
+.pushsection .text, "ax"
 .globl forge_pf_stub
 forge_pf_stub:
     push rax
@@ -55,6 +56,7 @@ forge_trap_div:
     mov  rbp, [r14 + {rbp}]
     mov  rsp, [r14 + {rsp}]
     jmp  [r14 + {res}]
+.popsection
 "#,
     lo = const CODE_BASE,
     oob = const forge_core::trap::MEMORY_OUT_OF_BOUNDS,
@@ -72,6 +74,7 @@ unsafe extern "C" {
 
 core::arch::global_asm!(
     r#"
+.pushsection .text, "ax"
 .globl forge_host_trap
 forge_host_trap:
     mov  r14, rdi
@@ -80,6 +83,7 @@ forge_host_trap:
     mov  rbp, [rdi + {rbp}]
     mov  rsp, [rdi + {rsp}]
     jmp  [rdi + {res}]
+.popsection
 "#,
     tc = const vmctx::TRAP_CODE,
     rbp = const vmctx::TRAP_RBP,

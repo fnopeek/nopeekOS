@@ -107,3 +107,9 @@ SECTIONS {
         *(.note.*)
     }
 }
+
+/* A global_asm block that names no section lands in the one the previous
+ * block left open: code must never end up beside the relocation block or
+ * the AP trampoline. */
+ASSERT(SIZEOF(.nreloc) == 12, "code or data landed in .nreloc")
+ASSERT(SIZEOF(.smp_trampoline) == smp_trampoline_end - smp_trampoline_start, "code or data landed in .smp_trampoline")
