@@ -22,6 +22,9 @@ pub enum Block {
     Iommu,
     /// The TLB cache the IOMMUs share (`brcm,bcm2712-iommuc`).
     IommuCache,
+    /// The AVS monitor with the temperature sensor
+    /// (`brcm,bcm2711-avs-monitor`).
+    Avs,
 }
 
 /// MMIO and delays. Widths are 1, 2 or 4 bytes.

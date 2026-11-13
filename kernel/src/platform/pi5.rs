@@ -29,7 +29,7 @@ impl Board {
             Block::Mip => &self.mip,
             Block::Rp1Bar0 => &self.bar0,
             Block::Rp1Bar1 => &self.bar1,
-            Block::Mbox | Block::Iommu | Block::IommuCache => unreachable!("not on the PCIe path"),
+            Block::Mbox | Block::Iommu | Block::IommuCache | Block::Avs => unreachable!("not on the PCIe path"),
         }
     }
 }
@@ -230,6 +230,14 @@ pub(super) fn rp1() -> Option<(pi5_core::rp1::Rp1, Board, u64)> {
 
 /// The board's blocks and RP1's DMA offset, once RP1 is probed.
 static BOARD: spin::Once<(Board, u64)> = spin::Once::new();
+/// The CPU address of RP1's BAR1, once RP1 is probed.
+static BAR1_CPU: spin::Once<u64> = spin::Once::new();
+
+/// The offset in BAR1 of an RP1 child's register window at CPU address
+/// `cpu` (its translated `reg`).
+pub(super) fn rp1_bar1_offset(cpu: u64) -> Option<u64> {
+    cpu.checked_sub(*BAR1_CPU.get()?)
+}
 
 /// The enabled child of the RP1 node with `compatible`.
 pub(super) fn rp1_child(fdt: &Fdt, compatible: &[u8]) -> Option<Node> {
@@ -464,5 +472,6 @@ pub fn init(fdt: &Fdt) -> bool {
 
     let dma_off = inb[..n_in].iter().find(|w| w.cpu == 0).map(|w| w.pci).unwrap_or(0);
     BOARD.call_once(|| (board, dma_off));
+    BAR1_CPU.call_once(|| cpu_of(dev.bars[1].bus));
     usb(fdt, &node, &mut board, cpu_of(dev.bars[1].bus), dma_off)
 }

@@ -91,6 +91,11 @@ pub const CLK_ETH: Clock = Clock {
     num_std_parents: 0, num_aux_parents: 3, ctrl: 0x64, div_int: 0x68, div_frac: 0, sel: 0x70,
     div_int_max: 0xff, clk_src_mask: 0, oe_mask: 0,
 };
+/// `clk_pwm1`: aux parents none, `pll_video_sec`, `xosc`.
+pub const CLK_PWM1: Clock = Clock {
+    num_std_parents: 0, num_aux_parents: 3, ctrl: 0x84, div_int: 0x88, div_frac: 0x8c, sel: 0x90,
+    div_int_max: 0xffff, clk_src_mask: 0, oe_mask: 0,
+};
 pub const CLK_ETH_TSU: Clock = Clock {
     num_std_parents: 0, num_aux_parents: 8, ctrl: 0x134, div_int: 0x138, div_frac: 0, sel: 0x140,
     div_int_max: 0xff, clk_src_mask: 0, oe_mask: 0,
@@ -364,4 +369,16 @@ pub fn macb_clk_init(hw: &mut impl Hw) -> EthRates {
     CLK_ETH.on(hw);
     CLK_ETH_TSU.on(hw);
     ETH_RATES
+}
+
+/// `clk_pwm1`'s parent `xosc`.
+const CLK_PWM1_PARENT_XOSC: u32 = 2;
+
+/// The PWM1 node's `assigned-clock-rates` and `devm_clk_get_enabled`:
+/// `rate` from the crystal (the parent `rp1_clock_determine_rate` picks
+/// when it divides exactly), then the clock on. Returns the rate.
+pub fn pwm1_clock(hw: &mut impl Hw, rate: u64) -> Result<u64, Error> {
+    CLK_PWM1.assign(hw, rate, CLK_PWM1_PARENT_XOSC, XOSC_HZ)?;
+    CLK_PWM1.on(hw);
+    Ok(CLK_PWM1.recalc_rate(hw, XOSC_HZ))
 }

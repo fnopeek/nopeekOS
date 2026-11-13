@@ -16,6 +16,7 @@ extern crate alloc;
 pub mod clk_rp1;
 pub mod dwc3;
 pub mod eth;
+pub mod fan;
 pub mod gem;
 pub mod gpio_rp1;
 pub mod hw;
@@ -35,6 +36,8 @@ mod tests;
 mod tests_eth;
 #[cfg(test)]
 mod tests_iommu;
+#[cfg(test)]
+mod tests_fan;
 
 /// How far bring-up came.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

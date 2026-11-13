@@ -2813,6 +2813,22 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
         #[cfg(target_arch = "aarch64")]
+        "fan" | "temp" => {
+            if require_cap(vault, &session, Rights::READ, "fan") {
+                match crate::platform::pi5_fan::status() {
+                    Some((t, state, duty, rpm)) => {
+                        kprint!("[npk] CPU {}.{} C, fan level {} ({}%)", t / 1000, (t % 1000).abs() / 100,
+                            state, duty * 100 / 255);
+                        match rpm {
+                            Some(r) => kprintln!(", {} RPM", r),
+                            None => kprintln!(),
+                        }
+                    }
+                    None => kprintln!("[npk] fan: not running"),
+                }
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
         "desktop" => {
             if require_cap(vault, &session, Rights::EXECUTE, "desktop") {
                 crate::arch::aarch64::boot::desktop_intent();

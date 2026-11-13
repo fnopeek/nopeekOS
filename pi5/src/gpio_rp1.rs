@@ -31,6 +31,7 @@ const RP1_FSEL_COUNT: u32 = 9;
 const RP1_OEOVER_DISABLE: u32 = 2;
 const RP1_OEOVER_PERI: u32 = 0;
 const RP1_OUTOVER_PERI: u32 = 0;
+const PAD_PULL_MASK: u32 = 0x3 << 2;
 const PAD_IN_ENABLE: u32 = 1 << 6;
 const PAD_OUT_DISABLE: u32 = 1 << 7;
 
@@ -40,6 +41,72 @@ const BANKS: [(u32, u64, u64, u64); 3] = [
     (28, 0x4000, 0x4000, 0x4004),
     (34, 0x8000, 0x8000, 0x8004),
 ];
+
+/// `rp1_gpio_pin_funcs`: the function of each `FUNCSEL` 0..9 per pin, "" for
+/// none.
+const PIN_FUNCS: [[&str; 9]; 54] = [
+    ["spi0", "dpi", "uart1", "i2c0", "", "gpio", "proc_rio", "pio", "spi2"],
+    ["spi0", "dpi", "uart1", "i2c0", "", "gpio", "proc_rio", "pio", "spi2"],
+    ["spi0", "dpi", "uart1", "i2c1", "ir", "gpio", "proc_rio", "pio", "spi2"],
+    ["spi0", "dpi", "uart1", "i2c1", "ir", "gpio", "proc_rio", "pio", "spi2"],
+    ["gpclk0", "dpi", "uart2", "i2c2", "ri0", "gpio", "proc_rio", "pio", "spi3"],
+    ["gpclk1", "dpi", "uart2", "i2c2", "dtr0", "gpio", "proc_rio", "pio", "spi3"],
+    ["gpclk2", "dpi", "uart2", "i2c3", "dcd0", "gpio", "proc_rio", "pio", "spi3"],
+    ["spi0", "dpi", "uart2", "i2c3", "dsr0", "gpio", "proc_rio", "pio", "spi3"],
+    ["spi0", "dpi", "uart3", "i2c0", "", "gpio", "proc_rio", "pio", "spi4"],
+    ["spi0", "dpi", "uart3", "i2c0", "", "gpio", "proc_rio", "pio", "spi4"],
+    ["spi0", "dpi", "uart3", "i2c1", "", "gpio", "proc_rio", "pio", "spi4"],
+    ["spi0", "dpi", "uart3", "i2c1", "", "gpio", "proc_rio", "pio", "spi4"],
+    ["pwm0", "dpi", "uart4", "i2c2", "aaud", "gpio", "proc_rio", "pio", "spi5"],
+    ["pwm0", "dpi", "uart4", "i2c2", "aaud", "gpio", "proc_rio", "pio", "spi5"],
+    ["pwm0", "dpi", "uart4", "i2c3", "uart0", "gpio", "proc_rio", "pio", "spi5"],
+    ["pwm0", "dpi", "uart4", "i2c3", "uart0", "gpio", "proc_rio", "pio", "spi5"],
+    ["spi1", "dpi", "dsi0_te_ext", "", "uart0", "gpio", "proc_rio", "pio", ""],
+    ["spi1", "dpi", "dsi1_te_ext", "", "uart0", "gpio", "proc_rio", "pio", ""],
+    ["spi1", "dpi", "i2s0", "pwm0", "i2s1", "gpio", "proc_rio", "pio", "gpclk1"],
+    ["spi1", "dpi", "i2s0", "pwm0", "i2s1", "gpio", "proc_rio", "pio", ""],
+    ["spi1", "dpi", "i2s0", "gpclk0", "i2s1", "gpio", "proc_rio", "pio", ""],
+    ["spi1", "dpi", "i2s0", "gpclk1", "i2s1", "gpio", "proc_rio", "pio", ""],
+    ["sd0", "dpi", "i2s0", "i2c3", "i2s1", "gpio", "proc_rio", "pio", ""],
+    ["sd0", "dpi", "i2s0", "i2c3", "i2s1", "gpio", "proc_rio", "pio", ""],
+    ["sd0", "dpi", "i2s0", "", "i2s1", "gpio", "proc_rio", "pio", "spi2"],
+    ["sd0", "dpi", "i2s0", "mic", "i2s1", "gpio", "proc_rio", "pio", "spi3"],
+    ["sd0", "dpi", "i2s0", "mic", "i2s1", "gpio", "proc_rio", "pio", "spi5"],
+    ["sd0", "dpi", "i2s0", "mic", "i2s1", "gpio", "proc_rio", "pio", "spi1"],
+    ["sd1", "i2c4", "i2s2", "spi6", "vbus0", "gpio", "proc_rio", "", ""],
+    ["sd1", "i2c4", "i2s2", "spi6", "vbus0", "gpio", "proc_rio", "", ""],
+    ["sd1", "i2c5", "i2s2", "spi6", "uart5", "gpio", "proc_rio", "", ""],
+    ["sd1", "i2c5", "i2s2", "spi6", "uart5", "gpio", "proc_rio", "", ""],
+    ["sd1", "gpclk3", "i2s2", "spi6", "uart5", "gpio", "proc_rio", "", ""],
+    ["sd1", "gpclk4", "i2s2", "spi6", "uart5", "gpio", "proc_rio", "", ""],
+    ["pwm1", "gpclk3", "vbus0", "i2c4", "mic", "gpio", "proc_rio", "", ""],
+    ["spi8", "pwm1", "vbus0", "i2c4", "mic", "gpio", "proc_rio", "", ""],
+    ["spi8", "uart5", "pcie_clkreq_n", "i2c5", "mic", "gpio", "proc_rio", "", ""],
+    ["spi8", "uart5", "mic", "i2c5", "pcie_clkreq_n", "gpio", "proc_rio", "", ""],
+    ["spi8", "uart5", "mic", "i2c6", "aaud", "gpio", "proc_rio", "dsi0_te_ext", ""],
+    ["spi8", "uart5", "mic", "i2c6", "aaud", "gpio", "proc_rio", "dsi1_te_ext", ""],
+    ["pwm1", "uart5", "i2c4", "spi6", "aaud", "gpio", "proc_rio", "", ""],
+    ["pwm1", "uart5", "i2c4", "spi6", "aaud", "gpio", "proc_rio", "", ""],
+    ["gpclk5", "uart5", "vbus1", "spi6", "i2s2", "gpio", "proc_rio", "", ""],
+    ["gpclk4", "uart5", "vbus1", "spi6", "i2s2", "gpio", "proc_rio", "", ""],
+    ["gpclk5", "i2c5", "pwm1", "spi6", "i2s2", "gpio", "proc_rio", "", ""],
+    ["pwm1", "i2c5", "spi7", "spi6", "i2s2", "gpio", "proc_rio", "", ""],
+    ["gpclk3", "i2c4", "spi7", "mic", "i2s2", "gpio", "proc_rio", "dsi0_te_ext", ""],
+    ["gpclk5", "i2c4", "spi7", "mic", "i2s2", "gpio", "proc_rio", "dsi1_te_ext", ""],
+    ["pwm1", "pcie_clkreq_n", "spi7", "mic", "uart5", "gpio", "proc_rio", "", ""],
+    ["spi8", "spi7", "i2c5", "aaud", "uart5", "gpio", "proc_rio", "", ""],
+    ["spi8", "spi7", "i2c5", "aaud", "vbus2", "gpio", "proc_rio", "", ""],
+    ["spi8", "spi7", "i2c6", "aaud", "vbus2", "gpio", "proc_rio", "", ""],
+    ["spi8", "", "i2c6", "aaud", "vbus3", "gpio", "proc_rio", "", ""],
+    ["spi8", "spi7", "", "pcie_clkreq_n", "vbus3", "gpio", "proc_rio", "", ""],
+];
+
+/// The `FUNCSEL` of pin `num` that carries `function` (`rp1_pmx_set`'s
+/// translation of a pinctrl `function` name).
+pub fn fsel_of(num: u32, function: &str) -> Option<u32> {
+    let funcs = PIN_FUNCS.get(num as usize)?;
+    funcs.iter().position(|f| !f.is_empty() && *f == function).map(|i| i as u32)
+}
 
 /// One of RP1's 54 GPIOs (`rp1_pin_info`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -110,6 +177,20 @@ impl Pin {
         }
         crate::hw::replace_bits(&mut ctrl, fsel, CTRL_FUNCSEL_MASK);
         Self::writel(hw, self.gpio + RP1_GPIO_CTRL, ctrl);
+    }
+
+    /// `rp1_pmx_set` with a function number of the pin (`rp1_gpio_pin_funcs`
+    /// column).
+    pub fn set_function(&self, hw: &mut impl Hw, fsel: u32) {
+        self.set_fsel(hw, fsel);
+    }
+
+    /// `rp1_pull_config_set`: `RP1_PUD_OFF` 0, `_DOWN` 1, `_UP` 2. A plain
+    /// write, unpaced, as in Linux.
+    pub fn set_pull(&self, hw: &mut impl Hw, pud: u32) {
+        let mut pad = hw.r32(Block::Rp1Bar1, self.pad);
+        crate::hw::replace_bits(&mut pad, pud & 0x3, PAD_PULL_MASK);
+        hw.w32(Block::Rp1Bar1, self.pad, pad);
     }
 
     /// `rp1_gpio_direction_output`: level first, then direction, then the

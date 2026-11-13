@@ -289,6 +289,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     }
     crate::platform::pi5::init(&fdt);
     crate::platform::pi5_eth::init(&fdt);
+    crate::platform::pi5_fan::init(&fdt);
     let Some(id) = crate::platform::pi5_sd::init(&fdt) else {
         kprintln!("[npk] No SD card: no system disk. System halted.");
         crate::arch::halt_forever()
