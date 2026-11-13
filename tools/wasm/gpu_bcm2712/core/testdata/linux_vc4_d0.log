@@ -471,7 +471,7 @@ W32 hvs+0x00154 <- 0x4b000f10  ; SCALER6D_DISP1_COB
 W32 hvs+0x00114 <- 0x87004b10  ; SCALER6D_DISP0_COB
 } vc4_hvs_cob_init
 } vc4_hvs_bind
-# info axi:gpu: bound 107c580000.hvs (ops 0x5f29e0)
+# info axi:gpu: bound 107c580000.hvs (ops 0x5f39e0)
 { vc4_hdmi_bind
 { vc5_hdmi_init_resources
 # map 107c701400.hdmi [mem 0x107c701400-0x107c7016ff flags 0x200]
@@ -506,12 +506,34 @@ MAP 0x107c702000 size 0x80
 { vc4_hdmi_build_regset
 } vc4_hdmi_build_regset
 } vc5_hdmi_init_resources
-R32 hd+0x044 = 0x80010000  ; HDMI_VID_CTL
+# rpm: 107c701400.hdmi runtime_resume
+{ vc4_hdmi_runtime_resume
 { raspberrypi_fw_prepare
 { raspberrypi_clock_property
 FW SET_CLOCK_STATE (0x00038001) clock m2mc: [0xd 0x1 0x0] -> [0xd 0x1 0x0]
 } raspberrypi_clock_property
 } raspberrypi_fw_prepare
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+R32 dvp+0x008 = 0x00000000  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000000  ; DVP_HT_RPI_MISC_CONFIG
+{ vc5_hdmi_reset
+W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
+R32 hdmi0.dvp+0x0bc = 0x00000001  ; HDMI_CLOCK_STOP
+W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
+} vc5_hdmi_reset
+R32 hdmi0.cec+0x010 = 0x00000000  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f000  ; HDMI_CEC_CNTRL_1
+{ vc4_hdmi_cec_update_clk_div
+R32 hdmi0.cec+0x010 = 0x0000f000  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+} vc4_hdmi_cec_update_clk_div
+W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
+} vc4_hdmi_runtime_resume
+R32 hd+0x044 = 0x80010000  ; HDMI_VID_CTL
 { vc4_hdmi_connector_init
 { vc4_hdmi_connector_reset
 } vc4_hdmi_connector_reset
@@ -543,8 +565,33 @@ W32 aon_intr+0x14 <- 0x00000002  ; CPU_MASK_CLEAR
 # device_add hdmi-audio-codec.1.auto
 # asoc: card vc4-hdmi-0 registered on 107c701400.hdmi (links not bound: no codec driver in run g)
 } vc4_hdmi_audio_init
+# rpm: 107c701400.hdmi runtime_suspend
+{ vc4_hdmi_runtime_suspend
+W32 hdmi0+0x0c4 <- 0x00000000  ; HDMI_RAM_PACKET_CONFIG
+R32 dvp+0x008 = 0x00000000  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_set_rate
+{ raspberrypi_clock_property
+FW SET_CLOCK_RATE (0x00038002) clock m2mc: [0xd 0x7270e00 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_set_rate
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+} vc4_hdmi_runtime_suspend
 } vc4_hdmi_bind
-# info axi:gpu: bound 107c701400.hdmi (ops 0x5f5340)
+# info axi:gpu: bound 107c701400.hdmi (ops 0x5f6340)
 { vc4_hdmi_bind
 { vc5_hdmi_init_resources
 # map 107c706400.hdmi [mem 0x107c706400-0x107c7066ff flags 0x200]
@@ -579,6 +626,28 @@ MAP 0x107c707000 size 0x80
 { vc4_hdmi_build_regset
 } vc4_hdmi_build_regset
 } vc5_hdmi_init_resources
+# rpm: 107c706400.hdmi runtime_resume
+{ vc4_hdmi_runtime_resume
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+R32 dvp+0x008 = 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+{ vc5_hdmi_reset
+W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
+R32 hdmi1.dvp+0x0bc = 0x00000000  ; HDMI_CLOCK_STOP
+W32 hdmi1.dvp+0x0bc <- 0x00000002  ; HDMI_CLOCK_STOP
+} vc5_hdmi_reset
+R32 hdmi1.cec+0x010 = 0x00000000  ; HDMI_CEC_CNTRL_1
+W32 hdmi1.cec+0x010 <- 0x0000f000  ; HDMI_CEC_CNTRL_1
+{ vc4_hdmi_cec_update_clk_div
+R32 hdmi1.cec+0x010 = 0x0000f000  ; HDMI_CEC_CNTRL_1
+W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+} vc4_hdmi_cec_update_clk_div
+W32 hdmi1+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
+} vc4_hdmi_runtime_resume
 R32 hd+0x048 = 0x00000000
 { vc4_hdmi_connector_init
 { vc4_hdmi_connector_reset
@@ -611,8 +680,33 @@ W32 aon_intr+0x14 <- 0x00000800  ; CPU_MASK_CLEAR
 # device_add hdmi-audio-codec.3.auto
 # asoc: card vc4-hdmi-1 registered on 107c706400.hdmi (links not bound: no codec driver in run g)
 } vc4_hdmi_audio_init
+# rpm: 107c706400.hdmi runtime_suspend
+{ vc4_hdmi_runtime_suspend
+W32 hdmi1+0x0c4 <- 0x00000000  ; HDMI_RAM_PACKET_CONFIG
+R32 dvp+0x008 = 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_set_rate
+{ raspberrypi_clock_property
+FW SET_CLOCK_RATE (0x00038002) clock m2mc: [0xd 0x7270e00 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_set_rate
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+} vc4_hdmi_runtime_suspend
 } vc4_hdmi_bind
-# info axi:gpu: bound 107c706400.hdmi (ops 0x5f5340)
+# info axi:gpu: bound 107c706400.hdmi (ops 0x5f6340)
 { vc4_txp_bind
 { vc4_ioremap_regs
 # map 107c500000.mop [mem 0x107c500000-0x107c500027 flags 0x200]
@@ -1076,7 +1170,7 @@ MAP 0x107c500000 size 0x28
 } vc4_crtc_init
 W32 disp_intr+0x14 <- 0x00000002  ; CPU_MASK_CLEAR
 } vc4_txp_bind
-# info axi:gpu: bound 107c500000.mop (ops 0x5f8020)
+# info axi:gpu: bound 107c500000.mop (ops 0x5f9020)
 { vc4_txp_bind
 { vc4_ioremap_regs
 # map 107c501000.moplet [mem 0x107c501000-0x107c50101f flags 0x200]
@@ -1540,7 +1634,7 @@ MAP 0x107c501000 size 0x20
 } vc4_crtc_init
 W32 disp_intr+0x14 <- 0x00000001  ; CPU_MASK_CLEAR
 } vc4_txp_bind
-# info axi:gpu: bound 107c501000.moplet (ops 0x5f8020)
+# info axi:gpu: bound 107c501000.moplet (ops 0x5f9020)
 { vc4_crtc_bind
 { vc4_ioremap_regs
 # map 107c410000.pixelvalve [mem 0x107c410000-0x107c4100ff flags 0x200]
@@ -2011,7 +2105,7 @@ GIC set_type intid 133 (SPI 101) level-high
 GIC unmask intid 133 (SPI 101)
 GIC set_affinity intid 133 cpu0
 } vc4_crtc_bind
-# info axi:gpu: bound 107c410000.pixelvalve (ops 0x5f3c40)
+# info axi:gpu: bound 107c410000.pixelvalve (ops 0x5f4c40)
 { vc4_crtc_bind
 { vc4_ioremap_regs
 # map 107c411000.pixelvalve [mem 0x107c411000-0x107c4110ff flags 0x200]
@@ -2482,7 +2576,7 @@ GIC set_type intid 142 (SPI 110) level-high
 GIC unmask intid 142 (SPI 110)
 GIC set_affinity intid 142 cpu0
 } vc4_crtc_bind
-# info axi:gpu: bound 107c411000.pixelvalve (ops 0x5f3c40)
+# info axi:gpu: bound 107c411000.pixelvalve (ops 0x5f4c40)
 { vc4_plane_create_additional_planes
 { vc4_plane_init
 { vc4_format_mod_supported
@@ -26135,6 +26229,28 @@ R32 pv0+0x004 = 0x00000003  ; PV_V_CONTROL
 { vc4_hvs_get_fifo_from_output
 } vc4_hvs_get_fifo_from_output
 R32 pv0+0x000 = 0x07174001  ; PV_CONTROL
+# rpm: 107c701400.hdmi runtime_resume
+{ vc4_hdmi_runtime_resume
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+R32 dvp+0x008 = 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000010  ; DVP_HT_RPI_MISC_CONFIG
+{ vc5_hdmi_reset
+W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
+R32 hdmi0.dvp+0x0bc = 0x00000003  ; HDMI_CLOCK_STOP
+W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
+} vc5_hdmi_reset
+R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+{ vc4_hdmi_cec_update_clk_div
+R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+} vc4_hdmi_cec_update_clk_div
+W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
+} vc4_hdmi_runtime_resume
 { vc4_crtc_disable
 R32 pv0+0x004 = 0x00000003  ; PV_V_CONTROL
 W32 pv0+0x004 <- 0x00000002  ; PV_V_CONTROL
@@ -26544,6 +26660,31 @@ FW GET_CLOCK_RATE (0x00030002) clock pixel-bvb: [0xe 0x0 0x0] -> [0xe 0x134fd900
 } raspberrypi_fw_get_rate
 { raspberrypi_fw_dumb_determine_rate
 } raspberrypi_fw_dumb_determine_rate
+# rpm: 107c701400.hdmi runtime_suspend
+{ vc4_hdmi_runtime_suspend
+W32 hdmi0+0x0c4 <- 0x00000000  ; HDMI_RAM_PACKET_CONFIG
+R32 dvp+0x008 = 0x00000010  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_set_rate
+{ raspberrypi_clock_property
+FW SET_CLOCK_RATE (0x00038002) clock m2mc: [0xd 0x7270e00 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_set_rate
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+} vc4_hdmi_runtime_suspend
 } vc4_hdmi_encoder_post_crtc_powerdown
 } vc4_crtc_disable
 } vc4_crtc_disable_at_boot
@@ -26553,6 +26694,28 @@ R32 pv1+0x004 = 0x00000003  ; PV_V_CONTROL
 { vc4_hvs_get_fifo_from_output
 } vc4_hvs_get_fifo_from_output
 R32 pv1+0x000 = 0x07174001  ; PV_CONTROL
+# rpm: 107c706400.hdmi runtime_resume
+{ vc4_hdmi_runtime_resume
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+R32 dvp+0x008 = 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+{ vc5_hdmi_reset
+W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
+R32 hdmi1.dvp+0x0bc = 0x00000002  ; HDMI_CLOCK_STOP
+W32 hdmi1.dvp+0x0bc <- 0x00000002  ; HDMI_CLOCK_STOP
+} vc5_hdmi_reset
+R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+{ vc4_hdmi_cec_update_clk_div
+R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+} vc4_hdmi_cec_update_clk_div
+W32 hdmi1+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
+} vc4_hdmi_runtime_resume
 { vc4_crtc_disable
 R32 pv1+0x004 = 0x00000003  ; PV_V_CONTROL
 W32 pv1+0x004 <- 0x00000002  ; PV_V_CONTROL
@@ -26731,6 +26894,31 @@ FW GET_CLOCK_RATE (0x00030002) clock pixel-bvb: [0xe 0x0 0x0] -> [0xe 0x134fd900
 # WARN (ud2) at 0x4b7aae, continuing as the kernel does
 # WARN Unpreparing critical fw-clk-pixel-bvb
 # WARN (ud2) at 0x4b78c0, continuing as the kernel does
+# rpm: 107c706400.hdmi runtime_suspend
+{ vc4_hdmi_runtime_suspend
+W32 hdmi1+0x0c4 <- 0x00000000  ; HDMI_RAM_PACKET_CONFIG
+R32 dvp+0x008 = 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_set_rate
+{ raspberrypi_clock_property
+FW SET_CLOCK_RATE (0x00038002) clock m2mc: [0xd 0x7270e00 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_set_rate
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+} vc4_hdmi_runtime_suspend
 } vc4_hdmi_encoder_post_crtc_powerdown
 } vc4_crtc_disable
 } vc4_crtc_disable_at_boot
@@ -26770,6 +26958,28 @@ FW GET_CLOCK_RATE (0x00030002) clock pixel-bvb: [0xe 0x0 0x0] -> [0xe 0x134fd900
 { drm_client_modeset_probe
 { drm_helper_probe_single_connector_modes
 { vc4_hdmi_connector_detect_ctx
+# rpm: 107c701400.hdmi runtime_resume
+{ vc4_hdmi_runtime_resume
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+R32 dvp+0x008 = 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000010  ; DVP_HT_RPI_MISC_CONFIG
+{ vc5_hdmi_reset
+W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
+R32 hdmi0.dvp+0x0bc = 0x00000003  ; HDMI_CLOCK_STOP
+W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
+} vc5_hdmi_reset
+R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+{ vc4_hdmi_cec_update_clk_div
+R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+} vc4_hdmi_cec_update_clk_div
+W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
+} vc4_hdmi_runtime_resume
 { vc5_hdmi_hp_detect
 R32 hdmi0+0x1c8 = 0x00000001  ; HDMI_HOTPLUG  [monitor on HDMI0]
 } vc5_hdmi_hp_detect
@@ -27490,6 +27700,31 @@ R32 ddc0+0x04c = 0xd2000000  ; DATA_OUT7
 { vc4_hdmi_reset_link
 } vc4_hdmi_reset_link
 } vc4_hdmi_handle_hotplug
+# rpm: 107c701400.hdmi runtime_suspend
+{ vc4_hdmi_runtime_suspend
+W32 hdmi0+0x0c4 <- 0x00000000  ; HDMI_RAM_PACKET_CONFIG
+R32 dvp+0x008 = 0x00000010  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_set_rate
+{ raspberrypi_clock_property
+FW SET_CLOCK_RATE (0x00038002) clock m2mc: [0xd 0x7270e00 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_set_rate
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+} vc4_hdmi_runtime_suspend
 } vc4_hdmi_connector_detect_ctx
 # delayed work (re)queued: 0x5a1494 (not run)
 { vc4_hdmi_connector_get_modes
@@ -27575,12 +27810,59 @@ R32 ddc0+0x04c = 0xd2000000  ; DATA_OUT7
 } drm_helper_probe_single_connector_modes
 { drm_helper_probe_single_connector_modes
 { vc4_hdmi_connector_detect_ctx
+# rpm: 107c706400.hdmi runtime_resume
+{ vc4_hdmi_runtime_resume
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+R32 dvp+0x008 = 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+{ vc5_hdmi_reset
+W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
+R32 hdmi1.dvp+0x0bc = 0x00000002  ; HDMI_CLOCK_STOP
+W32 hdmi1.dvp+0x0bc <- 0x00000002  ; HDMI_CLOCK_STOP
+} vc5_hdmi_reset
+R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+{ vc4_hdmi_cec_update_clk_div
+R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+} vc4_hdmi_cec_update_clk_div
+W32 hdmi1+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
+} vc4_hdmi_runtime_resume
 { vc5_hdmi_hp_detect
 R32 hdmi1+0x1c8 = 0x00000000  ; HDMI_HOTPLUG  [nothing on HDMI1]
 } vc5_hdmi_hp_detect
 { vc4_hdmi_handle_hotplug
 # cec: vc4-hdmi-1 physical address f.f.f.f
 } vc4_hdmi_handle_hotplug
+# rpm: 107c706400.hdmi runtime_suspend
+{ vc4_hdmi_runtime_suspend
+W32 hdmi1+0x0c4 <- 0x00000000  ; HDMI_RAM_PACKET_CONFIG
+R32 dvp+0x008 = 0x00000008  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_dumb_determine_rate
+} raspberrypi_fw_dumb_determine_rate
+{ raspberrypi_fw_set_rate
+{ raspberrypi_clock_property
+FW SET_CLOCK_RATE (0x00038002) clock m2mc: [0xd 0x7270e00 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_set_rate
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+} vc4_hdmi_runtime_suspend
 } vc4_hdmi_connector_detect_ctx
 # delayed work (re)queued: 0x5a1494 (not run)
 } drm_helper_probe_single_connector_modes
@@ -28279,6 +28561,28 @@ W32 hvs+0x00100 <- 0x8eff086f  ; SCALER6D_DISP0_CTRL0
 } vc6_hvs_init_channel
 } vc4_hvs_atomic_enable
 { vc4_hdmi_encoder_pre_crtc_configure
+# rpm: 107c701400.hdmi runtime_resume
+{ vc4_hdmi_runtime_resume
+{ raspberrypi_fw_get_rate
+{ raspberrypi_clock_property
+FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
+} raspberrypi_clock_property
+} raspberrypi_fw_get_rate
+R32 dvp+0x008 = 0x00000018  ; DVP_HT_RPI_MISC_CONFIG
+W32 dvp+0x008 <- 0x00000010  ; DVP_HT_RPI_MISC_CONFIG
+{ vc5_hdmi_reset
+W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
+R32 hdmi0.dvp+0x0bc = 0x00000003  ; HDMI_CLOCK_STOP
+W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
+} vc5_hdmi_reset
+R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+{ vc4_hdmi_cec_update_clk_div
+R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+} vc4_hdmi_cec_update_clk_div
+W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
+} vc4_hdmi_runtime_resume
 { raspberrypi_fw_get_rate
 { raspberrypi_clock_property
 FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
@@ -28299,8 +28603,8 @@ FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
 } raspberrypi_clock_property
 } raspberrypi_fw_get_rate
 { vc4_hdmi_cec_update_clk_div
-R32 hdmi0.cec+0x010 = 0x00000000  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x000002a3  ; HDMI_CEC_CNTRL_1
+R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
+W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
 } vc4_hdmi_cec_update_clk_div
 { raspberrypi_fw_get_rate
 { raspberrypi_clock_property
