@@ -75,3 +75,32 @@ pub const VC4_HDMI_RAM_PACKET_ENABLE: u32 = 0x10000;
 // vc4_hdmi.c
 pub const HDMI_14_MAX_TMDS_CLK: u32 = 0x1443fd00;
 pub const BCM2712_MAX_PIXEL_CLOCK: u32 = 0x23c34600;
+pub const VC5_HDMI_SCRAMBLER_CTL_ENABLE: u32 = 0x1;
+
+// vc4_hdmi_phy.c
+pub const VC6_HDMI_TX_PHY_PLL_POST_KDIV_BYPASS_EN: u32 = 0x10;
+pub const HDMI_SCRAMBLER_CTL: HdmiField = [(HdmiReg::Hdmi, 0x1e4), (HdmiReg::Hdmi, 0x1e4)];
+pub const HDMI_TX_PHY_RESET_CTL: HdmiField = [(HdmiReg::Phy, 0x0), (HdmiReg::Phy, 0x0)];
+pub const HDMI_TX_PHY_POWERUP_CTL: HdmiField = [(HdmiReg::Phy, 0x4), (HdmiReg::Phy, 0x4)];
+pub const HDMI_TX_PHY_PLL_POST_KDIV: HdmiField = [(HdmiReg::Phy, 0x28), (HdmiReg::Phy, 0x28)];
+pub const VC4_HD_VID_CTL_CLRRGB: u32 = 0x800000;
+pub const VC4_HD_VID_CTL_BLANKPIX: u32 = 0x40000;
+
+// The pixel valves (vc4_regs.h)
+pub const PV_CONTROL: u32 = 0x0;
+pub const PV_CONTROL_EN: u32 = 0x1;
+pub const PV_CONTROL_FIFO_CLR: u32 = 0x2;
+pub const PV_CONTROL_CLK_SELECT_MASK: u32 = 0xc;
+pub const PV_V_CONTROL: u32 = 0x4;
+pub const PV_VCONTROL_VIDEN: u32 = 0x1;
+pub const PV_INTEN: u32 = 0x24;
+pub const PV_INTSTAT: u32 = 0x28;
+pub const PV_INT_VFP_START: u32 = 0x80;
+
+// HVS channels
+pub const SCALER6_DISPX_CTRL0: [[u32; 3]; 2] = [[0x30, 0x50, 0x70], [0x100, 0x140, 0x180]];
+pub const SCALER6_DISPX_CTRL0_ENB: u32 = 0x80000000;
+pub const SCALER6_DISPX_CTRL0_RESET: u32 = 0x40000000;
+pub const SCALER6_DISPX_STATUS: [[u32; 3]; 2] = [[0x44, 0x64, 0x84], [0x118, 0x158, 0x198]];
+pub const SCALER6_DISPX_STATUS_MODE_MASK: u32 = 0x6000;
+pub const SCALER6_DISPX_STATUS_MODE_DISABLED: u32 = 0x0;

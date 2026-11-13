@@ -178,4 +178,31 @@ impl Hvs {
         }
         Ok(hvs)
     }
+
+    /// `vc4_hvs_get_fifo_from_output`, gen 6: the channel feeding output
+    /// `output`.
+    pub fn get_fifo_from_output(&self, output: u32) -> Option<u32> {
+        match output {
+            0 => Some(0),
+            2 => Some(2),
+            1 | 3 | 4 => Some(1),
+            _ => None,
+        }
+    }
+
+    /// `vc4_hvs_stop_channel` → `__vc6_hvs_stop_channel`.
+    pub fn stop_channel(&self, hw: &mut impl Hw, chan: u32) {
+        let g = self.generation.idx();
+        let ctrl0 = SCALER6_DISPX_CTRL0[g][chan as usize];
+        if self.read(hw, ctrl0) & SCALER6_DISPX_CTRL0_ENB == 0 {
+            return;
+        }
+        let v = self.read(hw, ctrl0);
+        self.write(hw, ctrl0, v | SCALER6_DISPX_CTRL0_RESET);
+        let v = self.read(hw, ctrl0);
+        self.write(hw, ctrl0, v & !SCALER6_DISPX_CTRL0_ENB);
+        // Linux WARNs once if the channel did not stop.
+        let _ = field_get(SCALER6_DISPX_STATUS_MODE_MASK, self.read(hw, SCALER6_DISPX_STATUS[g][chan as usize]))
+            != SCALER6_DISPX_STATUS_MODE_DISABLED;
+    }
 }

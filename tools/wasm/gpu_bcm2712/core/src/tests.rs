@@ -11,6 +11,7 @@ use crate::drm_edid::drm_do_probe_ddc_edid;
 use crate::hw::{Block, ClockOp, HdmiReg, Hw, Spi};
 use crate::i2c_brcmstb::{Bsc, Ddc};
 use crate::irq_brcmstb_l2::{L2Intc, L2_2711_LVL_INTC_INIT, L2_LVL_INTC_INIT};
+use crate::vc4_drv::Vc4;
 use crate::vc4_hdmi::Vc4Hdmi;
 use crate::vc4_hvs::{Gen, Hvs};
 use std::collections::VecDeque;
@@ -304,4 +305,39 @@ fn hdmi_bind_is_linux() {
         hw.done();
         assert!(h.scdc_enabled);
     }
+}
+
+/// The accesses from the start up to the first call of `end`, without
+/// those inside calls of `skip`.
+fn upto(evs: &[Ev], end: &str, skip: &[&str]) -> Vec<Ev> {
+    let mut out = Vec::new();
+    let mut depth = 0;
+    for e in evs {
+        match e {
+            Ev::Enter(n) if n == end && depth == 0 => break,
+            Ev::Enter(n) if skip.contains(&n.as_str()) => depth += 1,
+            Ev::Exit(n) if skip.contains(&n.as_str()) => depth -= 1,
+            Ev::Read { .. } | Ev::Write { .. } if depth == 0 => out.push(e.clone()),
+            Ev::Fw { tag, req, .. } if depth == 0 && *tag != GET_CLOCKS && req.first() != Some(&V3D_CLK) => {
+                out.push(e.clone())
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The whole bind as one stream: the L2 controllers, the clocks, the DDC
+/// controllers, NOTIFY_DISPLAY_DONE, the HVS, both HDMI controllers, both
+/// pixel valves and the takeover of both running outputs, without the
+/// writeback engines.
+#[test]
+fn bind_and_takeover_are_linux() {
+    let evs = parse(LOG);
+    let stream = upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]);
+    assert!(stream.len() > 350, "{} events", stream.len());
+    let mut hw = Strict::new(stream);
+    let vc4 = Vc4::bind(&mut hw).expect("bind");
+    hw.done();
+    assert!(!vc4.hdmi[0].scdc_enabled && !vc4.hdmi[1].scdc_enabled);
 }

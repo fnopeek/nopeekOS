@@ -9,7 +9,9 @@
 //! suspends at once.
 
 use crate::clk::{Clk, DvpGate, FwClocks};
+use crate::drm_scdc_helper::{drm_scdc_set_high_tmds_clock_ratio, drm_scdc_set_scrambling};
 use crate::hw::{Block, Hw, RPI_FIRMWARE_M2MC_CLK_ID, RPI_FIRMWARE_PIXEL_BVB_CLK_ID};
+use crate::i2c_brcmstb::{Bsc, Ddc};
 use crate::irq_brcmstb_l2::L2Intc;
 use crate::linux::EINVAL;
 use crate::regs::*;
@@ -130,5 +132,42 @@ impl Vc4Hdmi {
         }
         h.pm_runtime_put(hw, clocks);
         Ok(h)
+    }
+
+    /// `vc4_hdmi_disable_scrambling`: once, also at boot (`scdc_enabled`
+    /// starts true, since the firmware's state is unknown).
+    fn disable_scrambling(&mut self, hw: &mut impl Hw, bsc: &mut Bsc) {
+        if !self.scdc_enabled {
+            return;
+        }
+        self.scdc_enabled = false;
+        let v = self.read(hw, &HDMI_SCRAMBLER_CTL);
+        self.write(hw, &HDMI_SCRAMBLER_CTL, v & !VC5_HDMI_SCRAMBLER_CTL_ENABLE);
+        let mut ddc = Ddc { bsc, n: self.port as usize };
+        drm_scdc_set_scrambling(hw, &mut ddc, false);
+        drm_scdc_set_high_tmds_clock_ratio(hw, &mut ddc, false);
+    }
+
+    /// `vc4_hdmi_encoder_post_crtc_disable`, gen 6 (the output stays
+    /// enabled: clearing `VC4_HD_VID_CTL_ENABLE` locks the BCM2712 up).
+    pub fn encoder_post_crtc_disable(&mut self, hw: &mut impl Hw, bsc: &mut Bsc) {
+        self.write(hw, &HDMI_RAM_PACKET_CONFIG, VC4_HDMI_RAM_PACKET_ENABLE);
+        let v = self.read(hw, &HDMI_VID_CTL);
+        self.write(hw, &HDMI_VID_CTL, v | VC4_HD_VID_CTL_CLRRGB);
+        let v = self.read(hw, &HDMI_VID_CTL);
+        self.write(hw, &HDMI_VID_CTL, v | VC4_HD_VID_CTL_BLANKPIX);
+        hw.delay_us(1000);
+        self.disable_scrambling(hw, bsc);
+    }
+
+    /// `vc4_hdmi_encoder_post_crtc_powerdown`: the PHY off, the clocks a
+    /// running output holds released, the runtime-PM reference dropped.
+    pub fn encoder_post_crtc_powerdown(&mut self, hw: &mut impl Hw, clocks: &mut FwClocks) {
+        let v = self.read(hw, &HDMI_VID_CTL);
+        self.write(hw, &HDMI_VID_CTL, v | VC4_HD_VID_CTL_BLANKPIX);
+        crate::vc4_hdmi_phy::vc6_hdmi_phy_disable(self, hw);
+        let _ = clocks.set_min_rate(hw, self.pixel_bvb_clock, 0);
+        clocks.disable_unprepare(hw, self.pixel_bvb_clock);
+        self.pm_runtime_put(hw, clocks);
     }
 }
