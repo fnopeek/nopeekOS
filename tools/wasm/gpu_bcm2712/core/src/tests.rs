@@ -513,3 +513,65 @@ fn takeover_picks_the_framebuffer_size() {
     let m = vc4.takeover_modesets(&client, 1366, 768);
     assert_eq!(m.modesets[0].mode.as_ref().map(|m| (m.hdisplay, m.vdisplay)), Some((3840, 2160)));
 }
+
+/// Registers as the last write left them, every write kept.
+#[derive(Default)]
+struct Regs {
+    vals: std::collections::BTreeMap<(String, u32), u32>,
+    writes: Vec<(Block, u32, u32)>,
+}
+
+impl Hw for Regs {
+    /// A display that runs: every vblank arrives, and the HVS reads the
+    /// dlist its list pointer names.
+    fn read(&mut self, b: Block, off: u32) -> u32 {
+        use crate::regs::{PV_INTSTAT, SCALER6_DISPX_DL, SCALER6_DISPX_LPTRS};
+        if matches!(b, Block::Pv(_)) && off == PV_INTSTAT {
+            return u32::MAX;
+        }
+        for g in 0..2 {
+            if let Some(c) = SCALER6_DISPX_DL[g].iter().position(|&r| r == off) && b == Block::Hvs {
+                return self.read(b, SCALER6_DISPX_LPTRS[g][c]) & 0xfff;
+            }
+        }
+        *self.vals.get(&(format!("{b:?}"), off)).unwrap_or(&0)
+    }
+    fn write(&mut self, b: Block, off: u32, v: u32) {
+        self.vals.insert((format!("{b:?}"), off), v);
+        self.writes.push((b, off, v));
+    }
+    fn now_us(&mut self) -> u64 { 0 }
+    fn delay_us(&mut self, _: u64) {}
+    fn irq_arm(&mut self, _: Spi) -> u64 { 0 }
+    fn irq_wait(&mut self, _: Spi, _: u64, _: u32) -> bool { true }
+    fn fw_clock(&mut self, _: u32, _: ClockOp) -> Option<u32> { Some(0) }
+    fn fw_display_done(&mut self) -> bool { true }
+}
+
+/// A page flip after run G's fbdev commit touches only the HVS: a new
+/// dlist with the other buffer's address, no pixel valve, no HDMI.
+#[test]
+fn page_flip_rewrites_only_the_dlist() {
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    let client = vc4.fbdev_probe(&mut hw);
+    let mut hw = Strict::new(segment(&evs, "drm_fb_helper_set_par", 0));
+    assert_eq!(vc4.fbdev_commit(&mut hw, &client, &run_g_fb()), 0);
+
+    let mut other = run_g_fb();
+    other.dma_addr[0] = 0x5000_0000;
+    let mut regs = Regs::default();
+    assert_eq!(vc4.page_flip(&mut regs, &other), 0);
+    // The pixel valve only acknowledges its vblank interrupt.
+    let foreign = |&&(b, off, _): &&(Block, u32, u32)| match b {
+        Block::Hvs | Block::DispIntr => false,
+        Block::Pv(_) => off != crate::regs::PV_INTSTAT,
+        _ => true,
+    };
+    assert!(!regs.writes.iter().any(|w| foreign(&w)), "{:?}", regs.writes.iter().find(|w| foreign(w)));
+    assert!(regs.writes.iter().any(|&(b, _, v)| b == Block::Hvs && v == 0x5000_0000),
+        "no dlist word holds the new address");
+    assert_eq!(vc4.kms.planes[0].base.fb.map(|f| f.dma_addr[0]), Some(0x5000_0000));
+}

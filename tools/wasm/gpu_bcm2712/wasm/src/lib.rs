@@ -6,10 +6,13 @@
 //! monitor's EDID, the kernel's framebuffer moved to that size. A
 //! hotplug probes again and follows.
 //!
-//! The compositor keeps drawing on the CPU into that framebuffer
-//! (`gpudev_ready` without the copy capability): the module only scans it
-//! out. The driver itself is `gpu_bcm2712_core`, replayed against a Linux
-//! run on the host.
+//! The compositor keeps composing on the CPU into its two shadow buffers;
+//! the module presents them (`CAP_COPY | CAP_PRESENT`): a copy of a whole
+//! shadow to the framebuffer becomes a page flip to that shadow, a copy of
+//! part of the shadow on screen is already shown (the kernel wrote the
+//! rectangle back from its caches before handing the copy over). The
+//! driver itself is `gpu_bcm2712_core`, replayed against a Linux run on
+//! the host.
 
 #![no_std]
 
@@ -51,6 +54,12 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 const GPUDEV_VERSION: i32 = 2;
 const JOB_BYTES: usize = 32;
 
+/// `npk_gpudev_ready` capabilities (`kernel/src/gpu/gpudev.rs`).
+const CAP_COPY: i32 = 1;
+const CAP_PRESENT: i32 = 16;
+/// `OP_COPY_RECT`: `a0` source, `a1` target buffer, `a2..a5` x, y, w, h.
+const OP_COPY_RECT: u32 = 1;
+
 /// The mask bits of `npk_sys::wait`.
 const WAIT_IRQ: i32 = 2;
 const WAIT_GPU_CMD: i32 = 64;
@@ -63,7 +72,9 @@ fn printk(b: &[u8]) {
     npk_sys::log(&v);
 }
 
-/// The kernel's framebuffer, gpudev buffer 0.
+/// A kernel buffer: gpudev buffer 0 is the framebuffer, 1 and 2 the
+/// compositor's shadows.
+#[derive(Clone, Copy)]
 struct KernelFb {
     phys: u64,
     pitch: u32,
@@ -73,8 +84,12 @@ struct KernelFb {
 }
 
 fn kernel_fb() -> Option<KernelFb> {
+    buffer(0)
+}
+
+fn buffer(id: i32) -> Option<KernelFb> {
     let mut o = [0u8; 40];
-    if npk_sys::gpudev_bo_info(0, &mut o) < 0 {
+    if npk_sys::gpudev_bo_info(id, &mut o) < 0 {
         return None;
     }
     let u32_at = |i: usize| u32::from_le_bytes([o[i], o[i + 1], o[i + 2], o[i + 3]]);
@@ -129,11 +144,91 @@ pub extern "C" fn _start() {
     let client = vc4.fbdev_probe(&mut hw);
     show(&mut vc4, &mut hw, &client, &mut kfb);
 
-    // The compositor stays on the CPU, drawing into the framebuffer the
-    // HVS shows now.
-    npk_sys::gpudev_ready(0);
+    // The shadows, if the HVS can show them, are presented by flips;
+    // otherwise the compositor copies into the framebuffer on the CPU.
+    let shadows = bind_shadows(&kfb);
+    let caps = if shadows.is_some() { CAP_COPY | CAP_PRESENT } else { 0 };
+    if npk_sys::gpudev_ready(caps) < 0 {
+        Line::new().s("the kernel did not take the presenting, the compositor copies on the CPU").say();
+    }
 
-    serve(&mut vc4, &mut hw, &mut kfb);
+    let mut p = Present { shown: 0, shadows: shadows.unwrap_or([kfb, kfb]) };
+    serve(&mut vc4, &mut hw, &mut kfb, &mut p);
+}
+
+/// Buffers 0..=2 bound at their bus addresses (identity through the
+/// display's IOMMU, which the kernel granted them), when both shadows
+/// are one contiguous run of pages each, of the framebuffer's size and
+/// format: the HVS scans a buffer from one base address.
+fn bind_shadows(kfb: &KernelFb) -> Option<[KernelFb; 2]> {
+    let a = buffer(1)?;
+    let b = buffer(2)?;
+    for (id, s) in [(1, &a), (2, &b)] {
+        if (s.width, s.height, s.pitch, s.format) != (kfb.width, kfb.height, kfb.pitch, kfb.format)
+            || !contiguous(id, s)
+        {
+            Line::new().s("a shadow buffer the HVS cannot scan, the compositor copies on the CPU").say();
+            return None;
+        }
+    }
+    for (id, f) in [(0, kfb), (1, &a), (2, &b)] {
+        if npk_sys::gpudev_bo_bound(id, f.phys as i64) < 0 {
+            return None;
+        }
+    }
+    Some([a, b])
+}
+
+/// Whether buffer `id`'s pages follow each other from `f.phys` on.
+fn contiguous(id: i32, f: &KernelFb) -> bool {
+    let pages = (f.pitch as u64 * f.height as u64).div_ceil(4096) as i32;
+    let mut list = [0u64; 512];
+    let mut first = 0;
+    while first < pages {
+        let n = npk_sys::gpudev_bo_pages(id, first, &mut list);
+        if n <= 0 {
+            return false;
+        }
+        for (i, &p) in list[..n as usize].iter().enumerate() {
+            if p != f.phys + (first as u64 + i as u64) * 4096 {
+                return false;
+            }
+        }
+        first += n;
+    }
+    true
+}
+
+/// Which buffer the HVS shows: 0 the framebuffer, 1 or 2 a shadow.
+struct Present {
+    shown: u32,
+    shadows: [KernelFb; 2],
+}
+
+impl Present {
+    /// One `OP_COPY_RECT`. A copy of a whole shadow to the framebuffer
+    /// flips to that shadow; a copy out of the shadow on screen is there
+    /// already. Anything else the kernel does on the CPU (-1).
+    fn copy(&mut self, vc4: &mut Vc4, hw: &mut PiHw, a: &[u32; 6]) -> i32 {
+        let (src, dst) = (a[0], a[1]);
+        if dst != 0 || !(1..=2).contains(&src) {
+            return -1;
+        }
+        if src == self.shown {
+            return 0;
+        }
+        let s = self.shadows[src as usize - 1];
+        if (a[2], a[3], a[4], a[5]) != (0, 0, s.width, s.height) {
+            return -1;
+        }
+        let ret = vc4.page_flip(hw, &framebuffer(&s));
+        if ret != 0 {
+            Line::new().s("page flip failed ").dec(ret.unsigned_abs() as u64).say();
+            return -1;
+        }
+        self.shown = src;
+        0
+    }
 }
 
 /// The fbdev client's choice on screen: the monitor's own mode (Linux's
@@ -192,7 +287,7 @@ fn framebuffer(kfb: &KernelFb) -> drm_framebuffer {
 
 /// The interrupts and the timed work of a running display, and the GPU
 /// service's queue, which stays empty without the copy capability.
-fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb) {
+fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
     let mut jobs = [0u8; JOB_BYTES * 16];
     let mut seen = hw.arm_all();
     loop {
@@ -221,6 +316,8 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb) {
             if vc4.aon_intr_handler(hw) != 0 {
                 let client = vc4.fbdev_probe(hw);
                 show(vc4, hw, &client, kfb);
+                // The commit showed the framebuffer again.
+                p.shown = 0;
             }
         }
         seen = hw.arm_all();
@@ -239,9 +336,14 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb) {
             return;
         }
         for j in 0..n as usize {
-            let seq = i32::from_le_bytes([jobs[j * JOB_BYTES], jobs[j * JOB_BYTES + 1],
-                jobs[j * JOB_BYTES + 2], jobs[j * JOB_BYTES + 3]]);
-            npk_sys::gpudev_complete(seq, -1);
+            let job = &jobs[j * JOB_BYTES..(j + 1) * JOB_BYTES];
+            let word = |i: usize| u32::from_le_bytes([job[i * 4], job[i * 4 + 1], job[i * 4 + 2], job[i * 4 + 3]]);
+            let mut a = [0u32; 6];
+            for (k, v) in a.iter_mut().enumerate() {
+                *v = word(2 + k);
+            }
+            let status = if word(1) == OP_COPY_RECT { p.copy(vc4, hw, &a) } else { -1 };
+            npk_sys::gpudev_complete(word(0) as i32, status);
         }
     }
 }

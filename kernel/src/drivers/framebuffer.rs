@@ -155,14 +155,8 @@ fn compositor_active() -> bool {
 }
 
 /// Wait for a GPU copy of the front buffer; false if it failed.
-#[cfg(target_arch = "x86_64")]
 fn gpu_copy_done() -> bool {
     crate::gpu::gpudev::wait_framebuffer()
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn gpu_copy_done() -> bool {
-    true
 }
 
 /// The console's `FbInfo`, outside `CONSOLE`: rendering runs under
@@ -549,7 +543,6 @@ fn scroll(console: &mut FbConsole) {
 /// (`gpudev::present_by_module`), a rectangle of the front buffer copied
 /// through it: the display would not show a CPU write. False when there is
 /// no such module, or the copy was not taken.
-#[cfg(target_arch = "x86_64")]
 fn present(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) -> bool {
     if !crate::gpu::gpudev::present_by_module() {
         return false;
@@ -563,10 +556,6 @@ fn present(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) -> bool {
     src != 0 && crate::gpu::gpu_blit_rect(src, info.pitch, crate::gpu::fb_gpu_addr(), info.pitch, x, y, w, h)
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-fn present(_: &FbConsole, _: u32, _: u32, _: u32, _: u32) -> bool {
-    false
-}
 
 /// Blit a rectangular region from front buffer to MMIO framebuffer.
 pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {

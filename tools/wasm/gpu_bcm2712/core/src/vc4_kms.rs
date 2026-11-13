@@ -137,6 +137,33 @@ impl Vc4 {
         self.client_commit(hw, client, fb, true)
     }
 
+    /// `drm_atomic_helper_page_flip` on every CRTC that shows a
+    /// framebuffer: the primary plane keeps its source and position and
+    /// shows `fb`, a buffer of the same size and format; the commit
+    /// returns once the flip is done (a blocking commit). No modeset.
+    pub fn page_flip(&mut self, hw: &mut impl Hw, fb: &drm_framebuffer) -> i32 {
+        let mut s = self.atomic_state_duplicate();
+        let mut any = false;
+        for (c, p) in s.planes.iter_mut().enumerate() {
+            if !s.crtcs[c].active || p.base.fb.is_none() {
+                continue;
+            }
+            // drm_atomic_set_fb_for_plane
+            p.base.fb = Some(*fb);
+            any = true;
+        }
+        if !any {
+            self.atomic_state_put(hw, s);
+            return -drm_core::linux::EINVAL;
+        }
+        let ret = self.atomic_check(&mut s);
+        if ret != 0 {
+            self.atomic_state_put(hw, s);
+            return ret;
+        }
+        self.atomic_commit(hw, s)
+    }
+
     fn client_commit(&mut self, hw: &mut impl Hw, client: &drm_client_dev, fb: &drm_framebuffer, whole_fb: bool)
         -> i32
     {

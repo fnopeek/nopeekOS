@@ -1471,6 +1471,19 @@ fn submit_copy(src_gpu: u64, src_pitch: u32, dst_gpu: u64, dst_pitch: u32,
         let (Some(src), Some(dst)) = (find(src_gpu, src_pitch), find(dst_gpu, dst_pitch)) else {
             return false;
         };
+        // The display reads memory past the CPU caches: the rectangle's
+        // lines of the source go to memory first.
+        #[cfg(target_arch = "aarch64")]
+        if let Some(bo) = st.bos.get(&src).filter(|b| b.addr != 0) {
+            let row = |r: u32| bo.addr + r as u64 * src_pitch as u64 + x as u64 * 4;
+            if x == 0 && w * 4 == src_pitch {
+                crate::mm::clflush_range(row(y), h as u64 * src_pitch as u64);
+            } else {
+                for r in y..y + h {
+                    crate::mm::clflush_range(row(r), w as u64 * 4);
+                }
+            }
+        }
         queue_job(&mut st, OP_COPY_RECT, [src, dst, x, y, w, h], None, &[src, dst])
     };
     COPY_DEADLINE.store(deadline(), Ordering::Release);
