@@ -218,7 +218,7 @@ unsafe fn split_1gb_to_2mb(pdpt: u64, index: usize) -> Result<u64, PagingError> 
     unsafe {
         let entry = read_entry(pdpt, index);
         let huge_base = entry_addr(entry); // 1GB-aligned physical base
-        let base_flags = (entry & 0xFF) | PageFlags::HUGE.bits();
+        let base_flags = (entry & (0xFF | PageFlags::NO_EXECUTE.bits())) | PageFlags::HUGE.bits();
 
         let pdt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
         zero_frame(pdt);
@@ -247,7 +247,7 @@ unsafe fn split_2mb_to_4kb(pdt: u64, index: usize) -> Result<u64, PagingError> {
         let entry = read_entry(pdt, index);
         let huge_base = entry_addr(entry);
         // bit 7 at PT level is PAT, not HUGE — strip it from base flags
-        let base_flags = entry & 0x67;
+        let base_flags = entry & (0x67 | PageFlags::NO_EXECUTE.bits());
 
         let pt = memory::allocate_frame().ok_or(PagingError::FrameAllocationFailed)?;
         zero_frame(pt);
@@ -345,10 +345,12 @@ pub fn init() {
         // and `p` < 16 indexes the PML4's lower entries.
         unsafe {
             core::ptr::write_bytes(pdpt_phys as *mut u8, 0, 4096);
-            // 0x83 = Present (bit 0) + Writable (bit 1) + Huge (bit 7).
+            // Present + Writable + Huge, not executable: the direct map is
+            // data (Linux `_PAGE_NX` on it, `CONFIG_STRICT_KERNEL_RWX`).
             let pdpt = pdpt_phys as *mut u64;
+            let flags = PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::HUGE | PageFlags::NO_EXECUTE;
             for i in 0..(gigs - p * 512).min(512) {
-                *pdpt.add(i as usize) = ((p * 512 + i) << 30) | 0x83;
+                *pdpt.add(i as usize) = ((p * 512 + i) << 30) | flags.bits();
             }
             // PML4[p] → PDPT, Present + Writable.
             *(pml4_phys as *mut u64).add(p as usize) = pdpt_phys | 0x03;
@@ -366,7 +368,47 @@ pub fn init() {
         core::arch::asm!("mov cr3, {}", in(reg) pml4_phys);
     }
 
+    protect_kernel_image();
     crate::kdebug!("[npk] Paging: {} GB identity-mapped, NX enabled (own PML4 @ {:#x})", end >> 30, pml4_phys);
+}
+
+unsafe extern "C" {
+    static __image_base: u8;
+    static __text_start: u8;
+    static __text_end: u8;
+    static __rodata_end: u8;
+    static __heap_start: u8;
+}
+
+/// The kernel image's own permissions in the identity map (Linux
+/// `mark_rodata_ro`, `CONFIG_STRICT_KERNEL_RWX`): text read-only and
+/// executable, rodata read-only, everything else (headers, data,
+/// relocations, bss and the boot stack) writable and not executable.
+fn protect_kernel_image() {
+    // SAFETY: linker symbols; only their addresses are taken.
+    let (base, text, text_end, ro_end, end) = unsafe {
+        (
+            &__image_base as *const u8 as u64,
+            &__text_start as *const u8 as u64,
+            &__text_end as *const u8 as u64,
+            &__rodata_end as *const u8 as u64,
+            &__heap_start as *const u8 as u64,
+        )
+    };
+    let mut a = base & !0xFFF;
+    while a < end {
+        let flags = if (text..text_end).contains(&a) {
+            PageFlags::PRESENT
+        } else if (text_end..ro_end).contains(&a) {
+            PageFlags::PRESENT | PageFlags::NO_EXECUTE
+        } else {
+            PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE
+        };
+        if let Err(e) = map_page(a, a, flags) {
+            crate::kprintln!("[npk] Paging: kernel image page {:#x}: {:?}", a, e);
+        }
+        a += 4096;
+    }
 }
 
 /// Read one byte at a physical address (identity-mapped, so physical equals

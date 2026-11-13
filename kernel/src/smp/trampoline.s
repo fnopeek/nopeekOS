@@ -3,25 +3,26 @@
  * Copied to physical 0x8000 at runtime. APs begin here in 16-bit real mode
  * after INIT-SIPI-SIPI from BSP.
  *
- * Layout at BOOT (0x8000):
+ * Layout at BOOT (0x8000), a page mapped read-only and executable:
  *   0x000  Code: 16-bit → 32-bit → 64-bit
  *   0x0D0  GDT32 (null + code32 + data32)
  *   0x0E8  GDT32 pointer
- *   0x0F0  GDT64 pointer (filled by BSP)
- *   0x100  CR3 (u32, filled by BSP)
- *   0x108  Stack top (u64, filled by BSP)
- *   0x110  Rust entry (u64, filled by BSP)
- *   0x118  Core ID (u32, filled by BSP)
- *   0x11C  AP running flag (u32, set to 1 by AP)
- *   0x120  IDTR (10 bytes, filled by BSP)
  *
- * Code budget: 0x0D0 = 208 bytes (was 0x0C0 = 192). The +16-byte bump
- * landed in v0.85.5 to make room for the AVX bring-up sequence
- * (XSETBV with XCR0 = x87|SSE|AVX). All offsets shifted in lockstep
- * with kernel/src/smp/mod.rs OFF_* constants.
+ * Layout at DATA (0x9000), a page mapped writable and not executable,
+ * filled by the BSP (offsets match `OFF_*` in smp/x86.rs):
+ *   0x00  CR3 (u32)
+ *   0x08  Stack top (u64)
+ *   0x10  Rust entry (u64)
+ *   0x18  Core ID (u32)
+ *   0x1C  AP running flag (u32, set to 1 by AP)
+ *   0x20  IDTR (10 bytes)
+ *   0x30  GDT64 pointer (10 bytes)
+ *
+ * Code budget: 0x0D0 = 208 bytes.
  */
 
 .set BOOT, 0x8000
+.set DATA, 0x9000
 
 .section .smp_trampoline, "a"
 
@@ -68,7 +69,7 @@ smp_pm32:
     mov %eax, %cr4
 
     /* Load CR3 from data area */
-    mov (BOOT + 0x100), %eax
+    mov (DATA + 0x00), %eax
     mov %eax, %cr3
 
     /* Enable Long Mode (EFER.LME) + NX (EFER.NXE) */
@@ -83,8 +84,8 @@ smp_pm32:
     or $0x80000022, %eax    /* PG | MP | NE */
     mov %eax, %cr0
 
-    /* Load 64-bit GDT (written by BSP at BOOT+0xF0) */
-    lgdt (BOOT + 0xF0)
+    /* Load 64-bit GDT (written by BSP at DATA+0x30) */
+    lgdt (DATA + 0x30)
 
     /* Far jump to 64-bit */
     .byte 0xEA
@@ -103,13 +104,13 @@ smp_lm64:
     mov %ax, %gs
 
     /* Base register for data area access */
-    mov $BOOT, %rbx
+    mov $DATA, %rbx
 
     /* Load BSP's IDT */
-    lidt 0x120(%rbx)
+    lidt 0x20(%rbx)
 
     /* Per-AP state */
-    mov 0x108(%rbx), %rsp      /* stack top */
+    mov 0x08(%rbx), %rsp       /* stack top */
 
     /* Initialize FPU/SSE state (CR0/CR4 already set in 32-bit mode). */
     fninit
@@ -123,9 +124,9 @@ smp_lm64:
     mov $7, %eax
     xsetbv
 
-    mov 0x110(%rbx), %rax      /* Rust entry point */
-    mov 0x118(%rbx), %edi      /* core ID (arg 1, System V ABI) */
-    movl $1, 0x11C(%rbx)       /* signal BSP: AP is alive */
+    mov 0x10(%rbx), %rax       /* Rust entry point */
+    mov 0x18(%rbx), %edi       /* core ID (arg 1, System V ABI) */
+    movl $1, 0x1C(%rbx)        /* signal BSP: AP is alive */
 
     /* Enter Rust via CALL (not JMP) so rsp ends up at the alignment
      * the System V ABI expects at function entry: rsp % 16 == 8
@@ -154,24 +155,5 @@ smp_lm64:
 .org smp_trampoline_start + 0xE8
     .word 23                        /* limit: 3*8 - 1 */
     .long BOOT + 0xD0              /* base at runtime address */
-
-/* GDT64 pointer (offset 0xF0, filled by BSP from SGDT) */
-.org smp_trampoline_start + 0xF0
-    .word 0
-    .long 0
-    .long 0                         /* 12 bytes reserved */
-
-/* Data area (offset 0x100, filled by BSP) */
-.org smp_trampoline_start + 0x100
-    .long 0                         /* +0x100: CR3 */
-    .long 0                         /* +0x104: reserved */
-    .quad 0                         /* +0x108: stack top */
-    .quad 0                         /* +0x110: entry point */
-    .long 0                         /* +0x118: core ID */
-    .long 0                         /* +0x11C: AP running */
-
-/* IDTR (offset 0x120, filled by BSP from SIDT) */
-.org smp_trampoline_start + 0x120
-    .space 16, 0                    /* 10 bytes IDTR + 6 padding */
 
 smp_trampoline_end:
