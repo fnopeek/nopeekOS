@@ -10,6 +10,7 @@ use crate::drm_edid::drm_do_probe_ddc_edid;
 use crate::hw::{Block, ClockOp, HdmiReg, Hw, Spi};
 use crate::i2c_brcmstb::{Bsc, Ddc};
 use crate::irq_brcmstb_l2::{L2Intc, L2_2711_LVL_INTC_INIT, L2_LVL_INTC_INIT};
+use crate::vc4_hvs::{Gen, Hvs};
 use std::collections::VecDeque;
 
 const LOG: &str = include_str!("../testdata/linux_vc4_d0.log");
@@ -198,11 +199,11 @@ impl Hw for Strict {
 }
 
 /// The three L2 controllers and both DDC controllers as Linux probes
-/// them, in Linux's order.
-fn probe_bsc(evs: &[Ev]) -> Bsc {
+/// them, in Linux's order: aon_intr, disp_intr, bsc_irq.
+fn probe_l2(evs: &[Ev]) -> (L2Intc, L2Intc, Bsc) {
     let mut hw = Strict::new(segment(evs, "brcmstb_l2_driver_init", 0));
-    let _aon = L2Intc::probe(&mut hw, Block::AonIntr, &L2_2711_LVL_INTC_INIT);
-    let _disp = L2Intc::probe(&mut hw, Block::DispIntr, &L2_2711_LVL_INTC_INIT);
+    let aon = L2Intc::probe(&mut hw, Block::AonIntr, &L2_2711_LVL_INTC_INIT);
+    let disp = L2Intc::probe(&mut hw, Block::DispIntr, &L2_2711_LVL_INTC_INIT);
     let bsc_irq = L2Intc::probe(&mut hw, Block::BscIrq, &L2_LVL_INTC_INIT);
     hw.done();
     let mut bsc = Bsc::new(bsc_irq);
@@ -210,7 +211,25 @@ fn probe_bsc(evs: &[Ev]) -> Bsc {
     bsc.probe(&mut hw, 0, 1, 97500);
     bsc.probe(&mut hw, 1, 2, 97500);
     hw.done();
-    bsc
+    (aon, disp, bsc)
+}
+
+fn probe_bsc(evs: &[Ev]) -> Bsc {
+    probe_l2(evs).2
+}
+
+#[test]
+fn hvs_bind_is_linux() {
+    let evs = parse(LOG);
+    let (_aon, mut disp, _bsc) = probe_l2(&evs);
+    let mut hw = Strict::new(segment(&evs, "vc4_hvs_bind", 0));
+    let hvs = Hvs::bind(&mut hw, &mut disp).expect("bind");
+    hw.done();
+    assert_eq!(hvs.generation, Gen::Gen6D);
+    assert_eq!(hvs.dlist_mem_size, 0x1000);
+    assert_eq!(hvs.max_core_rate, 0x363d7f80);
+    assert!(hvs.vc5_hdmi_enable_hdmi_20 && hvs.vc5_hdmi_enable_4096by2160);
+    assert_eq!((hvs.mitchell_netravali_filter.start, hvs.nearest_neighbour_filter.start), (32, 43));
 }
 
 #[test]

@@ -55,6 +55,8 @@ pub struct L2Intc {
     masked: u32,
     /// `IRQD_IRQ_DISABLED` per line; cleared by `request_irq`.
     disabled: u32,
+    /// `desc->depth`: nested disables per line.
+    depth: [u8; 32],
 }
 
 impl L2Intc {
@@ -65,7 +67,7 @@ impl L2Intc {
         if let Some(clear) = params.cpu_clear {
             hw.write(block, clear, 0xffff_ffff);
         }
-        L2Intc { block, params, masked: !0, disabled: !0 }
+        L2Intc { block, params, masked: !0, disabled: !0, depth: [1; 32] }
     }
 
     /// `irq_gc_mask_disable_reg` (its `mask_cache` is read only on suspend).
@@ -110,12 +112,41 @@ impl L2Intc {
     /// `request_irq` → `irq_startup` → `irq_enable`: the chip has no
     /// `irq_enable`, so the line is unmasked.
     pub fn request_irq(&mut self, hw: &mut impl Hw, line: u32) {
+        self.depth[line as usize] = 0;
         self.disabled &= !(1 << line);
         self.unmask_irq(hw, line);
     }
 
+    /// `request_irq` with `IRQF_NO_AUTOEN`: the line stays disabled and
+    /// masked until `enable_irq`.
+    pub fn request_irq_noautoen(&mut self, line: u32) {
+        self.depth[line as usize] = 1;
+    }
+
+    /// `enable_irq`: the last enable of a nested disable unmasks.
+    pub fn enable_irq(&mut self, hw: &mut impl Hw, line: u32) {
+        let d = &mut self.depth[line as usize];
+        if *d == 0 { return; }
+        *d -= 1;
+        if *d == 0 {
+            self.disabled &= !(1 << line);
+            self.unmask_irq(hw, line);
+        }
+    }
+
+    /// `disable_irq`: lazy (the chip has no `irq_disable`), the line is
+    /// only marked; if it fires, the level flow masks it.
+    pub fn disable_irq(&mut self, line: u32) {
+        let d = &mut self.depth[line as usize];
+        *d += 1;
+        if *d == 1 {
+            self.disabled |= 1 << line;
+        }
+    }
+
     /// `free_irq` → `irq_shutdown` → `irq_disable` → `mask_irq`.
     pub fn free_irq(&mut self, hw: &mut impl Hw, line: u32) {
+        self.depth[line as usize] = 1;
         self.disabled |= 1 << line;
         self.mask_irq(hw, line);
     }
