@@ -16,25 +16,21 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering
 use spin::Mutex;
 
 const TRAMPOLINE_BASE: usize = 0x8000;
-/// The trampoline's data page, apart from its code so the code page is
-/// never writable and the data page never executable.
-const TRAMPOLINE_DATA: usize = 0x9000;
 // 2 MB per AP, matching the BSP boot stack (linker.ld). Native intents run
 // on the AP stack, not a fiber, and `update` runs the deep OTA chain there
 // (TLS record buffer, storage::put, B-tree splits with 4 KB node buffers).
 // There is no guard page, so the size is the only safety margin.
 const AP_STACK_SIZE: usize = 2 * 1024 * 1024;
 
-// Offsets in the data page (must match trampoline.s).
-const OFF_CR3: usize = 0x00;
-const OFF_STACK: usize = 0x08;
-const OFF_ENTRY: usize = 0x10;
-const OFF_CORE_ID: usize = 0x18;
-const OFF_RUNNING: usize = 0x1C;
-const OFF_IDTR: usize = 0x20;
-const OFF_GDT64: usize = 0x30;
-/// The bytes the data page uses.
-const DATA_SIZE: usize = 0x40;
+// Data area offsets within trampoline (must match trampoline.s).
+// The AVX bring-up (XSETBV) sits before the GDT block.
+const OFF_GDT64: usize = 0xF0;
+const OFF_CR3: usize = 0x100;
+const OFF_STACK: usize = 0x108;
+const OFF_ENTRY: usize = 0x110;
+const OFF_CORE_ID: usize = 0x118;
+const OFF_RUNNING: usize = 0x11C;
+const OFF_IDTR: usize = 0x120;
 
 /// Counter incremented by each AP when it reaches Rust entry
 static AP_STARTED: AtomicUsize = AtomicUsize::new(0);
@@ -210,23 +206,19 @@ static AP_BOOT_GDT: [u64; 3] = [
     0x00CF_9300_0000_FFFF,
 ];
 
-/// Copy the trampoline's code to 0x8000, map that page read-only and
-/// executable (as Linux `set_memory_x` on the real-mode text), and fill the
-/// data page at 0x9000 (CR3, GDT, IDT, entry), which stays writable and not
-/// executable.
+/// Copy trampoline to 0x8000 and fill in shared data (CR3, GDT, IDT, entry)
 fn setup_trampoline() {
     // SAFETY: runs on the boot core before any AP is started, so nothing else
-    // touches the trampoline pages. 0x8000 and 0x9000 are below 1 MiB,
-    // identity-mapped and reserved for this; every write below stays inside
-    // the code image or the data page's `DATA_SIZE` bytes (offsets from
-    // `trampoline.s`), and the asm only reads CR3 and the IDTR.
+    // touches the trampoline page. 0x8000 is below 1 MiB, identity-mapped and
+    // reserved for this; every write below stays inside the trampoline image
+    // (offsets from `trampoline.s`), and the asm only reads CR3 and the IDTR.
     unsafe {
         let start = &smp_trampoline_start as *const u8;
         let end = &smp_trampoline_end as *const u8;
         let size = end as usize - start as usize;
 
+        // SAFETY: 0x8000 is in first 1MB (reserved, identity-mapped, not used by kernel)
         core::ptr::copy_nonoverlapping(start, TRAMPOLINE_BASE as *mut u8, size);
-        core::ptr::write_bytes(TRAMPOLINE_DATA as *mut u8, 0, DATA_SIZE);
 
         // CR3 — BSP's page table root. The trampoline loads it in 32-bit
         // protected mode (only a 32-bit mov), so the PML4 must lie below
@@ -235,7 +227,7 @@ fn setup_trampoline() {
         let cr3: u64;
         core::arch::asm!("mov {}, cr3", out(reg) cr3);
         assert!(cr3 < 0x1_0000_0000, "PML4 above 4GB — AP trampoline cannot load it");
-        *((TRAMPOLINE_DATA + OFF_CR3) as *mut u32) = cr3 as u32;
+        *((TRAMPOLINE_BASE + OFF_CR3) as *mut u32) = cr3 as u32;
 
         // GDT64 pointer. The trampoline loads it with a 32-bit lgdt, so it
         // must lie below 4 GiB: the image does, the heap (where each core's
@@ -244,27 +236,23 @@ fn setup_trampoline() {
         let gdt_base = core::ptr::addr_of!(AP_BOOT_GDT) as u64;
         let gdt_limit = (core::mem::size_of::<[u64; 3]>() - 1) as u16;
         assert!(gdt_base < 0x1_0000_0000, "GDT above 4GB — AP trampoline cannot load it");
-        *((TRAMPOLINE_DATA + OFF_GDT64) as *mut u16) = gdt_limit;
+        *((TRAMPOLINE_BASE + OFF_GDT64) as *mut u16) = gdt_limit;
         // The base follows the 2-byte limit (descriptor-table register
         // layout), so it is only 2-byte aligned.
-        core::ptr::write_unaligned((TRAMPOLINE_DATA + OFF_GDT64 + 2) as *mut u32, gdt_base as u32);
+        core::ptr::write_unaligned((TRAMPOLINE_BASE + OFF_GDT64 + 2) as *mut u32, gdt_base as u32);
 
         // IDTR — copy BSP's IDT register (SIDT stores 10 bytes)
         let mut idtr = [0u8; 10];
         core::arch::asm!("sidt [{}]", in(reg) idtr.as_mut_ptr());
         core::ptr::copy_nonoverlapping(
             idtr.as_ptr(),
-            (TRAMPOLINE_DATA + OFF_IDTR) as *mut u8,
+            (TRAMPOLINE_BASE + OFF_IDTR) as *mut u8,
             10,
         );
 
         // Rust AP entry point
-        *((TRAMPOLINE_DATA + OFF_ENTRY) as *mut u64) =
+        *((TRAMPOLINE_BASE + OFF_ENTRY) as *mut u64) =
             smp_ap_entry as *const () as u64;
-    }
-    if let Err(e) = crate::paging::map_page(TRAMPOLINE_BASE as u64, TRAMPOLINE_BASE as u64,
-                                            crate::paging::PageFlags::PRESENT) {
-        kprintln!("[npk] smp: trampoline page not executable: {:?}", e);
     }
 }
 
@@ -279,9 +267,9 @@ fn boot_ap(lapic: Mmio, target_apic_id: u32, core_id: u32) -> bool {
     // SAFETY: trampoline at 0x8000 is set up, no AP is using it yet
     //         (we boot APs sequentially)
     unsafe {
-        *((TRAMPOLINE_DATA + OFF_STACK) as *mut u64) = stack_top;
-        *((TRAMPOLINE_DATA + OFF_CORE_ID) as *mut u32) = core_id;
-        *((TRAMPOLINE_DATA + OFF_RUNNING) as *mut u32) = 0;
+        *((TRAMPOLINE_BASE + OFF_STACK) as *mut u64) = stack_top;
+        *((TRAMPOLINE_BASE + OFF_CORE_ID) as *mut u32) = core_id;
+        *((TRAMPOLINE_BASE + OFF_RUNNING) as *mut u32) = 0;
 
         // Ensure all writes are visible before SIPI
         core::sync::atomic::fence(Ordering::SeqCst);

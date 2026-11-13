@@ -19,12 +19,10 @@ SECTIONS {
     }
 
     .rodata ALIGN(4K) : {
-        __text_end = .;
         *(.rodata .rodata.*)
     }
 
     .data ALIGN(4K) : {
-        __rodata_end = .;
         *(.data .data.*)
     }
 

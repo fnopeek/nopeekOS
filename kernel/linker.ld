@@ -31,17 +31,14 @@ SECTIONS {
     . = 0x10001000;
 
     .text ALIGN(4K) : {
-        __text_start = .;
         *(.text .text.*)
     }
 
     .rodata ALIGN(4K) : {
-        __text_end = .;
         *(.rodata .rodata.*)
     }
 
     .data ALIGN(4K) : {
-        __rodata_end = .;
         *(.data .data.*)
     }
 
