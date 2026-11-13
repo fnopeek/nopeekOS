@@ -9,6 +9,8 @@ use crate::linux::field_get;
 use crate::regs::*;
 use crate::vc4_hdmi::Vc4Hdmi;
 use crate::vc4_hvs::Hvs;
+use drm_core::drm_modes::{drm_display_mode, drm_mode_status};
+use drm_core::regs::{DRM_MODE_FLAG_DBLSCAN, MODE_NO_DBLESCAN, MODE_OK};
 
 /// `struct vc4_pv_data` with its `struct vc4_crtc_data`.
 pub struct PvData {
@@ -96,4 +98,14 @@ impl Vc4Crtc {
         self.disable(hw, hvs, hdmi, bsc, clocks, channel);
         Ok(())
     }
+}
+
+/// `vc4_crtc_mode_valid`.
+pub fn vc4_crtc_mode_valid(mode: &drm_display_mode) -> drm_mode_status {
+    // Do not allow doublescan modes from user space
+    if mode.flags & DRM_MODE_FLAG_DBLSCAN != 0 {
+        return MODE_NO_DBLESCAN as i32;
+    }
+
+    MODE_OK as i32
 }

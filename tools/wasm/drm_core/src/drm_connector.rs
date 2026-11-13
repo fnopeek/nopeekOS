@@ -146,6 +146,9 @@ pub const MAX_ELD_BYTES: usize = 128;
 /// `struct drm_connector`, the EDID members.
 pub struct drm_connector {
     pub name: String,
+    /// `index`: the connector's place in the device's list, by which a
+    /// driver finds its own state.
+    pub index: u32,
     /// `DRM_MODE_CONNECTOR_*`.
     pub connector_type: u32,
     pub force: drm_connector_force,
@@ -189,6 +192,7 @@ impl drm_connector {
     pub fn new(name: String, connector_type: u32) -> Self {
         drm_connector {
             name,
+            index: 0,
             connector_type,
             force: drm_connector_force::DRM_FORCE_UNSPECIFIED,
             display_info: drm_display_info::default(),

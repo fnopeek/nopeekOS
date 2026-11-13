@@ -342,3 +342,56 @@ fn bind_and_takeover_are_linux() {
     hw.done();
     assert!(!vc4.hdmi[0].scdc_enabled && !vc4.hdmi[1].scdc_enabled);
 }
+
+/// Linux's `# kms:` lines for one connector, up to the next connector or
+/// modeset.
+fn kms_connector_lines(name: &str) -> Vec<String> {
+    let head = format!("# kms: connector {} ", name);
+    let mut out = Vec::new();
+    let mut on = false;
+    for l in LOG.lines() {
+        if l.starts_with("# kms: connector ") || l.starts_with("# kms: modeset ") {
+            on = l.starts_with(&head);
+        }
+        if on {
+            out.push(l.to_string());
+        }
+    }
+    out
+}
+
+/// The fbdev client's probe after the bind: both connectors detected
+/// (hotplug, EDID over DDC 0, runtime PM around it), the modes validated
+/// by vc4, and Linux's choice. The port's CRTC `n` is pixel valve `n`,
+/// Linux's CRTC `n + 2` (its writeback CRTCs come first).
+#[test]
+fn fbdev_probe_is_linux() {
+    use drm_core::kms_dump::{connector_lines, modeset_lines};
+
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    hw.done();
+
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    let client = vc4.fbdev_probe(&mut hw);
+    hw.done();
+
+    for (i, c) in vc4.connectors.iter().enumerate() {
+        assert_eq!(connector_lines(c), kms_connector_lines(&c.name), "connector {i}");
+    }
+    let linux: Vec<String> = LOG.lines()
+        .filter(|l| l.starts_with("# kms: modeset crtc 2 ") || l.starts_with("# kms: modeset crtc 3 ")
+            || l.starts_with("# kms: chosen "))
+        .map(String::from).collect();
+    let port: Vec<String> = modeset_lines(&client, &vc4.connectors).into_iter()
+        .map(|l| match l.strip_prefix("# kms: modeset crtc ") {
+            Some(rest) => {
+                let (n, tail) = rest.split_once(' ').unwrap();
+                format!("# kms: modeset crtc {} {}", n.parse::<u32>().unwrap() + 2, tail)
+            }
+            None => l,
+        })
+        .collect();
+    assert_eq!(port, linux);
+}

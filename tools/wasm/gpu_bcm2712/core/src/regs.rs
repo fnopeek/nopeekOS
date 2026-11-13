@@ -75,6 +75,7 @@ pub const VC4_HDMI_RAM_PACKET_ENABLE: u32 = 0x10000;
 // vc4_hdmi.c
 pub const HDMI_14_MAX_TMDS_CLK: u32 = 0x1443fd00;
 pub const BCM2712_MAX_PIXEL_CLOCK: u32 = 0x23c34600;
+pub const BCM2712_UNSUPPORTED_ODD_H_TIMINGS: u32 = 0x0;
 pub const VC5_HDMI_SCRAMBLER_CTL_ENABLE: u32 = 0x1;
 
 // vc4_hdmi_phy.c
@@ -85,6 +86,8 @@ pub const HDMI_TX_PHY_POWERUP_CTL: HdmiField = [(HdmiReg::Phy, 0x4), (HdmiReg::P
 pub const HDMI_TX_PHY_PLL_POST_KDIV: HdmiField = [(HdmiReg::Phy, 0x28), (HdmiReg::Phy, 0x28)];
 pub const VC4_HD_VID_CTL_CLRRGB: u32 = 0x800000;
 pub const VC4_HD_VID_CTL_BLANKPIX: u32 = 0x40000;
+pub const HDMI_HOTPLUG: HdmiField = [(HdmiReg::Hdmi, 0x1c8), (HdmiReg::Hdmi, 0x1c8)];
+pub const VC4_HDMI_HOTPLUG_CONNECTED: u32 = 0x1;
 
 // The pixel valves (vc4_regs.h)
 pub const PV_CONTROL: u32 = 0x0;

@@ -15,6 +15,17 @@ use crate::i2c_brcmstb::{Bsc, Ddc};
 use crate::irq_brcmstb_l2::L2Intc;
 use crate::linux::EINVAL;
 use crate::regs::*;
+use crate::vc4_hvs::Hvs;
+use alloc::format;
+use core::sync::atomic::{AtomicBool, Ordering};
+use drm_core::drm_connector::{drm_connector, drm_connector_status};
+use drm_core::drm_edid::drm_edid_connector_add_modes;
+use drm_core::drm_hdmi_helper::drm_hdmi_compute_mode_clock;
+use drm_core::drm_hdmi_state_helper::{drm_atomic_helper_connector_hdmi_hotplug, drm_hdmi_connector_mode_valid};
+use drm_core::drm_modes::{drm_display_mode, drm_mode_status, drm_mode_vrefresh};
+use drm_core::regs::{
+    DRM_MODE_CONNECTOR_HDMIA, DRM_MODE_FLAG_DBLCLK, HDMI_COLORSPACE_RGB, MODE_CLOCK_HIGH, MODE_H_ILLEGAL, MODE_OK,
+};
 
 /// The `aon_intr` lines of `hpd-connected` and `hpd-removed` per port
 /// (`interrupt-names` of the HDMI nodes).
@@ -134,6 +145,57 @@ impl Vc4Hdmi {
         Ok(h)
     }
 
+    /// `vc5_hdmi_hp_detect`.
+    fn hp_detect(&self, hw: &mut impl Hw) -> bool {
+        self.read(hw, &HDMI_HOTPLUG) & VC4_HDMI_HOTPLUG_CONNECTED != 0
+    }
+
+    /// `vc4_hdmi_connector_detect_ctx`, without `force_hotplug` (no
+    /// module parameters) and without an HPD GPIO (the BCM2712 nodes have
+    /// none).
+    pub fn connector_detect_ctx(&mut self, hw: &mut impl Hw, connector: &mut drm_connector, bsc: &mut Bsc,
+        clocks: &mut FwClocks) -> drm_connector_status
+    {
+        if let Err(ret) = self.pm_runtime_resume_and_get(hw, clocks) {
+            drm_core::linux::Line::new()
+                .s(&format!("Failed to retain HDMI power domain: {}", ret))
+                .say();
+            return drm_connector_status::connector_status_unknown;
+        }
+
+        let status = if self.hp_detect(hw) {
+            drm_connector_status::connector_status_connected
+        } else {
+            drm_connector_status::connector_status_disconnected
+        };
+
+        self.handle_hotplug(hw, connector, bsc, status);
+        self.pm_runtime_put(hw, clocks);
+
+        status
+    }
+
+    /// `vc4_hdmi_handle_hotplug`.
+    fn handle_hotplug(&mut self, hw: &mut impl Hw, connector: &mut drm_connector, bsc: &mut Bsc,
+        status: drm_connector_status)
+    {
+        let mut ddc = Ddc { bsc, n: self.port as usize };
+        drm_atomic_helper_connector_hdmi_hotplug(connector, status, &mut |m| ddc.i2c_transfer(hw, m));
+
+        if status != drm_connector_status::connector_status_connected {
+            return;
+        }
+
+        self.reset_link();
+    }
+
+    /// `vc4_hdmi_reset_link`: a connector whose state has no CRTC needs
+    /// nothing. The atomic state is not ported, so no connector state has
+    /// a CRTC.
+    fn reset_link(&mut self) -> i32 {
+        0
+    }
+
     /// `vc4_hdmi_disable_scrambling`: once, also at boot (`scdc_enabled`
     /// starts true, since the firmware's state is unknown).
     fn disable_scrambling(&mut self, hw: &mut impl Hw, bsc: &mut Bsc) {
@@ -170,4 +232,83 @@ impl Vc4Hdmi {
         clocks.disable_unprepare(hw, self.pixel_bvb_clock);
         self.pm_runtime_put(hw, clocks);
     }
+}
+
+/// `vc4_hdmi_connector_init`: the connector `drmm_connector_hdmi_init`
+/// sets up for port `port`, the device's connector `port`.
+pub fn vc4_hdmi_connector_init(port: u8) -> drm_connector {
+    let mut connector = drm_connector::new(format!("HDMI-A-{}", port + 1), DRM_MODE_CONNECTOR_HDMIA);
+    connector.index = port as u32;
+    connector.rpi_downstream = true;
+    connector.interlace_allowed = true;
+    connector.doublescan_allowed = false;
+    connector.stereo_allowed = true;
+    connector
+}
+
+/// `vc4_hdmi_connector_get_modes`.
+pub fn vc4_hdmi_connector_get_modes(connector: &mut drm_connector, hvs: &Hvs) -> i32 {
+    let ret = drm_edid_connector_add_modes(connector);
+
+    // drm_warn_once
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !hvs.vc5_hdmi_enable_hdmi_20
+        && connector.probed_modes.iter().any(|m| vc4_hdmi_mode_needs_scrambling(m, 8, HDMI_COLORSPACE_RGB))
+        && !WARNED.swap(true, Ordering::Relaxed)
+    {
+        drm_core::linux::Line::new()
+            .s("The core clock cannot reach frequencies high enough to support 4k @ 60Hz.")
+            .say();
+        drm_core::linux::Line::new()
+            .s("Please change your config.txt file to add hdmi_enable_4kp60.")
+            .say();
+    }
+
+    ret
+}
+
+/// `vc4_hdmi_mode_needs_scrambling`.
+pub fn vc4_hdmi_mode_needs_scrambling(mode: &drm_display_mode, bpc: u32, fmt: u32) -> bool {
+    drm_hdmi_compute_mode_clock(mode, bpc, fmt) > HDMI_14_MAX_TMDS_CLK as u64
+}
+
+/// `vc4_hdmi_connector_clock_valid`, the connector's
+/// `tmds_char_rate_valid`.
+pub fn vc4_hdmi_connector_clock_valid(hvs: &Hvs, mode: &drm_display_mode, clock: u64) -> drm_mode_status {
+    if clock > BCM2712_MAX_PIXEL_CLOCK as u64 {
+        return MODE_CLOCK_HIGH as i32;
+    }
+
+    if !hvs.vc5_hdmi_enable_hdmi_20 && clock > HDMI_14_MAX_TMDS_CLK as u64 {
+        return MODE_CLOCK_HIGH as i32;
+    }
+
+    // 4096x2160@60 is not reliable without overclocking core
+    if !hvs.vc5_hdmi_enable_4096by2160 && mode.hdisplay > 3840 && mode.vdisplay >= 2160
+        && drm_mode_vrefresh(mode) >= 50
+    {
+        return MODE_CLOCK_HIGH as i32;
+    }
+
+    MODE_OK as i32
+}
+
+/// The connector's `mode_valid`: `drm_hdmi_connector_mode_valid` with
+/// vc4's TMDS check.
+pub fn vc4_hdmi_connector_mode_valid(connector: &drm_connector, mode: &drm_display_mode, hvs: &Hvs)
+    -> drm_mode_status
+{
+    drm_hdmi_connector_mode_valid(connector, mode, Some(&mut |_, m, clock| vc4_hdmi_connector_clock_valid(hvs, m, clock)))
+}
+
+/// `vc4_hdmi_encoder_mode_valid`.
+pub fn vc4_hdmi_encoder_mode_valid(mode: &drm_display_mode) -> drm_mode_status {
+    if BCM2712_UNSUPPORTED_ODD_H_TIMINGS != 0
+        && mode.flags & DRM_MODE_FLAG_DBLCLK == 0
+        && (mode.hdisplay % 2 != 0 || mode.hsync_start % 2 != 0 || mode.hsync_end % 2 != 0 || mode.htotal % 2 != 0)
+    {
+        return MODE_H_ILLEGAL as i32;
+    }
+
+    MODE_OK as i32
 }
