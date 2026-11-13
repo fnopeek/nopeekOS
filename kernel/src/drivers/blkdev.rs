@@ -302,6 +302,21 @@ pub fn read_disk_sector(lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), Blk
     }
 }
 
+/// Sectors `lba..` of the whole disk into `out`, a whole number of
+/// sectors: one transfer where the backend takes several, else one sector
+/// after the other.
+pub fn read_disk_sectors(lba: u64, out: &mut [u8]) -> Result<(), BlkError> {
+    if out.len() % SECTOR_SIZE != 0 { return Err(BlkError::OutOfRange); }
+    if let Backend::Sd(id) = backend() {
+        return crate::drivers::mmc_sd::read(id, lba, out).map_err(sd_err);
+    }
+    for (i, chunk) in out.chunks_exact_mut(SECTOR_SIZE).enumerate() {
+        let sec: &mut [u8; SECTOR_SIZE] = chunk.try_into().map_err(|_| BlkError::OutOfRange)?;
+        read_disk_sector(lba + i as u64, sec)?;
+    }
+    Ok(())
+}
+
 /// Write sector `lba` of the whole disk, before any partition.
 pub fn write_disk_sector(lba: u64, buf: &[u8; SECTOR_SIZE]) -> Result<(), BlkError> {
     let actual = lba;

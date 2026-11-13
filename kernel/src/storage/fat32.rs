@@ -831,6 +831,44 @@ pub fn read_small_file(esp_start: u64, name: &str, buf: &mut [u8]) -> Option<usi
     Some(len)
 }
 
+/// Clusters read in one transfer at most (1 MiB with 4 KiB clusters).
+const READ_RUN_CLUSTERS: u32 = 256;
+
+/// The whole of root-directory file `name` (8.3), or None when it is
+/// missing, a directory, or its chain is broken. Consecutive clusters are
+/// read in one transfer.
+pub fn read_root_file(esp_start: u64, name: &str) -> Option<alloc::vec::Vec<u8>> {
+    let short = short_name(name)?;
+    let fs = Fat32Reader::from_esp(esp_start).ok()?;
+    let e = fs.scan_dir(fs.root_cluster, &short).ok()?.found?;
+    if e.attr & ATTR_DIR != 0 { return None; }
+    let size = e.size as usize;
+    let cluster_bytes = fs.spc as usize * SECTOR_SIZE;
+    let mut out = alloc::vec![0u8; size.div_ceil(cluster_bytes) * cluster_bytes];
+    let mut done = 0usize;
+    let mut cl = Some(e.first_cluster);
+    while done < size {
+        let first = cl?;
+        if !fs.valid_cluster(first) { return None; }
+        // The run of clusters that follow each other on the disk.
+        let mut run = 1u32;
+        let mut next = fs.fat_next(first).ok()?;
+        while run < READ_RUN_CLUSTERS && next == Some(first + run)
+            && done + (run as usize) * cluster_bytes < size
+        {
+            run += 1;
+            next = fs.fat_next(first + run - 1).ok()?;
+        }
+        let bytes = run as usize * cluster_bytes;
+        let sector = fs.part_start + fs.cluster_to_sector(first) as u64;
+        blkdev::read_disk_sectors(sector, &mut out[done..done + bytes]).ok()?;
+        done += bytes;
+        cl = next;
+    }
+    out.truncate(size);
+    Some(out)
+}
+
 /// Create or replace `/EFI/NOPEEK/<name>` with `data` (at most
 /// `SMALL_FILE_MAX` bytes), creating `/EFI/NOPEEK` when missing. An existing
 /// file is overwritten in its own cluster. Never writes into or allocates

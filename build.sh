@@ -919,10 +919,49 @@ framebuffer_ignore_alpha=1
 enable_uart=1
 uart_2ndstage=1
 CFG
+    # The standard installation the USB installer bundles on a PC (the
+    # modules of modules.list but the x86 drivers, fonts, icons, root CAs,
+    # wallpapers), packed for storage/seed.rs: NPKSEED1, then per file
+    # path_len u16, path, len u32, bytes. `~/` is the user's home.
+    python3 - "$PROJECT_DIR" "$dir/SEED.BIN" <<'PYEOF' || { err "SEED.BIN failed"; exit 1; }
+import os, struct, sys
+root, out = sys.argv[1], sys.argv[2]
+rel = os.path.join(root, "release")
+files = []
+for line in open(os.path.join(root, "kernel/src/install_data/modules.list")):
+    name, _, note = line.partition("#")
+    name = name.strip()
+    if not name or note.strip() == "x86_64":
+        continue
+    files.append(("sys/wasm/" + name, os.path.join(rel, "modules", name + ".wasm")))
+    files.append(("sys/wasm/" + name + ".version", os.path.join(rel, "modules", name + ".version")))
+for src, dst in [("inter-variable.ttf", "sys/fonts/inter-variable"),
+                 ("ibm-plex-mono.ttf", "sys/fonts/ibm-plex-mono"),
+                 ("LICENSE-Inter.txt", "sys/fonts/LICENSE-Inter"),
+                 ("LICENSE-IBM-Plex.txt", "sys/fonts/LICENSE-IBM-Plex"),
+                 ("phosphor.atlas", "sys/icons/phosphor")]:
+    files.append((dst, os.path.join(rel, "assets", src)))
+certs = os.path.join(rel, "assets", "certs")
+for n in sorted(os.listdir(certs)):
+    if n.endswith(".der"):
+        files.append(("sys/certs/" + n, os.path.join(certs, n)))
+wps = os.path.join(root, "assets", "wallpapers")
+for n in sorted(os.listdir(wps)):
+    files.append(("~/pictures/wallpapers/" + n, os.path.join(wps, n)))
+with open(out, "wb") as f:
+    f.write(b"NPKSEED1")
+    for path, src in files:
+        data = open(src, "rb").read()
+        if path.endswith(".version"):
+            data = data.strip()
+        p = path.encode()
+        f.write(struct.pack("<H", len(p)) + p + struct.pack("<I", len(data)) + data)
+print(f"[npk] SEED.BIN: {len(files)} files, {os.path.getsize(out) // (1024 * 1024)} MB")
+PYEOF
     # The PC's layout (storage/gpt.rs): GPT, the boot partition as ESP at
-    # 2048 (64 MiB, FAT32), then a small npkFS partition the kernel grows
-    # over the card on first boot.
-    local start=2048 esp=131072 npk=65536
+    # 2048 (256 MiB, FAT32: the firmware, the kernel, SEED.BIN), then a
+    # small npkFS partition the kernel grows over the card on first boot.
+    local start=2048 esp=524288 npk=65536
     local sectors=$((start + esp + npk + 34))
     rm -f "$PI_SD_IMG"
     truncate -s $((sectors * 512)) "$PI_SD_IMG"
@@ -942,6 +981,7 @@ PARTS
     for o in overlay_map.dtb vc4-kms-v3d-pi5.dtbo; do
         [ -f "$PI_FW/boot/overlays/$o" ] && mcopy -i "$part" "$PI_FW/boot/overlays/$o" ::overlays/
     done
+    mcopy -i "$part" "$dir/SEED.BIN" ::SEED.BIN
     # The kernel last: the clusters after it stay free as the run an
     # update rewrites it into (fat32.rs MIN_KERNEL_RESERVED).
     mcopy -i "$part" "$ARM_IMG" ::nopeek.img

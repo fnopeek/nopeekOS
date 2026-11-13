@@ -213,6 +213,8 @@ fn identity() {
             kprintln!("[npk] Setup failed. System halted.");
             crate::arch::halt_forever()
         }
+        // The SD card's standard installation, now that the disk key exists.
+        crate::storage::seed::seed_from_esp();
     } else {
         crate::setup::text_unlock();
     }
