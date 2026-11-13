@@ -77,6 +77,12 @@ pub fn use_sd(id: u32) {
     SD_DISK.store(id, Ordering::Release);
 }
 
+/// The SD card the system runs from, if it runs from one.
+pub fn system_sd() -> Option<u32> {
+    let sd = SD_DISK.load(Ordering::Acquire);
+    (sd != NO_SD).then_some(sd)
+}
+
 #[derive(Clone, Copy)]
 enum Backend {
     None,

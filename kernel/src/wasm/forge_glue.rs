@@ -170,11 +170,9 @@ host_imports! {
     // serial lives inside the same SERIAL mutex but skips the
     // terminal-side work, so it is safe to call from a worker core
     // regardless of shade state.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_log_serial(ptr: i32, len: i32);
 
     // npk_fetch(name_ptr, name_len, buf_ptr, buf_max) -> bytes, -(needed + 2) or -1
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_fetch(name_ptr: i32, name_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_http_request(url_ptr, url_len, buf_ptr, buf_max) -> bytes or -1
@@ -326,7 +324,6 @@ host_imports! {
     mem fn npk_http_last_error(buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_store(name_ptr, name_len, data_ptr, data_len) -> 0 or -1
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_store(name_ptr: i32, name_len: i32, data_ptr: i32, data_len: i32) -> i32;
 
     // ── npk_file_* ─────────────────────────────
@@ -337,27 +334,21 @@ host_imports! {
     // module; all of them close when it ends, a writer unpublished.
 
     // npk_file_open(name_ptr, name_len) -> handle or -1
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_file_open(name_ptr: i32, name_len: i32) -> i32;
     // npk_file_read(handle, offset, buf_ptr, buf_max) -> bytes, 0 at the end, or -1.
     // A stream read: what fits, a short count is no error.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_file_read(handle: i32, offset: i64, buf_ptr: i32, buf_max: i32) -> i32;
     // npk_file_size(handle) -> file length (a writer: bytes so far) or -1
     ctx fn npk_file_size(handle: i32) -> i64;
     // npk_file_create(name_ptr, name_len) -> handle or -1. The file appears
     // at npk_file_close, whole; until then the name keeps its old content.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_file_create(name_ptr: i32, name_len: i32) -> i32;
     // npk_file_write(handle, data_ptr, len) -> len or -1. Appends; checks the
     // system reserve and the private-area quota on every call.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_file_write(handle: i32, data_ptr: i32, len: i32) -> i32;
     // npk_file_close(handle) -> 0 or -1. Publishes a writer's file.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_file_close(handle: i32) -> i32;
     // npk_file_abort(handle) -> 0 or -1. Closes without publishing.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_file_abort(handle: i32) -> i32;
 
     // ── Keyvault ───────────────────────────────
@@ -417,7 +408,6 @@ host_imports! {
     // `.system/config` blob, not a fetchable `sys/config/name` object —
     // so they can't derive their home/documents path on their own.
     // READ-gated (it reveals the user identity from config).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_home_dir(buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_fs_usage() -> i64
@@ -456,7 +446,6 @@ host_imports! {
     // npk_clipboard_set(ptr, len) -> i32
     // Copy `len` UTF-8 bytes from guest memory into the clipboard as Text.
     // Returns bytes stored, or -1 (denied / not focused / bad ptr).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_clipboard_set(ptr: i32, len: i32) -> i32;
 
     // npk_clipboard_len() -> i32
@@ -480,7 +469,6 @@ host_imports! {
     // associations — open a file with its handler app. The kernel stays
     // generic: the ext→app mapping lives in the caller (loft + config),
     // never here.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_open(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32) -> i32;
 
     // npk_launch(app_ptr, app_len, arg_ptr, arg_len) -> 0 / -1
@@ -514,7 +502,6 @@ host_imports! {
     //   0  → dialog opened
     //   -1 → cap denied / no window / bad args / picker module missing
     //   -2 → this app already has a dialog open
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_pick(mode: i32, start_ptr: i32, start_len: i32, suggest_ptr: i32, suggest_len: i32, tag: i32) -> i32;
 
     // npk_pick_result(path_ptr, path_len) -> 0 / -1
@@ -525,7 +512,6 @@ host_imports! {
     // kernel itself registered as a picker in `npk_pick`. An ordinary app
     // calling this finds no session and gets -1, so it cannot forge a
     // "the user chose this file" claim for another app.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_pick_result(path_ptr: i32, path_len: i32) -> i32;
 
     // npk_window_set_close_guard(on) -> 0 / -1
@@ -535,14 +521,12 @@ host_imports! {
     //
     // Not a veto: asking again, or staying silent for a few seconds, closes
     // it anyway. Apps that don't opt in are unaffected.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_set_close_guard(on: i32) -> i32;
 
     // npk_window_close_cancel() -> 0 / -1
     // Answer an outstanding `CloseRequest` with "stay open" (the user
     // cancelled the unsaved-work dialog): the next close gesture asks again,
     // and a power-off or restart waiting on this window is cancelled.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_close_cancel() -> i32;
 
     // npk_pick_mkdir(path_ptr, path_len) -> 0 / -1
@@ -558,7 +542,6 @@ host_imports! {
     // Authorised exactly like `npk_pick_result` — the caller's window
     // must be one the kernel itself registered as a picker. `sys/` stays
     // off limits regardless.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_pick_mkdir(path_ptr: i32, path_len: i32) -> i32;
 
     // npk_scene_commit(ptr, len) -> i32
@@ -574,7 +557,6 @@ host_imports! {
     //   -1 → version mismatch / cap denied / bad payload
     //   -2 → postcard decode failure
     //   -3 → shade couldn't allocate a window
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_scene_commit(ptr: i32, len: i32) -> i32;
 
     // npk_canvas_commit(canvas_id, ptr, len, width, height) -> 0 / -1
@@ -583,7 +565,6 @@ host_imports! {
     // already own a widget window (commit a scene first) — the bitmap is
     // keyed by (window_id, canvas_id); the render walker blits it
     // contain-fit into the canvas rect on the next rasterise.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_canvas_commit(canvas_id: i32, ptr: i32, len: i32, width: i32, height: i32) -> i32;
 
     // npk_canvas_frame(canvas_id, ptr, len, width, height, format) -> 0 / -1:
@@ -595,13 +576,11 @@ host_imports! {
     // The same escape hatch for a planar 4:2:0 frame — a video decoder
     // hands over its own planes and the blit converts, at destination
     // size and natively. CANVAS-gated exactly like the BGRA form.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_canvas_commit_yuv(canvas_id: i32, y_ptr: i32, u_ptr: i32, v_ptr: i32, ys: i32, cs: i32, width: i32, height: i32, flags: i32) -> i32;
 
     // npk_screen_size() -> (width << 16) | height in logical px, or 0 on
     // error. Allowed for RENDER or CAPTURE.
     // (Screens are well under 65535 px/side.)
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_screen_size() -> i32;
 
     // npk_capture_size() -> (width << 16) | height in physical px — the
@@ -643,14 +622,12 @@ host_imports! {
     // 1:1 (no contain-fit scaling) and map click coordinates into content
     // space. RENDER-gated. Returns -1 until the canvas has been laid out once
     // (commit a scene with the Canvas first, then query on the next frame).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_canvas_rect(canvas_id: i32, out_ptr: i32) -> i32;
 
     // npk_canvas_drop(canvas_id) -> 0 / -1
     // Free one canvas bitmap of the caller's window: an app that keeps many
     // (thumbnails) gives back the ones it no longer shows, instead of only
     // at window close. RENDER-gated; -1 if there was none.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_canvas_drop(canvas_id: i32) -> i32;
 
     // npk_drag_start(ptr, len) -> 0 / -1
@@ -658,7 +635,6 @@ host_imports! {
     // focused window while its left button is held, and only paths the
     // caller may read. The drop arrives as Event::Drop in a window of the
     // same module. RENDER-gated.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_drag_start(ptr: i32, len: i32) -> i32;
 
     // npk_cursor_pos() -> (x << 16) | y, or -1
@@ -670,7 +646,6 @@ host_imports! {
     //
     // Exists because `Event::Wheel` carries no position — an app that
     // wants to zoom towards the pointer has to ask for it.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_cursor_pos() -> i32;
 
     // npk_screen_flash() -> 0 or -1
@@ -679,7 +654,6 @@ host_imports! {
     // the finished frame for ~150 ms. The caller is expected to capture
     // first and flash after, so the wash can never be in the shot; the
     // compositor also draws it last, after every window.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_screen_flash() -> i32;
 
     // npk_capture_screen(buf_ptr, buf_max) -> bytes_written, -(needed + 2) or -1
@@ -696,7 +670,6 @@ host_imports! {
     //   0  → queue empty (app should sleep / yield)
     //   -1 → no widget window or cap denied
     //   -(needed + 2) → buffer too small; the event stays queued
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_event_poll(buf_ptr: i32, buf_max: i32) -> i32;
 
     // npk_list_modules(buf_ptr, buf_max) -> i32
@@ -729,7 +702,6 @@ host_imports! {
     //   0  → spawn accepted
     //   -1 → cap denied / bad args / module not found / compositor
     //        unavailable (no free terminal slot)
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_spawn_module(name_ptr: i32, name_len: i32) -> i32;
 
     // npk_run_intent(verb_ptr, verb_len) -> i32
@@ -743,7 +715,6 @@ host_imports! {
     // dedicated core picks it up via vm_core_serve and runs the
     // entire VM lifecycle on itself). Cooperative path (≤2 cores)
     // needs Core-0 BSP state for VMXON, so this rejects there.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_run_intent(verb_ptr: i32, verb_len: i32) -> i32;
 
     // npk_window_set_overlay(w, h) -> i32
@@ -757,7 +728,6 @@ host_imports! {
     // subsequent calls just reconfigure.
     //
     // Returns 0 on success, -1 on cap denied / compositor unavailable.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_set_overlay(w: i32, h: i32) -> i32;
 
     // npk_window_set_modal(modal: i32) -> i32
@@ -767,7 +737,6 @@ host_imports! {
     //
     // Returns 0 on success, -1 if the app has no widget window yet /
     // cap denied.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_set_modal(modal: i32) -> i32;
 
     // npk_window_set_overlay_at(x, y, w, h) -> i32
@@ -785,7 +754,6 @@ host_imports! {
     // closes it when a click lands outside it (transient overlays like the
     // volume slider). Off by default, so other overlays (loft, pick) are
     // unaffected. Returns 0 on success, -1 if no widget window / cap denied.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_set_light_dismiss(on: i32) -> i32;
 
     // npk_window_set_clipboard_sink() -> i32
@@ -794,7 +762,6 @@ host_imports! {
     // (copy/cut with no selection, paste into an empty single-line Input).
     // Used by file managers so the shortcuts drive file operations without
     // stealing text copy/paste from other apps. Returns 0 / -1.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_set_clipboard_sink() -> i32;
 
     // npk_window_set_panel(edge, behavior, w, h) -> i32
@@ -804,14 +771,12 @@ host_imports! {
     // compositor's panel config.
     //
     // Returns 0 on success, -1 on cap denied / bad args / no compositor.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_set_panel(edge: i32, behavior: i32, w: i32, h: i32) -> i32;
 
     // npk_bar_state(buf, max) -> i32
     // Live state for the panel: "HH:MM\n<ws_count>\n<ws_active>\n<title>"
     // (clock already timezone-adjusted). Returns bytes written,
     // -(needed + 2) for a short buffer; -1 on cap / args.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_bar_state(buf_ptr: i32, max: i32) -> i32;
 
     // npk_window_titles(buf, max) -> i32
@@ -822,13 +787,11 @@ host_imports! {
     // only for a SHELL caller. Panels and overlays are excluded. The panel
     // derives its window list from this; the kernel stays free of app names.
     // Bytes written, -(needed + 2) for a short buffer, -1 on cap.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_window_titles(buf_ptr: i32, max: i32) -> i32;
 
     // npk_window_activate(id) -> i32 — switch to the workspace of window
     // `id` (from npk_window_titles) and focus it. Panels and overlays are
     // refused. 0 / -1.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_window_activate(id: i32) -> i32;
 
     // npk_popup(popup, anchor, gap, ptr, len) -> i32 — open or update popup
@@ -838,11 +801,9 @@ host_imports! {
     // keyboard; its events go to the app's queue; a press outside or the
     // focus moving elsewhere closes it with Event::PopupDone.
     // 0 / -1.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_popup(popup: i32, anchor: i32, gap: i32, ptr: i32, len: i32) -> i32;
 
     // npk_popup_close(popup) -> i32 — close popup `popup`; no PopupDone.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_popup_close(popup: i32) -> i32;
 
     // Status items.
@@ -857,7 +818,6 @@ host_imports! {
     mem fn npk_status_clear(key_ptr: i32, key_len: i32) -> i32;
     // npk_status_list(buf, max) -> bytes / -(needed + 2) / -1; RENDER.
     // Format in `status::serialize`.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_status_list(buf_ptr: i32, max: i32) -> i32;
     // npk_audit_read(since_ms, buf, max) -> bytes / -(needed + 2) / -1:
     // the audit journal touched since uptime `since_ms`, the live holders
@@ -866,7 +826,6 @@ host_imports! {
     // npk_launch_at(app, arg, anchor) -> 0 / -1: `npk_launch`, and the
     // app's first overlay is placed next to node `anchor` of the caller's
     // window, light-dismissed. EXECUTE.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_launch_at(app_ptr: i32, app_len: i32, arg_ptr: i32, arg_len: i32, anchor: i32) -> i32;
 
     // ── AML battery driver (acpi.wasm) host functions, HARDWARE-gated ─────
@@ -931,7 +890,6 @@ host_imports! {
     // shuttles, converts and sum-mixes bytes.
 
     // npk_audio_open() -> slot index, or -1 if no slot free.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_audio_open() -> i32;
 
     // npk_audio_format(slot, rate, encoding, channels) -> 0 / -1.
@@ -946,16 +904,13 @@ host_imports! {
     ctx fn npk_audio_device_format(rate: i32, encoding: i32, channels: i32) -> i32;
 
     // npk_audio_close(slot) -> 0.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_audio_close(slot: i32) -> i32;
 
     // npk_audio_submit(slot, ptr, len) -> bytes accepted, or -1 on bad args.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_audio_submit(slot: i32, ptr: i32, len: i32) -> i32;
 
     // npk_audio_buffered(slot) -> bytes still in the ring, -1 if closed.
     // The honest play clock; see host_core for why the wall clock is not one.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_audio_buffered(slot: i32) -> i32;
 
     // npk_audio_poll_mix(ptr, max) -> bytes written (driver side).
@@ -990,24 +945,19 @@ host_imports! {
     mem fn npk_disk_bench(kind: i32, a: i64, b: i64, out_ptr: i32, out_len: i32) -> i32;
 
     // npk_audio_set_volume(pct) -> 0; npk_audio_get_volume() -> 0..=100.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_audio_set_volume(pct: i32) -> i32;
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_audio_get_volume() -> i32;
 
     // npk_workspace_switch(n) -> i32 — switch to workspace n (panel clicks).
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_workspace_switch(n: i32) -> i32;
 
     // npk_power() -> 0 / -1 — power off in order (panel power button): apps
     // are asked to close, the microVM saves, then npkFS syncs and the
     // machine goes off (`shutdown`). Returns at once; an app that stays open
     // cancels it.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_power() -> i32;
 
     // npk_restart() -> 0 / -1 — the same, ending in a restart.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_restart() -> i32;
 
     // npk_fs_list(prefix_ptr, prefix_len, out_ptr, out_cap, recursive) -> i32
@@ -1030,7 +980,6 @@ host_imports! {
     //
     // Returns bytes written, -(needed + 2) when the full listing does not
     // fit, -1 on cap / args.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_fs_list(prefix_ptr: i32, prefix_len: i32, out_ptr: i32, out_cap: i32, recursive: i32) -> i32;
 
     // npk_fs_stat(name_ptr, name_len, out_ptr) -> i32
@@ -1038,7 +987,6 @@ host_imports! {
     //   size_le_u64 (8) + is_dir_u8 (1) + mtime_le_u64 (8).
     // Returns 17 on success, 0 if no entry, -1 on cap / args.
     // mtime is UTC seconds since the Unix epoch — zero means unknown.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_fs_stat(name_ptr: i32, name_len: i32, out_ptr: i32) -> i32;
 
     // npk_config_get(key_ptr, key_len, buf_ptr, buf_max) -> len, 0 (unset),
@@ -1049,25 +997,21 @@ host_imports! {
     // npk_fs_delete(name_ptr, name_len) -> i32
     // Delete a single npkFS key. WRITE-gated. Returns 0 on success,
     // -1 on cap / not found / fs error.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_fs_delete(name_ptr: i32, name_len: i32) -> i32;
 
     // npk_fs_mkdir(name_ptr, name_len) -> 0 or -1
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_fs_mkdir(name_ptr: i32, name_len: i32) -> i32;
 
     // npk_fs_rename(old_ptr, old_len, new_ptr, new_len) -> i32
     // Move/rename a single npkFS key (files and whole directories).
     // Content-addressed, so even a directory move is O(1). WRITE-gated;
     // neither path may touch the module store. Returns 0 / -1.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_fs_rename(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
 
     // npk_fs_copy(old_ptr, old_len, new_ptr, new_len) -> i32
     // Copy a single npkFS key (files and whole directories). Shares the
     // source's content hash — no data duplication. WRITE-gated; neither
     // path may touch the module store. Returns 0 / -1.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_fs_copy(old_ptr: i32, old_len: i32, new_ptr: i32, new_len: i32) -> i32;
 
     // npk_close_widget() -> i32
@@ -1075,7 +1019,6 @@ host_imports! {
     // out of its `_start` loop by its own logic; this host fn only tears
     // down the window + scene + event queue. Returns 0 on success,
     // -1 if the app doesn't own a widget window.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_close_widget() -> i32;
 
     // npk_get_fb_size() -> (width << 32) | height, physical px
@@ -1083,7 +1026,6 @@ host_imports! {
 
     // npk_set_wallpaper(ptr, len, width, height) -> 0 or -1
     // Receives raw BGRA pixel data, sets it as the compositor wallpaper.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_set_wallpaper(ptr: i32, len: i32, width: i32, height: i32) -> i32;
 
     // npk_set_theme(ptr) -> 0 or -1
@@ -1095,7 +1037,6 @@ host_imports! {
     // Keys: 0=cores, 1=uptime_secs, 2=free_mb, 3=heap_used, 4=heap_total,
     //        5=tasks_spawned, 6=tasks_completed, 7=steals, 8=workers,
     //        9=has_mwait, 10=tsc_mhz, 11=queue_len(core N, pass core in high bits)
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_sys_info(key: i32) -> i64;
 
     // npk_sleep(ms) -> 0 — sleep for N milliseconds.
@@ -1112,7 +1053,6 @@ host_imports! {
     // npk_input_wait(timeout_ms) -> key or -1 — blocking wait with timeout
     // Spins on worker core checking per-app key buffer + TSC deadline.
     // Flushes busy-TSC and marks core idle during wait for accurate CPU usage.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_input_wait(timeout_ms: i32) -> i32;
 
     // npk_sci_arm(gpe) -> vector | -1 and npk_sci_service() -> mask: the
@@ -1146,11 +1086,9 @@ host_imports! {
     // npk_wait(mask, timeout_ms) -> fired bits (0 = timeout). Parks the
     // app's fiber until an input event arrives (mask bit 1) or the timeout
     // passes; timeout < 0 waits without one. See host_core::npk_wait.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_wait(mask: i32, timeout_ms: i32) -> i32;
 
     // npk_clear() — clear the app's terminal
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_clear();
 
     // ── Terminal Stream Sink (for remote debug mirroring) ─────────
@@ -1500,14 +1438,11 @@ host_imports! {
     mem fn npk_wifi_publish(buf_ptr: i32, len: i32) -> i32;
     // npk_wifi_status(buf_ptr, max) -> len / -(needed + 2) / -1 — read that
     // state (`link`).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_wifi_status(buf_ptr: i32, max: i32) -> i32;
     // npk_wifi_request(buf_ptr, len) -> 0 / -1 — scan/connect/disconnect/forget (`link`).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_wifi_request(buf_ptr: i32, len: i32) -> i32;
     // npk_net_info(buf_ptr, max) -> len / -(needed + 2) / -1 — interfaces +
     // IPv4 (RENDER).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_net_info(buf_ptr: i32, max: i32) -> i32;
 
     // npk_driver_report(buf_ptr, len) -> 0 / -1 — a bound driver publishes a
@@ -1593,11 +1528,9 @@ host_imports! {
     // For apps with EXTERNAL. npk_ext_volumes(buf, max) -> bytes,
     // -(needed + 2) or -1: per mounted volume label length u16, read-only
     // u8, size u64, free u64 (bytes), label.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_ext_volumes(buf_ptr: i32, buf_max: i32) -> i32;
     // npk_ext_eject(label_ptr, label_len) -> 0 or -1: the drive of that
     // volume finishes what runs, is flushed and stopped, and goes.
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_ext_eject(label_ptr: i32, label_len: i32) -> i32;
 
     // USB interfaces (CAMERA for video, MIC for audio). Errors: -1 gone,
@@ -1638,9 +1571,7 @@ host_imports! {
     // npk_device_list(kind, buf, max) -> bytes of records `handle u32,
     // flags u8 (1 active), id_len u8, name_len u8, 0, id, name`, or
     // -(needed + 2); npk_device_select(handle) -> 0 (SHELL).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_device_list(kind: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_device_select(handle: i32) -> i32;
 
     // Audio capture (docs/spec/AUDIO.md). Driver side, HARDWARE:
@@ -1690,8 +1621,6 @@ host_imports! {
     // value), -(needed + 2), or -1 (no RENDER, or a key apps cannot read).
     // npk_setting_set(key_ptr, key_len, val_ptr, val_len) -> 0, -1 (no
     // SETTINGS, or a key apps cannot write), -2 (value refused).
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_setting_get(key_ptr: i32, key_len: i32, buf_ptr: i32, buf_max: i32) -> i32;
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_setting_set(key_ptr: i32, key_len: i32, val_ptr: i32, val_len: i32) -> i32;
 }

@@ -146,7 +146,10 @@ fn kernel_items(wlan_shown: bool) -> Vec<Item> {
 
     // The camera's own light, in software: on while any stream is open,
     // whoever opened it.
+    #[cfg(target_arch = "x86_64")]
     let cams = crate::xhci::usbfn::camera_streams();
+    #[cfg(not(target_arch = "x86_64"))]
+    let cams = 0;
     if cams > 0 {
         v.push(kernel_item("camera", IconId::Camera, cams as i32, STATE_ATTENTION, "Camera on".into(), ""));
     }
@@ -178,10 +181,17 @@ fn kernel_items(wlan_shown: bool) -> Vec<Item> {
 }
 
 /// The driver's report, or a smart battery on the SMBus; `None` without one.
+#[cfg(target_arch = "x86_64")]
 pub fn battery_packed() -> Option<i32> {
     let cached = crate::battery::cached();
     if cached >= 0 { return Some(cached); }
     crate::battery::read().map(|b| ((b.status as i32) << 8) | b.percent as i32)
+}
+
+/// The Pi has no battery.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn battery_packed() -> Option<i32> {
+    None
 }
 
 /// The interface the traffic takes, unless the WLAN manager's item stands

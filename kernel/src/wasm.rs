@@ -367,7 +367,6 @@ pub fn set_debug_target(ip_packed: u32, port: u16) {
     DEBUG_TARGET.store(v, AtOrd::Release);
 }
 
-#[cfg(target_arch = "x86_64")]
 #[derive(Clone, Copy)]
 struct BenchCache {
     blake3_mbs: u64,
@@ -377,10 +376,8 @@ struct BenchCache {
     raw_read_mbs: u64,
 }
 
-#[cfg(target_arch = "x86_64")]
 static BENCH_CACHE: Mutex<Option<BenchCache>> = Mutex::new(None);
 
-#[cfg(target_arch = "x86_64")]
 fn ensure_bench() -> BenchCache {
     let mut lock = BENCH_CACHE.lock();
     if let Some(b) = *lock { return b; }
@@ -423,7 +420,6 @@ fn fsck_sys_info() -> i64 {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 fn bench_sys_info(key: i32) -> i64 {
     let b = ensure_bench();
     match key & 0xFF {
@@ -1452,7 +1448,6 @@ fn read_wasm_leb128_u32(buf: &[u8]) -> Option<(u32, usize)> {
 /// True if the calling WASM app owns the currently-focused widget window.
 /// The clipboard focus-gate: only the focused app may touch the clipboard,
 /// so a background app cannot snoop or poison it.
-#[cfg(target_arch = "x86_64")]
 fn app_is_focused(state: &HostState) -> bool {
     let wid = state.widget_window_id;
     wid != 0 && crate::shade::focused_widget_id() == Some(wid)

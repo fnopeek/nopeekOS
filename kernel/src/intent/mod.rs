@@ -19,7 +19,6 @@ pub mod system;
 mod update;
 pub mod install;
 mod python;
-#[cfg(target_arch = "x86_64")]
 pub(crate) mod wallpaper;
 mod wasm;
 
@@ -3307,7 +3306,6 @@ fn intent_cd(args: &str) {
 /// Re-export public API for main.rs
 #[cfg(target_arch = "x86_64")]
 pub use wallpaper::apply_startup_wallpaper;
-#[cfg(target_arch = "x86_64")]
 pub use fs::crypto_bench;
 
 /// Create initial directory structure and set cwd to home.

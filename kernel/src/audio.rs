@@ -606,6 +606,7 @@ pub fn display_audio_clear() {
 
 /// An Intel display device is on the bus (`i915_gfx_present`): only then
 /// can an audio driver expect the component to bind.
+#[cfg(target_arch = "x86_64")]
 pub fn intel_display_present() -> bool {
     [0x00u8, 0x80].iter().any(|&sub| {
         (0..).map_while(|i| crate::drivers::pci::find_by_class_n(0x03, sub, i)).any(|d| d.vendor_id == 0x8086)

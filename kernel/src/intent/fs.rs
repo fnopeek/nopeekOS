@@ -532,7 +532,6 @@ pub fn intent_disk_info() {
 /// Micro-bench BLAKE3 + AES-256-GCM on a 1 MB buffer to confirm the
 /// HW backends (AVX2 / AES-NI) fire at runtime. Returns
 /// `(blake3_mbs, aes_enc_mbs, aes_dec_mbs)`.
-#[cfg(target_arch = "x86_64")]
 pub fn crypto_bench() -> (u64, u64, u64) {
     use crate::time::{counter, counter_hz};
 
@@ -581,6 +580,18 @@ pub fn crypto_bench() -> (u64, u64, u64) {
     let aes_dec_mbs = (bytes * hz) / (dt * 1024 * 1024);
     let _ = (total, ok);
 
+    #[cfg(target_arch = "x86_64")]
+    aes_hw_bench(&key, &nonce, &buf, bytes, hz);
+
+    (blake3_mbs, aes_enc_mbs, aes_dec_mbs)
+}
+
+/// The AES-NI AES-GCM (`aead_hw`) against the crate's, then its speed.
+#[cfg(target_arch = "x86_64")]
+fn aes_hw_bench(key: &[u8; 32], nonce: &[u8; 12], buf: &[u8], bytes: u64, hz: u64) {
+    use crate::time::counter;
+    const ITERS: usize = 4;
+    let (key, nonce) = (*key, *nonce);
     // ── Custom AES-GCM (aead_hw.rs) ────────────────────────────────
     // Validate first: encrypt with both, compare ciphertext+tag.
     let ct_ref = crate::crypto::aead_encrypt_aes(&key, &nonce, &buf);
@@ -621,8 +632,6 @@ pub fn crypto_bench() -> (u64, u64, u64) {
         kprintln!("  Crypto[hw]: enc {} dec(in-place) {} MB/s | bytes match={}",
             hw_enc_mbs, hw_dec_mbs, bytes_match);
     }
-
-    (blake3_mbs, aes_enc_mbs, aes_dec_mbs)
 }
 
 #[cfg(target_arch = "x86_64")]

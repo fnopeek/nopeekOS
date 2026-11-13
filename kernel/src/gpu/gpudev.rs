@@ -812,7 +812,6 @@ pub fn module_gone(dev: DevId) {
     READY.store(false, Ordering::Release);
     mark_all_done();
     SCENES.store(false, Ordering::Release);
-    #[cfg(target_arch = "x86_64")]
     crate::audio::display_audio_clear();
     NATIVE.store(false, Ordering::Release);
     CURSOR.store(false, Ordering::Release);

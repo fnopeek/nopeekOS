@@ -31,7 +31,6 @@ pub use drivers::{pci, nvme, virtio_blk, virtio_net, intel_nic, rtl8153};
 #[cfg(target_arch = "x86_64")]
 pub use drivers::{usb_storage, keyboard, rtc, acpi, smbus, battery, ec, sci};
 pub use drivers::{blkdev, netdev};
-#[cfg(target_arch = "x86_64")]
 pub use drivers::wifi;
 
 mod mm;
@@ -45,7 +44,6 @@ pub use crypto::{tls, update_key};
 
 mod storage;
 pub use storage::gpt;
-#[cfg(target_arch = "x86_64")]
 pub use storage::ext;
 pub use storage::fat32;
 pub use storage::npkfs;
@@ -62,21 +60,16 @@ mod irq;
 #[cfg(target_arch = "x86_64")]
 mod ioapic;
 mod notify;
-#[cfg(target_arch = "x86_64")]
 mod status;
 mod input;
 mod net;
-#[cfg(target_arch = "x86_64")]
 mod audio;
-#[cfg(target_arch = "x86_64")]
 mod capture;
 #[cfg(target_arch = "x86_64")]
 mod camfeed;
-#[cfg(target_arch = "x86_64")]
 mod devices;
 mod intent;
 mod config;
-#[cfg(target_arch = "x86_64")]
 mod settings;
 mod shutdown;
 #[cfg(target_arch = "x86_64")]
