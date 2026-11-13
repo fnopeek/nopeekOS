@@ -2435,6 +2435,91 @@ fn hub_port_debounce_root(oper: Mmio, port: u32) -> Option<bool> {
     }
 }
 
+/// `xhci_shutdown` ran: the root ports are not polled any more.
+static SHUT_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// `xhci_pci_quirks`, the part `xhci_shutdown` and `xhci_pci_shutdown`
+/// act on, for the controller at `ctrl`.
+#[derive(Clone, Copy, Default)]
+struct ShutdownQuirks {
+    /// `XHCI_SPURIOUS_REBOOT`: switch the ports away from xHCI first.
+    spurious_reboot: bool,
+    /// `XHCI_SPURIOUS_WAKEUP`: reset, then D3hot.
+    spurious_wakeup: bool,
+    /// `XHCI_RESET_TO_DEFAULT`: reset, so the firmware finds no port in U3.
+    reset_to_default: bool,
+}
+
+fn shutdown_quirks(ctrl: CtrlId) -> ShutdownQuirks {
+    #[cfg(target_arch = "x86_64")]
+    if let CtrlId::Pci(a) = ctrl {
+        const PCI_VENDOR_ID_INTEL: u16 = 0x8086;
+        const PCI_DEVICE_ID_INTEL_PANTHERPOINT_XHCI: u16 = 0x1e31;
+        const PCI_DEVICE_ID_INTEL_LYNXPOINT_LP_XHCI: u16 = 0x9c31;
+        const PCI_DEVICE_ID_INTEL_WILDCATPOINT_LP_XHCI: u16 = 0x9cb1;
+        const PCI_DEVICE_ID_INTEL_TIGER_LAKE_PCH_XHCI: u16 = 0xa0ed;
+        const PCI_DEVICE_ID_INTEL_ALDER_LAKE_PCH_XHCI: u16 = 0x51ed;
+        const PCI_DEVICE_ID_INTEL_ALDER_LAKE_N_PCH_XHCI: u16 = 0x54ed;
+        let id = pci::read32(a, 0x00);
+        let (vendor, device) = (id as u16, (id >> 16) as u16);
+        let mut q = ShutdownQuirks::default();
+        if vendor == PCI_VENDOR_ID_INTEL {
+            if device == PCI_DEVICE_ID_INTEL_PANTHERPOINT_XHCI {
+                q.spurious_reboot = true;
+            }
+            if device == PCI_DEVICE_ID_INTEL_LYNXPOINT_LP_XHCI || device == PCI_DEVICE_ID_INTEL_WILDCATPOINT_LP_XHCI {
+                q.spurious_reboot = true;
+                q.spurious_wakeup = true;
+            }
+            if device == PCI_DEVICE_ID_INTEL_TIGER_LAKE_PCH_XHCI
+                || device == PCI_DEVICE_ID_INTEL_ALDER_LAKE_PCH_XHCI
+                || device == PCI_DEVICE_ID_INTEL_ALDER_LAKE_N_PCH_XHCI
+            {
+                q.reset_to_default = true;
+            }
+        }
+        return q;
+    }
+    let _ = ctrl;
+    ShutdownQuirks::default()
+}
+
+/// Before a restart or power-off, every controller as Linux leaves it
+/// (`usb_hcd_pci_shutdown` / `usb_hcd_platform_shutdown`): `xhci_shutdown`
+/// halts it (and resets it where a quirk asks); a PCI one then gives up
+/// MSI-X (`xhci_cleanup_msix`) and bus mastering (`pci_disable_device`).
+pub fn shutdown() {
+    SHUT_DOWN.store(true, Ordering::Release);
+    let mut g = CTRLS.lock();
+    for s in g.iter_mut() {
+        let q = shutdown_quirks(s.ctrl);
+        // `usb_disable_xhci_ports`: USB_INTEL_USB3_PSSEN and
+        // USB_INTEL_XUSB2PR to 0.
+        #[cfg(target_arch = "x86_64")]
+        if q.spurious_reboot && let CtrlId::Pci(a) = s.ctrl {
+            pci::write32(a, 0xD8, 0);
+            pci::write32(a, 0xD0, 0);
+        }
+        let mut w = Win(s.mmio);
+        if let Err(e) = xhci_core::halt(&mut w, &s.layout, &mut s.intr) {
+            kprintln!("[npk] xhci {}: halt at shutdown: {:?}", s.ctrl, e);
+        }
+        if (q.spurious_wakeup || q.reset_to_default)
+            && let Err(e) = xhci_core::reset(&mut w, &s.layout, xhci_core::XHCI_RESET_SHORT_USEC)
+        {
+            kprintln!("[npk] xhci {}: reset at shutdown: {:?}", s.ctrl, e);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if let CtrlId::Pci(a) = s.ctrl {
+            pci::msix_shutdown(a, &[0]);
+            pci::disable_device(a);
+            if q.spurious_wakeup {
+                pci::set_d3hot(a);
+            }
+        }
+    }
+}
+
 /// A hotplug task is queued or running.
 static HOTPLUG_RUNNING: AtomicBool = AtomicBool::new(false);
 
@@ -2450,6 +2535,7 @@ pub fn hotplug() {
 /// the caller must not wait with it. Events of other devices keep flowing:
 /// the waits drain the event ring themselves.
 fn kick_hotplug() {
+    if SHUT_DOWN.load(Ordering::Acquire) { return; }
     if !HOTPLUG.load(Ordering::Acquire) { return; }
     if HOTPLUG_RUNNING.swap(true, Ordering::AcqRel) { return; }
     crate::smp::scheduler::spawn("usb hotplug", hotplug_task, 0);

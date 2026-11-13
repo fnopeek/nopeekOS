@@ -630,34 +630,11 @@ pub fn program_msix(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) -> boo
 /// on LAPIC `dest_apic`. The entry is masked while address and data change,
 /// as Linux' `__pci_write_msi_msg`, so no message goes out half-written.
 pub fn msix_set_target(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) {
-    if read16(dev, 0x06) & (1 << 4) == 0 {
-        return;
-    }
-    let mut cap = read8(dev, 0x34) & 0xFC;
-    while cap != 0 {
-        if read8(dev, cap) == 0x11 {
-            break;
-        }
-        cap = read8(dev, cap + 1) & 0xFC;
-    }
+    let cap = find_cap(dev, 0x11);
     if cap == 0 {
         return;
     }
-    let table = read32(dev, cap + 4);
-    let bir = (table & 0x7) as u8;
-    let tbl_off = (table & !0x7) as u64;
-    let bar_offset = 0x10 + bir * 4;
-    let bar_lo = read32(dev, bar_offset);
-    let is_64 = bar_lo & 0x04 != 0;
-    let bar_base = if is_64 {
-        ((read32(dev, bar_offset + 4) as u64) << 32) | ((bar_lo as u64) & !0xF)
-    } else {
-        (bar_lo as u64) & !0xF
-    };
-    if bar_base == 0 {
-        return;
-    }
-    let entry_addr = bar_base + tbl_off + (entry as u64) * 16;
+    let Some(entry_addr) = msix_entry_addr(dev, cap, entry) else { return };
     let msg_addr_lo: u32 = 0xFEE0_0000 | ((dest_apic & 0xFF) << 12);
     // SAFETY: MSI-X table entry in an assigned BAR; `irq` only re-points
     // entries `program_msix` has programmed.
@@ -667,6 +644,65 @@ pub fn msix_set_target(dev: PciAddr, entry: u16, vector: u8, dest_apic: u32) {
     e.w32(0u64, msg_addr_lo);
     e.w32(8u64, vector as u32);
     e.w32(12u64, ctrl);
+}
+
+/// Physical address of MSI-X table `entry` of `dev`, whose MSI-X
+/// capability is at `cap`; None while the table's BAR is unassigned.
+fn msix_entry_addr(dev: PciAddr, cap: u8, entry: u16) -> Option<u64> {
+    let table = read32(dev, cap + 4);
+    let bir = (table & 0x7) as u8;
+    let tbl_off = (table & !0x7) as u64;
+    let bar_offset = 0x10 + bir * 4;
+    let bar_lo = read32(dev, bar_offset);
+    let bar_base = if bar_lo & 0x04 != 0 {
+        ((read32(dev, bar_offset + 4) as u64) << 32) | ((bar_lo as u64) & !0xF)
+    } else {
+        (bar_lo as u64) & !0xF
+    };
+    (bar_base != 0).then_some(bar_base + tbl_off + entry as u64 * 16)
+}
+
+/// `pci_msix_shutdown` for the entries `entries` the driver used: each
+/// masked, MSI-X off, INTx allowed again (`pci_intx_for_msi`), the device
+/// left as it came.
+pub fn msix_shutdown(dev: PciAddr, entries: &[u16]) {
+    let cap = find_cap(dev, 0x11);
+    if cap == 0 || !msix_enabled(dev) {
+        return;
+    }
+    for &entry in entries {
+        let Some(entry_addr) = msix_entry_addr(dev, cap, entry) else { continue };
+        // SAFETY: an entry of the MSI-X table this capability names.
+        if let Some(e) = unsafe { msix_entry(entry_addr) } {
+            e.w32(12u64, e.r32(12u64) | 1);
+        }
+    }
+    // PCI_MSIX_FLAGS_ENABLE is bit 15 of Message Control (bit 31 of the
+    // capability dword).
+    write32(dev, cap, read32(dev, cap) & !(1 << 31));
+    // PCI_COMMAND_INTX_DISABLE.
+    write16(dev, 0x04, read16(dev, 0x04) & !(1 << 10));
+}
+
+/// `do_pci_disable_device`: bus mastering off.
+pub fn disable_device(dev: PciAddr) {
+    let cmd = read16(dev, 0x04);
+    if cmd & (1 << 2) != 0 {
+        write16(dev, 0x04, cmd & !(1 << 2));
+    }
+}
+
+/// `pci_set_power_state(dev, PCI_D3hot)` for a device with the power
+/// management capability: PMCSR to D3hot, then `pci_pm_d3hot_delay`
+/// (10 ms).
+pub fn set_d3hot(dev: PciAddr) {
+    let pm = find_cap(dev, 0x01);
+    if pm == 0 {
+        return;
+    }
+    let pmcsr = read16(dev, pm + 4);
+    write16(dev, pm + 4, (pmcsr & !0x3) | 0x3);
+    crate::time::delay_us(10_000);
 }
 
 /// The 16-byte MSI-X table entry at physical `entry_addr`, its page mapped

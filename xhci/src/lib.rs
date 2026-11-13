@@ -69,6 +69,8 @@ const CMD_RING_CYCLE: u64 = 1 << 0;
 const CMD_RING_PTR_MASK: u64 = !0x3f;
 /// `XHCI_RESET_LONG_USEC`: the reset `xhci_gen_setup` waits for.
 pub const XHCI_RESET_LONG_USEC: u64 = 10 * 1000 * 1000;
+/// `XHCI_RESET_SHORT_USEC`: the reset `xhci_shutdown` waits for.
+pub const XHCI_RESET_SHORT_USEC: u64 = 250 * 1000;
 /// `imod_interval` of xhci-plat and xhci-pci: 40 us.
 pub const IMOD_INTERVAL_NS: u32 = 40_000;
 

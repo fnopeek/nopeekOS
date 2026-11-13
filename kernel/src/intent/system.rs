@@ -2093,6 +2093,7 @@ pub fn intent_reboot() -> ! {
     kprintln!();
     kprintln!("[npk] Rebooting...");
     crate::npkfs::sync();
+    crate::xhci::shutdown();
     crate::nvme::shutdown();
     crate::drivers::mmc_sd::shutdown();
     kprintln!();
@@ -2138,6 +2139,7 @@ pub fn intent_reboot() -> ! {
     // The reboot notifier, then the devices, then the firmware driver's
     // own shutdown: Linux tells the firmware twice.
     crate::platform::rpi_fw::notify_reboot();
+    crate::xhci::shutdown();
     crate::drivers::mmc_sd::shutdown();
     crate::platform::rpi_fw::notify_reboot();
     crate::arch::irq_disable();
@@ -2409,6 +2411,7 @@ pub fn intent_halt() -> ! {
     kprintln!();
     kprintln!("[npk] Shutting down...");
     crate::npkfs::sync();
+    crate::xhci::shutdown();
     crate::nvme::shutdown();
     crate::drivers::mmc_sd::shutdown();
     kprintln!("[npk] Goodbye.");
@@ -2448,6 +2451,7 @@ pub fn intent_halt() -> ! {
     // The reboot notifier, then the devices, then the firmware driver's
     // own shutdown: Linux tells the firmware twice.
     crate::platform::rpi_fw::notify_reboot();
+    crate::xhci::shutdown();
     crate::drivers::mmc_sd::shutdown();
     crate::platform::rpi_fw::notify_reboot();
     kprintln!("[npk] Goodbye.");
