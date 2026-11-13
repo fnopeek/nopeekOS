@@ -1186,11 +1186,19 @@ pub fn start_autostart() {
         Some(v) => v,
         None => return,
     };
-    let mut names = list
-        .split(|c| c == ',' || c == ' ')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .map(String::from);
+    start_autostart_list(
+        list.split(|c| c == ',' || c == ' ')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .collect(),
+    );
+}
+
+/// Launch `names` as `start_autostart` launches the config's list: for a
+/// board that started some of them (its drivers) before the desktop.
+pub fn start_autostart_list(names: alloc::vec::Vec<String>) {
+    let mut names = names.into_iter();
     let Some(first) = names.next() else { return };
     launch(&first, None, true);
     let rest: alloc::collections::VecDeque<String> = names.collect();

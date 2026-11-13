@@ -22,7 +22,7 @@ mod python;
 pub(crate) mod wallpaper;
 mod wasm;
 #[cfg(target_arch = "aarch64")]
-pub(crate) use wasm::autostart_driver;
+pub(crate) use wasm::{autostart_driver, is_driver};
 
 use crate::capability::{CapId, Vault, Rights};
 use crate::{kprint, kprintln, serial};
@@ -40,12 +40,9 @@ fn read_key() -> Option<u8> {
     { crate::serial::key() }
 }
 
-/// Is the compositor up? Only x86 has one so far.
+/// Is the compositor up?
 fn shade_active() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    { crate::shade::is_active() }
-    #[cfg(not(target_arch = "x86_64"))]
-    { false }
+    crate::shade::is_active()
 }
 
 /// First size of the input line; it grows with what is typed or pasted.
@@ -1302,6 +1299,13 @@ fn core0_idle_tick() {
     core0_wait();
 }
 
+/// Without a PS/2 mouse to drain: park until input or the next tick.
+#[cfg(not(target_arch = "x86_64"))]
+#[inline]
+fn core0_idle_tick() {
+    core0_wait();
+}
+
 /// Idle auto-GC trigger, called from the shell run-loop's ~1 Hz top.
 /// Reclaims orphans once `GC_PRESSURE_THRESHOLD` mutations have piled up,
 /// but only when the system is quiet: FS mounted, no in-flight streaming
@@ -1427,13 +1431,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
     // Pre-shade: serial-only output, no session needed.
 
     // WASM key routing state (not per-session — persists across focus changes)
-    #[cfg(target_arch = "x86_64")]
     let mut wasm_esc: u8 = 0;
-    #[cfg(target_arch = "x86_64")]
     let mut wasm_esc_mod = false;
-    #[cfg(target_arch = "x86_64")]
     let mut from_wasm = false;
-    #[cfg(target_arch = "x86_64")]
     let mut wasm_term: u8 = 255;
     let mut from_intent = false;
     let mut need_prompt = true;
@@ -1453,7 +1453,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         maybe_idle_gc();
 
         // If focused window has a running WASM app or intent, route keys / wait.
-        #[cfg(target_arch = "x86_64")]
         if shade_active() {
             let focused_term = crate::shade::terminal::active_idx();
 
@@ -1464,6 +1463,8 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             // surface keeps compositing), let shade keybinds through
             // (Mod+Q closes it and tears the VM down), and forward
             // other keys to the guest.
+            // A microVM surface: x86 runs the guests.
+            #[cfg(target_arch = "x86_64")]
             if crate::shade::focused_surface_id().is_some() {
                 // Drain the mouse ring here, before poll_render():
                 // poll_mouse is a consuming SPSC ring and poll_render
@@ -1497,7 +1498,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
                 }
-                while let Some(event) = crate::keyboard::read_event() {
+                while let Some(event) = crate::input::read_event() {
                     // Mod+X keybinds (Mod+Q close, focus moves, …)
                     // still reach shade so the window stays
                     // manageable. Everything else is translated to
@@ -1527,6 +1528,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             if let Some(widget_wid) = crate::shade::focused_widget_id() {
                 crate::shade::poll_render();
                 crate::net::poll();
+                #[cfg(target_arch = "x86_64")]
                 crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
@@ -1541,7 +1543,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_action(action);
                 }
 
-                while let Some(event) = crate::keyboard::read_event() {
+                while let Some(event) = crate::input::read_event() {
                     // Mod+X keybinds still reach shade (Mod+D, Mod+Q, etc.).
                     if crate::shade::input::try_keybind_event(&event) {
                         continue;
@@ -1705,6 +1707,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 from_intent = true;
                 crate::shade::poll_render();
                 crate::net::poll();
+                #[cfg(target_arch = "x86_64")]
                 crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
@@ -1726,7 +1729,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 // first (`request_close_window`). Ctrl+C was already turned
                 // into a cancel by the interrupt.
                 if PROMPTS_WAITING.load(core::sync::atomic::Ordering::Acquire) == 0 {
-                    while let Some(event) = crate::keyboard::read_event() {
+                    while let Some(event) = crate::input::read_event() {
                         crate::shade::input::try_keybind_event(&event);
                     }
                 }
@@ -1746,6 +1749,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 wasm_term = focused_term;
                 crate::shade::poll_render();
                 crate::net::poll();
+                #[cfg(target_arch = "x86_64")]
                 crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
@@ -1816,11 +1820,9 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             need_prompt = true;
             // Flush worker output before printing prompt
             if shade_active() {
-                #[cfg(target_arch = "x86_64")]
                 crate::shade::render_frame();
             }
         }
-        #[cfg(target_arch = "x86_64")]
         if from_wasm {
             from_wasm = false;
             let current = crate::shade::terminal::active_idx();
@@ -1843,10 +1845,10 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // keybinds (Mod+Enter to open a loop, Mod+D launcher) and the mouse
         // still work; plain keys are dropped.
         // Guard only applies in shade mode; serial-only mode has no windows.
-        #[cfg(target_arch = "x86_64")]
         if shade_active() && !crate::shade::focused_is_terminal() {
             crate::shade::poll_render();
             crate::net::poll();
+            #[cfg(target_arch = "x86_64")]
             crate::microvm::vm_poll_slice();
             while let Some(evt) = crate::xhci::poll_mouse() {
                 crate::shade::handle_mouse(&evt);
@@ -2864,6 +2866,12 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 system::intent_unset(args);
             }
         }
+        #[cfg(target_arch = "aarch64")]
+        "desktop" => {
+            if require_cap(vault, &session, Rights::EXECUTE, "desktop") {
+                crate::arch::aarch64::boot::desktop_intent();
+            }
+        }
         "get" => {
             if require_cap(vault, &session, Rights::READ, "get") {
                 system::intent_get(args);
@@ -3307,7 +3315,6 @@ fn intent_cd(args: &str) {
 }
 
 /// Re-export public API for main.rs
-#[cfg(target_arch = "x86_64")]
 pub use wallpaper::apply_startup_wallpaper;
 pub use fs::crypto_bench;
 

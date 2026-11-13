@@ -23,19 +23,31 @@ fn fetch_store_module(name: &str) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
 }
 
 /// Start installed module `name` as `run <name>` does, if it is a driver
-/// (declares HARDWARE): the autostart of a board without the desktop,
-/// where a window app has nowhere to go. A module that is not installed
-/// is skipped quietly.
+/// (declares HARDWARE): the drivers a board starts before its desktop.
+/// A module that is not installed, or no driver, is skipped quietly;
+/// true when it was started.
 #[cfg(target_arch = "aarch64")]
-pub(crate) fn autostart_driver(name: &str) {
+pub(crate) fn autostart_driver(name: &str) -> bool {
     if name.is_empty() || name.contains('/') || name.starts_with('.') {
-        return;
+        return false;
     }
-    let Ok((bytes, _)) = crate::npkfs::fetch(&alloc::format!("sys/wasm/{}", name)) else { return };
+    let Ok((bytes, _)) = crate::npkfs::fetch(&alloc::format!("sys/wasm/{}", name)) else { return false };
     if !crate::capability::widget_rights_from_wasm(&bytes).contains(crate::capability::Rights::HARDWARE) {
-        return;
+        return false;
     }
     intent_run(name);
+    true
+}
+
+/// Is installed module `name` a driver (declares HARDWARE)?
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn is_driver(name: &str) -> bool {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return false;
+    }
+    crate::npkfs::fetch(&alloc::format!("sys/wasm/{}", name)).is_ok_and(|(bytes, _)| {
+        crate::capability::widget_rights_from_wasm(&bytes).contains(crate::capability::Rights::HARDWARE)
+    })
 }
 
 pub fn intent_run(args: &str) {

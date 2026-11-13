@@ -298,6 +298,14 @@ static RINGS: Mutex<BTreeMap<(u32, u32), (u64, u64)>> = Mutex::new(BTreeMap::new
 
 /// The module serves jobs (registered, self-test passed, not dead).
 static READY: AtomicBool = AtomicBool::new(false);
+/// The display module called `ready`, with or without copies; until it is
+/// gone. What a desktop waits for before it takes the framebuffer's size.
+static SETTLED: AtomicBool = AtomicBool::new(false);
+
+/// Has a display module finished its setup (`ready`) and is still there?
+pub fn display_settled() -> bool {
+    SETTLED.load(Ordering::Acquire)
+}
 /// It also runs scene lists (`CAP_SCENE`).
 static SCENES: AtomicBool = AtomicBool::new(false);
 /// It also serves guest native contexts (`CAP_NATIVE`).
@@ -683,6 +691,7 @@ pub fn ready(dev: DevId, caps: i32) -> i32 {
         if !owned_by(dev) {
             return -1;
         }
+        SETTLED.store(true, Ordering::Release);
         crate::kprintln!("[npk] gpudev: the module offers no GPU copies (none built, or its self-test failed), compositor on the CPU");
         return 0;
     }
@@ -703,6 +712,7 @@ pub fn ready(dev: DevId, caps: i32) -> i32 {
     crate::drivers::framebuffer::set_shadow_gpu(a, b);
     super::install(Box::new(GpudevDriver { fb }));
     READY.store(true, Ordering::Release);
+    SETTLED.store(true, Ordering::Release);
     SCENES.store(caps & CAP_SCENE != 0, Ordering::Release);
     NATIVE.store(caps & CAP_NATIVE != 0, Ordering::Release);
     CURSOR.store(caps & CAP_CURSOR != 0, Ordering::Release);
@@ -887,6 +897,7 @@ pub fn module_gone(dev: DevId) {
         (st.fb.take(), frees)
     };
     READY.store(false, Ordering::Release);
+    SETTLED.store(false, Ordering::Release);
     mark_all_done();
     SCENES.store(false, Ordering::Release);
     crate::audio::display_audio_clear();
