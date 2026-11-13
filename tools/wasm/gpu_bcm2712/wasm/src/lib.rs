@@ -23,9 +23,13 @@ use drm_core::linux::Line;
 use gpu_bcm2712_core::vc4_drv::Vc4;
 use hw::PiHw;
 
+// The default rights plus HARDWARE, which binding the display set
+// requires. A section replaces the default, so READ, EXECUTE and RENDER
+// are listed; RENDER also makes `run` start the module as a process of its
+// own (the set is never bound to the shell's pid 0).
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [0x40]; // HARDWARE
+static NPK_CAPS: [u8; 1] = [0x01 | 0x04 | 0x08 | 0x40]; // READ|EXEC|RENDER|HARDWARE
 
 #[global_allocator]
 static ALLOCATOR: nopeek_widgets::heap::Allocator = nopeek_widgets::heap::new();
@@ -88,7 +92,7 @@ pub extern "C" fn _start() {
     Line::new().s("v").s(env!("CARGO_PKG_VERSION")).s(" starting").say();
 
     if npk_sys::dt_bind(b"brcm,bcm2712-hvs") != 0 {
-        Line::new().s("no display set to bind (needs the Pi 5 and HARDWARE)").say();
+        Line::new().s("no display set to bind (needs the Pi 5, HARDWARE and a process of its own)").say();
         return;
     }
     let Some(mut hw) = PiHw::map() else {
