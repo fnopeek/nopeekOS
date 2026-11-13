@@ -19,6 +19,10 @@ regs.list, one item per line:
                             tuple of e1, e2, .. per element `x`; every
                             element must satisfy cond. `e$n` is a char
                             array of n bytes, read byte by byte, as a &str
+    COPY t = decl           the array declared as `decl` inside a function
+                            of the current `@` file, copied to file scope
+                            as `t` for TABLE (Linux keeps some tables
+                            function-local)
 
     python3 gen_regs.py           # rewrite src/regs.rs
     python3 gen_regs.py --check   # fail if it is not what it would write
@@ -59,6 +63,10 @@ def parse():
             cols = [c.strip() for c in m.group(2).split(",")]
             items.append(("table", m.group(1), cols, m.group(3), src))
             continue
+        m = re.fullmatch(r"COPY\s+(\w+)\s*=\s*(.+)", line.strip())
+        if m:
+            items.append(("copy", m.group(1), m.group(2), src))
+            continue
         m = re.fullmatch(r"(\w+)\s*=\s*(.+)", line.strip())
         if m:
             items.append(("expr", m.group(1), m.group(2), src))
@@ -92,6 +100,24 @@ def compile_asm(body, src):
         return open(out).read()
 
 
+def copy_array(src, name, decl):
+    """The initializer of `decl` in src, brace-matched, as a file-scope
+    array `name` of the same type."""
+    text = open(f"{DRM}/{src}").read()
+    at = text.index(decl)
+    i = text.index("{", at)
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{":
+            depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0:
+                break
+    ty = decl.split("[")[0].rsplit(" ", 1)[0]
+    return f"{ty} {name}[] = {text[i:j + 1]};\n"
+
+
 def evaluate(items):
     by_src = {}
     for it in items:
@@ -99,12 +125,15 @@ def evaluate(items):
             by_src.setdefault(it[-1], []).append(it)
     vals = {}
     for src, its in by_src.items():
+        copies = "".join(copy_array(src, it[1], it[2]) for it in its if it[0] == "copy")
         # Table sizes first: the elements' functions depend on them.
         sizes = [f"unsigned n_{it[1]}(void) {{ return ARRAY_SIZE({it[1]}); }}" for it in its if it[0] == "table"]
         if sizes:
-            vals.update(g.ints(compile_asm("\n".join(sizes) + "\n", src)))
+            vals.update(g.ints(compile_asm(copies + "\n".join(sizes) + "\n", src)))
         body = []
         for it in its:
+            if it[0] == "copy":
+                continue
             if it[0] == "expr":
                 body.append(f"unsigned v_{it[1]}(void) {{ return (unsigned)({it[2]}); }}")
                 continue
@@ -120,7 +149,7 @@ def evaluate(items):
                     body.append(f"unsigned t_{name}_{i}_{j}(void) {{ typeof({x}) x = {x}; return (unsigned)({e}); }}")
                 if cond:
                     body.append(f"unsigned c_{name}_{i}(void) {{ typeof({x}) x = {x}; return (unsigned)!!({cond}); }}")
-        vals.update(g.ints(compile_asm("\n".join(body) + "\n", src)))
+        vals.update(g.ints(compile_asm(copies + "\n".join(body) + "\n", src)))
     return vals
 
 
@@ -136,6 +165,8 @@ def main():
         "#![allow(dead_code, non_upper_case_globals)]",
     ]
     for it in items:
+        if it[0] == "copy":
+            continue
         if it[0] == "comment":
             o.append("")
             o.append(f"// {it[1]}")

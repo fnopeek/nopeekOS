@@ -9,11 +9,15 @@
 //!   from it.
 //! - [`drm_client_modeset`]: how the fbdev client picks modes and CRTCs.
 //! - [`drm_connector`]: the connector and display info EDID fills.
+//! - [`drm_fourcc`]: pixel formats and format modifiers.
 //! - [`drm_hdmi_helper`]: the TMDS character rate of a mode.
 //! - [`drm_hdmi_state_helper`]: an HDMI connector's mode check and
 //!   hotplug.
 //! - [`drm_modes`]: a display mode, CVT and GTF, matching and sorting.
+//! - [`drm_plane`]: a plane's state, its framebuffer and their check.
 //! - [`drm_probe_helper`]: probing a connector's modes against the driver.
+//! - [`drm_rect`]: rectangles, clipping and scaling.
+//! - [`drm_vblank`]: a CRTC's vblank count and timestamps.
 //! - [`hdmi`]: the HDMI infoframes and their packing.
 //! - [`i2c`]: an I2C message, as DDC transfers carry it.
 //! - [`kms_dump`]: a connector as the pi5 oracle's `# kms:` lines.
@@ -28,10 +32,14 @@ extern crate alloc;
 pub mod drm_client_modeset;
 pub mod drm_connector;
 pub mod drm_edid;
+pub mod drm_fourcc;
 pub mod drm_hdmi_helper;
 pub mod drm_hdmi_state_helper;
 pub mod drm_modes;
+pub mod drm_plane;
 pub mod drm_probe_helper;
+pub mod drm_rect;
+pub mod drm_vblank;
 pub mod hdmi;
 pub mod i2c;
 pub mod kms_dump;

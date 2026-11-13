@@ -52,6 +52,8 @@ pub struct Vc4 {
     /// `n` is HDMI `n`'s, CRTC `n` pixel valve `n`; Linux's writeback
     /// CRTCs and connectors are not bound.
     pub connectors: Vec<drm_connector>,
+    /// The current atomic state of every object.
+    pub kms: crate::vc4_kms::Vc4KmsState,
 }
 
 impl Vc4 {
@@ -74,7 +76,8 @@ impl Vc4 {
         ];
         let crtc = [Vc4Crtc::bind(hw, 0), Vc4Crtc::bind(hw, 1)];
         let connectors = vec![vc4_hdmi_connector_init(0), vc4_hdmi_connector_init(1)];
-        let mut vc4 = Vc4 { aon_intr, disp_intr, bsc, clocks, hvs, hdmi, crtc, connectors };
+        let kms = crate::vc4_kms::Vc4KmsState::reset(&connectors, crtc.len());
+        let mut vc4 = Vc4 { aon_intr, disp_intr, bsc, clocks, hvs, hdmi, crtc, connectors, kms };
         // vc4_kms_load: drm_mode_config_reset, then every output the
         // firmware left running stopped.
         for i in 0..2 {

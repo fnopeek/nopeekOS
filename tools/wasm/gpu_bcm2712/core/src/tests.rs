@@ -447,3 +447,48 @@ fn hdmi_encoder_enable_is_linux() {
     hw.done();
     assert!(vc4.hdmi[0].scdc_enabled && vc4.hdmi[0].scrambling_work.is_some());
 }
+
+/// The fbdev framebuffer of run G: 3840x2160 RGB565, pitch 7680, at the
+/// bus address `vc5_dumb_create` got (`dma alloc ... at 0x40008000`).
+fn run_g_fb() -> drm_core::drm_plane::drm_framebuffer {
+    use drm_core::drm_fourcc::drm_format_info;
+    drm_core::drm_plane::drm_framebuffer {
+        format: drm_format_info(drm_core::regs::DRM_FORMAT_RGB565).expect("RGB565"),
+        width: 3840,
+        height: 2160,
+        pitches: [7680, 0, 0, 0],
+        offsets: [0; 4],
+        modifier: drm_core::regs::DRM_FORMAT_MOD_LINEAR as u64,
+        dma_addr: [0x4000_8000, 0, 0, 0],
+    }
+}
+
+/// The fbdev client's first commit (`drm_fb_helper_set_par`) after bind
+/// and probe, as one stream: the plane's dlist at 54, the background,
+/// the pixel valve, the HVS channel, the HDMI encoder, then the flip on
+/// the first vblank interrupt.
+#[test]
+fn fbdev_commit_is_linux() {
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    let client = vc4.fbdev_probe(&mut hw);
+    hw.done();
+
+    let mut hw = Strict::new(segment(&evs, "drm_fb_helper_set_par", 0));
+    assert_eq!(vc4.fbdev_commit(&mut hw, &client, &run_g_fb()), 0);
+    hw.done();
+
+    let c = &vc4.kms.crtcs[0];
+    assert_eq!((c.assigned_channel, c.mm.map(|m| m.node.start)), (Some(0), Some(54)));
+    assert!(!vc4.crtc[0].event);
+    assert_eq!(vc4.kms.vblank[0].refcount, 0);
+}
+
+#[test]
+fn fbdev_commit_segment_is_the_whole_commit() {
+    let evs = parse(LOG);
+    let seg = segment(&evs, "drm_fb_helper_set_par", 0);
+    assert!(seg.len() > 250, "{} events", seg.len());
+}
