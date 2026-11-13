@@ -29286,6 +29286,19 @@ GIC eoi intid 133 (SPI 101)
 } vc4_load_tracker_destroy_state
 } drm_client_modeset_commit_locked
 } drm_fb_helper_set_par
+# kms: config num_crtc 4 max 8192x8192
+# kms: crtc 0 mop
+# kms: crtc 1 moplet
+# kms: crtc 2 crtc-2
+# kms: crtc 3 crtc-3
+# kms: encoder TMDS-34 possible_crtcs 0x4
+# kms: encoder TMDS-43 possible_crtcs 0x8
+# kms: encoder Virtual-60 possible_crtcs 0x1
+# kms: encoder Virtual-79 possible_crtcs 0x2
+# kms: possible HDMI-A-1 TMDS-34
+# kms: possible HDMI-A-2 TMDS-43
+# kms: possible Writeback-1 Virtual-60
+# kms: possible Writeback-2 Virtual-79
 # kms: connector HDMI-A-1 status 1
 # kms: info 700x390 mm bpc 8 color_formats 0x7 is_hdmi 1 has_audio 1 max_tmds_clock 600000 dvi_dual 0 cea_rev 3 non_desktop 0 quirks 0x0 spa 0x1000 rgb_qrs 0 dc_rgb444 0x0 dc_ycbcr444 0x0
 # kms: hdmi scdc 1 read_request 0 scrambling 1 low_rates 0 y420_dc 0x0 frl 0 lanes 0

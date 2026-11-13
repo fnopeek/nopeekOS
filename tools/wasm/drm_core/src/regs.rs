@@ -314,3 +314,7 @@ pub const DATA_BLOCK_TYPE_1_DETAILED_TIMING: u32 = 0x3;
 pub const DATA_BLOCK_2_TYPE_7_DETAILED_TIMING: u32 = 0x22;
 pub const DATA_BLOCK_2_TYPE_9_FORMULA_TIMING: u32 = 0x24;
 pub const DATA_BLOCK_2_TYPE_10_FORMULA_TIMING: u32 = 0x2a;
+
+// The DRM client (drm_client.h, uapi/drm/drm_mode.h)
+pub const DRM_MODE_CONNECTOR_WRITEBACK: u32 = 0x12;
+pub const DRM_CLIENT_MAX_CLONED_CONNECTORS: u32 = 0x8;

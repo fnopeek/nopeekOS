@@ -4,8 +4,18 @@
 //! a part: the EDID blob a property would carry is kept as `edid_blob`.
 #![allow(dead_code)]
 
+use crate::drm_modes::drm_display_mode;
 use alloc::string::String;
 use alloc::vec::Vec;
+
+/// `enum drm_connector_status`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum drm_connector_status {
+    connector_status_connected = 1,
+    connector_status_disconnected = 2,
+    #[default]
+    connector_status_unknown = 3,
+}
 
 /// `enum drm_connector_force`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -161,6 +171,15 @@ pub struct drm_connector {
     /// `edid_blob_ptr`'s data: the EDID the connector last saw.
     pub edid_blob: Option<Vec<u8>>,
     pub epoch_counter: u64,
+    pub status: drm_connector_status,
+    /// `probed_modes`: what the EDID and the driver add, before validation.
+    pub probed_modes: Vec<drm_display_mode>,
+    /// `modes`: the validated, sorted list.
+    pub modes: Vec<drm_display_mode>,
+    pub interlace_allowed: bool,
+    pub doublescan_allowed: bool,
+    pub stereo_allowed: bool,
+    pub ycbcr_420_allowed: bool,
     /// The connector runs on Raspberry Pi's tree, whose patches to these
     /// helpers apply (`drm_reset_display_info`); off, mainline's.
     pub rpi_downstream: bool,
@@ -192,6 +211,13 @@ impl drm_connector {
             tile_v_size: 0,
             edid_blob: None,
             epoch_counter: 0,
+            status: drm_connector_status::connector_status_unknown,
+            probed_modes: Vec::new(),
+            modes: Vec::new(),
+            interlace_allowed: false,
+            doublescan_allowed: false,
+            stereo_allowed: false,
+            ycbcr_420_allowed: false,
             rpi_downstream: false,
         }
     }

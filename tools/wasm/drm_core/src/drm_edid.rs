@@ -11,6 +11,7 @@
 #![allow(dead_code)]
 
 use crate::drm_connector::*;
+use crate::drm_modes::*;
 use crate::i2c::{i2c_msg, i2c_transfer_fn, I2C_M_RD};
 use crate::linux::{Line, ENXIO};
 use crate::regs::*;
@@ -1511,9 +1512,400 @@ fn not_ported(name: &str) {
 }
 
 /// `drm_parse_cea_ext`.
+/// `parse_cta_vdb`.
+fn parse_cta_vdb(connector: &mut drm_connector, db: &[u8]) {
+    let info = &mut connector.display_info;
+    let len = cea_db_payload_len(db);
+    let svds = &db[CEA_DB_DATA..];
+
+    if len == 0 {
+        return;
+    }
+
+    // Gracefully handle multiple VDBs, however unlikely that is
+    for &svd in &svds[..len] {
+        let mut vic = svd_to_vic(svd);
+
+        if !drm_valid_cea_vic(vic) {
+            vic = 0;
+        }
+
+        info.vics.push(vic);
+    }
+}
+
+/// `update_cta_y420cmdb`: the y420cmdb_map, indexed by VIC position in the
+/// VDBs, as y420_cmdb_modes indexed by the VICs themselves.
+fn update_cta_y420cmdb(connector: &mut drm_connector, y420cmdb_map: u64) {
+    let info = &mut connector.display_info;
+    let len = info.vics.len().min(64);
+
+    for i in 0..len {
+        let vic = info.vics[i];
+
+        if vic != 0 && y420cmdb_map & (1u64 << i) != 0 {
+            bitmap_set(&mut info.hdmi.y420_cmdb_modes, vic);
+        }
+    }
+}
+
+/// `cta_vdb_has_vic`.
+fn cta_vdb_has_vic(connector: &drm_connector, vic: u8) -> bool {
+    vic != 0 && connector.display_info.vics.contains(&vic)
+}
+
+/// `parse_cta_y420vdb`: CTA-861-H YCbCr 4:2:0 Video Data Block.
+fn parse_cta_y420vdb(connector: &mut drm_connector, db: &[u8]) {
+    let info = &mut connector.display_info;
+    let svds = &db[CEA_DB_DATA + 1..];
+
+    for &svd in &svds[..cea_db_payload_len(db).saturating_sub(1)] {
+        let vic = svd_to_vic(svd);
+
+        if !drm_valid_cea_vic(vic) {
+            continue;
+        }
+
+        bitmap_set(&mut info.hdmi.y420_vdb_modes, vic);
+        info.color_formats |= DRM_COLOR_FORMAT_YCBCR420;
+    }
+}
+
+/// `drm_parse_vcdb`.
+fn drm_parse_vcdb(connector: &mut drm_connector, db: &[u8]) {
+    if db[2] as u32 & EDID_CEA_VCDB_QS != 0 {
+        connector.display_info.rgb_quant_range_selectable = true;
+    }
+}
+
+/// `drm_get_max_frl_rate`: (max_lanes, max_rate_per_lane).
+fn drm_get_max_frl_rate(max_frl_rate: u8) -> (u8, u8) {
+    match max_frl_rate {
+        1 => (3, 3),
+        2 => (3, 6),
+        3 => (4, 6),
+        4 => (4, 8),
+        5 => (4, 10),
+        6 => (4, 12),
+        _ => (0, 0),
+    }
+}
+
+/// `drm_parse_ycbcr420_deep_color_info`.
+fn drm_parse_ycbcr420_deep_color_info(connector: &mut drm_connector, db: &[u8]) {
+    let dc_mask = (db[7] as u32 & DRM_EDID_YCBCR420_DC_MASK) as u8;
+    connector.display_info.hdmi.y420_dc_modes = dc_mask;
+}
+
+/// `drm_parse_dsc_info`.
+fn drm_parse_dsc_info(hdmi_dsc: &mut drm_hdmi_dsc_cap, hf_scds: &[u8]) {
+    hdmi_dsc.v_1p2 = hf_scds[11] as u32 & DRM_EDID_DSC_1P2 != 0;
+
+    if !hdmi_dsc.v_1p2 {
+        return;
+    }
+
+    hdmi_dsc.native_420 = hf_scds[11] as u32 & DRM_EDID_DSC_NATIVE_420 != 0;
+    hdmi_dsc.all_bpp = hf_scds[11] as u32 & DRM_EDID_DSC_ALL_BPP != 0;
+
+    hdmi_dsc.bpc_supported = if hf_scds[11] as u32 & DRM_EDID_DSC_16BPC != 0 {
+        16
+    } else if hf_scds[11] as u32 & DRM_EDID_DSC_12BPC != 0 {
+        12
+    } else if hf_scds[11] as u32 & DRM_EDID_DSC_10BPC != 0 {
+        10
+    } else {
+        // Supports min 8 BPC if DSC 1.2 is supported
+        8
+    };
+
+    if cea_db_payload_len(hf_scds) >= 12 && hf_scds[12] != 0 {
+        let dsc_max_frl_rate = ((hf_scds[12] as u32 & DRM_EDID_DSC_MAX_FRL_RATE_MASK) >> 4) as u8;
+        (hdmi_dsc.max_lanes, hdmi_dsc.max_frl_rate_per_lane) = drm_get_max_frl_rate(dsc_max_frl_rate);
+
+        let dsc_max_slices = hf_scds[12] as u32 & DRM_EDID_DSC_MAX_SLICES;
+
+        (hdmi_dsc.max_slices, hdmi_dsc.clk_per_slice) = match dsc_max_slices {
+            1 => (1, 340),
+            2 => (2, 340),
+            3 => (4, 340),
+            4 => (8, 340),
+            5 => (8, 400),
+            6 => (12, 400),
+            7 => (16, 400),
+            _ => (0, 0),
+        };
+    }
+
+    if cea_db_payload_len(hf_scds) >= 13 && hf_scds[13] != 0 {
+        hdmi_dsc.total_chunk_kbytes = (hf_scds[13] as u32 & DRM_EDID_DSC_TOTAL_CHUNK_KBYTES) as u8;
+    }
+}
+
+/// `drm_parse_hdmi_forum_scds`: Sink Capability Data Structure.
+fn drm_parse_hdmi_forum_scds(connector: &mut drm_connector, hf_scds: &[u8]) {
+    let info = &mut connector.display_info;
+
+    info.has_hdmi_infoframe = true;
+
+    if hf_scds[6] & 0x80 != 0 {
+        info.hdmi.scdc.supported = true;
+        if hf_scds[6] & 0x40 != 0 {
+            info.hdmi.scdc.read_request = true;
+        }
+    }
+
+    // All HDMI 2.0 monitors must support scrambling at rates > 340 MHz.
+    // And as per the spec, three factors confirm this:
+    // * Availability of a HF-VSDB block in EDID (check)
+    // * Non zero Max_TMDS_Char_Rate filed in HF-VSDB (let's check)
+    // * SCDC support available (let's check)
+    // Lets check it out.
+
+    if hf_scds[5] != 0 {
+        let scdc = &mut info.hdmi.scdc;
+
+        // max clock is 5000 KHz times block value
+        let max_tmds_clock = hf_scds[5] as i32 * 5000;
+
+        if max_tmds_clock > 340000 {
+            info.max_tmds_clock = max_tmds_clock;
+        }
+
+        if scdc.supported {
+            scdc.scrambling.supported = true;
+
+            // Few sinks support scrambling for clocks < 340M
+            if hf_scds[6] & 0x8 != 0 {
+                scdc.scrambling.low_rates = true;
+            }
+        }
+    }
+
+    if hf_scds[7] != 0 {
+        let max_frl_rate = ((hf_scds[7] as u32 & DRM_EDID_MAX_FRL_RATE_MASK) >> 4) as u8;
+        (info.hdmi.max_lanes, info.hdmi.max_frl_rate_per_lane) = drm_get_max_frl_rate(max_frl_rate);
+    }
+
+    drm_parse_ycbcr420_deep_color_info(connector, hf_scds);
+
+    if cea_db_payload_len(hf_scds) >= 11 && hf_scds[11] != 0 {
+        drm_parse_dsc_info(&mut connector.display_info.hdmi.dsc_cap, hf_scds);
+    }
+}
+
+/// `drm_parse_hdmi_deep_color_info`.
+fn drm_parse_hdmi_deep_color_info(connector: &mut drm_connector, hdmi: &[u8]) {
+    let info = &mut connector.display_info;
+    let mut dc_bpc = 0;
+
+    // HDMI supports at least 8 bpc
+    info.bpc = 8;
+
+    if cea_db_payload_len(hdmi) < 6 {
+        return;
+    }
+
+    if hdmi[6] as u32 & DRM_EDID_HDMI_DC_30 != 0 {
+        dc_bpc = 10;
+        info.edid_hdmi_rgb444_dc_modes |= DRM_EDID_HDMI_DC_30 as u8;
+    }
+
+    if hdmi[6] as u32 & DRM_EDID_HDMI_DC_36 != 0 {
+        dc_bpc = 12;
+        info.edid_hdmi_rgb444_dc_modes |= DRM_EDID_HDMI_DC_36 as u8;
+    }
+
+    if hdmi[6] as u32 & DRM_EDID_HDMI_DC_48 != 0 {
+        dc_bpc = 16;
+        info.edid_hdmi_rgb444_dc_modes |= DRM_EDID_HDMI_DC_48 as u8;
+    }
+
+    if dc_bpc == 0 {
+        return;
+    }
+
+    info.bpc = dc_bpc;
+
+    // YCRCB444 is optional according to spec.
+    if hdmi[6] as u32 & DRM_EDID_HDMI_DC_Y444 != 0 {
+        info.edid_hdmi_ycbcr444_dc_modes = info.edid_hdmi_rgb444_dc_modes;
+    }
+
+    // Spec says that if any deep color mode is supported at all,
+    // then deep color 36 bit must be supported (only logged).
+}
+
+/// `drm_parse_hdmi_vsdb_video`: HDMI Vendor-Specific Data Block.
+fn drm_parse_hdmi_vsdb_video(connector: &mut drm_connector, db: &[u8]) {
+    let info = &mut connector.display_info;
+    let len = cea_db_payload_len(db);
+
+    info.is_hdmi = true;
+
+    info.source_physical_address = (db[4] as u16) << 8 | db[5] as u16;
+
+    if len >= 6 {
+        info.dvi_dual = db[6] & 1 != 0;
+    }
+    if len >= 7 {
+        info.max_tmds_clock = db[7] as i32 * 5000;
+    }
+
+    // Try to infer whether the sink supports HDMI infoframes.
+    //
+    // HDMI infoframe support was first added in HDMI 1.4. Assume the sink
+    // supports infoframes if HDMI_Video_present is set.
+    if len >= 8 && db[8] & (1 << 5) != 0 {
+        info.has_hdmi_infoframe = true;
+    }
+
+    drm_parse_hdmi_deep_color_info(connector, db);
+}
+
+/// `drm_parse_microsoft_vsdb`: the EDID extension for head-mounted and
+/// specialized monitors.
+fn drm_parse_microsoft_vsdb(connector: &mut drm_connector, db: &[u8]) {
+    let version = db[4];
+    let desktop_usage = db[5] & (1 << 6) != 0;
+
+    // Version 1 and 2 for HMDs, version 3 flags desktop usage explicitly
+    if version == 1 || version == 2 || (version == 3 && !desktop_usage) {
+        connector.display_info.non_desktop = true;
+    }
+}
+
+/// `parse_cta_y420cmdb`: the map of VDB positions that also take 4:2:0.
+fn parse_cta_y420cmdb(connector: &mut drm_connector, db: &[u8]) -> u64 {
+    let mut map_len = cea_db_payload_len(db).saturating_sub(1);
+    let data = &db[CEA_DB_DATA + 1..];
+    let mut map: u64 = 0;
+
+    if map_len == 0 {
+        // All CEA modes support ycbcr420 sampling also.
+        map = u64::MAX;
+    } else {
+        // This map indicates which of the existing CEA block modes
+        // from VDB can support YCBCR420 output too. So if bit=0 is
+        // set, first mode from VDB can support YCBCR420 output too.
+        // We will parse and keep this map, before parsing VDB itself
+        // to avoid going through the same block again and again.
+        //
+        // Spec is not clear about max possible size of this block.
+        // Clamping max bitmap block size at 8 bytes. Every byte can
+        // address 8 CEA modes, in this way this map can address
+        // 8*8 = first 64 SVDs.
+        if map_len > 8 {
+            map_len = 8;
+        }
+
+        for (i, &b) in data[..map_len].iter().enumerate() {
+            map |= (b as u64) << (8 * i);
+        }
+    }
+
+    if map != 0 {
+        connector.display_info.color_formats |= DRM_COLOR_FORMAT_YCBCR420;
+    }
+
+    map
+}
+
+/// `eotf_supported`.
+fn eotf_supported(edid_ext: &[u8]) -> u8 {
+    edid_ext[2]
+        & ((1 << HDMI_EOTF_TRADITIONAL_GAMMA_SDR)
+            | (1 << HDMI_EOTF_TRADITIONAL_GAMMA_HDR)
+            | (1 << HDMI_EOTF_SMPTE_ST2084)
+            | (1 << HDMI_EOTF_BT_2100_HLG)) as u8
+}
+
+/// `hdr_metadata_type`.
+fn hdr_metadata_type(edid_ext: &[u8]) -> u8 {
+    edid_ext[3] & (1 << HDMI_STATIC_METADATA_TYPE1) as u8
+}
+
+/// `drm_calculate_luminance_range`.
+fn drm_calculate_luminance_range(connector: &mut drm_connector) {
+    let hdr_metadata = connector.display_info.hdr_sink_metadata.hdmi_type1;
+    let luminance_range = &mut connector.display_info.luminance_range;
+    const pre_computed_values: [u8; 32] = [
+        50, 51, 52, 53, 55, 56, 57, 58, 59, 61, 62, 63, 65, 66, 68, 69, 71, 72, 74, 75, 77, 79, 81, 82, 84, 86, 88,
+        90, 92, 94, 96, 98,
+    ];
+
+    if hdr_metadata.metadata_type as u32 & (1 << HDMI_STATIC_METADATA_TYPE1) == 0 {
+        return;
+    }
+
+    let max_avg = hdr_metadata.max_fall as u32;
+    let min_cll = hdr_metadata.min_cll as u32;
+
+    // From the specification (CTA-861-G), for calculating the maximum
+    // luminance we need to use:
+    //	Luminance = 50*2**(CV/32)
+    // Where CV is a one-byte value. CV = 32*q + r gives
+    // 50*(2**q)*(2**(r/32)), with the values of r/32 pre-computed:
+    //	(0...32).each {|cv| puts (50*2**(cv/32.0)).round}
+    let q = max_avg >> 5;
+    let r = max_avg % 32;
+    let max = (1u32 << q).wrapping_mul(pre_computed_values[r as usize] as u32);
+
+    // min luminance: maxLum * (CV/255)^2 / 100
+    let q = (min_cll + 255 / 2) / 255;
+    let min = max.wrapping_mul((q * q + 100 / 2) / 100);
+
+    luminance_range.min_luminance = min;
+    luminance_range.max_luminance = max;
+}
+
+/// `drm_parse_hdr_metadata_block`.
+fn drm_parse_hdr_metadata_block(connector: &mut drm_connector, db: &[u8]) {
+    let len = cea_db_payload_len(db);
+    let hdr_metadata = &mut connector.display_info.hdr_sink_metadata.hdmi_type1;
+
+    hdr_metadata.eotf = eotf_supported(db);
+    hdr_metadata.metadata_type = hdr_metadata_type(db);
+
+    if len >= 4 {
+        hdr_metadata.max_cll = db[4] as u16;
+    }
+    if len >= 5 {
+        hdr_metadata.max_fall = db[5] as u16;
+    }
+    if len >= 6 {
+        hdr_metadata.min_cll = db[6] as u16;
+
+        // Calculate only when all values are available
+        drm_calculate_luminance_range(connector);
+    }
+}
+
+/// `drm_parse_hdmi_vsdb_audio`.
+fn drm_parse_hdmi_vsdb_audio(connector: &mut drm_connector, db: &[u8]) {
+    let len = cea_db_payload_len(db);
+
+    if len >= 6 && db[6] & (1 << 7) != 0 {
+        connector.eld[DRM_ELD_SAD_COUNT_CONN_TYPE as usize] |= DRM_ELD_SUPPORTS_AI as u8;
+    }
+
+    if len >= 10 && hdmi_vsdb_latency_present(db) {
+        connector.latency_present[0] = true;
+        connector.video_latency[0] = db[9] as i32;
+        connector.audio_latency[0] = db[10] as i32;
+    }
+
+    if len >= 12 && hdmi_vsdb_i_latency_present(db) {
+        connector.latency_present[1] = true;
+        connector.video_latency[1] = db[11] as i32;
+        connector.audio_latency[1] = db[12] as i32;
+    }
+}
+
+/// `drm_parse_cea_ext`.
 fn drm_parse_cea_ext(connector: &mut drm_connector, drm_edid: &drm_edid) {
     let info = &mut connector.display_info;
-    let y420cmdb_map: u64 = 0;
+    let mut y420cmdb_map: u64 = 0;
 
     let mut edid_iter = drm_edid_iter_begin(Some(drm_edid));
     while let Some(o) = __drm_edid_iter_next(&mut edid_iter) {
@@ -1545,21 +1937,21 @@ fn drm_parse_cea_ext(connector: &mut drm_connector, drm_edid: &drm_edid) {
         let db = &iter.edid[db..];
 
         if cea_db_is_hdmi_vsdb(db) {
-            not_ported("drm_parse_hdmi_vsdb_video");
+            drm_parse_hdmi_vsdb_video(connector, db);
         } else if cea_db_is_hdmi_forum_vsdb(db) || cea_db_is_hdmi_forum_scdb(db) {
-            not_ported("drm_parse_hdmi_forum_scds");
+            drm_parse_hdmi_forum_scds(connector, db);
         } else if cea_db_is_microsoft_vsdb(db) {
-            not_ported("drm_parse_microsoft_vsdb");
+            drm_parse_microsoft_vsdb(connector, db);
         } else if cea_db_is_y420cmdb(db) {
-            not_ported("parse_cta_y420cmdb");
+            y420cmdb_map = parse_cta_y420cmdb(connector, db);
         } else if cea_db_is_y420vdb(db) {
-            not_ported("parse_cta_y420vdb");
+            parse_cta_y420vdb(connector, db);
         } else if cea_db_is_vcdb(db) {
-            not_ported("drm_parse_vcdb");
+            drm_parse_vcdb(connector, db);
         } else if cea_db_is_hdmi_hdr_metadata_block(db) {
-            not_ported("drm_parse_hdr_metadata_block");
+            drm_parse_hdr_metadata_block(connector, db);
         } else if cea_db_tag(db) == CTA_DB_VIDEO {
-            not_ported("parse_cta_vdb");
+            parse_cta_vdb(connector, db);
         } else if cea_db_tag(db) == CTA_DB_AUDIO {
             connector.display_info.has_audio = true;
         }
@@ -1567,7 +1959,7 @@ fn drm_parse_cea_ext(connector: &mut drm_connector, drm_edid: &drm_edid) {
     cea_db_iter_end(&mut iter);
 
     if y420cmdb_map != 0 {
-        not_ported("update_cta_y420cmdb");
+        update_cta_y420cmdb(connector, y420cmdb_map);
     }
 }
 
@@ -1716,6 +2108,9 @@ fn drm_edid_to_eld(connector: &mut drm_connector, drm_edid: Option<&drm_edid>) {
     let connector_type = connector.connector_type;
     let eld = &mut connector.eld;
     let mut total_sad_count = 0;
+    // The HDMI VSDBs, parsed for audio once `eld` is no longer borrowed:
+    // drm_parse_hdmi_vsdb_audio's bits are or-ed in, in any order.
+    let mut hdmi_vsdbs: Vec<Vec<u8>> = Vec::new();
 
     let mnl = get_monitor_name(drm_edid, &mut eld[DRM_ELD_MONITOR_NAME_STRING as usize..]);
 
@@ -1754,7 +2149,7 @@ fn drm_edid_to_eld(connector: &mut drm_connector, drm_edid: Option<&drm_edid>) {
             CTA_DB_VENDOR => {
                 // HDMI Vendor-Specific Data Block
                 if cea_db_is_hdmi_vsdb(db) {
-                    not_ported("drm_parse_hdmi_vsdb_audio");
+                    hdmi_vsdbs.push(db.to_vec());
                 }
             }
             _ => {}
@@ -1771,6 +2166,10 @@ fn drm_edid_to_eld(connector: &mut drm_connector, drm_edid: Option<&drm_edid>) {
     }
 
     eld[DRM_ELD_BASELINE_ELD_LEN as usize] = drm_eld_calc_baseline_block_size(&eld[..]).div_ceil(4) as u8;
+
+    for db in &hdmi_vsdbs {
+        drm_parse_hdmi_vsdb_audio(connector, db);
+    }
 }
 
 /// `DRM_ELD_CEA_SAD` (drm_eld.h).
@@ -1827,4 +2226,1694 @@ pub fn drm_edid_connector_update(connector: &mut drm_connector, drm_edid: Option
     _drm_update_tile_info(connector, drm_edid);
 
     _drm_edid_connector_property_update(connector, drm_edid)
+}
+
+/// `drm_edid_alloc`: a copy of `edid` as a drm_edid.
+pub fn drm_edid_alloc(edid: &[u8]) -> Option<drm_edid> {
+    if edid.is_empty() || edid.len() < EDID_LENGTH {
+        return None;
+    }
+
+    _drm_edid_alloc(edid.to_vec(), edid.len())
+}
+
+// ── modes ──
+
+/// `struct edid` offsets of the established and standard timings.
+const EDID_EST_T1: usize = 35;
+const EDID_EST_T2: usize = 36;
+const EDID_EST_MFG_RSVD: usize = 37;
+const EDID_STD_TIMINGS_OFF: usize = 38;
+
+/// `struct detailed_pixel_timing` byte offsets in a detailed timing.
+const PT_HACTIVE_LO: usize = 2;
+const PT_HBLANK_LO: usize = 3;
+const PT_HACTIVE_HBLANK_HI: usize = 4;
+const PT_VACTIVE_LO: usize = 5;
+const PT_VBLANK_LO: usize = 6;
+const PT_VACTIVE_VBLANK_HI: usize = 7;
+const PT_HSYNC_OFFSET_LO: usize = 8;
+const PT_HSYNC_PULSE_WIDTH_LO: usize = 9;
+const PT_VSYNC_OFFSET_PULSE_WIDTH_LO: usize = 10;
+const PT_HSYNC_VSYNC_OFFSET_PULSE_WIDTH_HI: usize = 11;
+const PT_WIDTH_MM_LO: usize = 12;
+const PT_HEIGHT_MM_LO: usize = 13;
+const PT_WIDTH_HEIGHT_MM_HI: usize = 14;
+const PT_MISC: usize = 17;
+
+/// `struct detailed_data_monitor_range` offsets in a display descriptor.
+const DT_RANGE_FORMULA: usize = DT_DATA + 6;
+
+fn le16(b: &[u8], o: usize) -> u16 {
+    b[o] as u16 | (b[o + 1] as u16) << 8
+}
+
+/// A byte of a data block, 0 past the EDID's end: the parsers below index
+/// by lengths the block declares.
+fn at(b: &[u8], i: usize) -> u8 {
+    b.get(i).copied().unwrap_or(0)
+}
+
+/// `MODE_SIZE`.
+fn MODE_SIZE(m: &drm_display_mode) -> i32 {
+    (m.hdisplay as i32).wrapping_mul(m.vdisplay as i32)
+}
+
+/// `drm_mode_probed_add`.
+fn drm_mode_probed_add(connector: &mut drm_connector, mode: drm_display_mode) {
+    connector.probed_modes.push(mode);
+}
+
+/// `edid_fixup_preferred`: walk the mode list for connector, clearing the
+/// preferred status on existing modes and setting it anew for the right
+/// mode ala quirks.
+fn edid_fixup_preferred(connector: &mut drm_connector) {
+    let mut target_refresh = 0;
+
+    if connector.probed_modes.is_empty() {
+        return;
+    }
+
+    if drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_60) {
+        target_refresh = 60;
+    }
+    if drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_75) {
+        target_refresh = 75;
+    }
+
+    let mut preferred = 0;
+    for cur in 0..connector.probed_modes.len() {
+        connector.probed_modes[cur].r#type &= !(DRM_MODE_TYPE_PREFERRED as u8);
+
+        if cur == preferred {
+            continue;
+        }
+
+        let cur_mode = &connector.probed_modes[cur];
+        // Largest mode is preferred
+        if MODE_SIZE(cur_mode) > MODE_SIZE(&connector.probed_modes[preferred]) {
+            preferred = cur;
+        }
+
+        let cur_vrefresh = drm_mode_vrefresh(cur_mode);
+        let preferred_vrefresh = drm_mode_vrefresh(&connector.probed_modes[preferred]);
+        // At a given size, try to get closest to target refresh
+        if MODE_SIZE(cur_mode) == MODE_SIZE(&connector.probed_modes[preferred])
+            && (cur_vrefresh - target_refresh).wrapping_abs() < (preferred_vrefresh - target_refresh).wrapping_abs()
+        {
+            preferred = cur;
+        }
+    }
+
+    connector.probed_modes[preferred].r#type |= DRM_MODE_TYPE_PREFERRED as u8;
+}
+
+/// `mode_is_rb`.
+fn mode_is_rb(mode: &drm_display_mode) -> bool {
+    (mode.htotal as i32 - mode.hdisplay as i32 == 160)
+        && (mode.hsync_end as i32 - mode.hdisplay as i32 == 80)
+        && (mode.hsync_end as i32 - mode.hsync_start as i32 == 32)
+        && (mode.vsync_start as i32 - mode.vdisplay as i32 == 3)
+}
+
+/// `drm_mode_find_dmt`: a copy of the DMT mode with these parameters.
+pub fn drm_mode_find_dmt(hsize: i32, vsize: i32, fresh: i32, rb: bool) -> Option<drm_display_mode> {
+    for t in drm_dmt_modes.iter() {
+        let ptr = mode_from_table(t);
+
+        if hsize != ptr.hdisplay as i32 {
+            continue;
+        }
+        if vsize != ptr.vdisplay as i32 {
+            continue;
+        }
+        if fresh != drm_mode_vrefresh(&ptr) {
+            continue;
+        }
+        if rb != mode_is_rb(&ptr) {
+            continue;
+        }
+
+        return Some(ptr);
+    }
+
+    None
+}
+
+/// `is_detailed_timing_descriptor`.
+fn is_detailed_timing_descriptor(descriptor: &[u8]) -> bool {
+    le16(descriptor, 0) != 0
+}
+
+/// `drm_monitor_supports_rb`: EDID 1.4 defines this explicitly. For EDID
+/// 1.3, we guess, badly.
+fn drm_monitor_supports_rb(drm_edid: &drm_edid) -> bool {
+    if drm_edid.edid[EDID_REVISION] >= 4 {
+        let mut ret = false;
+
+        drm_for_each_detailed_block(Some(drm_edid), &mut |descriptor| {
+            // is_rb
+            if !is_display_descriptor(descriptor, EDID_DETAIL_MONITOR_RANGE as u8) {
+                return;
+            }
+
+            if descriptor[DT_RANGE_FLAGS] as u32 == DRM_EDID_CVT_SUPPORT_FLAG
+                && descriptor[15] as u32 & DRM_EDID_CVT_FLAGS_REDUCED_BLANKING != 0
+            {
+                ret = true;
+            }
+        });
+        return ret;
+    }
+
+    drm_edid_is_digital(Some(drm_edid))
+}
+
+/// `find_gtf2`: the last secondary-GTF range descriptor, as 18 bytes.
+fn find_gtf2(drm_edid: &drm_edid) -> Option<[u8; DT_SIZE]> {
+    let mut res = None;
+
+    drm_for_each_detailed_block(Some(drm_edid), &mut |descriptor| {
+        if !is_display_descriptor(descriptor, EDID_DETAIL_MONITOR_RANGE as u8) {
+            return;
+        }
+
+        if descriptor[DT_RANGE_FLAGS] as u32 == DRM_EDID_SECONDARY_GTF_SUPPORT_FLAG {
+            let mut d = [0u8; DT_SIZE];
+            d.copy_from_slice(descriptor);
+            res = Some(d);
+        }
+    });
+
+    res
+}
+
+/// `drm_gtf2_hbreak`: secondary GTF curve kicks in above some break
+/// frequency.
+fn drm_gtf2_hbreak(drm_edid: &drm_edid) -> i32 {
+    find_gtf2(drm_edid).map_or(0, |d| d[12] as i32 * 2)
+}
+
+/// `drm_gtf2_2c`.
+fn drm_gtf2_2c(drm_edid: &drm_edid) -> i32 {
+    find_gtf2(drm_edid).map_or(0, |d| d[13] as i32)
+}
+
+/// `drm_gtf2_m`.
+fn drm_gtf2_m(drm_edid: &drm_edid) -> i32 {
+    find_gtf2(drm_edid).map_or(0, |d| le16(&d, 14) as i32)
+}
+
+/// `drm_gtf2_k`.
+fn drm_gtf2_k(drm_edid: &drm_edid) -> i32 {
+    find_gtf2(drm_edid).map_or(0, |d| d[16] as i32)
+}
+
+/// `drm_gtf2_2j`.
+fn drm_gtf2_2j(drm_edid: &drm_edid) -> i32 {
+    find_gtf2(drm_edid).map_or(0, |d| d[17] as i32)
+}
+
+/// `standard_timing_level`: CVT, GTF2, GTF or DMT. On 1.4, Linux's
+/// `get_timing_level` leaves CVT whatever the range descriptors say.
+fn standard_timing_level(drm_edid: &drm_edid) -> u32 {
+    let revision = drm_edid.edid[EDID_REVISION];
+
+    if revision >= 4 {
+        LEVEL_CVT
+    } else if revision >= 3 && drm_gtf2_hbreak(drm_edid) != 0 {
+        LEVEL_GTF2
+    } else if revision >= 2 {
+        LEVEL_GTF
+    } else {
+        LEVEL_DMT
+    }
+}
+
+/// `bad_std_timing`: 0 is reserved, 1 or 0x20 as both bytes is unused.
+fn bad_std_timing(a: u8, b: u8) -> bool {
+    (a == 0x00 && b == 0x00) || (a == 0x01 && b == 0x01) || (a == 0x20 && b == 0x20)
+}
+
+/// `drm_mode_hsync`.
+fn drm_mode_hsync(mode: &drm_display_mode) -> i32 {
+    if mode.htotal == 0 {
+        return 0;
+    }
+
+    let d = mode.htotal as i32;
+    if mode.clock > 0 { mode.clock.wrapping_add(d / 2) / d } else { mode.clock.wrapping_sub(d / 2) / d }
+}
+
+/// `drm_gtf2_mode`: GTF, or GTF2 above the break frequency.
+fn drm_gtf2_mode(drm_edid: &drm_edid, hsize: i32, vsize: i32, vrefresh_rate: i32) -> Option<drm_display_mode> {
+    // This is potentially wrong if there's ever a monitor with
+    // more than one ranges section, each claiming a different
+    // secondary GTF curve. Please don't do that.
+    let mode = drm_gtf_mode(hsize, vsize, vrefresh_rate, false, 0)?;
+
+    if drm_mode_hsync(&mode) > drm_gtf2_hbreak(drm_edid) {
+        return drm_gtf_mode_complex(hsize, vsize, vrefresh_rate, false, 0, drm_gtf2_m(drm_edid),
+                                    drm_gtf2_2c(drm_edid), drm_gtf2_k(drm_edid), drm_gtf2_2j(drm_edid));
+    }
+
+    Some(mode)
+}
+
+/// `drm_mode_std`: the mode of a standard timing (`t`: hsize, vfreq_aspect).
+fn drm_mode_std(connector: &drm_connector, drm_edid: &drm_edid, t: &[u8]) -> Option<drm_display_mode> {
+    let (t_hsize, vfreq_aspect) = (t[0], t[1]);
+    let aspect_ratio = (vfreq_aspect as u32 & EDID_TIMING_ASPECT_MASK) >> EDID_TIMING_ASPECT_SHIFT;
+    let vfreq = (vfreq_aspect as u32 & EDID_TIMING_VFREQ_MASK) >> EDID_TIMING_VFREQ_SHIFT;
+    let timing_level = standard_timing_level(drm_edid);
+
+    if bad_std_timing(t_hsize, vfreq_aspect) {
+        return None;
+    }
+
+    // According to the EDID spec, the hdisplay = hsize * 8 + 248
+    let mut hsize = t_hsize as i32 * 8 + 248;
+    // vrefresh_rate = vfreq + 60
+    let vrefresh_rate = vfreq as i32 + 60;
+    // the vdisplay is calculated based on the aspect ratio
+    let mut vsize = if aspect_ratio == 0 {
+        if drm_edid.edid[EDID_REVISION] < 3 { hsize } else { (hsize * 10) / 16 }
+    } else if aspect_ratio == 1 {
+        (hsize * 3) / 4
+    } else if aspect_ratio == 2 {
+        (hsize * 4) / 5
+    } else {
+        (hsize * 9) / 16
+    };
+
+    // HDTV hack, part 1
+    if vrefresh_rate == 60 && ((hsize == 1360 && vsize == 765) || (hsize == 1368 && vsize == 769)) {
+        hsize = 1366;
+        vsize = 768;
+    }
+
+    // If this connector already has a mode for this size and refresh
+    // rate (because it came from detailed or CVT info), use that
+    // instead. This way we don't have to guess at interlace or
+    // reduced blanking.
+    for m in &connector.probed_modes {
+        if m.hdisplay as i32 == hsize && m.vdisplay as i32 == vsize && drm_mode_vrefresh(m) == vrefresh_rate {
+            return None;
+        }
+    }
+
+    // HDTV hack, part 2
+    if hsize == 1366 && vsize == 768 && vrefresh_rate == 60 {
+        let mut mode = drm_cvt_mode(1366, 768, vrefresh_rate, false, false, false)?;
+        mode.hdisplay = 1366;
+        mode.hsync_start = mode.hsync_start.wrapping_sub(1);
+        mode.hsync_end = mode.hsync_end.wrapping_sub(1);
+        return Some(mode);
+    }
+
+    // check whether it can be found in default mode table
+    if drm_monitor_supports_rb(drm_edid) {
+        if let Some(mode) = drm_mode_find_dmt(hsize, vsize, vrefresh_rate, true) {
+            return Some(mode);
+        }
+    }
+    if let Some(mode) = drm_mode_find_dmt(hsize, vsize, vrefresh_rate, false) {
+        return Some(mode);
+    }
+
+    // okay, generate it
+    match timing_level {
+        LEVEL_GTF => drm_gtf_mode(hsize, vsize, vrefresh_rate, false, 0),
+        LEVEL_GTF2 => drm_gtf2_mode(drm_edid, hsize, vsize, vrefresh_rate),
+        LEVEL_CVT => drm_cvt_mode(hsize, vsize, vrefresh_rate, false, false, false),
+        _ => None,
+    }
+}
+
+/// `drm_mode_do_interlace_quirk`: EDID is delightfully ambiguous about how
+/// interlaced modes are to be encoded. Our internal representation is of
+/// frame height, but some HDTV detailed timings are encoded as field
+/// height.
+fn drm_mode_do_interlace_quirk(mode: &mut drm_display_mode, pt: &[u8]) {
+    const cea_interlaced: [(u16, u16); 7] =
+        [(1920, 1080), (720, 480), (1440, 480), (2880, 480), (720, 576), (1440, 576), (2880, 576)];
+
+    if pt[PT_MISC] as u32 & DRM_EDID_PT_INTERLACED == 0 {
+        return;
+    }
+
+    for &(w, h) in &cea_interlaced {
+        if mode.hdisplay == w && mode.vdisplay == h / 2 {
+            mode.vdisplay = mode.vdisplay.wrapping_mul(2);
+            mode.vsync_start = mode.vsync_start.wrapping_mul(2);
+            mode.vsync_end = mode.vsync_end.wrapping_mul(2);
+            mode.vtotal = mode.vtotal.wrapping_mul(2);
+            mode.vtotal |= 1;
+        }
+    }
+
+    mode.flags |= DRM_MODE_FLAG_INTERLACE;
+}
+
+/// `drm_mode_detailed`: the mode of an EDID detailed timing descriptor.
+fn drm_mode_detailed(connector: &drm_connector, drm_edid: &drm_edid, timing: &[u8]) -> Option<drm_display_mode> {
+    let pt = timing;
+    let hactive = (pt[PT_HACTIVE_HBLANK_HI] as u32 & 0xf0) << 4 | pt[PT_HACTIVE_LO] as u32;
+    let vactive = (pt[PT_VACTIVE_VBLANK_HI] as u32 & 0xf0) << 4 | pt[PT_VACTIVE_LO] as u32;
+    let hblank = (pt[PT_HACTIVE_HBLANK_HI] as u32 & 0xf) << 8 | pt[PT_HBLANK_LO] as u32;
+    let vblank = (pt[PT_VACTIVE_VBLANK_HI] as u32 & 0xf) << 8 | pt[PT_VBLANK_LO] as u32;
+    let hi = pt[PT_HSYNC_VSYNC_OFFSET_PULSE_WIDTH_HI] as u32;
+    let hsync_offset = (hi & 0xc0) << 2 | pt[PT_HSYNC_OFFSET_LO] as u32;
+    let hsync_pulse_width = (hi & 0x30) << 4 | pt[PT_HSYNC_PULSE_WIDTH_LO] as u32;
+    let vsync_offset = (hi & 0xc) << 2 | pt[PT_VSYNC_OFFSET_PULSE_WIDTH_LO] as u32 >> 4;
+    let vsync_pulse_width = (hi & 0x3) << 4 | (pt[PT_VSYNC_OFFSET_PULSE_WIDTH_LO] as u32 & 0xf);
+
+    // ignore tiny modes
+    if hactive < 64 || vactive < 64 {
+        return None;
+    }
+
+    if pt[PT_MISC] as u32 & DRM_EDID_PT_STEREO != 0 {
+        // Stereo mode not supported
+        return None;
+    }
+
+    // it is incorrect if hsync/vsync width is zero
+    if hsync_pulse_width == 0 || vsync_pulse_width == 0 {
+        return None;
+    }
+
+    let mut mode;
+    'set_size: {
+        if drm_edid_has_internal_quirk(connector, EDID_QUIRK_FORCE_REDUCED_BLANKING) {
+            mode = drm_cvt_mode(hactive as i32, vactive as i32, 60, true, false, false)?;
+            break 'set_size;
+        }
+
+        mode = drm_display_mode::default();
+
+        if drm_edid_has_internal_quirk(connector, EDID_QUIRK_135_CLOCK_TOO_HIGH) {
+            mode.clock = 1088 * 10;
+        } else {
+            mode.clock = le16(timing, 0) as i32 * 10;
+        }
+
+        mode.hdisplay = hactive as u16;
+        mode.hsync_start = (mode.hdisplay as u32 + hsync_offset) as u16;
+        mode.hsync_end = (mode.hsync_start as u32 + hsync_pulse_width) as u16;
+        mode.htotal = (mode.hdisplay as u32 + hblank) as u16;
+
+        mode.vdisplay = vactive as u16;
+        mode.vsync_start = (mode.vdisplay as u32 + vsync_offset) as u16;
+        mode.vsync_end = (mode.vsync_start as u32 + vsync_pulse_width) as u16;
+        mode.vtotal = (mode.vdisplay as u32 + vblank) as u16;
+
+        // Some EDIDs have bogus h/vsync_end values
+        if mode.hsync_end > mode.htotal {
+            mode.hsync_end = mode.htotal;
+        }
+        if mode.vsync_end > mode.vtotal {
+            mode.vsync_end = mode.vtotal;
+        }
+
+        drm_mode_do_interlace_quirk(&mut mode, pt);
+
+        if drm_edid_has_internal_quirk(connector, EDID_QUIRK_DETAILED_SYNC_PP) {
+            mode.flags |= DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
+        } else {
+            mode.flags |= if pt[PT_MISC] as u32 & DRM_EDID_PT_HSYNC_POSITIVE != 0 {
+                DRM_MODE_FLAG_PHSYNC
+            } else {
+                DRM_MODE_FLAG_NHSYNC
+            };
+            mode.flags |= if pt[PT_MISC] as u32 & DRM_EDID_PT_VSYNC_POSITIVE != 0 {
+                DRM_MODE_FLAG_PVSYNC
+            } else {
+                DRM_MODE_FLAG_NVSYNC
+            };
+        }
+    }
+
+    // set_size:
+    mode.width_mm = pt[PT_WIDTH_MM_LO] as u16 | (pt[PT_WIDTH_HEIGHT_MM_HI] as u16 & 0xf0) << 4;
+    mode.height_mm = pt[PT_HEIGHT_MM_LO] as u16 | (pt[PT_WIDTH_HEIGHT_MM_HI] as u16 & 0xf) << 8;
+
+    if drm_edid_has_internal_quirk(connector, EDID_QUIRK_DETAILED_IN_CM) {
+        mode.width_mm = mode.width_mm.wrapping_mul(10);
+        mode.height_mm = mode.height_mm.wrapping_mul(10);
+    }
+
+    if drm_edid_has_internal_quirk(connector, EDID_QUIRK_DETAILED_USE_MAXIMUM_SIZE) {
+        mode.width_mm = drm_edid.edid[EDID_WIDTH_CM] as u16 * 10;
+        mode.height_mm = drm_edid.edid[EDID_HEIGHT_CM] as u16 * 10;
+    }
+
+    mode.r#type = DRM_MODE_TYPE_DRIVER as u8;
+    drm_mode_set_name(&mut mode);
+
+    Some(mode)
+}
+
+/// `mode_in_hsync_range`.
+fn mode_in_hsync_range(mode: &drm_display_mode, edid: &[u8], t: &[u8]) -> bool {
+    let mut hmin = t[7] as i32;
+    if edid[EDID_REVISION] >= 4 {
+        hmin += if t[4] & 0x04 != 0 { 255 } else { 0 };
+    }
+    let mut hmax = t[8] as i32;
+    if edid[EDID_REVISION] >= 4 {
+        hmax += if t[4] & 0x08 != 0 { 255 } else { 0 };
+    }
+    let hsync = drm_mode_hsync(mode);
+
+    hsync <= hmax && hsync >= hmin
+}
+
+/// `mode_in_vsync_range`.
+fn mode_in_vsync_range(mode: &drm_display_mode, edid: &[u8], t: &[u8]) -> bool {
+    let mut vmin = t[5] as i32;
+    if edid[EDID_REVISION] >= 4 {
+        vmin += if t[4] & 0x01 != 0 { 255 } else { 0 };
+    }
+    let mut vmax = t[6] as i32;
+    if edid[EDID_REVISION] >= 4 {
+        vmax += if t[4] & 0x02 != 0 { 255 } else { 0 };
+    }
+    let vsync = drm_mode_vrefresh(mode);
+
+    vsync <= vmax && vsync >= vmin
+}
+
+/// `range_pixel_clock`.
+fn range_pixel_clock(edid: &[u8], t: &[u8]) -> u32 {
+    // unspecified
+    if t[9] == 0 || t[9] == 255 {
+        return 0;
+    }
+
+    // 1.4 with CVT support gives us real precision, yay
+    if edid[EDID_REVISION] >= 4 && t[10] as u32 == DRM_EDID_CVT_SUPPORT_FLAG {
+        return (t[9] as i32 * 10000 - (t[12] as i32 >> 2) * 250) as u32;
+    }
+
+    // 1.3 is pathetic, so fuzz up a bit
+    t[9] as u32 * 10000 + 5001
+}
+
+/// `mode_in_range`.
+fn mode_in_range(mode: &drm_display_mode, drm_edid: &drm_edid, timing: &[u8]) -> bool {
+    let edid = &drm_edid.edid;
+    let t = timing;
+
+    if !mode_in_hsync_range(mode, edid, t) {
+        return false;
+    }
+
+    if !mode_in_vsync_range(mode, edid, t) {
+        return false;
+    }
+
+    let max_clock = range_pixel_clock(edid, t);
+    if max_clock != 0 && mode.clock as u32 > max_clock {
+        return false;
+    }
+
+    // 1.4 max horizontal check
+    if edid[EDID_REVISION] >= 4
+        && t[10] as u32 == DRM_EDID_CVT_SUPPORT_FLAG
+        && t[13] != 0
+        && mode.hdisplay as i32 > 8 * (t[13] as i32 + 256 * (t[12] as i32 & 0x3))
+    {
+        return false;
+    }
+
+    if mode_is_rb(mode) && !drm_monitor_supports_rb(drm_edid) {
+        return false;
+    }
+
+    true
+}
+
+/// `valid_inferred_mode`.
+fn valid_inferred_mode(connector: &drm_connector, mode: &drm_display_mode) -> bool {
+    let mut ok = false;
+
+    for m in &connector.probed_modes {
+        if mode.hdisplay == m.hdisplay && mode.vdisplay == m.vdisplay && drm_mode_vrefresh(mode) == drm_mode_vrefresh(m) {
+            return false; // duplicated
+        }
+        if mode.hdisplay <= m.hdisplay && mode.vdisplay <= m.vdisplay {
+            ok = true;
+        }
+    }
+    ok
+}
+
+/// `drm_dmt_modes_for_range`.
+fn drm_dmt_modes_for_range(connector: &mut drm_connector, drm_edid: &drm_edid, timing: &[u8]) -> i32 {
+    let mut modes = 0;
+
+    for t in drm_dmt_modes.iter() {
+        let m = mode_from_table(t);
+        if mode_in_range(&m, drm_edid, timing) && valid_inferred_mode(connector, &m) {
+            drm_mode_probed_add(connector, m);
+            modes += 1;
+        }
+    }
+
+    modes
+}
+
+/// `drm_mode_fixup_1366x768`: fix up 1366x768 mode from 1368x768; GFT/CVT
+/// can't express 1366 width which isn't dividable by 8.
+pub fn drm_mode_fixup_1366x768(mode: &mut drm_display_mode) {
+    if mode.hdisplay == 1368 && mode.vdisplay == 768 {
+        mode.hdisplay = 1366;
+        mode.hsync_start = mode.hsync_start.wrapping_sub(1);
+        mode.hsync_end = mode.hsync_end.wrapping_sub(1);
+        drm_mode_set_name(mode);
+    }
+}
+
+/// `drm_gtf_modes_for_range`, `drm_gtf2_modes_for_range`,
+/// `drm_cvt_modes_for_range`: the extra modes by one formula.
+fn formula_modes_for_range(connector: &mut drm_connector, drm_edid: &drm_edid, timing: &[u8],
+                           make: &dyn Fn(i32, i32, i32) -> Option<drm_display_mode>) -> i32 {
+    let mut modes = 0;
+
+    for m in extra_modes.iter() {
+        let Some(mut newmode) = make(m.0 as i32, m.1 as i32, m.2 as i32) else { return modes };
+
+        drm_mode_fixup_1366x768(&mut newmode);
+        if !mode_in_range(&newmode, drm_edid, timing) || !valid_inferred_mode(connector, &newmode) {
+            continue;
+        }
+
+        drm_mode_probed_add(connector, newmode);
+        modes += 1;
+    }
+
+    modes
+}
+
+/// `do_inferred_modes` + `add_inferred_modes`.
+fn add_inferred_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    let mut modes = 0;
+
+    if drm_edid.edid[EDID_REVISION] < 1 {
+        return 0;
+    }
+
+    drm_for_each_detailed_block(Some(drm_edid), &mut |timing| {
+        if !is_display_descriptor(timing, EDID_DETAIL_MONITOR_RANGE as u8) {
+            return;
+        }
+
+        modes += drm_dmt_modes_for_range(connector, drm_edid, timing);
+
+        if drm_edid.edid[EDID_REVISION] < 2 {
+            return; // GTF not defined yet
+        }
+
+        match timing[DT_RANGE_FLAGS] as u32 {
+            DRM_EDID_SECONDARY_GTF_SUPPORT_FLAG => {
+                modes += formula_modes_for_range(connector, drm_edid, timing,
+                                                 &|w, h, r| drm_gtf2_mode(drm_edid, w, h, r));
+            }
+            DRM_EDID_DEFAULT_GTF_SUPPORT_FLAG => {
+                modes += formula_modes_for_range(connector, drm_edid, timing,
+                                                 &|w, h, r| drm_gtf_mode(w, h, r, false, 0));
+            }
+            DRM_EDID_CVT_SUPPORT_FLAG => {
+                if drm_edid.edid[EDID_REVISION] < 4 {
+                    return;
+                }
+                let rb = drm_monitor_supports_rb(drm_edid);
+                modes += formula_modes_for_range(connector, drm_edid, timing,
+                                                 &|w, h, r| drm_cvt_mode(w, h, r, rb, false, false));
+            }
+            _ => {}
+        }
+    });
+
+    modes
+}
+
+/// `drm_est3_modes`.
+fn drm_est3_modes(connector: &mut drm_connector, timing: &[u8]) -> i32 {
+    let mut modes = 0;
+    let est = &timing[6..];
+
+    for i in 0..6 {
+        for j in (0..8).rev() {
+            let m = (i * 8) + (7 - j);
+            if m >= est3_modes.len() {
+                break;
+            }
+            if est[i] & (1 << j) != 0 {
+                let e = est3_modes[m];
+                if let Some(mode) = drm_mode_find_dmt(e.0 as i32, e.1 as i32, e.2 as i32, e.3 != 0) {
+                    drm_mode_probed_add(connector, mode);
+                    modes += 1;
+                }
+            }
+        }
+    }
+
+    modes
+}
+
+/// `add_established_modes`: the established timings bitmap of the base
+/// block, then the established timings III descriptors.
+fn add_established_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    let edid = &drm_edid.edid;
+    let est_bits: u32 =
+        edid[EDID_EST_T1] as u32 | (edid[EDID_EST_T2] as u32) << 8 | (edid[EDID_EST_MFG_RSVD] as u32 & 0x80) << 9;
+    let mut modes = 0;
+
+    for i in 0..=EDID_EST_TIMINGS as usize {
+        if est_bits & (1 << i) != 0 {
+            drm_mode_probed_add(connector, mode_from_table(&edid_est_modes[i]));
+            modes += 1;
+        }
+    }
+
+    let mut closure_modes = 0;
+    if edid[EDID_REVISION] >= 1 {
+        drm_for_each_detailed_block(Some(drm_edid), &mut |timing| {
+            // do_established_modes
+            if !is_display_descriptor(timing, EDID_DETAIL_EST_TIMINGS as u8) {
+                return;
+            }
+
+            closure_modes += drm_est3_modes(connector, timing);
+        });
+    }
+
+    modes + closure_modes
+}
+
+/// `add_standard_modes`: the standard timings of the base block, then
+/// those of standard timing descriptors.
+fn add_standard_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    let mut modes = 0;
+
+    for i in 0..EDID_STD_TIMINGS as usize {
+        let o = EDID_STD_TIMINGS_OFF + 2 * i;
+        if let Some(newmode) = drm_mode_std(connector, drm_edid, &drm_edid.edid[o..o + 2]) {
+            drm_mode_probed_add(connector, newmode);
+            modes += 1;
+        }
+    }
+
+    let mut closure_modes = 0;
+    if drm_edid.edid[EDID_REVISION] >= 1 {
+        drm_for_each_detailed_block(Some(drm_edid), &mut |timing| {
+            // do_standard_modes
+            if !is_display_descriptor(timing, EDID_DETAIL_STD_MODES as u8) {
+                return;
+            }
+
+            for i in 0..6 {
+                let o = DT_DATA + 2 * i;
+                if let Some(newmode) = drm_mode_std(connector, drm_edid, &timing[o..o + 2]) {
+                    drm_mode_probed_add(connector, newmode);
+                    closure_modes += 1;
+                }
+            }
+        });
+    }
+
+    // XXX should also look for standard codes in VTB blocks
+
+    modes + closure_modes
+}
+
+/// `drm_cvt_modes`: the four 3-byte CVT codes of a descriptor (Linux's
+/// `cvt[i]` starts at the descriptor's data, byte 5).
+fn drm_cvt_modes(connector: &mut drm_connector, timing: &[u8]) -> i32 {
+    let mut modes = 0;
+    const rates: [i32; 5] = [60, 85, 75, 60, 50];
+
+    for i in 0..4 {
+        let code = &timing[DT_DATA + 3 * i..DT_DATA + 3 * i + 3];
+
+        if code == [0, 0, 0] {
+            continue;
+        }
+
+        let height = (code[0] as i32 + ((code[1] as i32 & 0xf0) << 4) + 1) * 2;
+        let width = match code[1] & 0x0c {
+            0x04 => height * 16 / 9,
+            0x08 => height * 16 / 10,
+            0x0c => height * 15 / 9,
+            _ => height * 4 / 3,
+        };
+
+        for j in 1..5 {
+            if code[2] & (1 << j) != 0 {
+                if let Some(newmode) = drm_cvt_mode(width, height, rates[j], j == 0, false, false) {
+                    drm_mode_probed_add(connector, newmode);
+                    modes += 1;
+                }
+            }
+        }
+    }
+
+    modes
+}
+
+/// `add_cvt_modes`.
+fn add_cvt_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    let mut modes = 0;
+
+    if drm_edid.edid[EDID_REVISION] >= 3 {
+        drm_for_each_detailed_block(Some(drm_edid), &mut |timing| {
+            // do_cvt_mode
+            if !is_display_descriptor(timing, EDID_DETAIL_CVT_3BYTE as u8) {
+                return;
+            }
+
+            modes += drm_cvt_modes(connector, timing);
+        });
+    }
+
+    // XXX should also look for CVT codes in VTB blocks
+
+    modes
+}
+
+/// `add_detailed_modes`: the detailed timings, the first preferred.
+fn add_detailed_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    let mut modes = 0;
+    let mut preferred = if drm_edid.edid[EDID_REVISION] >= 4 {
+        true // first detailed timing is always preferred
+    } else {
+        drm_edid.edid[EDID_FEATURES] as u32 & DRM_EDID_FEATURE_PREFERRED_TIMING != 0
+    };
+
+    drm_for_each_detailed_block(Some(drm_edid), &mut |timing| {
+        // do_detailed_mode
+        if !is_detailed_timing_descriptor(timing) {
+            return;
+        }
+
+        let Some(mut newmode) = drm_mode_detailed(connector, drm_edid, timing) else { return };
+
+        if preferred {
+            newmode.r#type |= DRM_MODE_TYPE_PREFERRED as u8;
+        }
+
+        // Detailed modes are limited to 10kHz pixel clock resolution,
+        // so fix up anything that looks like CEA/HDMI mode, but the clock
+        // is just slightly off.
+        fixup_detailed_cea_mode_clock(&mut newmode);
+
+        drm_mode_probed_add(connector, newmode);
+        modes += 1;
+        preferred = false;
+    });
+
+    modes
+}
+
+/// `drm_edid_has_cta_extension`: a CTA extension or a DisplayID CTA data
+/// block.
+fn drm_edid_has_cta_extension(drm_edid: &drm_edid) -> bool {
+    let mut found = false;
+
+    // Look for a top level CEA extension block
+    let mut edid_iter = drm_edid_iter_begin(Some(drm_edid));
+    while let Some(ext) = __drm_edid_iter_next(&mut edid_iter) {
+        if drm_edid.edid[ext] as u32 == CEA_EXT {
+            found = true;
+            break;
+        }
+    }
+    drm_edid_iter_end(&mut edid_iter);
+
+    if found {
+        return true;
+    }
+
+    // CEA blocks can also be found embedded in a DisplayID block
+    let mut iter = displayid_iter_edid_begin(Some(drm_edid));
+    while let Some(block) = __displayid_iter_next(&mut iter) {
+        if drm_edid.edid[block] as u32 == DATA_BLOCK_CTA {
+            found = true;
+            break;
+        }
+    }
+    displayid_iter_end(&mut iter);
+
+    found
+}
+
+/// `cea_mode_for_vic`.
+fn cea_mode_for_vic(vic: u8) -> Option<drm_display_mode> {
+    let vic = vic as usize;
+
+    if vic >= 1 && vic < 1 + edid_cea_modes_1.len() {
+        return Some(mode_from_table(&edid_cea_modes_1[vic - 1]));
+    }
+    if vic >= 193 && vic < 193 + edid_cea_modes_193.len() {
+        return Some(mode_from_table(&edid_cea_modes_193[vic - 193]));
+    }
+    None
+}
+
+/// `cea_num_vics`.
+fn cea_num_vics() -> u8 {
+    (193 + edid_cea_modes_193.len()) as u8
+}
+
+/// `cea_next_vic`.
+fn cea_next_vic(vic: u8) -> u8 {
+    let vic = vic + 1;
+    if vic as usize == 1 + edid_cea_modes_1.len() { 193 } else { vic }
+}
+
+/// `cea_mode_alternate_clock`: the alternate clock for the CEA mode
+/// (60Hz vs. 59.94Hz etc.).
+fn cea_mode_alternate_clock(cea_mode: &drm_display_mode) -> u32 {
+    let mut clock = cea_mode.clock as u32;
+
+    if drm_mode_vrefresh(cea_mode) % 6 != 0 {
+        return clock;
+    }
+
+    // edid_cea_modes contains the 59.94Hz
+    // variant for 240 and 480 line modes,
+    // and the 60Hz variant otherwise.
+    if cea_mode.vdisplay == 240 || cea_mode.vdisplay == 480 {
+        clock = ((clock as u64 * 1001 + 500) / 1000) as u32;
+    } else {
+        clock = ((clock as u64 * 1000 + 500) / 1001) as u32;
+    }
+
+    clock
+}
+
+/// `cea_mode_alternate_timings`: for certain VICs the spec allows the
+/// vertical front porch to vary by one or two lines; cea_modes[] stores
+/// the variant with the shortest one.
+fn cea_mode_alternate_timings(vic: u8, mode: &mut drm_display_mode) -> bool {
+    if ((vic == 8 || vic == 9 || vic == 12 || vic == 13) && mode.vtotal < 263)
+        || ((vic == 23 || vic == 24 || vic == 27 || vic == 28) && mode.vtotal < 314)
+    {
+        mode.vsync_start += 1;
+        mode.vsync_end += 1;
+        mode.vtotal += 1;
+
+        return true;
+    }
+
+    false
+}
+
+/// `abs(int - unsigned int) > unsigned int`, in the kernel's `abs`.
+fn clock_off(clock: i32, other: u32, tolerance: u32) -> bool {
+    clock.wrapping_sub(other as i32).wrapping_abs() as u32 > tolerance
+}
+
+/// `drm_match_cea_mode_clock_tolerance`.
+fn drm_match_cea_mode_clock_tolerance(to_match: &drm_display_mode, clock_tolerance: u32) -> u8 {
+    let mut match_flags = DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_FLAGS;
+
+    if to_match.clock == 0 {
+        return 0;
+    }
+
+    if to_match.picture_aspect_ratio != 0 {
+        match_flags |= DRM_MODE_MATCH_ASPECT_RATIO;
+    }
+
+    let mut vic = 1;
+    while vic < cea_num_vics() {
+        let mut cea_mode = cea_mode_for_vic(vic).unwrap_or_default();
+
+        // Check both 60Hz and 59.94Hz
+        let clock1 = cea_mode.clock as u32;
+        let clock2 = cea_mode_alternate_clock(&cea_mode);
+
+        if !(clock_off(to_match.clock, clock1, clock_tolerance) && clock_off(to_match.clock, clock2, clock_tolerance)) {
+            loop {
+                if drm_mode_match(to_match, &cea_mode, match_flags) {
+                    return vic;
+                }
+                if !cea_mode_alternate_timings(vic, &mut cea_mode) {
+                    break;
+                }
+            }
+        }
+        vic = cea_next_vic(vic);
+    }
+
+    0
+}
+
+/// `drm_match_cea_mode`: the CEA Video ID (VIC) of the mode or 0 if it
+/// isn't a CEA-861 mode.
+pub fn drm_match_cea_mode(to_match: &drm_display_mode) -> u8 {
+    let mut match_flags = DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_FLAGS;
+
+    if to_match.clock == 0 {
+        return 0;
+    }
+
+    if to_match.picture_aspect_ratio != 0 {
+        match_flags |= DRM_MODE_MATCH_ASPECT_RATIO;
+    }
+
+    let mut vic = 1;
+    while vic < cea_num_vics() {
+        let mut cea_mode = cea_mode_for_vic(vic).unwrap_or_default();
+
+        // Check both 60Hz and 59.94Hz
+        let clock1 = cea_mode.clock;
+        let clock2 = cea_mode_alternate_clock(&cea_mode) as i32;
+
+        if KHZ2PICOS(to_match.clock) == KHZ2PICOS(clock1) || KHZ2PICOS(to_match.clock) == KHZ2PICOS(clock2) {
+            loop {
+                if drm_mode_match(to_match, &cea_mode, match_flags) {
+                    return vic;
+                }
+                if !cea_mode_alternate_timings(vic, &mut cea_mode) {
+                    break;
+                }
+            }
+        }
+        vic = cea_next_vic(vic);
+    }
+
+    0
+}
+
+/// `drm_valid_cea_vic`.
+fn drm_valid_cea_vic(vic: u8) -> bool {
+    cea_mode_for_vic(vic).is_some()
+}
+
+/// `drm_get_cea_aspect_ratio`.
+fn drm_get_cea_aspect_ratio(video_code: u8) -> u32 {
+    cea_mode_for_vic(video_code).map_or(HDMI_PICTURE_ASPECT_NONE, |m| m.picture_aspect_ratio)
+}
+
+/// `edid_4k_modes[vic]`.
+fn hdmi_mode_for_vic(vic: u8) -> drm_display_mode {
+    mode_from_table(&edid_4k_modes[vic as usize])
+}
+
+/// `hdmi_mode_alternate_clock`: the alternate clock for HDMI modes (those
+/// from the HDMI vendor specific block).
+fn hdmi_mode_alternate_clock(hdmi_mode: &drm_display_mode) -> u32 {
+    cea_mode_alternate_clock(hdmi_mode)
+}
+
+/// `drm_match_hdmi_mode_clock_tolerance`.
+fn drm_match_hdmi_mode_clock_tolerance(to_match: &drm_display_mode, clock_tolerance: u32) -> u8 {
+    let mut match_flags = DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_FLAGS;
+
+    if to_match.clock == 0 {
+        return 0;
+    }
+
+    if to_match.picture_aspect_ratio != 0 {
+        match_flags |= DRM_MODE_MATCH_ASPECT_RATIO;
+    }
+
+    for vic in 1..edid_4k_modes.len() as u8 {
+        let hdmi_mode = hdmi_mode_for_vic(vic);
+
+        // Make sure to also match alternate clocks
+        let clock1 = hdmi_mode.clock as u32;
+        let clock2 = hdmi_mode_alternate_clock(&hdmi_mode);
+
+        if clock_off(to_match.clock, clock1, clock_tolerance) && clock_off(to_match.clock, clock2, clock_tolerance) {
+            continue;
+        }
+
+        if drm_mode_match(to_match, &hdmi_mode, match_flags) {
+            return vic;
+        }
+    }
+
+    0
+}
+
+/// `drm_match_hdmi_mode`: the HDMI Video ID of a mode of the HDMI vendor
+/// specific block, or 0.
+fn drm_match_hdmi_mode(to_match: &drm_display_mode) -> u8 {
+    let mut match_flags = DRM_MODE_MATCH_TIMINGS | DRM_MODE_MATCH_FLAGS;
+
+    if to_match.clock == 0 {
+        return 0;
+    }
+
+    if to_match.picture_aspect_ratio != 0 {
+        match_flags |= DRM_MODE_MATCH_ASPECT_RATIO;
+    }
+
+    for vic in 1..edid_4k_modes.len() as u8 {
+        let hdmi_mode = hdmi_mode_for_vic(vic);
+
+        // Make sure to also match alternate clocks
+        let clock1 = hdmi_mode.clock;
+        let clock2 = hdmi_mode_alternate_clock(&hdmi_mode) as i32;
+
+        if (KHZ2PICOS(to_match.clock) == KHZ2PICOS(clock1) || KHZ2PICOS(to_match.clock) == KHZ2PICOS(clock2))
+            && drm_mode_match(to_match, &hdmi_mode, match_flags)
+        {
+            return vic;
+        }
+    }
+    0
+}
+
+/// `drm_valid_hdmi_vic`.
+fn drm_valid_hdmi_vic(vic: u8) -> bool {
+    vic > 0 && (vic as usize) < edid_4k_modes.len()
+}
+
+/// `add_alternate_cea_modes`: for each probed CEA or HDMI mode, the
+/// variant with the other clock (60Hz vs. 59.94Hz).
+fn add_alternate_cea_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    let mut list = Vec::new();
+
+    // Don't add CTA modes if the CTA extension block is missing
+    if !drm_edid_has_cta_extension(drm_edid) {
+        return 0;
+    }
+
+    // Go through all probed modes and create a new mode
+    // with the alternate clock for certain CEA modes.
+    for mode in &connector.probed_modes {
+        let mut vic = drm_match_cea_mode(mode);
+        let (cea_mode, clock2) = if drm_valid_cea_vic(vic) {
+            let m = cea_mode_for_vic(vic).unwrap_or_default();
+            let c = cea_mode_alternate_clock(&m);
+            (m, c)
+        } else {
+            vic = drm_match_hdmi_mode(mode);
+            if !drm_valid_hdmi_vic(vic) {
+                continue;
+            }
+            let m = hdmi_mode_for_vic(vic);
+            let c = hdmi_mode_alternate_clock(&m);
+            (m, c)
+        };
+
+        let clock1 = cea_mode.clock as u32;
+
+        if clock1 == clock2 {
+            continue;
+        }
+
+        if mode.clock as u32 != clock1 && mode.clock as u32 != clock2 {
+            continue;
+        }
+
+        let mut newmode = cea_mode;
+
+        // Carry over the stereo flags
+        newmode.flags |= mode.flags & DRM_MODE_FLAG_3D_MASK;
+
+        // The current mode could be either variant. Make
+        // sure to pick the "other" clock for the new mode.
+        if mode.clock as u32 != clock1 {
+            newmode.clock = clock1 as i32;
+        } else {
+            newmode.clock = clock2 as i32;
+        }
+
+        list.push(newmode);
+    }
+
+    let modes = list.len() as i32;
+    connector.probed_modes.append(&mut list);
+
+    modes
+}
+
+/// `svd_to_vic`: 0-6 bit vic, 7th bit native mode indicator.
+fn svd_to_vic(svd: u8) -> u8 {
+    if (1..=64).contains(&svd) || (129..=192).contains(&svd) {
+        return svd & 127;
+    }
+
+    svd
+}
+
+/// `drm_display_mode_from_vic_index`: the mode of the 0-based vic_index'th
+/// VIC across all CTA VDBs in the EDID.
+fn drm_display_mode_from_vic_index(connector: &drm_connector, vic_index: i32) -> Option<drm_display_mode> {
+    let info = &connector.display_info;
+
+    let vic = *info.vics.get(usize::try_from(vic_index).ok()?)?;
+    if vic == 0 {
+        return None;
+    }
+
+    drm_display_mode_from_cea_vic(vic)
+}
+
+/// `do_y420vdb_modes`: the modes of a YCbCr 4:2:0 Video Data Block, which
+/// the sink takes in 4:2:0 only.
+fn do_y420vdb_modes(connector: &mut drm_connector, svds: &[u8]) -> i32 {
+    let mut modes = 0;
+
+    for &svd in svds {
+        let vic = svd_to_vic(svd);
+
+        let Some(newmode) = cea_mode_for_vic(vic) else { continue };
+        drm_mode_probed_add(connector, newmode);
+        modes += 1;
+    }
+
+    modes
+}
+
+/// `drm_display_mode_from_cea_vic`: a new mode matching the CEA VIC.
+pub fn drm_display_mode_from_cea_vic(video_code: u8) -> Option<drm_display_mode> {
+    cea_mode_for_vic(video_code)
+}
+
+/// `add_cta_vdb_modes`: the modes of the VICs parse_cta_vdb() found.
+fn add_cta_vdb_modes(connector: &mut drm_connector) -> i32 {
+    let mut modes = 0;
+
+    for i in 0..connector.display_info.vics.len() {
+        if let Some(mode) = drm_display_mode_from_vic_index(connector, i as i32) {
+            drm_mode_probed_add(connector, mode);
+            modes += 1;
+        }
+    }
+
+    modes
+}
+
+/// `stereo_mandatory_modes`: width, height, vrefresh, flags.
+const stereo_mandatory_modes: [(u16, u16, i32, u32); 8] = [
+    (1920, 1080, 24, DRM_MODE_FLAG_3D_TOP_AND_BOTTOM),
+    (1920, 1080, 24, DRM_MODE_FLAG_3D_FRAME_PACKING),
+    (1920, 1080, 50, DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF),
+    (1920, 1080, 60, DRM_MODE_FLAG_INTERLACE | DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF),
+    (1280, 720, 50, DRM_MODE_FLAG_3D_TOP_AND_BOTTOM),
+    (1280, 720, 50, DRM_MODE_FLAG_3D_FRAME_PACKING),
+    (1280, 720, 60, DRM_MODE_FLAG_3D_TOP_AND_BOTTOM),
+    (1280, 720, 60, DRM_MODE_FLAG_3D_FRAME_PACKING),
+];
+
+/// `stereo_match_mandatory`.
+fn stereo_match_mandatory(mode: &drm_display_mode, stereo_mode: &(u16, u16, i32, u32)) -> bool {
+    let interlaced = mode.flags & DRM_MODE_FLAG_INTERLACE;
+
+    mode.hdisplay == stereo_mode.0
+        && mode.vdisplay == stereo_mode.1
+        && interlaced == (stereo_mode.3 & DRM_MODE_FLAG_INTERLACE)
+        && drm_mode_vrefresh(mode) == stereo_mode.2
+}
+
+/// `add_hdmi_mandatory_stereo_modes`.
+fn add_hdmi_mandatory_stereo_modes(connector: &mut drm_connector) -> i32 {
+    let mut stereo_modes = Vec::new();
+
+    for mode in &connector.probed_modes {
+        for mandatory in &stereo_mandatory_modes {
+            if !stereo_match_mandatory(mode, mandatory) {
+                continue;
+            }
+
+            let mut new_mode = mode.clone();
+            new_mode.flags |= mandatory.3;
+            stereo_modes.push(new_mode);
+        }
+    }
+
+    let modes = stereo_modes.len() as i32;
+    connector.probed_modes.append(&mut stereo_modes);
+
+    modes
+}
+
+/// `add_hdmi_mode`.
+fn add_hdmi_mode(connector: &mut drm_connector, vic: u8) -> i32 {
+    if !drm_valid_hdmi_vic(vic) {
+        Line::new().s("[CONNECTOR:").bytes(connector.name.as_bytes()).s("] Unknown HDMI VIC: ").dec(vic as u64).say();
+        return 0;
+    }
+
+    drm_mode_probed_add(connector, hdmi_mode_for_vic(vic));
+
+    1
+}
+
+/// `add_3d_struct_modes`.
+fn add_3d_struct_modes(connector: &mut drm_connector, structure: u16, vic_index: i32) -> i32 {
+    let mut modes = 0;
+
+    for (bit, flag) in [
+        (0, DRM_MODE_FLAG_3D_FRAME_PACKING),
+        (6, DRM_MODE_FLAG_3D_TOP_AND_BOTTOM),
+        (8, DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF),
+    ] {
+        if structure & (1 << bit) != 0 {
+            if let Some(mut newmode) = drm_display_mode_from_vic_index(connector, vic_index) {
+                newmode.flags |= flag;
+                drm_mode_probed_add(connector, newmode);
+                modes += 1;
+            }
+        }
+    }
+
+    modes
+}
+
+/// `hdmi_vsdb_latency_present`.
+fn hdmi_vsdb_latency_present(db: &[u8]) -> bool {
+    at(db, 8) & (1 << 7) != 0
+}
+
+/// `hdmi_vsdb_i_latency_present`.
+fn hdmi_vsdb_i_latency_present(db: &[u8]) -> bool {
+    hdmi_vsdb_latency_present(db) && at(db, 8) & (1 << 6) != 0
+}
+
+/// `hdmi_vsdb_latency_length`.
+fn hdmi_vsdb_latency_length(db: &[u8]) -> i32 {
+    if hdmi_vsdb_i_latency_present(db) {
+        4
+    } else if hdmi_vsdb_latency_present(db) {
+        2
+    } else {
+        0
+    }
+}
+
+/// `do_hdmi_vsdb_modes`: the modes of the HDMI Vendor Specific data block
+/// (`len`: its payload, db[1..=len]), with the stereo 3D modes.
+fn do_hdmi_vsdb_modes(connector: &mut drm_connector, db: &[u8], len: u8) -> i32 {
+    let len = len as i32;
+    let mut modes = 0;
+    let mut offset: i32 = 0;
+    let mut multi_present = 0;
+    let b = |i: i32| at(db, i as usize);
+
+    if len < 8 {
+        return modes;
+    }
+
+    // no HDMI_Video_Present
+    if b(8) & (1 << 5) == 0 {
+        return modes;
+    }
+
+    offset += hdmi_vsdb_latency_length(db);
+
+    // the declared length is not long enough for the 2 first bytes
+    // of additional video format capabilities
+    if len < 8 + offset + 2 {
+        return modes;
+    }
+
+    // 3D_Present
+    offset += 1;
+    if b(8 + offset) & (1 << 7) != 0 {
+        modes += add_hdmi_mandatory_stereo_modes(connector);
+
+        // 3D_Multi_present
+        multi_present = (b(8 + offset) & 0x60) >> 5;
+    }
+
+    offset += 1;
+    let vic_len = (b(8 + offset) >> 5) as i32;
+    let hdmi_3d_len = (b(8 + offset) & 0x1f) as i32;
+
+    let mut i = 0;
+    while i < vic_len && len >= 9 + offset + i {
+        let vic = b(9 + offset + i);
+        modes += add_hdmi_mode(connector, vic);
+        i += 1;
+    }
+    offset += 1 + vic_len;
+
+    let multi_len = match multi_present {
+        1 => 2,
+        2 => 4,
+        _ => 0,
+    };
+
+    if len < 8 + offset + hdmi_3d_len - 1 {
+        return modes;
+    }
+
+    if hdmi_3d_len < multi_len {
+        return modes;
+    }
+
+    if multi_present == 1 || multi_present == 2 {
+        // 3D_Structure_ALL
+        let structure_all = (b(8 + offset) as u16) << 8 | b(9 + offset) as u16;
+
+        // check if 3D_MASK is present
+        let mask: u16 = if multi_present == 2 { (b(10 + offset) as u16) << 8 | b(11 + offset) as u16 } else { 0xffff };
+
+        for i in 0..16 {
+            if mask & (1 << i) != 0 {
+                modes += add_3d_struct_modes(connector, structure_all, i);
+            }
+        }
+    }
+
+    offset += multi_len;
+
+    let mut i = 0;
+    while i < hdmi_3d_len - multi_len {
+        let mut newflag = 0;
+
+        let detail_present = (b(8 + offset + i) & 0x0f) > 7;
+
+        if detail_present && i + 1 == hdmi_3d_len - multi_len {
+            break;
+        }
+
+        // 2D_VIC_order_X
+        let vic_index = (b(8 + offset + i) >> 4) as i32;
+
+        // 3D_Structure_X
+        match b(8 + offset + i) & 0x0f {
+            0 => newflag = DRM_MODE_FLAG_3D_FRAME_PACKING,
+            6 => newflag = DRM_MODE_FLAG_3D_TOP_AND_BOTTOM,
+            8 => {
+                // 3D_Detail_X: 0 and 1 both include horizontal sub-sampling
+                if (b(9 + offset + i) >> 4) <= 1 {
+                    newflag = DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF;
+                }
+            }
+            _ => {}
+        }
+
+        if newflag != 0 {
+            if let Some(mut newmode) = drm_display_mode_from_vic_index(connector, vic_index) {
+                newmode.flags |= newflag;
+                drm_mode_probed_add(connector, newmode);
+                modes += 1;
+            }
+        }
+
+        if detail_present {
+            i += 1;
+        }
+        i += 1;
+    }
+
+    modes
+}
+
+/// `add_cea_modes`: the VDB modes, then those of the HDMI VSDB and the
+/// YCbCr 4:2:0 VDB.
+fn add_cea_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    // CTA VDB block VICs parsed earlier
+    let mut modes = add_cta_vdb_modes(connector);
+
+    let mut iter = cea_db_iter_edid_begin(Some(drm_edid));
+    while let Some(db) = __cea_db_iter_next(&mut iter) {
+        let db = &iter.edid[db..];
+        if cea_db_is_hdmi_vsdb(db) {
+            modes += do_hdmi_vsdb_modes(connector, db, cea_db_payload_len(db) as u8);
+        } else if cea_db_is_y420vdb(db) {
+            let n = cea_db_payload_len(db).saturating_sub(1);
+            let vdb420 = &db[CEA_DB_DATA + 1..CEA_DB_DATA + 1 + n];
+
+            // Add 4:2:0(only) modes present in EDID
+            modes += do_y420vdb_modes(connector, vdb420);
+        }
+    }
+    cea_db_iter_end(&mut iter);
+
+    modes
+}
+
+/// `fixup_detailed_cea_mode_clock`: allow 5kHz clock difference either
+/// way to account for the 10kHz clock resolution limit of detailed
+/// timings.
+fn fixup_detailed_cea_mode_clock(mode: &mut drm_display_mode) {
+    let (clock1, clock2);
+
+    let vic = drm_match_cea_mode_clock_tolerance(mode, 5);
+    if drm_valid_cea_vic(vic) {
+        let cea_mode = cea_mode_for_vic(vic).unwrap_or_default();
+        clock1 = cea_mode.clock;
+        clock2 = cea_mode_alternate_clock(&cea_mode) as i32;
+    } else {
+        let vic = drm_match_hdmi_mode_clock_tolerance(mode, 5);
+        if drm_valid_hdmi_vic(vic) {
+            let cea_mode = hdmi_mode_for_vic(vic);
+            clock1 = cea_mode.clock;
+            clock2 = hdmi_mode_alternate_clock(&cea_mode) as i32;
+        } else {
+            return;
+        }
+    }
+
+    // pick whichever is closest
+    let clock = if mode.clock.wrapping_sub(clock1).wrapping_abs() < mode.clock.wrapping_sub(clock2).wrapping_abs() {
+        clock1
+    } else {
+        clock2
+    };
+
+    if mode.clock == clock {
+        return;
+    }
+
+    mode.clock = clock;
+}
+
+/// `drm_mode_displayid_detailed`: a DisplayID type I or VII detailed
+/// timing (20 bytes).
+fn drm_mode_displayid_detailed(timings: &[u8], type_7: bool) -> drm_display_mode {
+    let pixel_clock = (timings[0] as u32 | (timings[1] as u32) << 8 | (timings[2] as u32) << 16) + 1;
+    let hactive = le16(timings, 4) as u32 + 1;
+    let hblank = le16(timings, 6) as u32 + 1;
+    let hsync = (le16(timings, 8) as u32 & 0x7fff) + 1;
+    let hsync_width = le16(timings, 10) as u32 + 1;
+    let vactive = le16(timings, 12) as u32 + 1;
+    let vblank = le16(timings, 14) as u32 + 1;
+    let vsync = (le16(timings, 16) as u32 & 0x7fff) + 1;
+    let vsync_width = le16(timings, 18) as u32 + 1;
+    let hsync_positive = le16(timings, 8) & (1 << 15) != 0;
+    let vsync_positive = le16(timings, 16) & (1 << 15) != 0;
+
+    let mut mode = drm_display_mode::default();
+
+    // resolution is kHz for type VII, and 10 kHz for type I
+    mode.clock = if type_7 { pixel_clock as i32 } else { (pixel_clock * 10) as i32 };
+    mode.hdisplay = hactive as u16;
+    mode.hsync_start = (mode.hdisplay as u32 + hsync) as u16;
+    mode.hsync_end = (mode.hsync_start as u32 + hsync_width) as u16;
+    mode.htotal = (mode.hdisplay as u32 + hblank) as u16;
+
+    mode.vdisplay = vactive as u16;
+    mode.vsync_start = (mode.vdisplay as u32 + vsync) as u16;
+    mode.vsync_end = (mode.vsync_start as u32 + vsync_width) as u16;
+    mode.vtotal = (mode.vdisplay as u32 + vblank) as u16;
+
+    mode.flags = 0;
+    mode.flags |= if hsync_positive { DRM_MODE_FLAG_PHSYNC } else { DRM_MODE_FLAG_NHSYNC };
+    mode.flags |= if vsync_positive { DRM_MODE_FLAG_PVSYNC } else { DRM_MODE_FLAG_NVSYNC };
+    mode.r#type = DRM_MODE_TYPE_DRIVER as u8;
+
+    if timings[3] & 0x80 != 0 {
+        mode.r#type |= DRM_MODE_TYPE_PREFERRED as u8;
+    }
+    drm_mode_set_name(&mut mode);
+
+    mode
+}
+
+/// `add_displayid_detailed_1_modes`.
+fn add_displayid_detailed_1_modes(connector: &mut drm_connector, edid: &[u8], block: usize) -> i32 {
+    let mut num_modes = 0;
+    let type_7 = edid[block] as u32 == DATA_BLOCK_2_TYPE_7_DETAILED_TIMING;
+    let num_bytes = edid[block + 2] as usize;
+    // blocks must be multiple of 20 bytes length
+    if num_bytes % 20 != 0 {
+        return 0;
+    }
+
+    let num_timings = num_bytes / 20;
+    for i in 0..num_timings {
+        let o = block + DISPLAYID_BLOCK_SIZE + 20 * i;
+        let Some(timings) = edid.get(o..o + 20) else { break };
+
+        let newmode = drm_mode_displayid_detailed(timings, type_7);
+        drm_mode_probed_add(connector, newmode);
+        num_modes += 1;
+    }
+    num_modes
+}
+
+/// `drm_mode_displayid_formula`: a DisplayID type IX or X formula timing
+/// (6 bytes).
+fn drm_mode_displayid_formula(timings: &[u8], _type_10: bool) -> Option<drm_display_mode> {
+    let hactive = le16(timings, 1).wrapping_add(1);
+    let vactive = le16(timings, 3).wrapping_add(1);
+    let timing_formula = timings[0] & 0x7;
+
+    // TODO: support RB-v2 & RB-v3
+    if timing_formula > 1 {
+        return None;
+    }
+
+    // TODO: support video-optimized refresh rate (only logged)
+
+    let mut mode = drm_cvt_mode(hactive as i32, vactive as i32, timings[5] as i32 + 1, timing_formula == 1, false,
+                                false)?;
+
+    // TODO: interpret S3D flags
+
+    mode.r#type = DRM_MODE_TYPE_DRIVER as u8;
+    drm_mode_set_name(&mut mode);
+
+    Some(mode)
+}
+
+/// `add_displayid_formula_modes`.
+fn add_displayid_formula_modes(connector: &mut drm_connector, edid: &[u8], block: usize) -> i32 {
+    let mut num_modes = 0;
+    let type_10 = edid[block] as u32 == DATA_BLOCK_2_TYPE_10_FORMULA_TIMING;
+    let timing_size = 6 + ((edid[block + 1] as usize & 0x70) >> 4);
+    let num_bytes = edid[block + 2] as usize;
+
+    // extended blocks are not supported yet
+    if timing_size != 6 {
+        return 0;
+    }
+
+    if num_bytes % timing_size != 0 {
+        return 0;
+    }
+
+    let num_timings = num_bytes / timing_size;
+    for i in 0..num_timings {
+        let o = block + DISPLAYID_BLOCK_SIZE + timing_size * i;
+        let Some(timings) = edid.get(o..o + 6) else { break };
+
+        let Some(newmode) = drm_mode_displayid_formula(timings, type_10) else { continue };
+
+        drm_mode_probed_add(connector, newmode);
+        num_modes += 1;
+    }
+    num_modes
+}
+
+/// `add_displayid_detailed_modes`.
+fn add_displayid_detailed_modes(connector: &mut drm_connector, drm_edid: &drm_edid) -> i32 {
+    let mut num_modes = 0;
+
+    let mut iter = displayid_iter_edid_begin(Some(drm_edid));
+    while let Some(block) = __displayid_iter_next(&mut iter) {
+        let tag = drm_edid.edid[block] as u32;
+        if tag == DATA_BLOCK_TYPE_1_DETAILED_TIMING || tag == DATA_BLOCK_2_TYPE_7_DETAILED_TIMING {
+            num_modes += add_displayid_detailed_1_modes(connector, &drm_edid.edid, block);
+        } else if tag == DATA_BLOCK_2_TYPE_9_FORMULA_TIMING || tag == DATA_BLOCK_2_TYPE_10_FORMULA_TIMING {
+            num_modes += add_displayid_formula_modes(connector, &drm_edid.edid, block);
+        }
+    }
+    displayid_iter_end(&mut iter);
+
+    num_modes
+}
+
+/// `_drm_edid_connector_add_modes`.
+fn _drm_edid_connector_add_modes(connector: &mut drm_connector, drm_edid: Option<&drm_edid>) -> i32 {
+    let mut num_modes = 0;
+
+    let Some(drm_edid) = drm_edid else { return 0 };
+
+    // EDID spec says modes should be preferred in this order:
+    // - preferred detailed mode
+    // - other detailed modes from base block
+    // - detailed modes from extension blocks
+    // - CVT 3-byte code modes
+    // - standard timing codes
+    // - established timing codes
+    // - modes inferred from GTF or CVT range information
+    //
+    // We get this pretty much right.
+    //
+    // XXX order for additional mode types in extension blocks?
+    num_modes += add_detailed_modes(connector, drm_edid);
+    num_modes += add_cvt_modes(connector, drm_edid);
+    num_modes += add_standard_modes(connector, drm_edid);
+    num_modes += add_established_modes(connector, drm_edid);
+    num_modes += add_cea_modes(connector, drm_edid);
+    num_modes += add_alternate_cea_modes(connector, drm_edid);
+    num_modes += add_displayid_detailed_modes(connector, drm_edid);
+    if drm_edid.edid[EDID_FEATURES] as u32 & DRM_EDID_FEATURE_CONTINUOUS_FREQ != 0 {
+        num_modes += add_inferred_modes(connector, drm_edid);
+    }
+
+    if drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_60)
+        || drm_edid_has_internal_quirk(connector, EDID_QUIRK_PREFER_LARGE_75)
+    {
+        edid_fixup_preferred(connector);
+    }
+
+    num_modes
+}
+
+/// `drm_edid_connector_add_modes`: the modes of the EDID the connector
+/// was last updated with (drm_edid_connector_update), added to its probed
+/// modes. The number added.
+pub fn drm_edid_connector_add_modes(connector: &mut drm_connector) -> i32 {
+    let drm_edid = connector.edid_blob.as_deref().and_then(drm_edid_alloc);
+
+    _drm_edid_connector_add_modes(connector, drm_edid.as_ref())
+}
+
+/// `drm_edid_override_connector_update`: the modes of an override or
+/// firmware EDID; there is none (drm_edid_override_get).
+pub fn drm_edid_override_connector_update(connector: &mut drm_connector) -> i32 {
+    let mut num_modes = 0;
+
+    if let Some(over) = drm_edid_override_get(connector) {
+        if drm_edid_connector_update(connector, Some(&over)) == 0 {
+            num_modes = drm_edid_connector_add_modes(connector);
+        }
+    }
+
+    num_modes
+}
+
+/// `drm_add_modes_noedid`: the DMT modes up to hdisplay x vdisplay and
+/// 61 Hz, for a connector without EDID.
+pub fn drm_add_modes_noedid(connector: &mut drm_connector, hdisplay: u32, vdisplay: u32) -> i32 {
+    let mut num_modes = 0;
+
+    for t in drm_dmt_modes.iter() {
+        let ptr = mode_from_table(t);
+
+        if hdisplay != 0 && vdisplay != 0 {
+            // Only when two are valid, they will be used to check
+            // whether the mode should be added to the mode list of
+            // the connector.
+            if ptr.hdisplay as u32 > hdisplay || ptr.vdisplay as u32 > vdisplay {
+                continue;
+            }
+        }
+        if drm_mode_vrefresh(&ptr) > 61 {
+            continue;
+        }
+        drm_mode_probed_add(connector, ptr);
+        num_modes += 1;
+    }
+    num_modes
+}
+
+/// `drm_connector_update_edid_property`.
+pub fn drm_connector_update_edid_property(connector: &mut drm_connector, edid: Option<&[u8]>) -> i32 {
+    let drm_edid = edid.map(drm_edid_legacy_init);
+    drm_edid_connector_update(connector, drm_edid.as_ref())
 }
