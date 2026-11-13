@@ -116,10 +116,10 @@ fn property_locked<const N: usize>(tag: u32, value: [u32; N]) -> Option<[u32; N]
         (f.irq, f.buf.bus() as u32)
     };
     // The buffer is uncached; the write below orders it (writel's wmb).
-    if !transaction(irq, fw::MBOX_CHAN_PROPERTY, bus) {
+    let Some(reply) = transaction(irq, fw::MBOX_CHAN_PROPERTY, bus) else {
         kprintln!("[npk] firmware: transaction {:#010x} timeout", tag);
         return None;
-    }
+    };
     let g = FW.lock();
     let f = g.as_ref()?;
     for (i, w) in words[..n].iter_mut().enumerate() {
@@ -132,16 +132,17 @@ fn property_locked<const N: usize>(tag: u32, value: [u32; N]) -> Option<[u32; N]
             Some(out)
         }
         None => {
-            kprintln!("[npk] firmware: request {:#010x} returned status {:#010x}", tag, words[1]);
+            kprintln!("[npk] firmware: request {:#010x} returned status {:#010x} (request {:#010x}, reply {:#010x})",
+                tag, words[1], fw::mbox_msg(fw::MBOX_CHAN_PROPERTY, bus), reply);
             None
         }
     }
 }
 
 /// `rpi_firmware_transaction`: the message to the firmware, then its
-/// answer within `TIMEOUT_MS`. A fiber parks on the interrupt; a caller
-/// outside one (boot) polls mailbox 0.
-fn transaction(irq: crate::irq::Irq, chan: u32, data: u32) -> bool {
+/// answer word within `TIMEOUT_MS`. A fiber parks on the interrupt; a
+/// caller outside one (boot) polls mailbox 0.
+fn transaction(irq: crate::irq::Irq, chan: u32, data: u32) -> Option<u32> {
     let msg = fw::mbox_msg(chan, data);
     let deadline = crate::time::uptime_us() + TIMEOUT_MS * 1000;
     let in_fiber = crate::smp::fiber::current_stack_lo().is_some();
@@ -150,23 +151,27 @@ fn transaction(irq: crate::irq::Irq, chan: u32, data: u32) -> bool {
     loop {
         let done = FW.lock().as_mut().is_some_and(|f| fw::last_tx_done(&mut f.mbox));
         if done { break; }
-        if crate::time::uptime_us() > deadline { return false; }
+        if crate::time::uptime_us() > deadline { return None; }
         crate::time::delay_us(POLL_US.min(100));
     }
     let mut since = crate::irq::arm(irq);
     if let Some(f) = FW.lock().as_mut() {
+        // Linux's interrupt handler takes every word as it arrives and
+        // `reinit_completion` forgets them before the send: a word waiting
+        // now (a late answer, one from before boot) is not this answer.
+        fw::drain(&mut f.mbox, |_| {});
         fw::send_data(&mut f.mbox, msg);
     }
     loop {
-        // `bcm2835_mbox_irq`: every answer waiting completes the client
-        // (`response_callback` ignores the word).
-        let mut got = false;
+        // `bcm2835_mbox_irq`: every answer waiting completes the client;
+        // the word is kept only for the error report (`dev_dbg` "Reply").
+        let mut got = None;
         if let Some(f) = FW.lock().as_mut() {
-            fw::drain(&mut f.mbox, |_| got = true);
+            fw::drain(&mut f.mbox, |m| got = Some(m));
         }
-        if got { return true; }
+        if got.is_some() { return got; }
         let now = crate::time::uptime_us();
-        if now > deadline { return false; }
+        if now > deadline { return None; }
         if in_fiber {
             let left_ms = (deadline - now).div_ceil(1000);
             crate::irq::wait(irq, since, left_ms);
