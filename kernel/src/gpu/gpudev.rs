@@ -298,14 +298,7 @@ static RINGS: Mutex<BTreeMap<(u32, u32), (u64, u64)>> = Mutex::new(BTreeMap::new
 
 /// The module serves jobs (registered, self-test passed, not dead).
 static READY: AtomicBool = AtomicBool::new(false);
-/// The display module called `ready`, with or without copies; until it is
-/// gone. What a desktop waits for before it takes the framebuffer's size.
-static SETTLED: AtomicBool = AtomicBool::new(false);
 
-/// Has a display module finished its setup (`ready`) and is still there?
-pub fn display_settled() -> bool {
-    SETTLED.load(Ordering::Acquire)
-}
 /// It also runs scene lists (`CAP_SCENE`).
 static SCENES: AtomicBool = AtomicBool::new(false);
 /// It also serves guest native contexts (`CAP_NATIVE`).
@@ -612,13 +605,24 @@ pub fn bo_gpu_only(dev: DevId, id: i32) -> i32 {
 #[cfg(target_arch = "aarch64")]
 static KERNEL_FB: Mutex<Option<(u64, usize)>> = Mutex::new(None);
 
+/// A framebuffer switch for Core 0 to carry out while the desktop runs
+/// (`apply_pending_framebuffer`): device, first page, pages, width, height.
+#[cfg(target_arch = "aarch64")]
+static PENDING_FB: Mutex<Option<(DevId, u64, usize, u32, u32)>> = Mutex::new(None);
+
+/// How long a module waits for Core 0 to switch the framebuffer.
+#[cfg(target_arch = "aarch64")]
+const SWITCH_WAIT_MS: u64 = 2000;
+
 /// `npk_gpudev_framebuffer(width, height)`: the display module drives a
 /// mode the current framebuffer does not have. The kernel takes a 32 bpp
 /// framebuffer of that size (contiguous, uncached, granted to the device
 /// at its bus address, as the identity-mapped IOMMU needs), moves its
 /// console there and describes it as buffer 0, with new shadows as 1
 /// and 2. The previous one the kernel took for a module goes back, its
-/// grant first. Before `ready`.
+/// grant first. While the desktop runs, Core 0 switches between two
+/// frames and the desktop follows the new size (`shade`); the module
+/// waits for it. Before `ready`.
 #[cfg(target_arch = "aarch64")]
 pub fn set_framebuffer(dev: DevId, width: i32, height: i32) -> i32 {
     const MAX_SIDE: i32 = 8192;
@@ -629,8 +633,7 @@ pub fn set_framebuffer(dev: DevId, width: i32, height: i32) -> i32 {
         return -1;
     }
     let (width, height) = (width as u32, height as u32);
-    let pitch = width * 4;
-    let pages = (pitch as u64 * height as u64).div_ceil(PAGE) as usize;
+    let pages = (width as u64 * 4 * height as u64).div_ceil(PAGE) as usize;
     let Some(phys) = crate::arch::aarch64::dma::alloc(pages, 1, 1 << 32) else {
         crate::kprintln!("[npk] gpudev: no {} MiB for a {}x{} framebuffer", pages / 256, width, height);
         return -1;
@@ -638,6 +641,48 @@ pub fn set_framebuffer(dev: DevId, width: i32, height: i32) -> i32 {
     // SAFETY: freshly allocated, mapped (uncached) and owned by nobody yet.
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, pages * PAGE as usize) }
     crate::drivers::iommu::grant(dev, phys, pages);
+
+    if !crate::shade::is_active() {
+        switch_framebuffer(dev, phys, pages, width, height);
+        return 0;
+    }
+    *PENDING_FB.lock() = Some((dev, phys, pages, width, height));
+    crate::shade::request_render();
+    crate::intent::wake_shell();
+    let mut waited = 0;
+    while PENDING_FB.lock().is_some() && waited < SWITCH_WAIT_MS {
+        fiber::yield_sleep(1);
+        waited += 1;
+    }
+    if let Some((dev, phys, pages, ..)) = PENDING_FB.lock().take() {
+        crate::kprintln!("[npk] gpudev: the desktop did not take the {}x{} framebuffer", width, height);
+        crate::drivers::iommu::revoke(dev, phys, pages);
+        crate::arch::aarch64::dma::free(phys, pages);
+        return -1;
+    }
+    0
+}
+
+/// Core 0, from the desktop's poll: a framebuffer switch a display
+/// module asked for. True when the size changed hands.
+#[cfg(target_arch = "aarch64")]
+pub fn apply_pending_framebuffer() -> bool {
+    let Some((dev, phys, pages, width, height)) = *PENDING_FB.lock() else { return false };
+    switch_framebuffer(dev, phys, pages, width, height);
+    *PENDING_FB.lock() = None;
+    true
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn apply_pending_framebuffer() -> bool {
+    false
+}
+
+/// The console, the GPU driver and gpudev's buffers on framebuffer
+/// `phys`; the previous one the kernel took goes back.
+#[cfg(target_arch = "aarch64")]
+fn switch_framebuffer(dev: DevId, phys: u64, pages: usize, width: u32, height: u32) {
+    let pitch = width * 4;
 
     // The shadows move with the console; their old grants go first.
     {
@@ -652,35 +697,34 @@ pub fn set_framebuffer(dev: DevId, width: i32, height: i32) -> i32 {
     crate::drivers::framebuffer::init_from_firmware(phys, width, height, pitch, 32);
     let fb = FramebufferInfo { addr: phys, pitch, width, height, bpp: 32 };
     super::init_from_firmware(fb);
-    let Some((pa, pb, shadow_pages)) = crate::drivers::framebuffer::shadow_phys_info() else { return -1 };
-
-    {
-        let mut st = STATE.lock();
-        st.fb = Some(fb);
-        let shadow = |addr| Bo {
-            addr,
-            size: shadow_pages as u64 * PAGE,
-            pitch,
-            width,
-            height,
-            format: FORMAT_XRGB8888,
-            gpu_addr: None,
-            state: BoState::Adding,
-            fence: 0,
-        };
-        st.bos.insert(0, Bo { addr: 0, size: pitch as u64 * height as u64, ..shadow(0) });
-        st.bos.insert(1, shadow(pa));
-        st.bos.insert(2, shadow(pb));
+    if let Some((pa, pb, shadow_pages)) = crate::drivers::framebuffer::shadow_phys_info() {
+        {
+            let mut st = STATE.lock();
+            st.fb = Some(fb);
+            let shadow = |addr| Bo {
+                addr,
+                size: shadow_pages as u64 * PAGE,
+                pitch,
+                width,
+                height,
+                format: FORMAT_XRGB8888,
+                gpu_addr: None,
+                state: BoState::Adding,
+                fence: 0,
+            };
+            st.bos.insert(0, Bo { addr: 0, size: pitch as u64 * height as u64, ..shadow(0) });
+            st.bos.insert(1, shadow(pa));
+            st.bos.insert(2, shadow(pb));
+        }
+        Grant::Range(pa, shadow_pages as usize).apply(dev, true);
+        Grant::Range(pb, shadow_pages as usize).apply(dev, true);
     }
-    Grant::Range(pa, shadow_pages as usize).apply(dev, true);
-    Grant::Range(pb, shadow_pages as usize).apply(dev, true);
 
     if let Some((old, old_pages)) = KERNEL_FB.lock().replace((phys, pages)) {
         crate::drivers::iommu::revoke(dev, old, old_pages);
         crate::arch::aarch64::dma::free(old, old_pages);
     }
     crate::kprintln!("[npk] gpudev: {}x{} framebuffer for the display module", width, height);
-    0
 }
 
 /// `npk_gpudev_ready`: with a passed self-test and the fixed buffers bound,
@@ -691,7 +735,6 @@ pub fn ready(dev: DevId, caps: i32) -> i32 {
         if !owned_by(dev) {
             return -1;
         }
-        SETTLED.store(true, Ordering::Release);
         crate::kprintln!("[npk] gpudev: the module offers no GPU copies (none built, or its self-test failed), compositor on the CPU");
         return 0;
     }
@@ -712,7 +755,6 @@ pub fn ready(dev: DevId, caps: i32) -> i32 {
     crate::drivers::framebuffer::set_shadow_gpu(a, b);
     super::install(Box::new(GpudevDriver { fb }));
     READY.store(true, Ordering::Release);
-    SETTLED.store(true, Ordering::Release);
     SCENES.store(caps & CAP_SCENE != 0, Ordering::Release);
     NATIVE.store(caps & CAP_NATIVE != 0, Ordering::Release);
     CURSOR.store(caps & CAP_CURSOR != 0, Ordering::Release);
@@ -897,7 +939,6 @@ pub fn module_gone(dev: DevId) {
         (st.fb.take(), frees)
     };
     READY.store(false, Ordering::Release);
-    SETTLED.store(false, Ordering::Release);
     mark_all_done();
     SCENES.store(false, Ordering::Release);
     crate::audio::display_audio_clear();

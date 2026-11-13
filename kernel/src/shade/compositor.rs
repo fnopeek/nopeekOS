@@ -874,7 +874,7 @@ impl Compositor {
 
     /// Bottom strut: full width minus the margin, always visible, global
     /// across workspaces, never focused.
-    fn set_bottom_panel(&mut self, id: WindowId, h: u32) -> bool {
+    pub fn set_bottom_panel(&mut self, id: WindowId, h: u32) -> bool {
         let screen_w = self.screen_w;
         let screen_h = self.screen_h;
         let margin = bar_margin();

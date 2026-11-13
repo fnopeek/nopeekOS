@@ -329,67 +329,35 @@ fn shell() -> ! {
     crate::intent::system::persist_boot_log();
     *SHELL_ARGS.lock() = Some((vault, session));
     crate::smp::fiber::admit_with_stack(0, shell_fiber, 0, 2 * 1024 * 1024);
-    crate::smp::fiber::admit_with_stack(0, autostart_fiber, 0, 256 * 1024);
+    crate::smp::fiber::admit_with_stack(0, desktop_fiber, 0, 256 * 1024);
     crate::smp::per_core::core0_loop()
 }
 
-/// Before the autostart: the shell's first prompt is out.
-const AUTOSTART_DELAY_MS: u64 = 400;
+/// Before the desktop: the shell's first prompt is out.
+const DESKTOP_DELAY_MS: u64 = 400;
 
-/// How long the desktop waits for the display module to settle (EDID,
-/// takeover, the framebuffer in the monitor's mode).
-const DISPLAY_SETTLE_MS: u64 = 10_000;
-const DISPLAY_POLL_MS: u64 = 50;
-
-/// The `autostart` list: its drivers first, as `run` starts them; with
-/// `desktop on`, once the display module settled (the desktop cannot
-/// change its size later), the desktop with the rest of the list.
-fn autostart_fiber(_: u64) {
-    crate::smp::fiber::yield_sleep(AUTOSTART_DELAY_MS);
-    let list = crate::config::get("autostart").unwrap_or_default();
-    let mut apps = alloc::vec::Vec::new();
-    let mut drivers = false;
-    for name in list.split([',', ' ']).map(str::trim).filter(|s| !s.is_empty()) {
-        if crate::intent::autostart_driver(name) {
-            drivers = true;
-        } else {
-            apps.push(alloc::string::String::from(name));
-        }
+/// With `desktop on`, the desktop after login as on x86.
+fn desktop_fiber(_: u64) {
+    crate::smp::fiber::yield_sleep(DESKTOP_DELAY_MS);
+    if crate::config::get("desktop").is_some_and(|v| v.trim() == "on") {
+        start_desktop();
     }
-    if !crate::config::get("desktop").is_some_and(|v| v.trim() == "on") {
-        return;
-    }
-    if drivers {
-        let mut waited = 0;
-        while !crate::gpu::gpudev::display_settled() && waited < DISPLAY_SETTLE_MS {
-            crate::smp::fiber::yield_sleep(DISPLAY_POLL_MS);
-            waited += DISPLAY_POLL_MS;
-        }
-    }
-    start_desktop(apps);
 }
 
-/// The `desktop` intent: the desktop now, with the autostart list's apps
-/// (its drivers run already or were started by hand). Once per boot.
+/// The `desktop` intent: the desktop now. Once per boot.
 pub fn desktop_intent() {
     if crate::shade::is_active() {
         crate::kprintln!("[npk] desktop: running already");
         return;
     }
-    let list = crate::config::get("autostart").unwrap_or_default();
-    let apps = list
-        .split([',', ' '])
-        .map(str::trim)
-        .filter(|s| !s.is_empty() && !crate::intent::is_driver(s))
-        .map(alloc::string::String::from)
-        .collect();
-    start_desktop(apps);
+    start_desktop();
 }
 
 /// What `kmain` does after login for the desktop: the console steps
-/// aside, the pointer settings, the UI font and icons, shade with the
-/// autostart apps, the wallpaper.
-fn start_desktop(apps: alloc::vec::Vec<alloc::string::String>) {
+/// aside, the pointer settings, the UI font and icons, shade on the
+/// firmware's framebuffer, the `autostart` list (deck, the display
+/// module, which moves the desktop to the monitor's mode), the wallpaper.
+fn start_desktop() {
     if !crate::framebuffer::is_available() {
         return;
     }
@@ -403,7 +371,7 @@ fn start_desktop(apps: alloc::vec::Vec<alloc::string::String>) {
     crate::gui::text::init();
     crate::gui::icons::init();
     crate::shade::init();
-    crate::shade::start_autostart_list(apps);
+    crate::shade::start_autostart();
     crate::intent::apply_startup_wallpaper();
     crate::shade::render_frame();
 }

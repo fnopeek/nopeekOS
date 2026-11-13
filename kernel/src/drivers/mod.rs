@@ -19,7 +19,6 @@ pub mod rtl8153;
 pub mod dev_id;
 pub use dev_id::DevId;
 pub mod xhci;
-#[cfg(target_arch = "x86_64")]
 pub mod usb_desc;
 pub mod disk;
 #[cfg(target_arch = "x86_64")]

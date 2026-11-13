@@ -726,7 +726,6 @@ pub fn intent_disk_write(args: &str) {
 }
 
 /// External disks (USB mass storage, SD cards): list, dump a block, measure, eject.
-#[cfg(target_arch = "x86_64")]
 pub fn intent_drives(args: &str) {
     use crate::storage::disk as us;
     let mut it = args.split_whitespace();

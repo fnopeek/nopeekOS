@@ -1428,7 +1428,6 @@ pub fn intent_gpu(args: &str) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 pub fn intent_shade(args: &str) {
     match args.trim() {
         // The window list with its full state (kind, terminal, PID, root
@@ -2210,7 +2209,6 @@ pub fn intent_lspci(args: &str) {
 
 /// `mouse [speed <n>] [size <n>]` — show or set pointer speed (25..=600 %) and
 /// cursor size (50..=300 %). Persisted to `mouse_speed` / `mouse_size` config.
-#[cfg(target_arch = "x86_64")]
 pub fn intent_mouse(args: &str) {
     let a = args.trim();
     let (what, key, range) = if let Some(v) = a.strip_prefix("speed") {
@@ -2239,7 +2237,6 @@ pub fn intent_mouse(args: &str) {
 
 /// `usb` / `lsusb`: the devices the running xHCI driver enumerated, and
 /// with a number, that device's descriptors. Nothing is reset or re-read.
-#[cfg(target_arch = "x86_64")]
 pub fn intent_lsusb(args: &str) {
     let a = args.trim();
     if a.is_empty() {

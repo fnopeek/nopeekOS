@@ -457,6 +457,40 @@ static FORCE_REDRAW_PENDING: AtomicBool = AtomicBool::new(false);
 /// Apply `shade.scale` (or, unset, the screen's default) at once: panels
 /// and overlays take their new size here, every scene is laid out again by
 /// the caller's `refresh_all_scenes`.
+/// The framebuffer changed size (a display module took the screen over in
+/// its own mode): the desktop follows on Core 0. The UI scale for the new
+/// width, the compositor's screen with its panel, tiles and overlays
+/// scaled along, the pointer's bounds, the wallpaper drawn for the new
+/// size, the apps' scenes, then the whole screen.
+pub fn screen_resized() {
+    let Some((w, h)) = framebuffer::with_fb(|fb| {
+        let info = fb.info();
+        (info.width, info.height)
+    }) else { return };
+    let old = widgets::scale::get();
+    widgets::scale::init(w);
+    let new = widgets::scale::get();
+    with_compositor(|c| {
+        c.screen_w = w;
+        c.screen_h = h;
+        c.mouse.init(w, h);
+        if old != new {
+            c.rescale_app_geometry(old, new);
+        } else if let Some(b) = c.bottom_strut {
+            // The panel spans the new width; retiles the rest.
+            c.set_bottom_panel(b.id, b.pill_h);
+        } else {
+            c.retile();
+        }
+        c.aurora_drawn = false;
+        c.needs_full_redraw = true;
+    });
+    cursor::init_atomic(w, h);
+    crate::intent::apply_startup_wallpaper();
+    widgets::refresh_all_scenes();
+    force_redraw();
+}
+
 pub fn rescale() {
     let _ = with_compositor(|c| {
         let old = widgets::scale::get();
@@ -1343,6 +1377,10 @@ pub fn poll_render() {
 
     if FORCE_REDRAW_PENDING.swap(false, Ordering::AcqRel) {
         force_redraw();
+    }
+
+    if crate::gpu::gpudev::apply_pending_framebuffer() {
+        screen_resized();
     }
 
     let mut revealed = false;

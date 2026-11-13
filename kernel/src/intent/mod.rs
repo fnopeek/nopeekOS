@@ -21,8 +21,6 @@ pub mod install;
 mod python;
 pub(crate) mod wallpaper;
 mod wasm;
-#[cfg(target_arch = "aarch64")]
-pub(crate) use wasm::{autostart_driver, is_driver};
 
 use crate::capability::{CapId, Vault, Rights};
 use crate::{kprint, kprintln, serial};
@@ -2400,7 +2398,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
         "drives" => {
             let sub = args.trim();
             let writes = sub.starts_with("eject") || sub.starts_with("write") || sub.ends_with(" write");
@@ -2507,13 +2504,11 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 system::intent_lspci(args);
             }
         }
-        #[cfg(target_arch = "x86_64")]
         "lsusb" | "usb" => {
             if require_cap(vault, &session, Rights::READ, "lsusb") {
                 system::intent_lsusb(args);
             }
         }
-        #[cfg(target_arch = "x86_64")]
         "mouse" => {
             system::intent_mouse(args);
         }
@@ -2552,7 +2547,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "gpu" => {
             crate::platform::pi5_display::intent_gpu(args);
         }
-        #[cfg(target_arch = "x86_64")]
         "shade" => {
             system::intent_shade(args);
         }
@@ -2821,7 +2815,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             install::intent_assets();
         }
 
-        #[cfg(target_arch = "x86_64")]
         "wallpaper" | "wp" => {
             wallpaper::intent_wallpaper(args);
         }
@@ -2840,7 +2833,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
             }
         }
 
-        #[cfg(target_arch = "x86_64")]
         "theme" => {
             intent_theme(args);
         }
@@ -3253,7 +3245,6 @@ fn require_cap(vault: &Mutex<Vault>, cap_id: &CapId, rights: Rights, intent: &st
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 fn intent_theme(args: &str) {
     let mode = args.trim();
     match mode {
