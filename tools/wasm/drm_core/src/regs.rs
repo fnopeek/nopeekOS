@@ -323,3 +323,58 @@ pub const DATA_BLOCK_2_TYPE_10_FORMULA_TIMING: u32 = 0x2a;
 // The DRM client (drm_client.h, uapi/drm/drm_mode.h)
 pub const DRM_MODE_CONNECTOR_WRITEBACK: u32 = 0x12;
 pub const DRM_CLIENT_MAX_CLONED_CONNECTORS: u32 = 0x8;
+
+// HDMI infoframes (linux/hdmi.h, drm_connector.h)
+pub const HDMI_INFOFRAME_TYPE_VENDOR: u32 = 0x81;
+pub const HDMI_INFOFRAME_TYPE_AVI: u32 = 0x82;
+pub const HDMI_INFOFRAME_TYPE_SPD: u32 = 0x83;
+pub const HDMI_INFOFRAME_TYPE_AUDIO: u32 = 0x84;
+pub const HDMI_INFOFRAME_TYPE_DRM: u32 = 0x87;
+pub const HDMI_INFOFRAME_HEADER_SIZE: u32 = 0x4;
+pub const HDMI_AVI_INFOFRAME_SIZE: u32 = 0xd;
+pub const HDMI_SPD_INFOFRAME_SIZE: u32 = 0x19;
+pub const HDMI_VENDOR_INFOFRAME_SIZE: u32 = 0x4;
+pub const HDMI_INFOFRAME_SIZE_MAX: u32 = 0x1f;
+pub const HDMI_PICTURE_ASPECT_16_9: u32 = 0x2;
+pub const HDMI_ACTIVE_ASPECT_PICTURE: u32 = 0x8;
+pub const HDMI_SCAN_MODE_UNDERSCAN: u32 = 0x2;
+pub const HDMI_CONTENT_TYPE_GRAPHICS: u32 = 0x0;
+pub const HDMI_QUANTIZATION_RANGE_DEFAULT: u32 = 0x0;
+pub const HDMI_QUANTIZATION_RANGE_LIMITED: u32 = 0x1;
+pub const HDMI_QUANTIZATION_RANGE_FULL: u32 = 0x2;
+pub const HDMI_YCC_QUANTIZATION_RANGE_LIMITED: u32 = 0x0;
+pub const HDMI_YCC_QUANTIZATION_RANGE_FULL: u32 = 0x1;
+pub const HDMI_SPD_SDI_PC: u32 = 0x9;
+pub const HDMI_3D_STRUCTURE_INVALID: u32 = 0xffffffff;
+pub const HDMI_3D_STRUCTURE_FRAME_PACKING: u32 = 0x0;
+pub const HDMI_3D_STRUCTURE_FIELD_ALTERNATIVE: u32 = 0x1;
+pub const HDMI_3D_STRUCTURE_LINE_ALTERNATIVE: u32 = 0x2;
+pub const HDMI_3D_STRUCTURE_SIDE_BY_SIDE_FULL: u32 = 0x3;
+pub const HDMI_3D_STRUCTURE_L_DEPTH: u32 = 0x4;
+pub const HDMI_3D_STRUCTURE_L_DEPTH_GFX_GFX_DEPTH: u32 = 0x5;
+pub const HDMI_3D_STRUCTURE_TOP_AND_BOTTOM: u32 = 0x6;
+pub const HDMI_3D_STRUCTURE_SIDE_BY_SIDE_HALF: u32 = 0x8;
+pub const DRM_MODE_FLAG_3D_FIELD_ALTERNATIVE: u32 = 0x8000;
+pub const DRM_MODE_FLAG_3D_LINE_ALTERNATIVE: u32 = 0xc000;
+pub const DRM_MODE_FLAG_3D_SIDE_BY_SIDE_FULL: u32 = 0x10000;
+pub const DRM_MODE_FLAG_3D_L_DEPTH: u32 = 0x14000;
+pub const DRM_MODE_FLAG_3D_L_DEPTH_GFX_GFX_DEPTH: u32 = 0x18000;
+pub const DRM_EDID_YCBCR420_DC_30: u32 = 0x1;
+pub const DRM_EDID_YCBCR420_DC_36: u32 = 0x2;
+pub const DRM_EDID_YCBCR420_DC_48: u32 = 0x4;
+pub const DRM_MODE_COLORIMETRY_DEFAULT: u32 = 0x0;
+pub const DRM_HDMI_BROADCAST_RGB_AUTO: u32 = 0x0;
+pub const DRM_HDMI_BROADCAST_RGB_FULL: u32 = 0x1;
+pub const DRM_HDMI_BROADCAST_RGB_LIMITED: u32 = 0x2;
+
+// The AVI infoframe's colorimetry (display/drm_hdmi_helper.c)
+pub const FULL_COLORIMETRY_MASK: u32 = 0x1ff;
+pub const NORMAL_COLORIMETRY_MASK: u32 = 0x3;
+pub const EXTENDED_COLORIMETRY_MASK: u32 = 0x7;
+pub const HDMI_COLORIMETRY_NO_DATA: u32 = 0x0;
+/// `hdmi_colorimetry_val`: x.
+pub static hdmi_colorimetry_val: [u32; 11] = [
+    0x0, 0x1, 0x2, 0x3,
+    0x7, 0xb, 0xf, 0x13,
+    0x17, 0x1b, 0x1b,
+];

@@ -77,3 +77,15 @@ pub fn drm_scdc_set_high_tmds_clock_ratio(hw: &mut impl Hw, ddc: &mut Ddc, set: 
     hw.delay_us(1000);
     true
 }
+
+/// `SCDC_SCRAMBLER_STATUS` / `SCDC_SCRAMBLING_STATUS`.
+pub const SCDC_SCRAMBLER_STATUS: u8 = 0x21;
+pub const SCDC_SCRAMBLING_STATUS: u8 = 1 << 0;
+
+/// `drm_scdc_get_scrambling_status`: does the sink see scrambled data?
+pub fn drm_scdc_get_scrambling_status(hw: &mut impl Hw, ddc: &mut Ddc) -> bool {
+    match drm_scdc_readb(hw, ddc, SCDC_SCRAMBLER_STATUS) {
+        Ok(status) => status & SCDC_SCRAMBLING_STATUS != 0,
+        Err(_) => false,
+    }
+}

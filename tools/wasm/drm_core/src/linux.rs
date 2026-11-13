@@ -5,6 +5,7 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 pub const ENXIO: i32 = 6;
 pub const EINVAL: i32 = 22;
+pub const ENOSPC: i32 = 28;
 pub const EAGAIN: i32 = 11;
 pub const EOPNOTSUPP: i32 = 95;
 

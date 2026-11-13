@@ -1,7 +1,10 @@
 //! drivers/gpu/drm/display/drm_hdmi_helper.c (Linux rpi-6.18): the TMDS
-//! character rate a mode needs.
+//! character rate a mode needs, and the AVI infoframe fields a connector
+//! state sets.
 
+use crate::drm_connector::drm_connector_state;
 use crate::drm_edid::drm_match_cea_mode;
+use crate::hdmi::hdmi_avi_infoframe;
 use crate::drm_modes::drm_display_mode;
 use crate::regs::*;
 
@@ -57,4 +60,28 @@ pub fn drm_hdmi_compute_mode_clock(mode: &drm_display_mode, bpc: u32, fmt: u32) 
 
     // DIV_ROUND_CLOSEST_ULL(clock * bpc, 8)
     clock.wrapping_mul(bpc as u64).wrapping_add(4) / 8
+}
+
+/// `drm_hdmi_avi_infoframe_colorimetry`.
+pub fn drm_hdmi_avi_infoframe_colorimetry(frame: &mut hdmi_avi_infoframe, conn_state: &drm_connector_state) {
+    let colorimetry_index = (conn_state.colorspace & FULL_COLORIMETRY_MASK) as usize;
+
+    let colorimetry_val = if colorimetry_index >= hdmi_colorimetry_val.len() {
+        HDMI_COLORIMETRY_NO_DATA
+    } else {
+        hdmi_colorimetry_val[colorimetry_index]
+    };
+
+    frame.colorimetry = colorimetry_val & NORMAL_COLORIMETRY_MASK;
+    // ToDo: Extend it for ACE formats as well. Modify the infoframe
+    // structure and extend it in drivers/video/hdmi
+    frame.extended_colorimetry = (colorimetry_val >> 2) & EXTENDED_COLORIMETRY_MASK;
+}
+
+/// `drm_hdmi_avi_infoframe_bars`.
+pub fn drm_hdmi_avi_infoframe_bars(frame: &mut hdmi_avi_infoframe, conn_state: &drm_connector_state) {
+    frame.right_bar = conn_state.margins.right as u16;
+    frame.left_bar = conn_state.margins.left as u16;
+    frame.top_bar = conn_state.margins.top as u16;
+    frame.bottom_bar = conn_state.margins.bottom as u16;
 }

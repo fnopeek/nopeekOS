@@ -14,6 +14,7 @@
 //!   hotplug.
 //! - [`drm_modes`]: a display mode, CVT and GTF, matching and sorting.
 //! - [`drm_probe_helper`]: probing a connector's modes against the driver.
+//! - [`hdmi`]: the HDMI infoframes and their packing.
 //! - [`i2c`]: an I2C message, as DDC transfers carry it.
 //! - [`kms_dump`]: a connector as the pi5 oracle's `# kms:` lines.
 //! - [`linux`]: printk and errno.
@@ -31,6 +32,7 @@ pub mod drm_hdmi_helper;
 pub mod drm_hdmi_state_helper;
 pub mod drm_modes;
 pub mod drm_probe_helper;
+pub mod hdmi;
 pub mod i2c;
 pub mod kms_dump;
 pub mod linux;

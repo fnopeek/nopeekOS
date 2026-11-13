@@ -186,6 +186,95 @@ pub struct drm_connector {
     /// The connector runs on Raspberry Pi's tree, whose patches to these
     /// helpers apply (`drm_reset_display_info`); off, mainline's.
     pub rpi_downstream: bool,
+    /// `max_bpc`: what `drmm_connector_hdmi_init` was given (8 otherwise).
+    pub max_bpc: u32,
+    /// `hdmi`: the HDMI connector's identity and formats.
+    pub hdmi: drm_connector_hdmi,
+}
+
+/// `struct drm_connector_hdmi`, what `drmm_connector_hdmi_init` stores.
+#[derive(Clone, Debug, Default)]
+pub struct drm_connector_hdmi {
+    pub vendor: String,
+    pub product: String,
+    /// `BIT(HDMI_COLORSPACE_*)`.
+    pub supported_formats: u32,
+}
+
+/// `struct drm_connector_hdmi_infoframe`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct drm_connector_hdmi_infoframe {
+    pub data: Option<crate::hdmi::hdmi_infoframe>,
+    pub set: bool,
+}
+
+impl Default for drm_connector_hdmi_infoframe {
+    fn default() -> Self {
+        drm_connector_hdmi_infoframe { data: None, set: false }
+    }
+}
+
+/// The infoframes of `struct drm_connector_hdmi_state`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct drm_connector_hdmi_infoframes {
+    pub avi: drm_connector_hdmi_infoframe,
+    pub hdr_drm: drm_connector_hdmi_infoframe,
+    pub spd: drm_connector_hdmi_infoframe,
+    pub hdmi: drm_connector_hdmi_infoframe,
+}
+
+/// `struct drm_connector_hdmi_state`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct drm_connector_hdmi_state {
+    /// `enum drm_hdmi_broadcast_rgb`.
+    pub broadcast_rgb: u32,
+    pub infoframes: drm_connector_hdmi_infoframes,
+    pub is_limited_range: bool,
+    pub output_bpc: u32,
+    /// `enum hdmi_colorspace`.
+    pub output_format: u32,
+    pub tmds_char_rate: u64,
+}
+
+/// `struct drm_connector_tv_margins`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct drm_connector_tv_margins {
+    pub bottom: u32,
+    pub left: u32,
+    pub right: u32,
+    pub top: u32,
+}
+
+/// `struct drm_connector_state`, the members the display paths read. A
+/// CRTC or encoder is its index in the device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct drm_connector_state {
+    pub crtc: Option<u32>,
+    pub best_encoder: Option<u32>,
+    pub max_requested_bpc: u32,
+    pub max_bpc: u32,
+    /// `enum drm_colorspace`.
+    pub colorspace: u32,
+    /// `tv.margins`.
+    pub margins: drm_connector_tv_margins,
+    pub hdmi: drm_connector_hdmi_state,
+}
+
+/// `__drm_atomic_helper_connector_hdmi_reset`: the initial HDMI state.
+pub fn __drm_atomic_helper_connector_hdmi_reset(connector: &drm_connector, new_conn_state: &mut drm_connector_state) {
+    new_conn_state.max_bpc = connector.max_bpc;
+    new_conn_state.max_requested_bpc = 8;
+    new_conn_state.hdmi.broadcast_rgb = crate::regs::DRM_HDMI_BROADCAST_RGB_AUTO;
+}
+
+/// `drm_atomic_connector_check` for a connector with a max bpc property
+/// (every HDMI connector has one): the bpc the sink and the request
+/// allow.
+pub fn drm_atomic_connector_check(connector: &drm_connector, state: &mut drm_connector_state) {
+    let info = &connector.display_info;
+
+    state.max_bpc = if info.bpc != 0 { info.bpc } else { 8 };
+    state.max_bpc = state.max_bpc.min(state.max_requested_bpc);
 }
 
 impl drm_connector {
@@ -223,6 +312,8 @@ impl drm_connector {
             stereo_allowed: false,
             ycbcr_420_allowed: false,
             rpi_downstream: false,
+            max_bpc: 8,
+            hdmi: drm_connector_hdmi::default(),
         }
     }
 }

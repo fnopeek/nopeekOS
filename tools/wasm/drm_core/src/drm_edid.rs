@@ -13,7 +13,8 @@
 use crate::drm_connector::*;
 use crate::drm_modes::*;
 use crate::i2c::{i2c_msg, i2c_transfer_fn, I2C_M_RD};
-use crate::linux::{Line, ENXIO};
+use crate::hdmi::*;
+use crate::linux::{Line, EINVAL, ENXIO};
 use crate::regs::*;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -3916,4 +3917,199 @@ pub fn drm_add_modes_noedid(connector: &mut drm_connector, hdisplay: u32, vdispl
 pub fn drm_connector_update_edid_property(connector: &mut drm_connector, edid: Option<&[u8]>) -> i32 {
     let drm_edid = edid.map(drm_edid_legacy_init);
     drm_edid_connector_update(connector, drm_edid.as_ref())
+}
+
+/// `is_hdmi2_sink`.
+fn is_hdmi2_sink(connector: &drm_connector) -> bool {
+    connector.display_info.hdmi.scdc.supported
+        || connector.display_info.color_formats & DRM_COLOR_FORMAT_YCBCR420 != 0
+}
+
+/// `drm_get_hdmi_aspect_ratio`.
+fn drm_get_hdmi_aspect_ratio(video_code: u8) -> u32 {
+    edid_4k_modes[video_code as usize].13
+}
+
+/// `drm_mode_hdmi_vic`.
+fn drm_mode_hdmi_vic(connector: &drm_connector, mode: &drm_display_mode) -> u8 {
+    if !connector.display_info.has_hdmi_infoframe {
+        return 0;
+    }
+
+    // No HDMI VIC when signalling 3D video format
+    if mode.flags & DRM_MODE_FLAG_3D_MASK != 0 {
+        return 0;
+    }
+
+    drm_match_hdmi_mode(mode)
+}
+
+/// `drm_mode_cea_vic`.
+fn drm_mode_cea_vic(connector: &drm_connector, mode: &drm_display_mode) -> u8 {
+    // HDMI spec says if a mode is found in HDMI 1.4b 4K modes
+    // we should send its VIC in vendor infoframes, else send the
+    // VIC in AVI infoframes. Lets check if this mode is present in
+    // HDMI 1.4b 4K modes
+    if drm_mode_hdmi_vic(connector, mode) != 0 {
+        return 0;
+    }
+
+    drm_match_cea_mode(mode)
+}
+
+/// `vic_for_avi_infoframe`: a VIC above 64 is sent only to an HDMI 2.0
+/// sink or one that lists it.
+fn vic_for_avi_infoframe(connector: &drm_connector, vic: u8) -> u8 {
+    if !is_hdmi2_sink(connector) && vic > 64 && !cta_vdb_has_vic(connector, vic) {
+        return 0;
+    }
+
+    vic
+}
+
+/// `drm_hdmi_avi_infoframe_from_display_mode`.
+pub fn drm_hdmi_avi_infoframe_from_display_mode(frame: &mut hdmi_avi_infoframe, connector: &drm_connector,
+                                                mode: &drm_display_mode) -> i32 {
+    hdmi_avi_infoframe_init(frame);
+
+    if mode.flags & DRM_MODE_FLAG_DBLCLK != 0 {
+        frame.pixel_repeat = 1;
+    }
+
+    let vic = drm_mode_cea_vic(connector, mode);
+    let hdmi_vic = drm_mode_hdmi_vic(connector, mode);
+
+    frame.picture_aspect = HDMI_PICTURE_ASPECT_NONE;
+
+    // As some drivers don't support atomic, we can't use connector state.
+    // So just initialize the frame with default values, just the same way
+    // as it's done with other properties here.
+    frame.content_type = HDMI_CONTENT_TYPE_GRAPHICS;
+    frame.itc = false;
+
+    // Populate picture aspect ratio from either
+    // user input (if specified) or from the CEA/HDMI mode lists.
+    let mut picture_aspect = mode.picture_aspect_ratio;
+    if picture_aspect == HDMI_PICTURE_ASPECT_NONE {
+        if vic != 0 {
+            picture_aspect = drm_get_cea_aspect_ratio(vic);
+        } else if hdmi_vic != 0 {
+            picture_aspect = drm_get_hdmi_aspect_ratio(hdmi_vic);
+        }
+    }
+
+    // The infoframe can't convey anything but none, 4:3
+    // and 16:9, so if the user has asked for anything else
+    // we can only satisfy it by specifying the right VIC.
+    if picture_aspect > HDMI_PICTURE_ASPECT_16_9 {
+        if vic != 0 {
+            if picture_aspect != drm_get_cea_aspect_ratio(vic) {
+                return -EINVAL;
+            }
+        } else if hdmi_vic != 0 {
+            if picture_aspect != drm_get_hdmi_aspect_ratio(hdmi_vic) {
+                return -EINVAL;
+            }
+        } else {
+            return -EINVAL;
+        }
+
+        picture_aspect = HDMI_PICTURE_ASPECT_NONE;
+    }
+
+    frame.video_code = vic_for_avi_infoframe(connector, vic);
+    frame.picture_aspect = picture_aspect;
+    frame.active_aspect = HDMI_ACTIVE_ASPECT_PICTURE;
+    frame.scan_mode = HDMI_SCAN_MODE_UNDERSCAN;
+
+    0
+}
+
+/// `drm_default_rgb_quant_range`: all CEA modes other than VIC 1 use
+/// limited quantization range.
+pub fn drm_default_rgb_quant_range(mode: &drm_display_mode) -> u32 {
+    if drm_match_cea_mode(mode) > 1 {
+        HDMI_QUANTIZATION_RANGE_LIMITED
+    } else {
+        HDMI_QUANTIZATION_RANGE_FULL
+    }
+}
+
+/// `drm_hdmi_avi_infoframe_quant_range`.
+pub fn drm_hdmi_avi_infoframe_quant_range(frame: &mut hdmi_avi_infoframe, connector: &drm_connector,
+                                          mode: &drm_display_mode, rgb_quant_range: u32) {
+    let info = &connector.display_info;
+
+    // CEA-861:
+    // "A Source shall not send a non-zero Q value that does not correspond
+    //  to the default RGB Quantization Range for the transmitted Picture
+    //  unless the Sink indicates support for the Q bit in a Video
+    //  Capabilities Data Block."
+    //
+    // HDMI 2.0 recommends sending non-zero Q when it does match the
+    // default RGB quantization range for the mode, even when QS=0.
+    if info.rgb_quant_range_selectable || rgb_quant_range == drm_default_rgb_quant_range(mode) {
+        frame.quantization_range = rgb_quant_range;
+    } else {
+        frame.quantization_range = HDMI_QUANTIZATION_RANGE_DEFAULT;
+    }
+
+    // CEA-861-F:
+    // "When transmitting any RGB colorimetry, the Source should set the
+    //  YQ-field to match the RGB Quantization Range being transmitted
+    //  (e.g., when Limited Range RGB, set YQ=0 or when Full Range RGB,
+    //  set YQ=1) and the Sink shall ignore the YQ-field."
+    //
+    // Unfortunate certain sinks (eg. VIZ Model 67/E261VA) get confused
+    // by non-zero YQ when receiving RGB. There doesn't seem to be any
+    // good way to tell which version of CEA-861 the sink supports, so
+    // we limit non-zero YQ to HDMI 2.0 sinks only as HDMI 2.0 is based
+    // on CEA-861-F.
+    if !is_hdmi2_sink(connector) || rgb_quant_range == HDMI_QUANTIZATION_RANGE_LIMITED {
+        frame.ycc_quantization_range = HDMI_YCC_QUANTIZATION_RANGE_LIMITED;
+    } else {
+        frame.ycc_quantization_range = HDMI_YCC_QUANTIZATION_RANGE_FULL;
+    }
+}
+
+/// `s3d_structure_from_display_mode`.
+fn s3d_structure_from_display_mode(mode: &drm_display_mode) -> i32 {
+    let layout = mode.flags & DRM_MODE_FLAG_3D_MASK;
+
+    (match layout {
+        DRM_MODE_FLAG_3D_FRAME_PACKING => HDMI_3D_STRUCTURE_FRAME_PACKING,
+        DRM_MODE_FLAG_3D_FIELD_ALTERNATIVE => HDMI_3D_STRUCTURE_FIELD_ALTERNATIVE,
+        DRM_MODE_FLAG_3D_LINE_ALTERNATIVE => HDMI_3D_STRUCTURE_LINE_ALTERNATIVE,
+        DRM_MODE_FLAG_3D_SIDE_BY_SIDE_FULL => HDMI_3D_STRUCTURE_SIDE_BY_SIDE_FULL,
+        DRM_MODE_FLAG_3D_L_DEPTH => HDMI_3D_STRUCTURE_L_DEPTH,
+        DRM_MODE_FLAG_3D_L_DEPTH_GFX_GFX_DEPTH => HDMI_3D_STRUCTURE_L_DEPTH_GFX_GFX_DEPTH,
+        DRM_MODE_FLAG_3D_TOP_AND_BOTTOM => HDMI_3D_STRUCTURE_TOP_AND_BOTTOM,
+        DRM_MODE_FLAG_3D_SIDE_BY_SIDE_HALF => HDMI_3D_STRUCTURE_SIDE_BY_SIDE_HALF,
+        _ => HDMI_3D_STRUCTURE_INVALID,
+    }) as i32
+}
+
+/// `drm_hdmi_vendor_infoframe_from_display_mode`.
+pub fn drm_hdmi_vendor_infoframe_from_display_mode(frame: &mut hdmi_vendor_infoframe, connector: &drm_connector,
+                                                   mode: &drm_display_mode) -> i32 {
+    if !connector.display_info.has_hdmi_infoframe {
+        return -EINVAL;
+    }
+
+    let err = hdmi_vendor_infoframe_init(frame);
+    if err < 0 {
+        return err;
+    }
+
+    // Even if it's not absolutely necessary to send the infoframe
+    // (ie.vic==0 and s3d_struct==0) we will still send it if we
+    // know that the sink can handle it. This is based on a
+    // suggestion in HDMI 2.0 Appendix F. Apparently some sinks
+    // have trouble realizing that they should switch from 3D to 2D
+    // mode if the source simply stops sending the infoframe when
+    // it wants to switch from 3D to 2D.
+    frame.vic = drm_mode_hdmi_vic(connector, mode);
+    frame.s3d_struct = s3d_structure_from_display_mode(mode);
+
+    0
 }

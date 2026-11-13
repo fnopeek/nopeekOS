@@ -395,3 +395,55 @@ fn fbdev_probe_is_linux() {
         .collect();
     assert_eq!(port, linux);
 }
+
+/// The HDMI encoder's part of the fbdev client's first commit, each
+/// function against its run G segment: the connector state as
+/// `drm_atomic_helper_connector_hdmi_check` computes it (RGB, 8 bpc,
+/// 594 MHz, limited range, AVI, SPD and HDMI vendor infoframes), the
+/// encoder's mode fixup, then `pre_crtc_configure` (clocks, PHY,
+/// timings), `pre_crtc_enable` (CSC) and `post_crtc_enable` (infoframes,
+/// FIFO, scrambling over SCDC).
+#[test]
+fn hdmi_encoder_enable_is_linux() {
+    use drm_core::drm_connector::{__drm_atomic_helper_connector_hdmi_reset, drm_atomic_connector_check,
+        drm_connector_state};
+    use crate::vc4_hdmi::vc4_hdmi_connector_atomic_check;
+
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    let client = vc4.fbdev_probe(&mut hw);
+    let mode = client.modesets[0].mode.clone().expect("mode on pixel valve 0");
+
+    let connector = &vc4.connectors[0];
+    let mut old = drm_connector_state::default();
+    __drm_atomic_helper_connector_hdmi_reset(connector, &mut old);
+    let mut new = old;
+    new.crtc = Some(0);
+    new.best_encoder = Some(0);
+    drm_atomic_connector_check(connector, &mut new);
+    assert_eq!(new.max_bpc, 8);
+    assert!(vc4_hdmi_connector_atomic_check(connector, &old, &mut new, &mode, &vc4.hvs).expect("check"));
+    assert_eq!((new.hdmi.output_format, new.hdmi.output_bpc, new.hdmi.tmds_char_rate), (0, 8, 594_000_000));
+    assert!(new.hdmi.is_limited_range);
+    assert!(new.hdmi.infoframes.avi.set && new.hdmi.infoframes.spd.set && new.hdmi.infoframes.hdmi.set);
+
+    let mut adjusted = mode.clone();
+    assert_eq!(vc4.hdmi[0].encoder_atomic_check(&mut adjusted), 0);
+    vc4.hdmi[0].encoder_atomic_mode_set(&adjusted, &new);
+
+    let mut hw = Strict::new(segment(&evs, "vc4_hdmi_encoder_pre_crtc_configure", 0));
+    vc4.hdmi[0].encoder_pre_crtc_configure(&mut hw, &mut vc4.clocks, &new);
+    hw.done();
+
+    let mut hw = Strict::new(segment(&evs, "vc4_hdmi_encoder_pre_crtc_enable", 0));
+    vc4.hdmi[0].encoder_pre_crtc_enable(&mut hw, &new);
+    hw.done();
+
+    let mut hw = Strict::new(segment(&evs, "vc4_hdmi_encoder_post_crtc_enable", 0));
+    let connector = &vc4.connectors[0];
+    vc4.hdmi[0].encoder_post_crtc_enable(&mut hw, &mut vc4.bsc, connector, &old, &new, &vc4.hvs);
+    hw.done();
+    assert!(vc4.hdmi[0].scdc_enabled && vc4.hdmi[0].scrambling_work.is_some());
+}
