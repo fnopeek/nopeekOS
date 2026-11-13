@@ -1196,7 +1196,6 @@ fn wake_shell() {
 pub(crate) fn emit_output(state: &mut HostState, s: &str) {
     if state.direct_output {
         let idx = state.terminal_idx;
-        #[cfg(target_arch = "x86_64")]
         if idx != TERM_IDX_ACTIVE && (idx as usize) < MAX_APP_BUFS {
             crate::shade::terminal::write_idx(idx as usize, s);
             return;

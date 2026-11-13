@@ -113,7 +113,6 @@ pub fn poll() {
     // despite being outside the guard. This is the heartbeat that drives the
     // compositor from the shell-prompt idle loop (read_line_with_tab), which
     // polls net but never renders directly.
-    #[cfg(target_arch = "x86_64")]
     crate::shade::poll_render();
 }
 

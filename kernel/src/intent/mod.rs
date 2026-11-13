@@ -112,7 +112,6 @@ pub fn confirm(question: &str) -> bool {
     let on_screen = shade_active()
         && crate::smp::per_core::current_core_id() == 0;
     if on_screen {
-        #[cfg(target_arch = "x86_64")]
         crate::shade::render_frame();
     }
 
@@ -167,7 +166,6 @@ pub fn confirm(question: &str) -> bool {
     };
     kprintln!();
     if on_screen {
-        #[cfg(target_arch = "x86_64")]
         crate::shade::render_frame();
     }
     answer
@@ -186,7 +184,6 @@ pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
     let on_screen = shade_active()
         && crate::smp::per_core::current_core_id() == 0;
     if on_screen {
-        #[cfg(target_arch = "x86_64")]
         crate::shade::render_frame();
     }
 
@@ -228,7 +225,6 @@ pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
                 _ => {}
             }
             if on_screen {
-                #[cfg(target_arch = "x86_64")]
                 crate::shade::render_frame();
             }
             continue;
@@ -239,7 +235,6 @@ pub fn read_secret(prompt: &str, buf: &mut [u8]) -> Option<usize> {
     };
     kprintln!();
     if on_screen {
-        #[cfg(target_arch = "x86_64")]
         crate::shade::render_frame();
     }
     if result.is_none() { buf.fill(0); }
@@ -486,24 +481,18 @@ pub fn set_cwd(path: &str) {
 
 /// The terminal that has the keyboard; without a compositor, the console.
 fn active_terminal() -> u8 {
-    #[cfg(target_arch = "x86_64")]
-    { crate::shade::terminal::active_idx() }
-    #[cfg(not(target_arch = "x86_64"))]
-    { 0 }
+    crate::shade::terminal::active_idx()
 }
 
 /// Determine which terminal the current core is operating on.
 /// Workers: output redirect terminal. Core 0: active terminal. Without a
 /// compositor there is one console, terminal 0.
 fn current_terminal() -> u8 {
-    #[cfg(target_arch = "x86_64")]
     if let Some(redirect) = crate::shade::terminal::output_redirect_terminal() {
         redirect
     } else {
         crate::shade::terminal::active_idx()
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    0
 }
 
 // ── Intent Job System (dispatch intents to worker cores) ─────
@@ -585,7 +574,6 @@ fn intent_worker_task(arg: u64) {
     let start_tsc = crate::time::counter();
 
     // Redirect kprint output to this terminal
-    #[cfg(target_arch = "x86_64")]
     crate::shade::terminal::set_output_redirect(job.terminal_idx);
 
     // A Ctrl+C from before this intent (a copy in a text field sets the
@@ -606,7 +594,6 @@ fn intent_worker_task(arg: u64) {
     crate::process::exit(pid);
 
     // Clear redirect + mark done (Core 0 prints the prompt when it detects completion)
-    #[cfg(target_arch = "x86_64")]
     crate::shade::terminal::clear_output_redirect();
     INTENT_RUNNING[job.terminal_idx as usize].store(false, AtOrd::Release);
     #[cfg(target_arch = "x86_64")]
@@ -615,7 +602,6 @@ fn intent_worker_task(arg: u64) {
             crate::shade::input::ShadeAction::CloseTerminal(job.terminal_idx));
     }
             wake_shell();
-    #[cfg(target_arch = "x86_64")]
     crate::shade::terminal::mark_dirty();
 }
 

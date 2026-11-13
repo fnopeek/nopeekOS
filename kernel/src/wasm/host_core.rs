@@ -1156,7 +1156,6 @@ pub(crate) fn npk_stream_open(ctx: &mut HostState, idx: i32) -> i32 {
         crate::serial::mirror_open();
         return 0;
     }
-    #[cfg(target_arch = "x86_64")]
     if crate::shade::terminal::stream_open(idx as usize) { return 0; }
     -1
 }
@@ -1166,7 +1165,6 @@ pub(crate) fn npk_stream_close(ctx: &mut HostState, idx: i32) -> i32 {
     if idx < 0 {
         crate::serial::mirror_close();
     } else {
-        #[cfg(target_arch = "x86_64")]
         crate::shade::terminal::stream_close(idx as usize);
     }
     0
@@ -4456,10 +4454,7 @@ pub(crate) fn npk_stream_read(mem: &mut [u8], ctx: &mut HostState, idx: i32, buf
     if idx < 0 {
         return crate::serial::mirror_read(out) as i32;
     }
-    #[cfg(target_arch = "x86_64")]
-    return crate::shade::terminal::stream_read(idx as usize, out) as i32;
-    #[cfg(not(target_arch = "x86_64"))]
-    0
+    crate::shade::terminal::stream_read(idx as usize, out) as i32
 }
 
 /// Most one `npk_tcp_send` may hand the kernel. The send buffer takes a
