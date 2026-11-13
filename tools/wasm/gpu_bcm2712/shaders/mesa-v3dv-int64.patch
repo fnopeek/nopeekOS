@@ -1,0 +1,19 @@
+--- a/src/broadcom/vulkan/v3dv_pipeline.c
++++ b/src/broadcom/vulkan/v3dv_pipeline.c
+@@ -190,6 +190,7 @@
+       .lower_pack_32_2x16_split = true,
+       .lower_unpack_32_2x16_split = true,
+       .lower_mul_2x32_64 = true,
++      .lower_int64_options = ~0,
+       .lower_fdiv = true,
+       .lower_find_lsb = true,
+       .lower_flrp16 = true,
+@@ -352,6 +353,8 @@
+             nir_var_mem_global,
+             nir_address_format_2x32bit_global);
+ 
++   NIR_PASS(_, nir, nir_lower_int64);
++
+    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
+ 
+    /* Lower a bunch of stuff */
