@@ -9,7 +9,5 @@ pub mod paging;
 #[cfg(target_arch = "aarch64")]
 pub use crate::arch::aarch64::paging;
 pub mod stack;
-#[cfg(target_arch = "x86_64")]
 mod cache;
-#[cfg(target_arch = "x86_64")]
 pub use cache::clflush_range;

@@ -882,6 +882,13 @@ pub fn current_core_id() -> usize {
     APIC_TO_CORE[(apic_id & 0xFF) as usize].load(Relaxed) as usize
 }
 
+/// The current core's id once the local APIC is set up; before that
+/// every caller is the boot core and per-core state is not yet in use.
+pub fn ready_core_id() -> Option<usize> {
+    if crate::interrupts::apic_base() == 0 { return None; }
+    Some(current_core_id())
+}
+
 /// xAPIC id → sequential core id, filled once per core at registration.
 ///
 /// Lets `current_core_id` avoid a lock on the hottest paths (`poll_rx_only`,

@@ -12,6 +12,7 @@ pub mod window;
 pub mod buffers;
 pub mod scene;
 pub mod gpu_scene;
+#[cfg(target_arch = "x86_64")]
 pub mod capture;
 pub mod compositor;
 pub mod terminal;
@@ -337,6 +338,7 @@ pub fn is_window_fullscreen(window_id: u32) -> bool {
 /// controls, without Mod held (a host gesture). A button pressed there
 /// holds the pointer in the guest until its release (implicit grab), so a
 /// drag may leave the window; a press anywhere else never reaches it.
+#[cfg(target_arch = "x86_64")]
 pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     use crate::microvm::devices::virtio_input_pci::{push_input_event, ABS_MAX};
     const EV_SYN: u16 = 0x00;
@@ -376,7 +378,7 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
         _ => return, // no Surface focused → no-op (called on every move)
     };
     let Some(out) = crate::microvm::output_of_window(wid) else { return };
-    let owns = on_content && !crate::keyboard::is_super_held();
+    let owns = on_content && !crate::input::is_super_held();
     let held = LAST_BTN.load(Ordering::Relaxed);
     if !owns && held == 0 {
         return;
@@ -431,12 +433,15 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 static LAST_ABS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(u64::MAX);
 /// The buttons the guest holds down.
+#[cfg(target_arch = "x86_64")]
 static LAST_BTN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 /// The host's buttons at the last event, to tell a press from a hold.
+#[cfg(target_arch = "x86_64")]
 static LAST_HOST_BTN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 
@@ -1342,6 +1347,8 @@ pub fn poll_render() {
     }
 
     // The guest named its windows: the panel shows them from the next notify.
+    #[cfg(target_arch = "x86_64")]
+    {
     let titles = crate::microvm::devices::virtio_console_pci::take_titles();
     if titles.iter().any(Option::is_some) {
         note_shell_fingerprint(with_compositor(|comp| {
@@ -1352,6 +1359,7 @@ pub fn poll_render() {
             }
             comp.shell_fingerprint()
         }));
+    }
     }
 
     // Tick swap animation (smooth window transition)
@@ -1558,6 +1566,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // consumer's path, so this is race-free. forward_pointer_to_guest no-ops
     // unless a Surface window is focused, so this is free in normal desktop
     // use.
+    #[cfg(target_arch = "x86_64")]
     forward_pointer_to_guest(evt);
 
     // Horizontal scrolling — two fingers left/right on a touchpad, wheel
@@ -1589,7 +1598,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
             // instead of moving the viewport — an app that doesn't zoom
             // just ignores it (and deliberately doesn't scroll either,
             // which is what every editor does).
-            if crate::keyboard::is_ctrl_held() {
+            if crate::input::is_ctrl_held() {
                 widgets::push_event(wid, widgets::abi::Event::Zoom {
                     delta: evt.scroll as i32,
                 });
@@ -1599,7 +1608,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
             let delta = -(evt.scroll as i32) * widget_scroll_step();
             // Shift+wheel scrolls sideways — the editor idiom, and the only
             // way to reach a long line with a mouse that has one wheel.
-            if crate::keyboard::is_shift_held() {
+            if crate::input::is_shift_held() {
                 if widgets::scroll_by_x(wid, delta) { request_render(); }
                 return;
             }
@@ -1682,7 +1691,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         let (btn, _) = cursor::atomic_buttons();
         if btn & 1 != 0
             && !DRAG_ACTIVE.load(Ordering::Relaxed)
-            && !crate::keyboard::is_super_held()
+            && !crate::input::is_super_held()
         {
             if let Some(wid) = focused_widget_id() {
                 widgets::push_event(wid, widgets::abi::Event::MouseMove { x: hx, y: hy });

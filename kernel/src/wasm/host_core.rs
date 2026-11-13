@@ -947,7 +947,7 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
             r |= WAIT_WIFI_CMD;
         }
         if mask & WAIT_GPU_CMD != 0 && hw.is_pci
-            && (crate::gpu::gpudev::pending(hw.pci_addr)
+            && (crate::gpu::gpudev::pending(crate::drivers::DevId::Pci(hw.pci_addr))
                 || owned_pci_class(ctx) == Some(0x03) && crate::audio::display_audio_pending())
         {
             r |= WAIT_GPU_CMD;
@@ -1037,7 +1037,7 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
                 sig |= SIG_WIFI;
             }
             if mask & WAIT_GPU_CMD != 0 && hw.is_pci {
-                crate::gpu::gpudev::set_waker(hw.pci_addr, w);
+                crate::gpu::gpudev::set_waker(crate::drivers::DevId::Pci(hw.pci_addr), w);
                 sig |= crate::smp::fiber::SIG_GPU;
             }
         }
@@ -1791,10 +1791,10 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     // anything the driver hands it: from here on it reaches only what the
     // kernel grants (`drivers::iommu`).
     if pci::read8(hw.pci_addr, 0x0B) == 0x03 && crate::gpu::iommu_wanted() {
-        match crate::drivers::iommu::protect(hw.pci_addr) {
+        match crate::drivers::iommu::protect(crate::drivers::DevId::Pci(hw.pci_addr)) {
             Ok(()) => {
                 for &(phys, pages) in &hw.dma_allocs {
-                    crate::drivers::iommu::grant(hw.pci_addr, phys, pages);
+                    crate::drivers::iommu::grant(crate::drivers::DevId::Pci(hw.pci_addr), phys, pages);
                 }
             }
             Err(e) => crate::kprintln!("[npk] iommu: {:02x}:{:02x}.{} not protected: {}",
@@ -2412,7 +2412,7 @@ pub(crate) fn npk_dma_free(ctx: &mut HostState, handle: i32) -> i32 {
     let Some(&(phys, pages)) = usize::try_from(handle).ok().and_then(|h| hw.dma_allocs.get(h)) else { return -1 };
     if pages == 0 { return -1; }
     if hw.is_pci {
-        crate::drivers::iommu::revoke(hw.pci_addr, phys, pages);
+        crate::drivers::iommu::revoke(crate::drivers::DevId::Pci(hw.pci_addr), phys, pages);
     }
     crate::memory::deallocate_contiguous(phys, pages);
     hw.dma_allocs[handle as usize] = (0, 0);
@@ -2442,7 +2442,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
     if hw.is_pci {
-        crate::drivers::iommu::grant(hw.pci_addr, phys, page_count);
+        crate::drivers::iommu::grant(crate::drivers::DevId::Pci(hw.pci_addr), phys, page_count);
     }
     handle as i32
 }
@@ -2487,7 +2487,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
     if hw.is_pci {
-        crate::drivers::iommu::grant(hw.pci_addr, phys, page_count);
+        crate::drivers::iommu::grant(crate::drivers::DevId::Pci(hw.pci_addr), phys, page_count);
     }
     handle as i32
 }
@@ -5816,7 +5816,7 @@ pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
 #[cfg(target_arch = "x86_64")]
 /// The display controller this module drives, if it holds one with
 /// HARDWARE: what every `npk_gpudev_*` call requires.
-fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::pci::PciAddr> {
+fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::DevId> {
     if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "gpudev_device") {
         return None;
     }
@@ -5824,7 +5824,7 @@ fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::pci::PciAddr> {
     if !hw.is_pci || pci::read8(hw.pci_addr, 0x0B) != 0x03 {
         return None;
     }
-    Some(hw.pci_addr)
+    Some(crate::drivers::DevId::Pci(hw.pci_addr))
 }
 
 #[cfg(target_arch = "x86_64")]

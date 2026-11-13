@@ -16,6 +16,8 @@ pub mod intel_nic;
 pub mod igc;
 #[cfg(target_arch = "x86_64")]
 pub mod rtl8153;
+pub mod dev_id;
+pub use dev_id::DevId;
 pub mod xhci;
 #[cfg(target_arch = "x86_64")]
 pub mod usb_desc;
@@ -56,7 +58,6 @@ pub mod amd_vi;
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code)]
 pub mod amd_vi_regs;
-#[cfg(target_arch = "x86_64")]
 pub mod iommu;
 #[cfg(target_arch = "x86_64")]
 pub mod smbus;

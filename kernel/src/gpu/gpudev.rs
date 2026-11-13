@@ -44,7 +44,7 @@ use spin::Mutex;
 
 use super::{FramebufferInfo, GpuError, GpuHal, ModeInfo};
 use crate::shade::buffers::{ForeignPixels, ForeignView};
-use crate::drivers::pci::PciAddr;
+use crate::drivers::DevId;
 use crate::smp::fiber::{self, Waker, NO_WAKER};
 
 pub const VERSION: i32 = 2;
@@ -177,7 +177,7 @@ enum Grant {
 }
 
 impl Grant {
-    fn apply(&self, dev: PciAddr, on: bool) {
+    fn apply(&self, dev: DevId, on: bool) {
         let one = |phys: u64, n: usize| {
             if on { crate::drivers::iommu::grant(dev, phys, n) } else { crate::drivers::iommu::revoke(dev, phys, n) }
         };
@@ -203,7 +203,7 @@ struct Job {
 }
 
 struct State {
-    owner: Option<PciAddr>,
+    owner: Option<DevId>,
     fb: Option<FramebufferInfo>,
     bos: BTreeMap<u32, Bo>,
     /// Live dynamic buffers by the address of their first pixel.
@@ -424,7 +424,7 @@ fn mark_all_done() {
 /// `npk_gpudev_register`: the module that owns the display controller at
 /// `dev` becomes the GPU service. The fixed buffers are described from the
 /// framebuffer the kernel draws into and its two shadows.
-pub fn register(dev: PciAddr, version: i32) -> i32 {
+pub fn register(dev: DevId, version: i32) -> i32 {
     if version != VERSION {
         return -2;
     }
@@ -482,19 +482,19 @@ pub fn register(dev: PciAddr, version: i32) -> i32 {
     st.capset = None;
     st.vram_window = None;
     mark_all_done();
-    crate::kprintln!("[npk] gpudev: {:02x}:{:02x}.{} registered, {}x{} framebuffer, 2 shadow buffers",
-        dev.bus, dev.device, dev.function, fb.width, fb.height);
+    crate::kprintln!("[npk] gpudev: {} registered, {}x{} framebuffer, 2 shadow buffers",
+        dev, fb.width, fb.height);
     0
 }
 
-fn owned_by(dev: PciAddr) -> bool {
+fn owned_by(dev: DevId) -> bool {
     STATE.lock().owner == Some(dev)
 }
 
 /// `npk_gpudev_bo_info`: `{phys, size: u64, pitch, width, height, format,
 /// offset, pages: u32}`. Buffer 0's `phys` is the framebuffer's bus
 /// address; its pages are the module's to find.
-pub fn bo_info(dev: PciAddr, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
+pub fn bo_info(dev: DevId, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
     let st = STATE.lock();
     if st.owner != Some(dev) {
         return None;
@@ -524,7 +524,7 @@ pub fn bo_info(dev: PciAddr, id: i32) -> Option<[u8; BO_INFO_BYTES]> {
 /// `npk_gpudev_bo_pages`: physical addresses of pages `first..` of buffer
 /// `id` into `out` (8 bytes each). Buffer 0 has none: `bo_info` gives its
 /// bus address.
-pub fn bo_pages(dev: PciAddr, id: i32, first: u32, out: &mut [u8]) -> i32 {
+pub fn bo_pages(dev: DevId, id: i32, first: u32, out: &mut [u8]) -> i32 {
     let (bo, list) = {
         let st = STATE.lock();
         if st.owner != Some(dev) || id <= 0 {
@@ -563,7 +563,7 @@ pub fn bo_pages(dev: PciAddr, id: i32, first: u32, out: &mut [u8]) -> i32 {
 /// `npk_gpudev_bo_bound`: where the first pixel of buffer `id` lies. Pages
 /// in foreign memory the module did not mark `bo_gpu_only` before are a
 /// linear picture.
-pub fn bo_bound(dev: PciAddr, id: i32, gpu_addr: i64) -> i32 {
+pub fn bo_bound(dev: DevId, id: i32, gpu_addr: i64) -> i32 {
     let mut st = STATE.lock();
     if st.owner != Some(dev) || gpu_addr < 0 {
         return -1;
@@ -584,7 +584,7 @@ pub fn bo_bound(dev: PciAddr, id: i32, gpu_addr: i64) -> i32 {
 /// `npk_gpudev_bo_gpu_only`: buffer `id`, in foreign pages, holds a
 /// picture laid out for the card (a tiled guest frame the module imports
 /// through its texture unit); the CPU composes nothing from those pages.
-pub fn bo_gpu_only(dev: PciAddr, id: i32) -> i32 {
+pub fn bo_gpu_only(dev: DevId, id: i32) -> i32 {
     let st = STATE.lock();
     if st.owner != Some(dev) {
         return -1;
@@ -601,7 +601,7 @@ pub fn bo_gpu_only(dev: PciAddr, id: i32) -> i32 {
 /// `npk_gpudev_ready`: with a passed self-test and the fixed buffers bound,
 /// the compositor's copies go to the module from the next frame on, and with
 /// `CAP_SCENE` its scenes may (`shade::gpu_scene` checks them first).
-pub fn ready(dev: PciAddr, caps: i32) -> i32 {
+pub fn ready(dev: DevId, caps: i32) -> i32 {
     if caps & CAP_COPY == 0 {
         if !owned_by(dev) {
             return -1;
@@ -645,7 +645,7 @@ pub fn ready(dev: PciAddr, caps: i32) -> i32 {
 }
 
 /// `npk_gpudev_poll`: up to `out.len() / JOB_BYTES` jobs into `out`.
-pub fn poll(dev: PciAddr, out: &mut [u8]) -> i32 {
+pub fn poll(dev: DevId, out: &mut [u8]) -> i32 {
     let mut st = STATE.lock();
     if st.owner != Some(dev) {
         return -1;
@@ -670,7 +670,7 @@ pub fn poll(dev: PciAddr, out: &mut [u8]) -> i32 {
 }
 
 /// `npk_gpudev_job_data`: bytes `offset..` of the payload of job `seq`.
-pub fn job_data(dev: PciAddr, seq: u32, offset: u32, out: &mut [u8]) -> i32 {
+pub fn job_data(dev: DevId, seq: u32, offset: u32, out: &mut [u8]) -> i32 {
     let st = STATE.lock();
     if st.owner != Some(dev) {
         return -1;
@@ -686,7 +686,7 @@ pub fn job_data(dev: PciAddr, seq: u32, offset: u32, out: &mut [u8]) -> i32 {
 }
 
 /// `npk_gpudev_complete`.
-pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
+pub fn complete(dev: DevId, seq: u32, status: i32) -> i32 {
     let free = {
         let mut st = STATE.lock();
         if st.owner != Some(dev) {
@@ -749,12 +749,12 @@ pub fn complete(dev: PciAddr, seq: u32, status: i32) -> i32 {
 }
 
 /// Jobs waiting for the module (`npk_wait(WAIT_GPU_CMD)`).
-pub fn pending(dev: PciAddr) -> bool {
+pub fn pending(dev: DevId) -> bool {
     let st = STATE.lock();
     st.owner == Some(dev) && !st.queue.is_empty()
 }
 
-pub fn set_waker(dev: PciAddr, w: Waker) {
+pub fn set_waker(dev: DevId, w: Waker) {
     if owned_by(dev) {
         WAKER.store(w, Ordering::Release);
     }
@@ -764,7 +764,7 @@ pub fn set_waker(dev: PciAddr, w: Waker) {
 /// removal it never completed are freed, and the compositor goes back to
 /// the CPU, copying into the framebuffer the module last showed. No
 /// register is touched.
-pub fn module_gone(dev: PciAddr) {
+pub fn module_gone(dev: DevId) {
     tts_module_gone();
     let (fb, frees) = {
         let mut st = STATE.lock();
@@ -812,6 +812,7 @@ pub fn module_gone(dev: PciAddr) {
     READY.store(false, Ordering::Release);
     mark_all_done();
     SCENES.store(false, Ordering::Release);
+    #[cfg(target_arch = "x86_64")]
     crate::audio::display_audio_clear();
     NATIVE.store(false, Ordering::Release);
     CURSOR.store(false, Ordering::Release);
@@ -822,6 +823,7 @@ pub fn module_gone(dev: PciAddr) {
     wake_waiters();
     wake_parked(true);
     // Waiting submissions see the module gone and complete.
+    #[cfg(target_arch = "x86_64")]
     crate::microvm::devices::gpu_backend::note_gpu_kick(0);
     for (phys, pages) in frees {
         crate::memory::deallocate_contiguous(phys, pages);
@@ -1110,9 +1112,7 @@ fn wake_waiters() {
         let c = waiting.trailing_zeros() as usize;
         waiting &= waiting - 1;
         if c != me {
-            if let Some(apic) = crate::smp::per_core::core_apic(c) {
-                crate::smp::send_wake_ipi(apic);
-            }
+            crate::smp::per_core::send_wake(c);
         }
     }
 }
@@ -1137,7 +1137,7 @@ fn halt_for(seq: u32, deadline: u64) {
             // In short steps: the halt re-arms the core's one-shot timer, and
             // a deadline someone else armed earlier is late by one step at most.
             let step = crate::time::counter() + crate::time::counter_hz() / (1_000_000 / HALT_STEP_US);
-            crate::interrupts::halt_until(Some(deadline.min(step)), crate::smp::per_core::WAKE_HLT_FALLBACK);
+            crate::smp::per_core::halt_until(Some(deadline.min(step)), crate::smp::per_core::WAKE_HLT_FALLBACK);
         }
     });
     WAITING_CORES.fetch_and(!bit, Ordering::SeqCst);
@@ -1530,9 +1530,14 @@ pub fn wait_scene(seq: u32) -> i32 {
 
 /// For `cores`: a scene the desktop waited for, and how long.
 fn note_scene_wait(t0: u64) {
-    use crate::microvm::devices::gpu_backend::{note, us_since, STAT_SCENE, STAT_SCENE_US};
-    note(STAT_SCENE, 1);
-    note(STAT_SCENE_US, us_since(t0));
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = t0;
+    #[cfg(target_arch = "x86_64")]
+    {
+        use crate::microvm::devices::gpu_backend::{note, us_since, STAT_SCENE, STAT_SCENE_US};
+        note(STAT_SCENE, 1);
+        note(STAT_SCENE_US, us_since(t0));
+    }
 }
 
 /// `wait_scene` for a scene queued behind new buffers: binding them is a
@@ -1557,7 +1562,7 @@ pub fn scenes_offered() -> bool {
 
 /// The card a module serves guest native contexts for: it reported
 /// `CAP_NATIVE` and the IOMMU confines the card to the pages granted to it.
-pub fn native_device() -> Option<PciAddr> {
+pub fn native_device() -> Option<DevId> {
     if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
         return None;
     }
@@ -1575,7 +1580,7 @@ pub fn native_refused() -> Option<&'static str> {
 
 /// `npk_gpudev_capset`: the capset of the card (`struct
 /// virgl_renderer_capset_drm`), set before `npk_gpudev_ready`.
-pub fn set_capset(dev: PciAddr, data: &[u8]) -> i32 {
+pub fn set_capset(dev: DevId, data: &[u8]) -> i32 {
     if data.len() < 24 || data.len() > MAX_CAPSET {
         return -1;
     }
@@ -1588,11 +1593,24 @@ pub fn set_capset(dev: PciAddr, data: &[u8]) -> i32 {
 }
 
 /// Pages of VRAM BAR0 and the window are compared at.
+/// The card's BAR0 (base, size): its VRAM aperture. A device-tree GPU
+/// shares system memory and has none.
+fn bar0(dev: DevId) -> Option<(u64, u64)> {
+    match dev {
+        #[cfg(target_arch = "x86_64")]
+        DevId::Pci(a) => crate::drivers::pci::bar(a, 0).map(|b| (b.base, b.size)),
+        #[cfg(target_arch = "aarch64")]
+        DevId::Dt(_) => None,
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
 const VRAM_ALIAS_SAMPLES: u64 = 16;
 
 /// Whether `[base, base + size)` holds the same bytes as BAR0 at sample
 /// pages across the BAR, at least one of them not all zero: then it is the
 /// memory behind the BAR, not merely a region of that size. Only read.
+#[cfg(target_arch = "x86_64")]
 fn vram_aliases_bar(base: u64, size: u64, bar: u64, bar_len: u64) -> bool {
     let span = size.min(bar_len) / PAGE;
     if span == 0 {
@@ -1644,7 +1662,8 @@ fn vram_aliases_bar(base: u64, size: u64, bar: u64, bar_len: u64) -> bool {
 /// card's VRAM (an APU's carve-out), before `npk_gpudev_ready`. Taken only
 /// when the firmware declared it as one region that is not RAM and it reads
 /// as BAR0 does; guest blobs above BAR0 are mapped through it.
-pub fn set_vram_window(dev: PciAddr, base: u64, size: u64) -> i32 {
+#[cfg(target_arch = "x86_64")]
+pub fn set_vram_window(dev: DevId, base: u64, size: u64) -> i32 {
     // Checked without the state lock: the comparison maps pages.
     if STATE.lock().owner != Some(dev) || READY.load(Ordering::Acquire) {
         return -1;
@@ -1656,8 +1675,8 @@ pub fn set_vram_window(dev: PciAddr, base: u64, size: u64) -> i32 {
         crate::kprintln!("[gpu] VRAM window {:#x}+{:#x} refused: not one firmware region", base, size);
         return -1;
     }
-    let Some(bar) = crate::drivers::pci::bar(dev, 0) else { return -1 };
-    if !vram_aliases_bar(base, size, bar.base, bar.size) {
+    let Some((bar_base, bar_size)) = bar0(dev) else { return -1 };
+    if !vram_aliases_bar(base, size, bar_base, bar_size) {
         crate::kprintln!("[gpu] VRAM window {:#x}+{:#x} refused: it does not read as BAR0", base, size);
         return -1;
     }
@@ -1667,7 +1686,7 @@ pub fn set_vram_window(dev: PciAddr, base: u64, size: u64) -> i32 {
     }
     st.vram_window = Some((base, size));
     drop(st);
-    crate::kprintln!("[gpu] VRAM window {:#x}+{} MB (BAR0 {} MB)", base, size >> 20, bar.size >> 20);
+    crate::kprintln!("[gpu] VRAM window {:#x}+{} MB (BAR0 {} MB)", base, size >> 20, bar_size >> 20);
     0
 }
 
@@ -1679,7 +1698,7 @@ pub fn native_capset() -> Option<Vec<u8>> {
 
 /// `npk_gpudev_reply`: the reply of `OP_CCMD` job `seq`, before its
 /// completion.
-pub fn reply(dev: PciAddr, seq: u32, data: &[u8]) -> i32 {
+pub fn reply(dev: DevId, seq: u32, data: &[u8]) -> i32 {
     if data.len() > MAX_REPLY {
         return -1;
     }
@@ -1699,7 +1718,7 @@ pub fn reply(dev: PciAddr, seq: u32, data: &[u8]) -> i32 {
 /// `npk_gpudev_ring`: client `client` has had `submitted` submissions on
 /// `ring` taken, `completed` of them done. Completions waiting for that
 /// ring are looked at again.
-pub fn ring(dev: PciAddr, client: u32, ring: u32, submitted: u64, completed: u64) -> i32 {
+pub fn ring(dev: DevId, client: u32, ring: u32, submitted: u64, completed: u64) -> i32 {
     if ring >= MAX_CLIENT_RINGS || completed > submitted {
         return -1;
     }
@@ -1710,6 +1729,7 @@ pub fn ring(dev: PciAddr, client: u32, ring: u32, submitted: u64, completed: u64
         }
     }
     RINGS.lock().insert((client, ring), (submitted, completed));
+    #[cfg(target_arch = "x86_64")]
     crate::microvm::devices::gpu_backend::fences_reported();
     0
 }
@@ -1858,7 +1878,7 @@ pub fn object_remove(id: u32, attached: Option<(u32, u32)>, frames: Arc<ForeignP
 }
 
 /// `npk_gpudev_released`: the module let go of a zombie of buffer `id`.
-pub fn released(dev: PciAddr, id: u32) -> i32 {
+pub fn released(dev: DevId, id: u32) -> i32 {
     let mut st = STATE.lock();
     if st.owner != Some(dev) {
         return -1;
@@ -1874,7 +1894,7 @@ pub fn released(dev: PciAddr, id: u32) -> i32 {
 
 /// Buffer `id` once nothing in the module reaches it: the card loses it,
 /// then its frames go back.
-fn release_held(st: &mut State, dev: PciAddr, id: u32) {
+fn release_held(st: &mut State, dev: DevId, id: u32) {
     let Some(h) = st.held.get(&id) else { return };
     if h.zombies != 0 || (h.frames.is_some() && !h.owner_done) {
         return;
@@ -1911,13 +1931,14 @@ static NEXT_TT: AtomicU32 = AtomicU32::new(1);
 
 /// `npk_gpudev_tt_alloc`: `pages` zeroed frames for a GTT object of guest
 /// client `client`, granted to the card; the buffer id to read them under.
-pub fn tt_alloc(dev: PciAddr, client: u32, pages: u32) -> i32 {
+pub fn tt_alloc(dev: DevId, client: u32, pages: u32) -> i32 {
     if pages == 0 || pages > MAX_TT_PAGES {
         return -1;
     }
     if !STATE.lock().clients.contains(&client) || !owned_by(dev) {
         return -1;
     }
+    #[cfg(target_arch = "x86_64")]
     if crate::microvm::devices::guest_mem::frames_spare() < pages as usize {
         crate::kprintln!("[gpu] native context: {} KB of GTT refused, host memory down to its reserve", pages * 4);
         return -1;
@@ -1955,7 +1976,7 @@ pub fn tt_buffer(tt: u32) -> Option<u32> {
 
 /// `npk_gpudev_tt_read`: bytes of GTT pages `tt` the module holds, from
 /// byte `offset` on, as many as `out` takes and the pages hold.
-pub fn tt_read(dev: PciAddr, tt: u32, offset: u64, out: &mut [u8]) -> i32 {
+pub fn tt_read(dev: DevId, tt: u32, offset: u64, out: &mut [u8]) -> i32 {
     if !owned_by(dev) {
         return -1;
     }
@@ -1984,7 +2005,7 @@ pub fn tt_read(dev: PciAddr, tt: u32, offset: u64, out: &mut [u8]) -> i32 {
 }
 
 /// `npk_gpudev_tt_free`: the module let go of GTT pages `tt`.
-pub fn tt_free(dev: PciAddr, tt: u32) -> i32 {
+pub fn tt_free(dev: DevId, tt: u32) -> i32 {
     if !owned_by(dev) {
         return -1;
     }
@@ -2025,6 +2046,7 @@ fn tts_module_gone() {
     }
     if VRAM_BLOBS.load(Ordering::Acquire) != 0 {
         VRAM_LOST.store(true, Ordering::Release);
+        #[cfg(target_arch = "x86_64")]
         crate::microvm::devices::gpu_backend::note_gpu_kick(0);
     }
 }
@@ -2085,8 +2107,7 @@ pub fn blob(client: u32, blob_id: u32, res_id: u32) -> Option<(Arc<ForeignPixels
             let (bar0, bar_len) = match window {
                 Some(w) => w,
                 None => {
-                    let bar = crate::drivers::pci::bar(dev, 0)?;
-                    (bar.base, bar.size)
+                    bar0(dev)?
                 }
             };
             let mut list = Vec::new();
@@ -2204,7 +2225,7 @@ pub const GPU_STAT_ENGINES: [&str; 5] = ["rcs", "bcs", "vcs0", "vcs2", "vecs"];
 static GPU_STATS: Mutex<[u64; GPU_STATS_WORDS]> = Mutex::new([0; GPU_STATS_WORDS]);
 
 /// `npk_gpudev_stats`.
-pub fn stats(dev: PciAddr, words: [u64; GPU_STATS_WORDS]) -> i32 {
+pub fn stats(dev: DevId, words: [u64; GPU_STATS_WORDS]) -> i32 {
     if !owned_by(dev) {
         return -1;
     }
@@ -2219,7 +2240,7 @@ pub fn gpu_stats_snapshot() -> [u64; GPU_STATS_WORDS] {
 
 /// What `gpu` reports about the GPU service.
 pub struct Status {
-    pub owner: Option<PciAddr>,
+    pub owner: Option<DevId>,
     pub ready: bool,
     pub scenes: bool,
     pub copies_done: u64,

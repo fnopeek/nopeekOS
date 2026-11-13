@@ -5,7 +5,7 @@
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use super::hw;
 
-pub use hw::{current_core_id, is_vcpu_core};
+pub use hw::{current_core_id, is_vcpu_core, ready_core_id};
 #[cfg(target_arch = "x86_64")]
 pub use hw::{
     amd_cstate_base, aperf_mperf_now, core_apic, halted_aperf_mperf, has_mwait, has_rapl,

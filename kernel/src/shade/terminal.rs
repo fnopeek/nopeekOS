@@ -416,7 +416,7 @@ pub fn clear_idx(idx: usize) {
     clear_selection(idx);
 }
 
-/// Per-core output redirect (indexed by LAPIC ID, 255 = no redirect).
+/// Per-core output redirect (indexed by core id, 255 = no redirect).
 /// Workers set this before intent dispatch so kprintln goes to the right terminal.
 static CORE_OUTPUT: [AtomicU8; 256] = {
     const NONE: AtomicU8 = AtomicU8::new(255);
@@ -425,27 +425,21 @@ static CORE_OUTPUT: [AtomicU8; 256] = {
 
 /// Set output redirect for the current core (call before intent dispatch on worker).
 pub fn set_output_redirect(terminal_idx: u8) {
-    let apic_base = crate::interrupts::apic_base();
-    if apic_base == 0 { return; }
-    let apic_id = crate::interrupts::current_apic_id();
-    CORE_OUTPUT[apic_id as usize & 0xFF].store(terminal_idx, Ordering::Release);
+    let Some(core) = crate::smp::per_core::ready_core_id() else { return };
+    CORE_OUTPUT[core & 0xFF].store(terminal_idx, Ordering::Release);
 }
 
 /// Get the output redirect terminal for the current core (None if no redirect / Core 0).
 pub fn output_redirect_terminal() -> Option<u8> {
-    let apic_base = crate::interrupts::apic_base();
-    if apic_base == 0 { return None; }
-    let apic_id = crate::interrupts::current_apic_id();
-    let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Acquire);
+    let core = crate::smp::per_core::ready_core_id()?;
+    let redirect = CORE_OUTPUT[core & 0xFF].load(Ordering::Acquire);
     if redirect != 255 && slot_in_use(redirect as usize) { Some(redirect) } else { None }
 }
 
 /// Clear output redirect for the current core.
 pub fn clear_output_redirect() {
-    let apic_base = crate::interrupts::apic_base();
-    if apic_base == 0 { return; }
-    let apic_id = crate::interrupts::current_apic_id();
-    CORE_OUTPUT[apic_id as usize & 0xFF].store(255, Ordering::Release);
+    let Some(core) = crate::smp::per_core::ready_core_id() else { return };
+    CORE_OUTPUT[core & 0xFF].store(255, Ordering::Release);
 }
 
 /// Write to the active terminal (called from serial::write_str).
@@ -460,10 +454,8 @@ pub fn write(s: &str) {
     }
 
     // Check per-core output redirect (workers running intents)
-    let apic_base = crate::interrupts::apic_base();
-    if apic_base != 0 {
-        let apic_id = crate::interrupts::current_apic_id();
-        let redirect = CORE_OUTPUT[apic_id as usize & 0xFF].load(Ordering::Relaxed);
+    if let Some(core) = crate::smp::per_core::ready_core_id() {
+        let redirect = CORE_OUTPUT[core & 0xFF].load(Ordering::Relaxed);
         if redirect != 255 {
             write_idx(redirect as usize, s);
             return;
@@ -933,7 +925,7 @@ pub fn paste_clipboard() {
         0x00..=0x1F | 0x7F => None,
         _             => Some(b),
     }).collect();
-    crate::keyboard::inject_paste(&clean);
+    crate::input::inject_paste(&clean);
 }
 
 /// Drop the selection if it belongs to terminal `idx` (its content just

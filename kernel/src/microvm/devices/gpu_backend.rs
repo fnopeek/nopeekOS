@@ -28,7 +28,7 @@ pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 /// The native-context protocol the next VM is offered, if the GPU module
 /// serves native contexts: the card's vendor picks it.
 pub fn native_protocol() -> Option<&'static str> {
-    let dev = crate::gpu::gpudev::native_device()?;
+    let dev = crate::gpu::gpudev::native_device()?.pci()?;
     Some(if crate::drivers::pci::read16(dev, 0) == 0x1002 { "amdgpu" } else { "i915" })
 }
 
@@ -41,7 +41,7 @@ pub fn reset() {
     // module's i915 when it serves native contexts behind the IOMMU, else the
     // probe for `set microvm_gpu test`, else none.
     super::virtio_gpu_ctx::set_backend(None);
-    if let Some(dev) = crate::gpu::gpudev::native_device() {
+    if let Some(dev) = crate::gpu::gpudev::native_device().and_then(|d| d.pci()) {
         // An AMD card's capset comes from its module.
         let backend: Option<(alloc::boxed::Box<dyn super::virtio_gpu_ctx::Backend>, &str)> =
             if native_protocol() == Some("amdgpu") {

@@ -15,4 +15,4 @@ mod hw;
 
 pub use hw::init;
 #[cfg(target_arch = "x86_64")]
-pub use hw::{kick_host_core, kick_host_core_posted, send_wake_ipi};
+pub use hw::{kick_host_core, kick_host_core_posted};

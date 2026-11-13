@@ -49,6 +49,11 @@ pub fn current_core_id() -> usize {
     cpu::current_core()
 }
 
+/// The current core's id; the boot code sets it before anything runs.
+pub fn ready_core_id() -> Option<usize> {
+    Some(current_core_id())
+}
+
 /// The wake SGI to core `c`.
 pub fn send_wake(c: usize) {
     gic::send_sgi(c, gic::SGI_WAKE);

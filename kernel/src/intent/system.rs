@@ -1301,8 +1301,8 @@ pub fn intent_gpu(args: &str) {
         "iommu" => {
             match crate::drivers::iommu::status() {
                 Some(s) => {
-                    kprintln!("  IOMMU:    {:02x}:{:02x}.{} behind {}, {} pages reachable, {} fault(s) since enabled",
-                        s.dev.bus, s.dev.device, s.dev.function, s.kind, s.pages, s.faults_total);
+                    kprintln!("  IOMMU:    {} behind {}, {} pages reachable, {} fault(s) since enabled",
+                        s.dev, s.kind, s.pages, s.faults_total);
                     for f in crate::drivers::iommu::take_faults(s.dev) {
                         kprintln!("            {} fault at {:#x} from {:#06x}, {} {:#x}",
                             if f.read { "read" } else { "write" }, f.addr, f.source,
@@ -1334,7 +1334,7 @@ pub fn intent_gpu(args: &str) {
                 kprintln!("[npk] gpu: no display controller");
                 return;
             };
-            if let Err(e) = crate::drivers::iommu::protect(dev.addr) {
+            if let Err(e) = crate::drivers::iommu::protect(crate::drivers::DevId::Pci(dev.addr)) {
                 kprintln!("[npk] gpu: {:02x}:{:02x}.{} not protected: {}", dev.addr.bus, dev.addr.device,
                     dev.addr.function, e);
             }
@@ -1397,7 +1397,7 @@ pub fn intent_gpu(args: &str) {
     }
     let st = crate::gpu::gpudev::status();
     match st.owner {
-        Some(d) => kprintln!("  Module:   {:02x}:{:02x}.{} registered, {}", d.bus, d.device, d.function,
+        Some(d) => kprintln!("  Module:   {} registered, {}", d,
             if st.ready { "ready: the GPU copies the frames" } else { "not ready: the CPU copies" }),
         None => kprintln!("  Module:   none, the CPU copies the frames (GOP)"),
     }

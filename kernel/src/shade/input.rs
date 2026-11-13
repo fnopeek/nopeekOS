@@ -107,9 +107,9 @@ pub fn is_mod_active() -> bool {
 /// Reads `shade.mod` config: "super" (default), "ctrl", "alt".
 fn is_mod_held() -> bool {
     match crate::config::get("shade.mod").as_deref() {
-        Some("ctrl") => crate::keyboard::is_ctrl_held(),
-        Some("alt") => crate::keyboard::is_alt_held(),
-        _ => crate::keyboard::is_super_held(), // default: super
+        Some("ctrl") => crate::input::is_ctrl_held(),
+        Some("alt") => crate::input::is_alt_held(),
+        _ => crate::input::is_super_held(), // default: super
     }
 }
 
@@ -156,7 +156,7 @@ pub fn try_keybind(key: u8) -> bool {
     if !is_mod_held() { return false; }
     if !crate::shade::is_active() { return false; }
 
-    let shift = crate::keyboard::is_shift_held();
+    let shift = crate::input::is_shift_held();
 
     match key {
         b'\n' | b'\r' => { push_action(ShadeAction::NewWindow); true }
@@ -179,8 +179,8 @@ pub fn try_keybind(key: u8) -> bool {
 /// Handle arrow key shade actions (legacy, called for ESC [ sequences).
 pub fn try_arrow_keybind(direction: u8) -> bool {
     if !crate::shade::is_active() { return false; }
-    let shift = crate::keyboard::is_shift_held();
-    let ctrl = crate::keyboard::is_ctrl_held();
+    let shift = crate::input::is_shift_held();
+    let ctrl = crate::input::is_ctrl_held();
     match direction {
         b'A' => { push_action(if ctrl { ShadeAction::ResizeUp } else if shift { ShadeAction::SwapUp } else { ShadeAction::FocusUp }); true }
         b'B' => { push_action(if ctrl { ShadeAction::ResizeDown } else if shift { ShadeAction::SwapDown } else { ShadeAction::FocusDown }); true }

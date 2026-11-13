@@ -140,6 +140,7 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
 /// Whether a driver module may take the card at `addr`. The kernel drives
 /// no GPU itself (GOP draws without touching the card), so a display
 /// controller nobody owns is free.
+#[cfg(target_arch = "x86_64")]
 pub fn yield_to_module(addr: crate::drivers::pci::PciAddr) -> bool {
     crate::drivers::pci::owner(addr).is_none()
 }
@@ -268,6 +269,7 @@ pub fn shadow_gpu_addr() -> (u64, u64) {
 /// its framebuffer and its own reserved area there; a frame handed out of
 /// it would be shared with the device. A firmware map that types any of it
 /// as RAM is reported, since frames from it may already be in use.
+#[cfg(target_arch = "x86_64")]
 pub fn reserve_intel_stolen() {
     use crate::drivers::pci;
     let dev = pci::PciAddr { bus: 0, device: 2, function: 0 };

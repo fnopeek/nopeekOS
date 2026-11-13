@@ -759,6 +759,7 @@ pub fn finish_pick(session: PickSession, path: alloc::string::String) {
     // Nothing is granted on a cancel (empty path). A folder the kernel
     // will not hand out (root, `sys`, `.system`, `priv`) answers like a cancel, so the
     // app never holds a folder it cannot work in.
+    #[cfg(target_arch = "x86_64")]
     if session.mode == PickMode::Screen {
         crate::shade::capture::picked(session.picker, path == "screen");
         return;

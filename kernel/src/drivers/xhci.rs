@@ -2439,8 +2439,8 @@ fn hub_port_debounce_root(oper: Mmio, port: u32) -> Option<bool> {
 static HOTPLUG_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// From the shell's idle step: hand pending port changes to a worker.
-#[cfg(target_arch = "x86_64")]
 pub fn hotplug() {
+    #[cfg(target_arch = "x86_64")]
     crate::usb_storage::kick();
     kick_hotplug();
 }

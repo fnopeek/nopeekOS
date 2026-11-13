@@ -214,6 +214,7 @@ impl ForeignPixels {
 
 impl Drop for ForeignPixels {
     fn drop(&mut self) {
+        #[cfg(target_arch = "x86_64")]
         if self.pinned {
             crate::microvm::devices::guest_mem::unpin_frames(&self.pages);
         }

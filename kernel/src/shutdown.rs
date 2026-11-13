@@ -66,7 +66,10 @@ pub fn tick() {
     if apps > 0 {
         return;
     }
+    #[cfg(target_arch = "x86_64")]
     let guest = crate::microvm::vm_busy();
+    #[cfg(not(target_arch = "x86_64"))]
+    let guest = false;
     if guest && crate::time::ticks().saturating_sub(since) < GUEST_GRACE_TICKS {
         return;
     }

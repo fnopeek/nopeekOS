@@ -50,9 +50,7 @@ pub use storage::ext;
 pub use storage::fat32;
 pub use storage::npkfs;
 
-#[cfg(target_arch = "x86_64")]
 mod gui;
-#[cfg(target_arch = "x86_64")]
 pub use gui::theme;
 
 // ── Standalone modules ────────────────────────────────────────
@@ -80,7 +78,6 @@ mod intent;
 mod config;
 #[cfg(target_arch = "x86_64")]
 mod settings;
-#[cfg(target_arch = "x86_64")]
 mod shutdown;
 #[cfg(target_arch = "x86_64")]
 mod vga;
@@ -93,9 +90,7 @@ mod wasi;
 #[cfg(target_arch = "x86_64")]
 mod shell;
 mod setup;
-#[cfg(target_arch = "x86_64")]
 mod gpu;
-#[cfg(target_arch = "x86_64")]
 mod shade;
 mod smp;
 #[cfg(target_arch = "x86_64")]

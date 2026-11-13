@@ -229,7 +229,7 @@ fn idle_halt() {
     // after `lock`, Core 0 has no tick any more — a bare `hlt`
     // would sleep until the next key and freeze the screen meanwhile.
     let d = crate::time::counter() + crate::time::counter_hz() / 100;
-    crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
+    crate::smp::per_core::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
 }
 
 /// Run the graphical login screen. Returns once the disk is unlocked;
@@ -322,7 +322,7 @@ pub fn run() {
         crate::drivers::mmc_sd::poll();
 
         // Poll keyboard (non-blocking)
-        if let Some(key) = crate::keyboard::read_key() {
+        if let Some(key) = crate::input::read_key() {
             match key {
                 b'\r' | b'\n' => {
                     if pos == 0 { continue; }

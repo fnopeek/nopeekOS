@@ -1179,6 +1179,7 @@ impl Compositor {
                     // to power off (best-effort — it may already have
                     // exited, which is what closed this window).
                     crate::shade::surface::remove_surface(id.0);
+                    #[cfg(target_arch = "x86_64")]
                     crate::microvm::vm_close_for_window(id.0);
                 }
             }
@@ -1749,6 +1750,7 @@ impl Compositor {
         let frame = self.build_scene();
         scene::expand_damage(&frame, &mut damage, Rect::new(0, 0, info.width, info.height));
         crate::shade::gpu_scene::compose(&frame, &*self, target, info, &damage);
+        #[cfg(target_arch = "x86_64")]
         crate::shade::capture::note_damage();
         damage
     }
@@ -2140,7 +2142,7 @@ impl Compositor {
             let under = self.window_at(mx, my).filter(|wid| self.drag.is_none() && self.windows.iter()
                 .any(|w| w.id == *wid && w.kind == crate::shade::window::WindowKind::Widget));
             crate::shade::widgets::drag::release(
-                under.map(|w| w.0), mx, my, crate::keyboard::is_ctrl_held());
+                under.map(|w| w.0), mx, my, crate::input::is_ctrl_held());
         }
         if self.drag.is_none()
             && (self.mouse.left_clicked() || self.mouse.right_clicked())
@@ -2150,7 +2152,7 @@ impl Compositor {
         }
         let mx = self.mouse.x;
         let my = self.mouse.y;
-        let mod_held = crate::keyboard::is_super_held();
+        let mod_held = crate::input::is_super_held();
 
         if self.drag.is_none() && (self.mouse.left_clicked() || self.mouse.right_clicked())
             && self.popup_dismiss_at(mx, my)
@@ -2321,8 +2323,8 @@ impl Compositor {
                         }
                     }
                     if let Some(action) = crate::shade::widgets::hit_test(wid.0, mx, my) {
-                        let shift = crate::keyboard::is_shift_held();
-                        let ctrl = crate::keyboard::is_ctrl_held();
+                        let shift = crate::input::is_shift_held();
+                        let ctrl = crate::input::is_ctrl_held();
                         if shift || ctrl {
                             crate::shade::widgets::push_event(wid.0, Event::Mods { shift, ctrl });
                         }
