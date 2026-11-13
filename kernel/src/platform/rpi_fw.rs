@@ -20,6 +20,10 @@ const TIMEOUT_MS: u64 = 3000;
 /// The polling step when the caller is not a fiber (boot, before the
 /// scheduler), as the mailbox framework's `txpoll_period`.
 const POLL_US: u64 = 5000;
+/// The firmware reads the low 30 bits of a buffer address as the memory
+/// address and the top two as a cache alias (U-Boot `phys_to_bus` /
+/// `bus_to_phys`, Circle `BUS_ADDRESS`): a buffer must lie in the first GiB.
+const VC_ALIAS_SPAN: u64 = 1 << 30;
 /// One page holds every request of this file (`PAGE_ALIGN(size)`).
 const BUF_WORDS: usize = 1024;
 
@@ -33,8 +37,8 @@ impl Hw for Mbox {
 
 struct Firmware {
     mbox: Mbox,
-    /// The property buffer: uncached, below 4 GiB, its bus address equal
-    /// to the physical one (no `dma-ranges` on `/soc`).
+    /// The property buffer: uncached, in the first GiB, its bus address
+    /// equal to the physical one (no `dma-ranges` on `/soc`).
     buf: DmaRegion,
     irq: crate::irq::Irq,
 }
@@ -61,8 +65,8 @@ pub fn init(fdt: &Fdt) -> bool {
         kprintln!("[npk] firmware: mailbox interrupt INTID {} refused", line + 32);
         return false;
     };
-    let Some(buf) = DmaRegion::alloc_zeroed_aligned_below(1, 1, 1 << 32) else {
-        kprintln!("[npk] firmware: no DMA memory below 4 GiB");
+    let Some(buf) = DmaRegion::alloc_zeroed_aligned_below(1, 1, VC_ALIAS_SPAN) else {
+        kprintln!("[npk] firmware: no DMA memory in the first GiB");
         crate::irq::release(irq);
         return false;
     };
