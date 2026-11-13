@@ -21,6 +21,9 @@ regs.list, one item per line:
     NAME(x) [n] ~       the same per generation: [[..; n]; 2]
     RUST = expr         a C expression, the same on both generations
     RUST[n] = expr      expr for i = 0 .. n - 1
+    HDMI NAME           the HDMI register NAME (`enum vc4_hdmi_field`) of
+                        each port: its window and offset in
+                        vc6_hdmi_hdmi0_fields / vc6_hdmi_hdmi1_fields
 
     python3 gen_regs.py           # rewrite core/src/regs.rs
     python3 gen_regs.py --check   # fail if it is not what it would write
@@ -51,6 +54,10 @@ def parse():
             continue
         if line.startswith("@"):
             src = line[1:].strip() or None
+            continue
+        m = re.fullmatch(r"HDMI\s+(\w+)", line.strip())
+        if m:
+            items.append(("hdmi", m.group(1), src))
             continue
         per_gen = line.rstrip().endswith("~")
         line = line.rstrip().rstrip("~").rstrip()
@@ -91,6 +98,12 @@ def evaluate(items):
     for src, its in by_src.items():
         body = []
         for it in its:
+            if it[0] == "hdmi":
+                for port in (0, 1):
+                    t = f"vc6_hdmi_hdmi{port}_fields[{it[1]}]"
+                    body.append(func(f"h{port}_{it[1]}_reg", GENS[1], f"{t}.reg"))
+                    body.append(func(f"h{port}_{it[1]}_off", GENS[1], f"{t}.offset"))
+                continue
             for gi, gen in enumerate(GENS):
                 if it[0] == "expr":
                     body.append(func(f"v{gi}_{it[1]}", gen, it[2]))
@@ -116,13 +129,33 @@ def main():
         "",
         "#![allow(dead_code)]",
         "",
+        "use crate::hw::HdmiReg;",
+        "",
+        "/// An HDMI register of ports 0 and 1: window and offset.",
+        "pub type HdmiField = [(HdmiReg, u32); 2];",
+        "",
     ]
+    # enum vc4_hdmi_regs, by the window each kind lives in
+    # (__vc4_hdmi_get_field_base; VC5_RAM is the `packet` window).
+    names = {"VC4_HDMI": "Hdmi", "VC4_HD": "Hd", "VC5_CEC": "Cec", "VC5_CSC": "Csc",
+             "VC5_DVP": "Dvp", "VC5_PHY": "Phy", "VC5_RAM": "Packet", "VC5_RM": "Rm"}
+    kv = g.ints(g.compile_asm("\n".join(f"unsigned k_{k}(void) {{ return {k}; }}" for k in names) + "\n", HEADERS))
+    kinds = {kv[f"k_{k}"]: r for k, r in names.items()}
     for it in items:
         if it[0] == "comment":
             o.append("")
             o.append(f"// {it[1]}")
             continue
         name = it[1]
+        if it[0] == "hdmi":
+            ports = []
+            for port in (0, 1):
+                kind = v[f"h{port}_{name}_reg"]
+                if kind not in kinds:
+                    sys.exit(f"{name}: HDMI{port} has no such register")
+                ports.append(f"(HdmiReg::{kinds[kind]}, {v[f'h{port}_{name}_off']:#x})")
+            o.append(f"pub const {name}: HdmiField = [{', '.join(ports)}];")
+            continue
         if it[0] == "expr":
             a, b = v[f"v0_{name}"], v[f"v1_{name}"]
             if it[3]:

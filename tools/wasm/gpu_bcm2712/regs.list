@@ -50,3 +50,5 @@ CSC_COEFFS[90] = ((const u32 *)csc_coeffs)[i]
 VC6_D0_CSC_COEFFS[36] = ((const u32 *)vc6_d0_csc_coeffs)[i]
 MITCHELL_NETRAVALI_1_3_1_3_KERNEL[11] = mitchell_netravali_1_3_1_3_kernel[i]
 NEAREST_NEIGHBOUR_KERNEL[11] = nearest_neighbour_kernel[i]
+# HDMI registers (vc4_hdmi_regs.h)
+HDMI HDMI_VID_CTL

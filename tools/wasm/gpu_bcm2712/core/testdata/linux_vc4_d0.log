@@ -471,7 +471,7 @@ W32 hvs+0x00154 <- 0x4b000f10  ; SCALER6D_DISP1_COB
 W32 hvs+0x00114 <- 0x87004b10  ; SCALER6D_DISP0_COB
 } vc4_hvs_cob_init
 } vc4_hvs_bind
-# info axi:gpu: bound 107c580000.hvs (ops 0x5f39e0)
+# info axi:gpu: bound 107c580000.hvs (ops 0x5f09e0)
 { vc4_hdmi_bind
 { vc5_hdmi_init_resources
 # map 107c701400.hdmi [mem 0x107c701400-0x107c7016ff flags 0x200]
@@ -525,12 +525,6 @@ W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
 R32 hdmi0.dvp+0x0bc = 0x00000001  ; HDMI_CLOCK_STOP
 W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
 } vc5_hdmi_reset
-R32 hdmi0.cec+0x010 = 0x00000000  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f000  ; HDMI_CEC_CNTRL_1
-{ vc4_hdmi_cec_update_clk_div
-R32 hdmi0.cec+0x010 = 0x0000f000  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-} vc4_hdmi_cec_update_clk_div
 W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
 } vc4_hdmi_runtime_resume
 R32 hd+0x044 = 0x80010000  ; HDMI_VID_CTL
@@ -549,14 +543,6 @@ W32 aon_intr+0x14 <- 0x00000080  ; CPU_MASK_CLEAR
 W32 aon_intr+0x14 <- 0x00000100  ; CPU_MASK_CLEAR
 } vc4_hdmi_hotplug_init
 { vc4_hdmi_cec_register
-# cec: adapter vc4-hdmi-0 allocated (CEC core not compiled)
-{ vc4_hdmi_cec_init
-# kthread irq/26-vc4 hdmi cec rx created (not scheduled in run g)
-W32 aon_intr+0x14 <- 0x00000004  ; CPU_MASK_CLEAR
-# kthread irq/27-vc4 hdmi cec tx created (not scheduled in run g)
-W32 aon_intr+0x14 <- 0x00000002  ; CPU_MASK_CLEAR
-} vc4_hdmi_cec_init
-# cec: adapter vc4-hdmi-0 registered, not configured
 } vc4_hdmi_cec_register
 { vc4_hdmi_audio_init
 # asoc: 107c701400.hdmi dmaengine PCM registered (sound core not compiled)
@@ -591,7 +577,7 @@ FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
 } raspberrypi_fw_get_rate
 } vc4_hdmi_runtime_suspend
 } vc4_hdmi_bind
-# info axi:gpu: bound 107c701400.hdmi (ops 0x5f6340)
+# info axi:gpu: bound 107c701400.hdmi (ops 0x5f3340)
 { vc4_hdmi_bind
 { vc5_hdmi_init_resources
 # map 107c706400.hdmi [mem 0x107c706400-0x107c7066ff flags 0x200]
@@ -640,12 +626,6 @@ W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
 R32 hdmi1.dvp+0x0bc = 0x00000000  ; HDMI_CLOCK_STOP
 W32 hdmi1.dvp+0x0bc <- 0x00000002  ; HDMI_CLOCK_STOP
 } vc5_hdmi_reset
-R32 hdmi1.cec+0x010 = 0x00000000  ; HDMI_CEC_CNTRL_1
-W32 hdmi1.cec+0x010 <- 0x0000f000  ; HDMI_CEC_CNTRL_1
-{ vc4_hdmi_cec_update_clk_div
-R32 hdmi1.cec+0x010 = 0x0000f000  ; HDMI_CEC_CNTRL_1
-W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-} vc4_hdmi_cec_update_clk_div
 W32 hdmi1+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
 } vc4_hdmi_runtime_resume
 R32 hd+0x048 = 0x00000000
@@ -658,20 +638,12 @@ R32 hd+0x048 = 0x00000000
 } vc4_hdmi_connector_reset
 } vc4_hdmi_connector_init
 { vc4_hdmi_hotplug_init
-# kthread irq/28-vc4 hdmi hpd connected created (not scheduled in run g)
+# kthread irq/26-vc4 hdmi hpd connected created (not scheduled in run g)
 W32 aon_intr+0x14 <- 0x00004000  ; CPU_MASK_CLEAR
-# kthread irq/29-vc4 hdmi hpd disconnected created (not scheduled in run g)
+# kthread irq/27-vc4 hdmi hpd disconnected created (not scheduled in run g)
 W32 aon_intr+0x14 <- 0x00008000  ; CPU_MASK_CLEAR
 } vc4_hdmi_hotplug_init
 { vc4_hdmi_cec_register
-# cec: adapter vc4-hdmi-1 allocated (CEC core not compiled)
-{ vc4_hdmi_cec_init
-# kthread irq/30-vc4 hdmi cec rx created (not scheduled in run g)
-W32 aon_intr+0x14 <- 0x00001000  ; CPU_MASK_CLEAR
-# kthread irq/31-vc4 hdmi cec tx created (not scheduled in run g)
-W32 aon_intr+0x14 <- 0x00000800  ; CPU_MASK_CLEAR
-} vc4_hdmi_cec_init
-# cec: adapter vc4-hdmi-1 registered, not configured
 } vc4_hdmi_cec_register
 { vc4_hdmi_audio_init
 # asoc: 107c706400.hdmi dmaengine PCM registered (sound core not compiled)
@@ -706,7 +678,7 @@ FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
 } raspberrypi_fw_get_rate
 } vc4_hdmi_runtime_suspend
 } vc4_hdmi_bind
-# info axi:gpu: bound 107c706400.hdmi (ops 0x5f6340)
+# info axi:gpu: bound 107c706400.hdmi (ops 0x5f3340)
 { vc4_txp_bind
 { vc4_ioremap_regs
 # map 107c500000.mop [mem 0x107c500000-0x107c500027 flags 0x200]
@@ -1170,7 +1142,7 @@ MAP 0x107c500000 size 0x28
 } vc4_crtc_init
 W32 disp_intr+0x14 <- 0x00000002  ; CPU_MASK_CLEAR
 } vc4_txp_bind
-# info axi:gpu: bound 107c500000.mop (ops 0x5f9020)
+# info axi:gpu: bound 107c500000.mop (ops 0x5f5fe0)
 { vc4_txp_bind
 { vc4_ioremap_regs
 # map 107c501000.moplet [mem 0x107c501000-0x107c50101f flags 0x200]
@@ -1634,7 +1606,7 @@ MAP 0x107c501000 size 0x20
 } vc4_crtc_init
 W32 disp_intr+0x14 <- 0x00000001  ; CPU_MASK_CLEAR
 } vc4_txp_bind
-# info axi:gpu: bound 107c501000.moplet (ops 0x5f9020)
+# info axi:gpu: bound 107c501000.moplet (ops 0x5f5fe0)
 { vc4_crtc_bind
 { vc4_ioremap_regs
 # map 107c410000.pixelvalve [mem 0x107c410000-0x107c4100ff flags 0x200]
@@ -2105,7 +2077,7 @@ GIC set_type intid 133 (SPI 101) level-high
 GIC unmask intid 133 (SPI 101)
 GIC set_affinity intid 133 cpu0
 } vc4_crtc_bind
-# info axi:gpu: bound 107c410000.pixelvalve (ops 0x5f4c40)
+# info axi:gpu: bound 107c410000.pixelvalve (ops 0x5f1c40)
 { vc4_crtc_bind
 { vc4_ioremap_regs
 # map 107c411000.pixelvalve [mem 0x107c411000-0x107c4110ff flags 0x200]
@@ -2576,7 +2548,7 @@ GIC set_type intid 142 (SPI 110) level-high
 GIC unmask intid 142 (SPI 110)
 GIC set_affinity intid 142 cpu0
 } vc4_crtc_bind
-# info axi:gpu: bound 107c411000.pixelvalve (ops 0x5f4c40)
+# info axi:gpu: bound 107c411000.pixelvalve (ops 0x5f1c40)
 { vc4_plane_create_additional_planes
 { vc4_plane_init
 { vc4_format_mod_supported
@@ -26243,12 +26215,6 @@ W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
 R32 hdmi0.dvp+0x0bc = 0x00000003  ; HDMI_CLOCK_STOP
 W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
 } vc5_hdmi_reset
-R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-{ vc4_hdmi_cec_update_clk_div
-R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-} vc4_hdmi_cec_update_clk_div
 W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
 } vc4_hdmi_runtime_resume
 { vc4_crtc_disable
@@ -26708,12 +26674,6 @@ W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
 R32 hdmi1.dvp+0x0bc = 0x00000002  ; HDMI_CLOCK_STOP
 W32 hdmi1.dvp+0x0bc <- 0x00000002  ; HDMI_CLOCK_STOP
 } vc5_hdmi_reset
-R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-{ vc4_hdmi_cec_update_clk_div
-R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-} vc4_hdmi_cec_update_clk_div
 W32 hdmi1+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
 } vc4_hdmi_runtime_resume
 { vc4_crtc_disable
@@ -26972,12 +26932,6 @@ W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
 R32 hdmi0.dvp+0x0bc = 0x00000003  ; HDMI_CLOCK_STOP
 W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
 } vc5_hdmi_reset
-R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-{ vc4_hdmi_cec_update_clk_div
-R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-} vc4_hdmi_cec_update_clk_div
 W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
 } vc4_hdmi_runtime_resume
 { vc5_hdmi_hp_detect
@@ -27696,7 +27650,6 @@ R32 ddc0+0x04c = 0xd2000000  ; DATA_OUT7
 } i2c_transfer
 } drm_do_probe_ddc_edid
 } drm_edid_read_ddc
-# cec: vc4-hdmi-0 physical address 1.0.0.0
 { vc4_hdmi_reset_link
 } vc4_hdmi_reset_link
 } vc4_hdmi_handle_hotplug
@@ -27726,7 +27679,7 @@ FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
 } raspberrypi_fw_get_rate
 } vc4_hdmi_runtime_suspend
 } vc4_hdmi_connector_detect_ctx
-# delayed work (re)queued: 0x5a1494 (not run)
+# delayed work (re)queued: 0x59e6d4 (not run)
 { vc4_hdmi_connector_get_modes
 } vc4_hdmi_connector_get_modes
 { vc4_hdmi_connector_clock_valid
@@ -27824,19 +27777,12 @@ W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
 R32 hdmi1.dvp+0x0bc = 0x00000002  ; HDMI_CLOCK_STOP
 W32 hdmi1.dvp+0x0bc <- 0x00000002  ; HDMI_CLOCK_STOP
 } vc5_hdmi_reset
-R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-{ vc4_hdmi_cec_update_clk_div
-R32 hdmi1.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi1.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-} vc4_hdmi_cec_update_clk_div
 W32 hdmi1+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
 } vc4_hdmi_runtime_resume
 { vc5_hdmi_hp_detect
 R32 hdmi1+0x1c8 = 0x00000000  ; HDMI_HOTPLUG  [nothing on HDMI1]
 } vc5_hdmi_hp_detect
 { vc4_hdmi_handle_hotplug
-# cec: vc4-hdmi-1 physical address f.f.f.f
 } vc4_hdmi_handle_hotplug
 # rpm: 107c706400.hdmi runtime_suspend
 { vc4_hdmi_runtime_suspend
@@ -27864,7 +27810,7 @@ FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
 } raspberrypi_fw_get_rate
 } vc4_hdmi_runtime_suspend
 } vc4_hdmi_connector_detect_ctx
-# delayed work (re)queued: 0x5a1494 (not run)
+# delayed work (re)queued: 0x59e6d4 (not run)
 } drm_helper_probe_single_connector_modes
 } drm_client_modeset_probe
 { vc5_dumb_create
@@ -28575,12 +28521,6 @@ W32 hd+0x000 <- 0x00000000  ; HDMI_DVP_CTL
 R32 hdmi0.dvp+0x0bc = 0x00000003  ; HDMI_CLOCK_STOP
 W32 hdmi0.dvp+0x0bc <- 0x00000003  ; HDMI_CLOCK_STOP
 } vc5_hdmi_reset
-R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-{ vc4_hdmi_cec_update_clk_div
-R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-} vc4_hdmi_cec_update_clk_div
 W32 hdmi0+0x0c4 <- 0x00010000  ; HDMI_RAM_PACKET_CONFIG
 } vc4_hdmi_runtime_resume
 { raspberrypi_fw_get_rate
@@ -28603,8 +28543,6 @@ FW GET_CLOCK_RATE (0x00030002) clock m2mc: [0xd 0x0 0x0] -> [0xd 0x269fb200 0x0]
 } raspberrypi_clock_property
 } raspberrypi_fw_get_rate
 { vc4_hdmi_cec_update_clk_div
-R32 hdmi0.cec+0x010 = 0x0000f2a3  ; HDMI_CEC_CNTRL_1
-W32 hdmi0.cec+0x010 <- 0x0000f2a3  ; HDMI_CEC_CNTRL_1
 } vc4_hdmi_cec_update_clk_div
 { raspberrypi_fw_get_rate
 { raspberrypi_clock_property
