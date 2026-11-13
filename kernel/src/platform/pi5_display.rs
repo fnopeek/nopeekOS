@@ -28,7 +28,15 @@ macro_rules! out {
 pub fn intent_gpu(args: &str) {
     match args.trim() {
         "survey" => survey(),
-        _ => kprintln!("  gpu survey   the display hardware as the firmware set it up (read only), also stored in {}", SURVEY_PATH),
+        "iommu on" => iommu_on(),
+        "iommu test" => iommu_test(),
+        "iommu" => iommu_show(),
+        _ => {
+            kprintln!("  gpu survey       the display hardware as the firmware set it up (read only), also stored in {}", SURVEY_PATH);
+            kprintln!("  gpu iommu on     put the HVS behind its IOMMU, no pass-through, the firmware framebuffer granted");
+            kprintln!("  gpu iommu test   take the framebuffer from the HVS for 2 s (screen dark), then give it back");
+            kprintln!("  gpu iommu        the IOMMU's state and counters");
+        }
     }
 }
 
@@ -209,4 +217,62 @@ fn dump(m: &Mmio, len: u64, label: &str, set: &[(&str, u32)]) {
 /// `FIELD_GET`.
 fn field(v: u32, mask: u32) -> u32 {
     (v & mask) >> mask.trailing_zeros()
+}
+
+/// The HVS as a device: its first `reg` window.
+fn hvs_dev() -> Option<crate::drivers::DevId> {
+    let fdt = super::dt::boot()?;
+    let n = fdt.find_compatible(b"brcm,bcm2712-hvs").filter(|n| fdt.is_enabled(n))?;
+    Some(crate::drivers::DevId::Dt(fdt.reg0(&n)?.0))
+}
+
+fn iommu_on() {
+    let Some(dev) = hvs_dev() else {
+        kprintln!("  no HVS in the device tree");
+        return;
+    };
+    match crate::drivers::iommu::protect(dev) {
+        Ok(()) => iommu_show(),
+        Err(e) => kprintln!("  not protected: {}", e),
+    }
+}
+
+fn iommu_show() {
+    let Some(s) = crate::drivers::bcm2712_iommu::stats() else {
+        kprintln!("  IOMMU: off (`gpu iommu on`)");
+        return;
+    };
+    let (dev, pages) = crate::drivers::bcm2712_iommu::granted_pages().unwrap_or((0, 0));
+    kprintln!("  IOMMU: HVS @{:x}, {} pages granted, CTRL {:#010x}{}{}, VIO_ADDR {:#010x}",
+        dev, pages, s.ctrl,
+        if s.ctrl & pi5_core::iommu::MMMU_CTRL_PT_INVALID != 0 { " PT_INVALID" } else { "" },
+        if s.ctrl & pi5_core::iommu::MMMU_CTRL_WRITE_VIOLATION != 0 { " WRITE_VIOLATION" } else { "" },
+        s.vio_addr);
+    kprintln!("  IOMMU: TLB hits {}, misses {}, stalls {}", s.hit, s.miss, s.stall);
+}
+
+fn iommu_test() {
+    let Some(dev) = hvs_dev() else { return };
+    if !crate::drivers::iommu::protected(dev) {
+        kprintln!("  `gpu iommu on` first");
+        return;
+    }
+    let Some(fdt) = super::dt::boot() else { return };
+    let Some(Ok(fb)) = super::simplefb::find(&fdt) else {
+        kprintln!("  no firmware framebuffer");
+        return;
+    };
+    let pages = fb.size.div_ceil(4096) as usize;
+    kprintln!("  framebuffer {:#x}+{:#x} taken from the HVS for 2 s", fb.addr, fb.size);
+    crate::drivers::iommu::revoke(dev, fb.addr, pages);
+    crate::time::delay_us(2_000_000);
+    let during = crate::drivers::bcm2712_iommu::stats();
+    crate::drivers::iommu::grant(dev, fb.addr, pages);
+    kprintln!("  given back");
+    if let Some(s) = during {
+        kprintln!("  while taken: CTRL {:#010x}{}, VIO_ADDR {:#010x}", s.ctrl,
+            if s.ctrl & pi5_core::iommu::MMMU_CTRL_PT_INVALID != 0 { " PT_INVALID (the HVS hit an unmapped page)" } else { "" },
+            s.vio_addr);
+    }
+    iommu_show();
 }

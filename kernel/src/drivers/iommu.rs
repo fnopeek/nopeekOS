@@ -1,7 +1,8 @@
 //! The IOMMU behind one confined device, whichever the firmware describes:
 //! VT-d (DMAR, `vtd`) or AMD-Vi (IVRS, `amd_vi`) for a PCI function. Both
 //! keep the same contract; every call is a no-op for a device that is not
-//! protected. A device-tree device has no IOMMU driver yet, so none is.
+//! protected. A device-tree device sits behind its bcm2712-iommu
+//! (`bcm2712_iommu`).
 
 use alloc::vec::Vec;
 use crate::drivers::DevId;
@@ -34,7 +35,7 @@ pub fn protect(dev: DevId) -> Result<(), &'static str> {
             }
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(_) => Err("no IOMMU driver for device-tree devices"),
+        DevId::Dt(base) => crate::drivers::bcm2712_iommu::protect(base),
     }
 }
 
@@ -43,7 +44,7 @@ pub fn protected(dev: DevId) -> bool {
         #[cfg(target_arch = "x86_64")]
         DevId::Pci(dev) => vtd::protected(dev) || amd_vi::protected(dev),
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(_) => false,
+        DevId::Dt(base) => crate::drivers::bcm2712_iommu::protected(base),
     }
 }
 
@@ -55,7 +56,7 @@ pub fn grant(dev: DevId, phys: u64, pages: usize) {
             amd_vi::grant(dev, phys, pages);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(_) => { let _ = (phys, pages); }
+        DevId::Dt(base) => crate::drivers::bcm2712_iommu::grant(base, phys, pages),
     }
 }
 
@@ -67,7 +68,7 @@ pub fn grant_list(dev: DevId, list: &[u64]) {
             amd_vi::grant_list(dev, list);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(_) => { let _ = list; }
+        DevId::Dt(base) => crate::drivers::bcm2712_iommu::grant_list(base, list),
     }
 }
 
@@ -81,7 +82,7 @@ pub fn revoke(dev: DevId, phys: u64, pages: usize) {
             amd_vi::revoke(dev, phys, pages);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(_) => { let _ = (phys, pages); }
+        DevId::Dt(base) => crate::drivers::bcm2712_iommu::revoke(base, phys, pages),
     }
 }
 
@@ -93,7 +94,7 @@ pub fn revoke_list(dev: DevId, list: &[u64]) {
             amd_vi::revoke_list(dev, list);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(_) => { let _ = list; }
+        DevId::Dt(base) => crate::drivers::bcm2712_iommu::revoke_list(base, list),
     }
 }
 

@@ -58,6 +58,8 @@ pub mod amd_vi;
 #[allow(dead_code)]
 pub mod amd_vi_regs;
 pub mod iommu;
+#[cfg(target_arch = "aarch64")]
+pub mod bcm2712_iommu;
 #[cfg(target_arch = "x86_64")]
 pub mod smbus;
 #[cfg(target_arch = "x86_64")]
