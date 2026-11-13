@@ -10,29 +10,56 @@ use super::dt::{Fdt, Node};
 use crate::hw::Mmio;
 use crate::kprintln;
 
+/// Where `gpu survey` keeps its last run, beside the boot log.
+const SURVEY_PATH: &str = "sys/log/gpu-survey";
+
+/// The survey's lines, printed and stored once it is done.
+static OUT: spin::Mutex<alloc::string::String> = spin::Mutex::new(alloc::string::String::new());
+
+macro_rules! out {
+    ($($arg:tt)*) => ({
+        use core::fmt::Write;
+        let mut o = OUT.lock();
+        let _ = writeln!(o, $($arg)*);
+    });
+}
+
 /// `gpu survey`: everything below; `gpu` alone says what there is.
 pub fn intent_gpu(args: &str) {
     match args.trim() {
         "survey" => survey(),
-        _ => kprintln!("  gpu survey   the display hardware as the firmware set it up (read only)"),
+        _ => kprintln!("  gpu survey   the display hardware as the firmware set it up (read only), also stored in {}", SURVEY_PATH),
     }
 }
 
 fn survey() {
+    OUT.lock().clear();
+    survey_all();
+    let text = core::mem::take(&mut *OUT.lock());
+    for l in text.lines() {
+        kprintln!("{}", l);
+    }
+    match crate::npkfs::upsert(SURVEY_PATH, text.as_bytes(), crate::capability::CAP_NULL) {
+        Ok(_) => kprintln!("  stored in {} ({} bytes)", SURVEY_PATH, text.len()),
+        Err(e) => kprintln!("  not stored in {}: {:?}", SURVEY_PATH, e),
+    }
+}
+
+fn survey_all() {
     let Some(fdt) = super::dt::boot() else {
-        kprintln!("  no device tree");
+        out!("  no device tree");
         return;
     };
     let hvs = fdt.find_compatible(b"brcm,bcm2712-hvs");
     match hvs {
         Some(n) if fdt.is_enabled(&n) => survey_hvs(&fdt, &n),
-        Some(_) => kprintln!("  HVS: disabled in the device tree (no dtoverlay=vc4-kms-v3d?)"),
-        None => kprintln!("  HVS: none in the device tree"),
+        Some(_) => out!("  HVS: disabled in the device tree (no dtoverlay=vc4-kms-v3d?)"),
+        None => out!("  HVS: none in the device tree"),
     }
     for (i, compat) in [&b"brcm,bcm2712-pixelvalve0"[..], b"brcm,bcm2712-pixelvalve1"].iter().enumerate() {
         match fdt.find_compatible(compat).filter(|n| fdt.is_enabled(n)) {
             Some(n) => dump_window(&fdt, &n, 0, &alloc::format!("PV{}", i), r::PV),
-            None => kprintln!("  PV{}: none enabled", i),
+            None => out!("  PV{}: none enabled", i),
         }
     }
     for (i, compat, fields) in [
@@ -41,7 +68,7 @@ fn survey() {
     ] {
         match fdt.find_compatible(compat).filter(|n| fdt.is_enabled(n)) {
             Some(n) => survey_hdmi(&fdt, &n, i, fields),
-            None => kprintln!("  HDMI{}: none enabled", i),
+            None => out!("  HDMI{}: none enabled", i),
         }
     }
     if let Some(n) = hvs {
@@ -56,13 +83,13 @@ fn survey_hvs(fdt: &Fdt, node: &Node) {
     let Some((base, len)) = fdt.reg0(node) else { return };
     // SAFETY: the HVS node's register window, read only.
     let Ok(m) = (unsafe { Mmio::map(base, len) }) else {
-        kprintln!("  HVS: window {:#x}+{:#x} not mappable", base, len);
+        out!("  HVS: window {:#x}+{:#x} not mappable", base, len);
         return;
     };
     let version = r::SCALER6_VERSION_MASK & m.r32(r::SCALER6_VERSION as u64);
     let d = version == r::SCALER6_VERSION_D0;
     let cxm = m.r32(r::SCALER6_CXM_SIZE as u64);
-    kprintln!("  HVS: {:#x}+{:#x}, version {:#x} ({}), CXM {} words",
+    out!("  HVS: {:#x}+{:#x}, version {:#x} ({}), CXM {} words",
         base, len, version, if d { "D0" } else { "C" }, cxm);
     dump(&m, len, "HVS", if d { r::HVS6_D } else { r::HVS6_C });
 
@@ -81,15 +108,15 @@ fn survey_hvs(fdt: &Fdt, node: &Node) {
     for i in 0..r::SCALER_CHANNELS_COUNT as usize {
         let mode = field(m.r32(status[i] as u64), r::SCALER6_DISPX_STATUS_MODE_MASK);
         if mode == r::SCALER6_DISPX_STATUS_MODE_DISABLED || mode == r::SCALER6_DISPX_STATUS_MODE_EOF {
-            kprintln!("  HVS chan {} disabled", i);
+            out!("  HVS chan {} disabled", i);
             continue;
         }
-        kprintln!("  HVS chan {}:", i);
+        out!("  HVS chan {}:", i);
         let active = field(m.r32(dl[i] as u64), r::SCALER6_DISPX_DL_LACT_MASK);
         let mut next_entry_start = 0;
         for j in active..words {
             let w = m.r32(r::SCALER5_DLIST_START as u64 + 4 * j as u64);
-            kprintln!("  dlist: {:02}: {:#010x}", j, w);
+            out!("  dlist: {:02}: {:#010x}", j, w);
             if next_entry_start == 0 || next_entry_start == j {
                 if w & r::SCALER_CTL0_END != 0 { break; }
                 next_entry_start = j + field(w, r::SCALER_CTL0_SIZE_MASK);
@@ -103,7 +130,7 @@ fn survey_hvs(fdt: &Fdt, node: &Node) {
 fn survey_hdmi(fdt: &Fdt, node: &Node, port: usize, fields: &[(&str, HdmiKind, u32)]) {
     for kind in HdmiKind::ALL {
         let Some(idx) = fdt.prop_str_index(node, b"reg-names", kind.reg_name().as_bytes()) else {
-            kprintln!("  HDMI{} {}: no window", port, kind.reg_name());
+            out!("  HDMI{} {}: no window", port, kind.reg_name());
             continue;
         };
         let set: alloc::vec::Vec<(&str, u32)> =
@@ -116,12 +143,12 @@ fn survey_hdmi(fdt: &Fdt, node: &Node, port: usize, fields: &[(&str, HdmiKind, u
 fn survey_iommu(fdt: &Fdt, hvs: &Node) {
     match fdt.prop_cell(hvs, b"iommus", 0).and_then(|ph| fdt.find_phandle(ph)) {
         Some(n) => dump_window(fdt, &n, 0, "IOMMU (HVS)", r::IOMMU),
-        None => kprintln!("  IOMMU: the HVS names none"),
+        None => out!("  IOMMU: the HVS names none"),
     }
     match fdt.find_compatible(b"brcm,bcm2712-iommuc").filter(|n| fdt.is_enabled(n)) {
         // `bcm2712_iommu_cache_flush`'s control word at offset 0.
         Some(n) => dump_window(fdt, &n, 0, "IOMMU cache", &[("MMUC_CONTROL", 0)]),
-        None => kprintln!("  IOMMU cache: none enabled"),
+        None => out!("  IOMMU cache: none enabled"),
     }
 }
 
@@ -134,12 +161,16 @@ fn survey_clocks() {
         ("pixel_bvb", fwid::RPI_FIRMWARE_PIXEL_BVB_CLK_ID),
         ("v3d", fwid::RPI_FIRMWARE_V3D_CLK_ID),
     ] {
+        // Asked before printing: `kprintln!` holds the console lock while
+        // it formats, and a firmware request waits on an interrupt.
+        let state = super::rpi_fw::clock_state(id);
+        let (rate, measured) = (super::rpi_fw::clock_rate(id), super::rpi_fw::clock_measured(id));
+        let (min, max) = (super::rpi_fw::clock_min_rate(id), super::rpi_fw::clock_max_rate(id));
         let mhz = |v: Option<u32>| v.map_or(alloc::string::String::from("-"), |v| alloc::format!("{}", v / 1_000_000));
-        kprintln!("  clock {} ({}): state {}, rate {} MHz, measured {}, min {}, max {}",
+        out!("  clock {} ({}): state {}, rate {} MHz, measured {}, min {}, max {}",
             id, name,
-            super::rpi_fw::clock_state(id).map_or(alloc::string::String::from("-"), |s| alloc::format!("{:#x}", s)),
-            mhz(super::rpi_fw::clock_rate(id)), mhz(super::rpi_fw::clock_measured(id)),
-            mhz(super::rpi_fw::clock_min_rate(id)), mhz(super::rpi_fw::clock_max_rate(id)));
+            state.map_or(alloc::string::String::from("-"), |s| alloc::format!("{:#x}", s)),
+            mhz(rate), mhz(measured), mhz(min), mhz(max));
     }
 }
 
@@ -152,15 +183,15 @@ fn dump_window(fdt: &Fdt, node: &Node, idx: usize, label: &str, set: &[(&str, u3
         i += 1;
     });
     let Some((base, len)) = win else {
-        kprintln!("  {}: no reg entry {}", label, idx);
+        out!("  {}: no reg entry {}", label, idx);
         return;
     };
     // SAFETY: a `reg` window of a display node, read only.
     let Ok(m) = (unsafe { Mmio::map(base, len) }) else {
-        kprintln!("  {}: window {:#x}+{:#x} not mappable", label, base, len);
+        out!("  {}: window {:#x}+{:#x} not mappable", label, base, len);
         return;
     };
-    kprintln!("  {}: {:#x}+{:#x}", label, base, len);
+    out!("  {}: {:#x}+{:#x}", label, base, len);
     dump(&m, len, label, set);
 }
 
@@ -168,10 +199,10 @@ fn dump_window(fdt: &Fdt, node: &Node, idx: usize, label: &str, set: &[(&str, u3
 fn dump(m: &Mmio, len: u64, label: &str, set: &[(&str, u32)]) {
     for &(name, off) in set {
         if off as u64 + 4 > len {
-            kprintln!("  {} {:>32} = outside the window ({:#x})", label, name, off);
+            out!("  {} {:>32} = outside the window ({:#x})", label, name, off);
             continue;
         }
-        kprintln!("  {} {:>32} = {:#010x}", label, name, m.r32(off as u64));
+        out!("  {} {:>32} = {:#010x}", label, name, m.r32(off as u64));
     }
 }
 
