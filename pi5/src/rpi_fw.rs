@@ -38,6 +38,12 @@ pub const RPI_FIRMWARE_GET_MIN_CLOCK_RATE: u32 = 0x0003_0007;
 pub const RPI_FIRMWARE_GET_THROTTLED: u32 = 0x0003_0046;
 pub const RPI_FIRMWARE_GET_CLOCK_MEASURED: u32 = 0x0003_0047;
 pub const RPI_FIRMWARE_NOTIFY_REBOOT: u32 = 0x0003_0048;
+pub const RPI_FIRMWARE_NOTIFY_DISPLAY_DONE: u32 = 0x0003_0066;
+pub const RPI_FIRMWARE_SET_CLOCK_STATE: u32 = 0x0003_8001;
+pub const RPI_FIRMWARE_SET_CLOCK_RATE: u32 = 0x0003_8002;
+
+/// `clk-raspberrypi.c`: the clock-state word's on bit.
+pub const RPI_FIRMWARE_STATE_ENABLE_BIT: u32 = 1 << 0;
 
 /// `enum rpi_firmware_clk_id`, the clocks the display uses.
 pub const RPI_FIRMWARE_CORE_CLK_ID: u32 = 4;

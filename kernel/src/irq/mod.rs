@@ -52,7 +52,7 @@ pub use hw::route_to_current;
 #[cfg(target_arch = "x86_64")]
 pub use hw::{isr, register, register_gsi};
 #[cfg(target_arch = "aarch64")]
-pub use hw::{register_chained, register_spi, Chained};
+pub use hw::{intid, register_chained, register_spi, Chained};
 
 /// An interrupt number: what a register function hands out and a driver
 /// passes back, 0 for none. It stays the same while the interrupt moves

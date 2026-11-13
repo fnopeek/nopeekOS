@@ -207,6 +207,12 @@ impl Domain {
     }
 }
 
+/// The end of `dev`'s IOVA aperture; IOVA = physical, so the device
+/// reaches no page above it.
+pub fn aperture_end(dev: u64) -> Option<u64> {
+    STATE.lock().as_ref().filter(|d| d.dev == dev).map(|d| d.mmu.aperture_end)
+}
+
 pub fn protected(dev: u64) -> bool {
     STATE.lock().as_ref().is_some_and(|d| d.dev == dev)
 }

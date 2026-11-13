@@ -31,12 +31,36 @@ pub fn intent_gpu(args: &str) {
         "iommu on" => iommu_on(),
         "iommu test" => iommu_test(),
         "iommu" => iommu_show(),
+        "set" => set_show(),
         _ => {
             kprintln!("  gpu survey       the display hardware as the firmware set it up (read only), also stored in {}", SURVEY_PATH);
             kprintln!("  gpu iommu on     put the HVS behind its IOMMU, no pass-through, the firmware framebuffer granted");
             kprintln!("  gpu iommu test   take the framebuffer from the HVS for 2 s (screen dark), then give it back");
             kprintln!("  gpu iommu        the IOMMU's state and counters");
+            kprintln!("  gpu set          the display set a driver module binds: windows and interrupts");
         }
+    }
+}
+
+/// `gpu set`: what `npk_dt_bind` hands a module, part by part.
+fn set_show() {
+    const NAMES: [&str; 11] = ["hvs", "pixelvalve0", "pixelvalve1", "disp_intr", "dvp",
+        "hdmi0", "hdmi1", "ddc0", "ddc1", "bsc_irq", "aon_intr"];
+    let Some(s) = super::pi5_display_set::get() else {
+        kprintln!("  no BCM2712 display set in the device tree");
+        return;
+    };
+    for (i, name) in NAMES.iter().enumerate() {
+        let mut line = alloc::format!("  {:2} {:12}", i, name);
+        let mut r = 0;
+        while let Some((a, l)) = s.window(i, r) {
+            line.push_str(&alloc::format!(" {:#x}+{:#x}", a, l));
+            r += 1;
+        }
+        if let Some(intid) = s.spi(i, 0) {
+            line.push_str(&alloc::format!("  INTID {}", intid));
+        }
+        kprintln!("{}", line);
     }
 }
 

@@ -90,8 +90,7 @@ pub struct WasmResult {
     pub output: String,
 }
 
-#[cfg(target_arch = "x86_64")]
-/// Hardware driver state for WASM modules that access PCI devices.
+/// Hardware driver state for WASM modules that access devices.
 pub(crate) struct HwDriverState {
     /// The device this driver is bound to. None for a driver using
     /// `npk_mmio_map_phys` on hardware that is no device of its own (the
@@ -111,27 +110,33 @@ pub(crate) struct HwDriverState {
     dma_pages: usize,
     bus_master_enabled: bool,
     registered_as_netdev: bool,
-    /// The interrupt this driver registered, 0 = none. A driver may arm
-    /// and wait on this one only: any other would let a module re-route
+    /// The interrupts this driver registered, each with its
+    /// `irq::fired_count` when `npk_wait` last reported it. A driver may arm
+    /// and wait on these only: any other would let a module re-route
     /// another driver's interrupt to its own core.
-    irq_vector: crate::irq::Irq,
-    /// `irq::fired_count` of that interrupt when `npk_wait` last reported it.
-    irq_seen: u64,
+    irqs: Vec<(crate::irq::Irq, u64)>,
     /// The device's DMA mask as a limit (`dma_set_mask`): its buffers lie
     /// below it. 4 GB until the driver names a wider one.
     dma_limit: u64,
 }
 
-#[cfg(target_arch = "x86_64")]
 impl HwDriverState {
     /// The PCI function, when the driver is bound to one.
+    #[cfg(target_arch = "x86_64")]
     pub(crate) fn pci(&self) -> Option<pci::PciAddr> {
         self.dev.and_then(crate::drivers::DevId::pci)
     }
 
-    /// A display controller: PCI class 0x03.
+    /// A display controller: PCI class 0x03, or the bound display set of
+    /// the device tree.
     pub(crate) fn is_display(&self) -> bool {
-        self.pci().is_some_and(|a| pci::read8(a, 0x0B) == 0x03)
+        match self.dev {
+            #[cfg(target_arch = "x86_64")]
+            Some(crate::drivers::DevId::Pci(a)) => pci::read8(a, 0x0B) == 0x03,
+            #[cfg(target_arch = "aarch64")]
+            Some(crate::drivers::DevId::Dt(base)) => crate::platform::pi5_display_set::is_hvs(base),
+            None => false,
+        }
     }
 
     /// DMA buffers the driver holds (`npk_dma_free` empties a slot).
@@ -140,6 +145,7 @@ impl HwDriverState {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 const MAX_MMIO_MAPS: usize = 4;
 /// Per-module DMA allocation slots. A WiFi driver needs many one-page
 /// receive buffers plus its rings. Each
@@ -182,7 +188,6 @@ pub(crate) struct HostState {
     /// Process ID in the process table
     pid: u32,
     /// Hardware driver state (only set for driver modules)
-    #[cfg(target_arch = "x86_64")]
     hw: Option<HwDriverState>,
     /// Network reach of the document this module currently shows.
     ///
@@ -670,7 +675,6 @@ fn wasm_worker_task(arg: u64) {
         terminal_idx: job.terminal_idx,
         core_id,
         pid,
-        #[cfg(target_arch = "x86_64")]
         hw: None,
         widget_window_id: job.widget_window_id,
         module_name: String::from(name_str),
@@ -791,7 +795,6 @@ fn forge_worker_task(slot: usize, mut job: WasmJob) {
         terminal_idx: job.terminal_idx,
         core_id,
         pid,
-        #[cfg(target_arch = "x86_64")]
         hw: None,
         widget_window_id: job.widget_window_id,
         module_name: String::from(name_str),
@@ -896,7 +899,6 @@ fn execute_inner(
         terminal_idx: 255,
         core_id: 0,
         pid: 0,
-        #[cfg(target_arch = "x86_64")]
         hw: None,
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
@@ -982,7 +984,6 @@ pub fn execute_wasi(
         terminal_idx,
         core_id: 0,
         pid: 0,
-        #[cfg(target_arch = "x86_64")]
         hw: None,
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
@@ -1054,7 +1055,6 @@ fn execute_inner_forge(
         terminal_idx: TERM_IDX_ACTIVE,
         core_id: 0,
         pid: 0,
-        #[cfg(target_arch = "x86_64")]
         hw: None,
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
@@ -1129,7 +1129,6 @@ pub fn execute_wasi_forge(
         terminal_idx,
         core_id: 0,
         pid: 0,
-        #[cfg(target_arch = "x86_64")]
         hw: None,
         net_reach: crate::intent::http::Reach::Public,
         widget_window_id: 0,
@@ -1252,13 +1251,11 @@ fn cleanup_instance_state(state: &mut HostState) {
     crate::audio::display_audio_release(state.pid);
     #[cfg(target_arch = "x86_64")]
     crate::ext::instance_ended(&state.cap_id);
-    #[cfg(target_arch = "x86_64")]
     if let Some(hw) = state.hw.take() {
         release_hw(hw);
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// Let go of a driver's device: quiet it, give back its interrupt vector,
 /// its DMA buffers and its network registration. On module exit, and when a
 /// driver binds another device in place of this one.
@@ -1281,6 +1278,11 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         if display && let Some(dev) = hw.dev {
             crate::gpu::gpudev::module_gone(dev);
         }
+        #[cfg(target_arch = "aarch64")]
+        if display {
+            crate::platform::pi5_display_set::release();
+        }
+        #[cfg(target_arch = "x86_64")]
         if let Some(addr) = hw.pci() {
             if !display {
                 let cmd = crate::drivers::pci::read32(addr, 0x04);
@@ -1296,7 +1298,7 @@ pub(crate) fn release_hw(hw: HwDriverState) {
                 }
             }
             if !display || confined {
-                crate::memory::deallocate_contiguous(phys, pages);
+                dma_give(phys, pages);
             }
             total_pages += pages;
         }
@@ -1309,14 +1311,33 @@ pub(crate) fn release_hw(hw: HwDriverState) {
             // so a re-launch doesn't inherit stale commands/events.
             crate::wifi::reset();
         }
-        if hw.irq_vector != 0 {
-            crate::irq::release(hw.irq_vector);
+        for &(irq, _) in &hw.irqs {
+            crate::irq::release(irq);
         }
         if (!display || confined) && (hw.dma_live() != 0 || hw.registered_as_netdev) {
             kprintln!("[npk] driver cleanup: freed {} DMA buffers ({} pages)",
                 hw.dma_live(), total_pages);
         }
     }
+}
+
+/// `pages` contiguous pages for a driver's DMA buffer, wholly below
+/// `limit`. Not zeroed. x86 devices snoop the caches; no device of the
+/// Raspberry Pi 5 does, so there the pages are mapped uncached
+/// (`arch::aarch64::dma`).
+pub(crate) fn dma_take(pages: usize, limit: u64) -> Option<u64> {
+    #[cfg(target_arch = "x86_64")]
+    return crate::memory::allocate_contiguous_below(pages, limit);
+    #[cfg(target_arch = "aarch64")]
+    return crate::arch::aarch64::dma::alloc(pages, 1, limit);
+}
+
+/// A buffer from `dma_take` goes back.
+pub(crate) fn dma_give(phys: u64, pages: usize) {
+    #[cfg(target_arch = "x86_64")]
+    crate::memory::deallocate_contiguous(phys, pages);
+    #[cfg(target_arch = "aarch64")]
+    crate::arch::aarch64::dma::free(phys, pages);
 }
 
 pub(crate) use crate::npkfs::paths::PRIVATE_ROOT;

@@ -13,12 +13,13 @@ use super::{
     MAX_APP_BUFS, app_is_focused, bench_sys_info, fsck_sys_info, append_entry, is_trust_critical_path,
     spawn_on_worker, picker_module_name, PICKER_W, PICKER_H,
 };
-// What the host functions not yet built on AArch64 use.
-#[cfg(target_arch = "x86_64")]
 use super::{
     HwDriverState, MAX_DMA_ALLOCS, MAX_DMA_ALLOCS_GPU, MAX_DMA_PAGES, MAX_DMA_PAGES_GPU,
-    MAX_DMA_PAGES_PER_CALL, MAX_MMIO_MAPS, TERM_IDX_ACTIVE,
+    MAX_DMA_PAGES_PER_CALL,
 };
+// What the host functions not yet built on AArch64 use.
+#[cfg(target_arch = "x86_64")]
+use super::{MAX_MMIO_MAPS, TERM_IDX_ACTIVE};
 use crate::{kprint, kprintln, capability};
 #[cfg(target_arch = "x86_64")]
 use crate::drivers::pci;
@@ -904,6 +905,18 @@ const WAIT_STATE: i32 = 32;
 /// (`npk_display_audio_serve`).
 const WAIT_GPU_CMD: i32 = 64;
 
+/// Display audio waits for this module: it drives the display controller
+/// whose HDMI/DP audio the kernel has queued work for.
+fn display_audio_pending(ctx: &HostState) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    return owned_pci_class(ctx) == Some(0x03) && crate::audio::display_audio_pending();
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = ctx;
+        false
+    }
+}
+
 /// Which of `mask`'s conditions hold right now. Bits the caller may not
 /// wait on (a driver bit without a driver, an event bit without NETCTL)
 /// never fire.
@@ -912,13 +925,15 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
     if mask & WAIT_INPUT != 0 && input_ready(ctx) {
         r |= WAIT_INPUT;
     }
-    #[cfg(target_arch = "x86_64")]
+    let display_audio = mask & WAIT_GPU_CMD != 0 && display_audio_pending(ctx);
     if let Some(hw) = ctx.hw.as_mut() {
-        if mask & WAIT_IRQ != 0 && hw.irq_vector != 0 {
-            let n = crate::irq::fired_count(hw.irq_vector);
-            if n != hw.irq_seen {
-                hw.irq_seen = n;
-                r |= WAIT_IRQ;
+        if mask & WAIT_IRQ != 0 {
+            for (irq, seen) in hw.irqs.iter_mut() {
+                let n = crate::irq::fired_count(*irq);
+                if n != *seen {
+                    *seen = n;
+                    r |= WAIT_IRQ;
+                }
             }
         }
         if mask & WAIT_NET_TX != 0 && hw.registered_as_netdev
@@ -930,8 +945,7 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
             r |= WAIT_WIFI_CMD;
         }
         if mask & WAIT_GPU_CMD != 0 && let Some(dev) = hw.dev
-            && (crate::gpu::gpudev::pending(dev)
-                || owned_pci_class(ctx) == Some(0x03) && crate::audio::display_audio_pending())
+            && (crate::gpu::gpudev::pending(dev) || display_audio)
         {
             r |= WAIT_GPU_CMD;
         }
@@ -1000,14 +1014,15 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
             crate::wasm::set_key_waker(ctx.terminal_idx, w);
             sig |= SIG_EVENT;
         }
-        #[cfg(target_arch = "x86_64")]
         if let Some(hw) = ctx.hw.as_ref() {
-            if mask & WAIT_IRQ != 0 && hw.irq_vector != 0 {
-                // The interrupt must wake this core, and a level line the
+            if mask & WAIT_IRQ != 0 && !hw.irqs.is_empty() {
+                // The interrupts must wake this core, and a level line the
                 // ISR masked is released: the driver waits again, so it has
                 // serviced the device (`irq::arm`).
-                let _ = crate::irq::arm(hw.irq_vector);
-                crate::irq::set_waiter(hw.irq_vector, w);
+                for &(irq, _) in &hw.irqs {
+                    let _ = crate::irq::arm(irq);
+                    crate::irq::set_waiter(irq, w);
+                }
                 sig |= SIG_IRQ;
             }
             if mask & WAIT_NET_TX != 0 && hw.registered_as_netdev {
@@ -1500,8 +1515,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
         dma_allocs: Vec::new(),
         bus_master_enabled: false,
         registered_as_netdev: false,
-        irq_vector: 0,
-        irq_seen: 0,
+        irqs: Vec::new(),
         dma_limit: DMA_LIMIT_DEFAULT,
         dma_pages: 0,
     });
@@ -1585,8 +1599,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         dma_allocs: Vec::new(),
         bus_master_enabled: false,
         registered_as_netdev: false,
-        irq_vector: 0,
-        irq_seen: 0,
+        irqs: Vec::new(),
         dma_limit: DMA_LIMIT_DEFAULT,
         dma_pages: 0,
     });
@@ -1805,9 +1818,9 @@ pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
     if !(0..2048).contains(&entry) { return -1; }
     // One interrupt per driver: registering again returns the same one, so
     // a loop around this call cannot take the vectors of its core.
-    if hw.irq_vector != 0 { return hw.irq_vector as i32; }
+    if let Some(&(v, _)) = hw.irqs.first() { return v as i32; }
     match crate::irq::register(addr, entry as u16) {
-        Some(v) => { hw.irq_vector = v; v as i32 }
+        Some(v) => { hw.irqs.push((v, 0)); v as i32 }
         None => -1,
     }
 }
@@ -1828,10 +1841,10 @@ pub(crate) fn npk_irq_register_gsi(ctx: &mut HostState, gsi: i32, flags: i32) ->
         return -1;
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
-    if hw.irq_vector != 0 { return hw.irq_vector as i32; }
+    if let Some(&(v, _)) = hw.irqs.first() { return v as i32; }
     if !(0..256).contains(&gsi) { return -1; }
     match crate::irq::register_gsi(gsi as u32, flags & 1 != 0, flags & 2 != 0) {
-        Some(v) => { hw.irq_vector = v; v as i32 }
+        Some(v) => { hw.irqs.push((v, 0)); v as i32 }
         None => -1,
     }
 }
@@ -1858,18 +1871,17 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
             dma_allocs: Vec::new(),
             bus_master_enabled: false,
             registered_as_netdev: false,
-            irq_vector: 0,
-            irq_seen: 0,
+            irqs: Vec::new(),
             dma_limit: DMA_LIMIT_DEFAULT,
             dma_pages: 0,
         });
     }
     let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
-    if hw.irq_vector != 0 { return -1; }
+    if !hw.irqs.is_empty() { return -1; }
     let Some((gsi, level, low)) = crate::sci::arm_ec(gpe as u32) else { return -1 };
     match crate::irq::register_gsi(gsi, level, low) {
         Some(v) => {
-            hw.irq_vector = v;
+            hw.irqs.push((v, 0));
             crate::sci::VECTOR.store(v as u32, core::sync::atomic::Ordering::Relaxed);
             v as i32
         }
@@ -1939,13 +1951,125 @@ pub(crate) fn npk_acpi_cst(mem: &mut [u8], ctx: &mut HostState, ptr: i32, count:
     crate::drivers::acpi_processor::take_cst(&cst) as i32
 }
 
-#[cfg(target_arch = "x86_64")]
-/// Is `vector` the one this module's driver registered?
-fn owns_vector(ctx: &HostState, vector: i32) -> bool {
-    matches!(ctx.hw.as_ref(), Some(h) if h.irq_vector != 0 && h.irq_vector as i32 == vector)
+/// `npk_dt_bind(compat_ptr, compat_len) -> 0 | -1`: bind the device-tree
+/// display set whose HVS is compatible with `compat` (only
+/// `brcm,bcm2712-hvs`, `platform::pi5_display_set`). HARDWARE. The HVS
+/// goes behind its IOMMU before the module touches anything: no IOMMU, no
+/// binding, since the HVS reads whatever memory its display list names.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_dt_bind(mem: &mut [u8], ctx: &mut HostState, compat_ptr: i32, compat_len: i32) -> i32 {
+    use crate::platform::pi5_display_set as set;
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_dt_bind") {
+        return -1;
+    }
+    let Ok(len) = usize::try_from(compat_len) else { return -1 };
+    let Some(compat) = guest(mem, compat_ptr, len) else { return -1 };
+    if compat != b"brcm,bcm2712-hvs" { return -1; }
+    let Some(s) = set::get() else { return -1 };
+    let dev = crate::drivers::DevId::Dt(s.hvs);
+    if ctx.hw.as_ref().is_some_and(|h| h.dev == Some(dev)) { return 0; }
+    if !set::take(ctx.pid) { return -1; }
+    if let Err(e) = crate::drivers::iommu::protect(dev) {
+        crate::kprintln!("[npk] display: not bound, the HVS is not behind its IOMMU: {}", e);
+        set::release();
+        return -1;
+    }
+    if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
+    crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
+    ctx.hw = Some(HwDriverState {
+        dev: Some(dev),
+        vendor_id: 0,
+        device_id: 0,
+        mmio_maps: Vec::new(),
+        dma_allocs: Vec::new(),
+        bus_master_enabled: false,
+        registered_as_netdev: false,
+        irqs: Vec::new(),
+        dma_limit: DMA_LIMIT_DEFAULT,
+        dma_pages: 0,
+    });
+    crate::kdebug!("[npk] WASM driver bound to the display set, HVS {}", dev);
+    0
 }
 
-#[cfg(target_arch = "x86_64")]
+/// The display set, when this module holds it.
+#[cfg(target_arch = "aarch64")]
+fn bound_set(ctx: &HostState) -> Option<&'static crate::platform::pi5_display_set::Set> {
+    let hw = ctx.hw.as_ref()?;
+    if !hw.is_display() { return None; }
+    crate::platform::pi5_display_set::get()
+}
+
+/// `npk_mmio_map_dt(part, reg) -> handle | -1`: window `reg` (the index in
+/// the node's `reg`, the binding's order) of display-set part `part`,
+/// exactly as long as the entry. Mapping a window again returns its handle.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_mmio_map_dt(ctx: &mut HostState, part: i32, reg: i32) -> i32 {
+    let Some(s) = bound_set(ctx) else { return -1 };
+    let (Ok(part), Ok(reg)) = (usize::try_from(part), usize::try_from(reg)) else { return -1 };
+    let Some((base, len)) = s.window(part, reg) else { return -1 };
+    let Ok(len) = usize::try_from(len) else { return -1 };
+    let Some(hw) = ctx.hw.as_mut() else { return -1 };
+    if let Some(h) = hw.mmio_maps.iter().position(|&m| m == (base, len)) {
+        return h as i32;
+    }
+    hw.mmio_maps.push((base, len));
+    (hw.mmio_maps.len() - 1) as i32
+}
+
+/// `npk_irq_register_dt(part, index) -> vector | -1`: interrupt `index` of
+/// display-set part `part`, a level GIC SPI, masked by the kernel's ISR
+/// until the driver waits again (oneshot). The L2 controllers behind
+/// their SPIs serve only display blocks; the module drives them.
+/// Registering one again returns its vector.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_irq_register_dt(ctx: &mut HostState, part: i32, index: i32) -> i32 {
+    let Some(s) = bound_set(ctx) else { return -1 };
+    let (Ok(part), Ok(index)) = (usize::try_from(part), usize::try_from(index)) else { return -1 };
+    let Some(intid) = s.spi(part, index) else { return -1 };
+    let Some(hw) = ctx.hw.as_mut() else { return -1 };
+    if let Some(&(v, _)) = hw.irqs.iter().find(|&&(v, _)| crate::irq::intid(v) == Some(intid)) {
+        return v as i32;
+    }
+    match crate::irq::register_spi(intid, false) {
+        Some(v) => { hw.irqs.push((v, 0)); v as i32 }
+        None => -1,
+    }
+}
+
+/// `npk_fw_clock(id, op, rate) -> rate | -1`: a firmware clock of the
+/// display, through the kernel's mailbox. `op` 0 rate, 1 max, 2 min,
+/// 3 set `rate` (clamped to min..max), 4 enable. Only the bound display's
+/// clocks: core 4, disp 16, M2MC 13, PIXEL_BVB 14.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_fw_clock(ctx: &mut HostState, id: i32, op: i32, rate: i64) -> i64 {
+    use crate::platform::pi5_display_set::{fw_clock, ClockOp};
+    if bound_set(ctx).is_none() { return -1; }
+    let op = match op {
+        0 => ClockOp::Rate,
+        1 => ClockOp::MaxRate,
+        2 => ClockOp::MinRate,
+        3 => match u32::try_from(rate) { Ok(r) => ClockOp::SetRate(r), Err(_) => return -1 },
+        4 => ClockOp::Enable,
+        _ => return -1,
+    };
+    let Ok(id) = u32::try_from(id) else { return -1 };
+    fw_clock(id, op).map_or(-1, |r| r as i64)
+}
+
+/// `npk_fw_display_done() -> 0 | -1`: the firmware stops driving the
+/// display (`vc4_drm_bind`'s `NOTIFY_DISPLAY_DONE`). Once per boot.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_fw_display_done(ctx: &mut HostState) -> i32 {
+    if bound_set(ctx).is_none() { return -1; }
+    if crate::platform::pi5_display_set::display_done() { 0 } else { -1 }
+}
+
+/// Is `vector` one this module's driver registered?
+fn owns_vector(ctx: &HostState, vector: i32) -> bool {
+    ctx.hw.as_ref().is_some_and(|h| h.irqs.iter().any(|&(v, _)| v != 0 && v as i32 == vector))
+}
+
 pub(crate) fn npk_irq_arm(ctx: &mut HostState, vector: i32) -> i64 {
     // Arming re-routes the device's MSI to the calling core — only for the
     // module that owns it.
@@ -1953,7 +2077,6 @@ pub(crate) fn npk_irq_arm(ctx: &mut HostState, vector: i32) -> i64 {
     crate::irq::arm(vector as crate::irq::Irq) as i64
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_irq_wait(ctx: &mut HostState, vector: i32, since: i64, timeout_ms: i32) -> i32 {
     if !owns_vector(ctx, vector) || since < 0 { return -1; }
     let t = if timeout_ms <= 0 { 1000 } else { timeout_ms as u64 };
@@ -2142,8 +2265,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
             dma_allocs: Vec::new(),
             bus_master_enabled: false,
             registered_as_netdev: false,
-            irq_vector: 0,
-            irq_seen: 0,
+            irqs: Vec::new(),
             dma_limit: DMA_LIMIT_DEFAULT,
             dma_pages: 0,
         });
@@ -2252,37 +2374,31 @@ fn hw_addr(base: u64, len: usize, offset: i32, width: usize) -> Option<HwAddr> {
     Some(HwAddr(base + off as u64))
 }
 
-#[cfg(target_arch = "x86_64")]
 fn mmio_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
     let &(base, len) = ctx.hw.as_ref()?.mmio_maps.get(usize::try_from(handle).ok()?)?;
     hw_addr(base, len, offset, width)
 }
 
-#[cfg(target_arch = "x86_64")]
 fn dma_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
     let &(phys, pages) = ctx.hw.as_ref()?.dma_allocs.get(usize::try_from(handle).ok()?)?;
     hw_addr(phys, pages.checked_mul(4096)?, offset, width)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     mmio_at(ctx, handle, offset, 4).map_or(-1, |a| a.read::<u32>() as i32)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write32(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     let Some(a) = mmio_at(ctx, handle, offset, 4) else { return -1 };
     a.write(value as u32);
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_read16(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     if offset & 1 != 0 { return -1; }
     mmio_at(ctx, handle, offset, 2).map_or(-1, |a| a.read::<u16>() as i32)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     if offset & 1 != 0 { return -1; }
     let Some(a) = mmio_at(ctx, handle, offset, 2) else { return -1 };
@@ -2295,19 +2411,16 @@ pub(crate) fn npk_mmio_write16(ctx: &mut HostState, handle: i32, offset: i32, va
 // like REG_SYS_FUNC_EN+1 mean a single byte. A 32-bit RMW also touches
 // three neighbouring bytes, which differs on registers with read side
 // effects. Linux chooses the width deliberately; we follow it.
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_read8(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     mmio_at(ctx, handle, offset, 1).map_or(-1, |a| a.read::<u8>() as i32)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write8(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     let Some(a) = mmio_at(ctx, handle, offset, 1) else { return -1 };
     a.write(value as u8);
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 /// Two 32-bit accesses, low half first: not every device decodes a 64-bit
 /// transaction.
 pub(crate) fn npk_mmio_read64(ctx: &mut HostState, handle: i32, offset: i32) -> i64 {
@@ -2316,7 +2429,6 @@ pub(crate) fn npk_mmio_read64(ctx: &mut HostState, handle: i32, offset: i32) -> 
     ((hi.read::<u32>() as u64) << 32 | lo.read::<u32>() as u64) as i64
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_write64(ctx: &mut HostState, handle: i32, offset: i32, value: i64) -> i32 {
     let (Some(lo), Some(hi)) = (mmio_at(ctx, handle, offset, 8), mmio_at(ctx, handle, offset.wrapping_add(4), 4))
         else { return -1 };
@@ -2325,7 +2437,6 @@ pub(crate) fn npk_mmio_write64(ctx: &mut HostState, handle: i32, offset: i32, va
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 /// One 64-bit read, as Linux `readq`. `npk_mmio_read64` is two 32-bit reads
 /// (low, then high), which is what iwlwifi's `iwl_read64` does; a GPU's
 /// page-table entries are read in one access.
@@ -2334,7 +2445,6 @@ pub(crate) fn npk_mmio_readq(ctx: &mut HostState, handle: i32, offset: i32) -> i
     mmio_at(ctx, handle, offset, 8).map_or(-1, |a| a.read::<u64>() as i64)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// One 64-bit write, as Linux `writeq`: the device never sees half of the
 /// value. i915 writes GGTT entries this way.
 pub(crate) fn npk_mmio_writeq(ctx: &mut HostState, handle: i32, offset: i32, value: i64) -> i32 {
@@ -2344,7 +2454,6 @@ pub(crate) fn npk_mmio_writeq(ctx: &mut HostState, handle: i32, offset: i32, val
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 /// DMA allocations and pages a module may hold. A GPU driver binds every
 /// buffer the compositor hands it through its own page tables, one page
 /// per 2 MB bound, and keeps a compute heap, scene and blur buffers; the
@@ -2361,7 +2470,6 @@ fn dma_caps(hw: &HwDriverState) -> (usize, usize) {
 /// BD has a 32-bit address field), as Linux's default mask.
 const DMA_LIMIT_DEFAULT: u64 = 0x1_0000_0000;
 
-#[cfg(target_arch = "x86_64")]
 /// `dma_set_mask(DMA_BIT_MASK(bits))`: the device reaches `bits` of
 /// address, so its later buffers may lie anywhere below `1 << bits`. 0, or
 /// -1 for a width outside 32..=64.
@@ -2369,10 +2477,17 @@ pub(crate) fn npk_dma_set_mask(ctx: &mut HostState, bits: i32) -> i32 {
     let Some(hw) = ctx.hw.as_mut() else { return -1 };
     if !(32..=64).contains(&bits) { return -1; }
     hw.dma_limit = if bits == 64 { u64::MAX } else { 1u64 << bits };
+    // Behind a bcm2712-iommu the IOVA is the physical address: the device
+    // reaches nothing above the aperture, whatever it decodes.
+    #[cfg(target_arch = "aarch64")]
+    if let Some(crate::drivers::DevId::Dt(base)) = hw.dev
+        && let Some(end) = crate::drivers::bcm2712_iommu::aperture_end(base)
+    {
+        hw.dma_limit = hw.dma_limit.min(end);
+    }
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 /// A handle for the new buffer `phys`: a slot `npk_dma_free` emptied, else
 /// a new one.
 fn dma_slot(hw: &mut HwDriverState, phys: u64, pages: usize) -> usize {
@@ -2388,7 +2503,6 @@ fn dma_slot(hw: &mut HwDriverState, phys: u64, pages: usize) -> usize {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `dma_free_coherent`: the driver's buffer `handle` goes back. Behind an
 /// IOMMU the device loses it first; the handle is then empty and every
 /// access through it fails. 0, or -1 for a handle that holds nothing.
@@ -2399,13 +2513,12 @@ pub(crate) fn npk_dma_free(ctx: &mut HostState, handle: i32) -> i32 {
     if let Some(dev) = hw.dev {
         crate::drivers::iommu::revoke(dev, phys, pages);
     }
-    crate::memory::deallocate_contiguous(phys, pages);
+    crate::wasm::dma_give(phys, pages);
     hw.dma_allocs[handle as usize] = (0, 0);
     hw.dma_pages -= pages;
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
         Some(h) => h,
@@ -2418,7 +2531,7 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     if hw.dma_pages + page_count > max_pages { return -1; }
 
     // Below the device's DMA mask.
-    let phys = match crate::memory::allocate_contiguous_below(page_count, hw.dma_limit) {
+    let phys = match crate::wasm::dma_take(page_count, hw.dma_limit) {
         Some(p) => p,
         None => return -1,
     };
@@ -2432,7 +2545,6 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     handle as i32
 }
 
-#[cfg(target_arch = "x86_64")]
 /// Like `npk_dma_alloc`, but the driver chooses the upper limit.
 ///
 /// `allocate_contiguous_below` searches top-down, so a 4 GB limit always
@@ -2463,7 +2575,7 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
         ((limit_mb as u64) * 1024 * 1024).min(hw.dma_limit)
     };
 
-    let phys = match crate::memory::allocate_contiguous_below(page_count, limit) {
+    let phys = match crate::wasm::dma_take(page_count, limit) {
         Some(p) => p,
         None => return -1,
     };
@@ -2477,7 +2589,6 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     handle as i32
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_phys_addr(ctx: &mut HostState, handle: i32) -> i64 {
     let hw = match ctx.hw.as_ref() {
         Some(h) => h,
@@ -2488,12 +2599,10 @@ pub(crate) fn npk_dma_phys_addr(ctx: &mut HostState, handle: i32) -> i64 {
     hw.dma_allocs[h].0 as i64
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_read32(ctx: &mut HostState, handle: i32, offset: i32) -> i32 {
     dma_at(ctx, handle, offset, 4).map_or(-1, |a| a.read::<u32>() as i32)
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_write32(ctx: &mut HostState, handle: i32, offset: i32, value: i32) -> i32 {
     let Some(a) = dma_at(ctx, handle, offset, 4) else { return -1 };
     a.write(value as u32);
@@ -4382,7 +4491,6 @@ pub(crate) fn npk_tcp_recv(mem: &mut [u8], ctx: &mut HostState, handle: i32, buf
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// The bytes `off .. off + len` of a module's DMA buffer, as a physical
 /// address, or `None` when the handle is not the module's or the range
 /// leaves the buffer. Negative values are refused before any arithmetic.
@@ -4391,7 +4499,6 @@ fn dma_range(ctx: &HostState, handle: i32, off: i32, len: i32) -> Option<(u64, u
     Some((dma_at(ctx, handle, off, len)?.0, len))
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
     let Some((phys, len)) = dma_range(ctx, handle, dma_off, len) else { return -1 };
     let Some(dst) = guest_mut(mem, wasm_ptr, len) else { return -1 };
@@ -4404,7 +4511,6 @@ pub(crate) fn npk_dma_read(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_dma_write(mem: &mut [u8], ctx: &mut HostState, handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32 {
     let Some((phys, len)) = dma_range(ctx, handle, dma_off, len) else { return -1 };
     let Some(src) = guest(mem, wasm_ptr, len) else { return -1 };
@@ -5760,7 +5866,6 @@ pub(crate) fn npk_netdev_poll_tx(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i
     write_bytes(mem, buf_ptr, &frame[..len])
 }
 
-#[cfg(target_arch = "x86_64")]
 /// The display controller this module drives, if it holds one with
 /// HARDWARE: what every `npk_gpudev_*` call requires.
 fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::DevId> {
@@ -5774,7 +5879,6 @@ fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::DevId> {
     hw.dev
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_register(version) -> 0 | <0`.
 pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5783,7 +5887,6 @@ pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_info(id, out) -> 0 | -1`: `{phys, size: u64, pitch,
 /// width, height, format, offset, pages: u32}`, 40 bytes.
 pub(crate) fn npk_gpudev_bo_info(mem: &mut [u8], ctx: &mut HostState, id: i32, out_ptr: i32) -> i32 {
@@ -5794,7 +5897,6 @@ pub(crate) fn npk_gpudev_bo_info(mem: &mut [u8], ctx: &mut HostState, id: i32, o
     0
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_pages(id, first, out_ptr, max) -> pages | -1`: physical
 /// addresses, 8 bytes each.
 pub(crate) fn npk_gpudev_bo_pages(mem: &mut [u8], ctx: &mut HostState, id: i32, first: i32, out_ptr: i32,
@@ -5807,7 +5909,6 @@ pub(crate) fn npk_gpudev_bo_pages(mem: &mut [u8], ctx: &mut HostState, id: i32, 
     crate::gpu::gpudev::bo_pages(dev, id, first as u32, out)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_job_data(seq, offset, out_ptr, len) -> bytes | -1`.
 pub(crate) fn npk_gpudev_job_data(mem: &mut [u8], ctx: &mut HostState, seq: i32, offset: i32, out_ptr: i32,
                                   len: i32) -> i32 {
@@ -5819,7 +5920,6 @@ pub(crate) fn npk_gpudev_job_data(mem: &mut [u8], ctx: &mut HostState, seq: i32,
     crate::gpu::gpudev::job_data(dev, seq as u32, offset as u32, out)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_bound(id, gpu_addr) -> 0 | -1`.
 pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -> i32 {
     match gpudev_device(ctx) {
@@ -5828,7 +5928,6 @@ pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_bo_gpu_only(id) -> 0 | -1`.
 pub(crate) fn npk_gpudev_bo_gpu_only(ctx: &mut HostState, id: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5837,7 +5936,6 @@ pub(crate) fn npk_gpudev_bo_gpu_only(ctx: &mut HostState, id: i32) -> i32 {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_ready(caps) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, caps: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5846,7 +5944,6 @@ pub(crate) fn npk_gpudev_ready(ctx: &mut HostState, caps: i32) -> i32 {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_poll(buf_ptr, max) -> jobs | -1`, 32 bytes each.
 pub(crate) fn npk_gpudev_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32, max: i32) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };
@@ -5857,7 +5954,6 @@ pub(crate) fn npk_gpudev_poll(mem: &mut [u8], ctx: &mut HostState, buf_ptr: i32,
     crate::gpu::gpudev::poll(dev, out)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_complete(seq, status) -> 0 | -1`.
 pub(crate) fn npk_gpudev_complete(ctx: &mut HostState, seq: i32, status: i32) -> i32 {
     match gpudev_device(ctx) {
@@ -5934,7 +6030,6 @@ pub(crate) fn npk_gpudev_capset(mem: &mut [u8], ctx: &mut HostState, ptr: i32, l
     crate::gpu::gpudev::set_capset(dev, data)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_released(id) -> 0 | -1`: the module let go of a GEM object
 /// it kept past its detach.
 pub(crate) fn npk_gpudev_released(ctx: &mut HostState, id: i32) -> i32 {
@@ -5945,7 +6040,6 @@ pub(crate) fn npk_gpudev_released(ctx: &mut HostState, id: i32) -> i32 {
     crate::gpu::gpudev::released(dev, id as u32)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_stats(ptr, len) -> 0 | -1`: the module's cumulative GPU
 /// counters (`gpudev::GPU_STATS_WORDS` little-endian u64s), for `cores`.
 pub(crate) fn npk_gpudev_stats(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {

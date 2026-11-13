@@ -77,6 +77,11 @@ fn bind(intid: u32) -> Option<(Irq, &'static Desc)> {
     Some((irq, d))
 }
 
+/// The INTID behind `irq`, if it is registered here.
+pub fn intid(irq: Irq) -> Option<u32> {
+    REGS.lock().get(&irq).map(|r| r.intid)
+}
+
 /// An SPI the device raises itself: edge-rising or level-high
 /// (`gic_set_type`). Masked until the driver `arm`s it.
 pub fn register_spi(intid: u32, edge: bool) -> Option<Irq> {

@@ -1218,16 +1218,47 @@ host_imports! {
     #[cfg(target_arch = "x86_64")]
     ctx fn npk_irq_register(entry: i32) -> i32;
 
+    // ── Device-tree display (Raspberry Pi 5) ───
+    //
+    // The BCM2712 display set: 0 hvs, 1 pixelvalve0, 2 pixelvalve1,
+    // 3 disp_intr, 4 dvp, 5 hdmi0, 6 hdmi1, 7 ddc0, 8 ddc1, 9 bsc_irq,
+    // 10 aon_intr (kernel/src/platform/pi5_display_set.rs).
+
+    // npk_dt_bind(compat_ptr, compat_len) -> 0 or -1. HARDWARE. Only
+    // "brcm,bcm2712-hvs"; the HVS is behind its IOMMU when this returns.
+    #[cfg(target_arch = "aarch64")]
+    mem fn npk_dt_bind(compat_ptr: i32, compat_len: i32) -> i32;
+
+    // npk_mmio_map_dt(part, reg) -> handle or -1. Window `reg` of the
+    // part's `reg` property, in bytes; the npk_mmio_* calls take the handle.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_mmio_map_dt(part: i32, reg: i32) -> i32;
+
+    // npk_irq_register_dt(part, index) -> vector or -1. The part's GIC SPI
+    // (pixel valves and the three L2 controllers); npk_irq_arm/npk_irq_wait
+    // and npk_wait(WAIT_IRQ) take it.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_irq_register_dt(part: i32, index: i32) -> i32;
+
+    // npk_fw_clock(id, op, rate) -> rate in Hz or -1. Firmware clocks 4 core,
+    // 16 disp, 13 M2MC, 14 PIXEL_BVB; op 0 get, 1 max, 2 min, 3 set (clamped
+    // to min..max, returns the rate set), 4 enable.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
+
+    // npk_fw_display_done() -> 0 or -1. The firmware stops driving the
+    // display; once per boot.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_fw_display_done() -> i32;
+
     // npk_irq_arm(vector) -> fired-count snapshot, or -1 on a bad vector. Call
     // before submitting/enabling the device work that triggers the IRQ; pass
     // the result to npk_irq_wait. Also routes the IRQ to the calling core.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_irq_arm(vector: i32) -> i64;
 
     // npk_irq_wait(vector, since, timeout_ms) -> 1 fired, 0 timeout, -1 bad arg.
     // Parks the driver's fiber until the device IRQ advances the fired-count
     // past `since`, or `timeout_ms` elapses (defaults to 1000 if <= 0).
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_irq_wait(vector: i32, since: i64, timeout_ms: i32) -> i32;
 
     // npk_mmio_map_bar(bar_index, page_count) -> handle or -1
@@ -1240,21 +1271,17 @@ host_imports! {
     ctx fn npk_mmio_map_bar(bar_idx: i32, pages: i32) -> i32;
 
     // npk_mmio_read32(handle, offset) -> u32
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_read32(handle: i32, offset: i32) -> i32;
 
     // npk_mmio_write32(handle, offset, value) -> 0 or -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_write32(handle: i32, offset: i32, value: i32) -> i32;
 
     // npk_mmio_read16(handle, offset) -> u16 as i32
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_read16(handle: i32, offset: i32) -> i32;
 
     // npk_mmio_write16(handle, offset, value) -> 0 or -1
     // True 16-bit MMIO write — required for split registers like RX/TX BD IDX
     // (HOST_IDX[15:0] + HW_IDX[31:16]). A 32-bit RMW would clobber HW_IDX.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_write16(handle: i32, offset: i32, value: i32) -> i32;
 
     // npk_mmio_read8(handle, offset) -> u8 as i32
@@ -1263,24 +1290,18 @@ host_imports! {
     // read8/write8 interpreter and addresses registers like REG_SYS_FUNC_EN+1
     // as a single byte. A 32-bit RMW touches three neighbouring bytes and is
     // a different operation; Linux picks the width on purpose.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_read8(handle: i32, offset: i32) -> i32;
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_write8(handle: i32, offset: i32, value: i32) -> i32;
 
     // npk_mmio_read64(handle, offset) -> i64
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_read64(handle: i32, offset: i32) -> i64;
 
     // npk_mmio_write64(handle, offset, value) -> 0 or -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_write64(handle: i32, offset: i32, value: i64) -> i32;
 
     // Single 64-bit accesses (Linux readq/writeq); the two above are split
     // into 32-bit halves. Offset must be 8-byte aligned.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_readq(handle: i32, offset: i32) -> i64;
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_mmio_writeq(handle: i32, offset: i32, value: i64) -> i32;
 
     // npk_dma_alloc_below(page_count, limit_mb) -> handle or -1
@@ -1288,41 +1309,32 @@ host_imports! {
     // searches from the top, so a 4 GB limit always lands right below the
     // PCI MMIO hole — on AMD platforms exactly where TSEG/DPR rejects device
     // DMA while the CPU can still read and write it.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_dma_alloc_below(pages: i32, limit_mb: i32) -> i32;
 
     // npk_dma_alloc(page_count) -> handle or -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_dma_alloc(pages: i32) -> i32;
 
     // npk_dma_free(handle) -> 0 or -1: the buffer goes back (behind VT-d
     // the device loses it first); the handle is empty afterwards.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_dma_free(handle: i32) -> i32;
 
     // npk_dma_set_mask(bits) -> 0 or -1: the device's DMA mask
     // (`dma_set_mask`); later buffers lie below `1 << bits`.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_dma_set_mask(bits: i32) -> i32;
 
     // npk_dma_phys_addr(handle) -> physical address as i64
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_dma_phys_addr(handle: i32) -> i64;
 
     // npk_dma_read(handle, dma_offset, wasm_ptr, len) -> 0 or -1
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_dma_read(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
 
     // npk_dma_write(handle, dma_offset, wasm_ptr, len) -> 0 or -1
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_dma_write(handle: i32, dma_off: i32, wasm_ptr: i32, len: i32) -> i32;
 
     // npk_dma_read32(handle, offset) -> u32
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_dma_read32(handle: i32, offset: i32) -> i32;
 
     // npk_dma_write32(handle, offset, value) -> 0 or -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_dma_write32(handle: i32, offset: i32, value: i32) -> i32;
 
     // npk_memory_fence() -> 0
@@ -1331,33 +1343,24 @@ host_imports! {
     // gpudev: a driver module holding a display
     // controller becomes the GPU service. HARDWARE-gated.
     // npk_gpudev_register(version) -> 0 / <0
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_register(version: i32) -> i32;
     // npk_gpudev_bo_info(id, out_ptr) -> 0 / -1; 40 bytes
     // {phys u64, size u64, pitch, width, height, format, offset, pages u32}
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_bo_info(id: i32, out_ptr: i32) -> i32;
     // npk_gpudev_bo_pages(id, first, out_ptr, max) -> pages / -1; u64 each
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_bo_pages(id: i32, first: i32, out_ptr: i32, max: i32) -> i32;
     // npk_gpudev_job_data(seq, offset, out_ptr, len) -> bytes / -1
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_job_data(seq: i32, offset: i32, out_ptr: i32, len: i32) -> i32;
     // npk_gpudev_bo_bound(id, gpu_addr) -> 0 / -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
     // npk_gpudev_bo_gpu_only(id) -> 0 / -1; its pages hold a picture only the card reads
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_bo_gpu_only(id: i32) -> i32;
     // npk_gpudev_ready(caps) -> 0 / -1; bit 0 copies, bit 1 scenes
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_ready(caps: i32) -> i32;
     // npk_gpudev_poll(buf_ptr, max) -> jobs / -1; 32 bytes each
     // {seq, op, a0..a5: u32}
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
     // npk_gpudev_complete(seq, status) -> 0 / -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
     // npk_gpudev_reply(seq, ptr, len) -> 0 / -1; reply of an OP_CCMD job, <= 64 KB
     #[cfg(target_arch = "x86_64")]
@@ -1384,10 +1387,8 @@ host_imports! {
     #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     // npk_gpudev_released(id) -> 0 / -1; a GEM object kept past its detach
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_released(id: i32) -> i32;
     // npk_gpudev_stats(ptr, len) -> 0 / -1; GPU_STATS_WORDS cumulative u64s
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_stats(ptr: i32, len: i32) -> i32;
 
     // npk_netdev_register(mac_ptr) -> 0 or -1
