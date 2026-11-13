@@ -905,6 +905,8 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             if !crate::microvm::vm_active() {
                 core0_wait();
             }
+            #[cfg(not(target_arch = "x86_64"))]
+            core0_wait();
             continue;
         } else {
             let serial = serial::SERIAL.lock();

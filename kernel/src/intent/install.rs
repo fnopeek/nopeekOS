@@ -323,8 +323,10 @@ pub fn plan_modules() -> (Vec<ModulePlan>, usize) {
 
     for remote in &modules {
         // Only update modules that are already installed (skip
-        // `.version` sidecars; we want bare `<name>` to be present).
-        if !installed.iter().any(|n| n.as_str() == remote.name) { continue; }
+        // `.version` sidecars; we want bare `<name>` to be present), and
+        // install a bundled one that is missing: a board set up without the
+        // installer (the Pi's SD card) never got them.
+        if !installed.iter().any(|n| n.as_str() == remote.name) && !is_bundled_here(&remote.name) { continue; }
 
         let version_key = alloc::format!("sys/wasm/{}.version", remote.name);
         let local = crate::npkfs::fetch(&version_key).ok()
@@ -510,6 +512,18 @@ fn is_bundled_module(name: &str) -> bool {
         .lines()
         .map(|l| l.split('#').next().unwrap_or("").trim())
         .any(|n| !n.is_empty() && n == name)
+}
+
+/// True iff `name` is a bundled module this architecture runs: one
+/// marked `# x86_64` in `modules.list` is that architecture's only.
+fn is_bundled_here(name: &str) -> bool {
+    include_str!("../install_data/modules.list").lines().any(|l| {
+        let (n, note) = l.split_once('#').unwrap_or((l, ""));
+        let n = n.trim();
+        let arch = note.trim();
+        !n.is_empty() && n == name
+            && (arch.is_empty() || (arch == "x86_64") == cfg!(target_arch = "x86_64"))
+    })
 }
 
 /// `modules` — list installed and available modules.

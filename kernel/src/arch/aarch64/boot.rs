@@ -138,10 +138,11 @@ const BERRY: [&str; 8] = [
     r"            ''",
 ];
 
-/// Console output to the text framebuffer and the remote mirror.
+/// The screens that mirror the console, as on x86: the text framebuffer
+/// and the desktop's terminal (which also feeds the remote mirror).
 fn console_screen(s: &str) {
     crate::framebuffer::write_str(s);
-    crate::serial::mirror_push(s);
+    crate::shade::terminal::write(s);
 }
 
 /// The firmware's framebuffer as a second console beside the UART: on a
@@ -241,7 +242,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
         write: console_screen,
         echo: crate::framebuffer::write_byte,
         key: crate::input::read_key,
-        quiet: crate::serial::mirror_push,
+        quiet: crate::shade::terminal::stream_push_global,
     });
     // The UART and the text framebuffer are the shell's only screen.
     crate::serial::set_line_repair(true);
