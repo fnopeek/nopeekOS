@@ -137,6 +137,15 @@ pub fn init(boot_info: &crate::boot_info::BootInfo) {
 }
 
 
+/// The firmware's framebuffer of the device tree (`simple-framebuffer`)
+/// as the starting driver, where no bootloader hands one over: the role
+/// GOP has on x86, and what a display module's `gpudev` registration
+/// describes and takes over.
+pub fn init_from_firmware(fb: FramebufferInfo) {
+    crate::kdebug!("[npk] GPU: firmware framebuffer {}x{}", fb.width, fb.height);
+    *GPU.lock() = Some(Box::new(gop::GopDriver::from_framebuffer(fb)) as Box<dyn GpuHal>);
+}
+
 /// Whether a driver module may take the card at `addr`. The kernel drives
 /// no GPU itself (GOP draws without touching the card), so a display
 /// controller nobody owns is free.

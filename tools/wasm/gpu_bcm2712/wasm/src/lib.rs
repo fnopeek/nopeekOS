@@ -100,8 +100,15 @@ pub extern "C" fn _start() {
         return;
     };
 
-    if npk_sys::gpudev_register(GPUDEV_VERSION) < 0 {
-        Line::new().s("the GPU service is taken, not binding").say();
+    // gpudev::register: -1 no framebuffer or shadows, -2 version, -3 taken.
+    let r = npk_sys::gpudev_register(GPUDEV_VERSION);
+    if r < 0 {
+        let why = match r {
+            -2 => "the kernel speaks another gpudev version",
+            -3 => "the GPU service is taken",
+            _ => "the kernel has no 32 bpp framebuffer to hand over",
+        };
+        Line::new().s(why).s(", not binding").say();
         return;
     }
     let Some(kfb) = kernel_fb() else {

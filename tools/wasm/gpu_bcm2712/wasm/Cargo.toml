@@ -1,6 +1,6 @@
 [package]
 name = "gpu_bcm2712"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Raspberry Pi 5 display (vc4 on BCM2712), after Linux"

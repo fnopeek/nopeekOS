@@ -150,6 +150,13 @@ fn screen(fdt: &Fdt) {
     let Some(Ok(m)) = crate::platform::simplefb::find(fdt) else { return };
     if !super::mmu::map_uncached(m.addr, m.addr + m.size) { return; }
     crate::framebuffer::init_from_firmware(m.addr, m.width, m.height, m.stride, m.format.bpp());
+    crate::gpu::init_from_firmware(crate::gpu::FramebufferInfo {
+        addr: m.addr,
+        pitch: m.stride,
+        width: m.width,
+        height: m.height,
+        bpp: m.format.bpp(),
+    });
 }
 
 /// What `screen` found, once the console is up to show it.
