@@ -35,7 +35,14 @@ const PXN: u64 = 1 << 53;
 const UXN: u64 = 1 << 54;
 
 const DEVICE_BLOCK: u64 = VALID | AF | (ATTR_DEVICE << 2) | PXN | UXN;
-const NORMAL_BLOCK: u64 = VALID | AF | SH_INNER | (ATTR_NORMAL << 2) | UXN;
+/// RAM: never executable (Linux maps the linear map PXN, `CONFIG_STRICT_KERNEL_RWX`);
+/// the kernel's text is mapped apart by `map_image`.
+const NORMAL_BLOCK: u64 = VALID | AF | SH_INNER | (ATTR_NORMAL << 2) | PXN | UXN;
+/// A 4 KiB page of the kernel image; AP[2] (`RO`) makes it read-only.
+const IMAGE_PAGE: u64 = VALID | TABLE | AF | SH_INNER | (ATTR_NORMAL << 2) | UXN;
+const RO: u64 = 1 << 7;
+/// Third-level tables for the 2 MiB blocks the kernel image covers.
+const L3_TABLES: usize = 8;
 const NC_BLOCK: u64 = VALID | AF | SH_INNER | (ATTR_NC << 2) | PXN | UXN;
 
 #[repr(C, align(4096))]
@@ -46,12 +53,14 @@ struct Tables {
     l0: Table,
     l1: Table,
     l2: [Table; L2_TABLES],
+    l3: [Table; L3_TABLES],
 }
 
 static mut BOOT: Tables = Tables {
     l0: Table([0; 512]),
     l1: Table([0; 512]),
     l2: [const { Table([0; 512]) }; L2_TABLES],
+    l3: [const { Table([0; 512]) }; L3_TABLES],
 };
 
 /// Second-level tables of `TABLES` in use.
@@ -61,6 +70,7 @@ static mut TABLES: Tables = Tables {
     l0: Table([0; 512]),
     l1: Table([0; 512]),
     l2: [const { Table([0; 512]) }; L2_TABLES],
+    l3: [const { Table([0; 512]) }; L3_TABLES],
 };
 
 /// RAM as the device tree's /memory nodes describe it.
@@ -80,6 +90,8 @@ fn holds_ram(lo: u64, hi: u64) -> bool {
 
 unsafe extern "C" {
     static __image_base: u8;
+    static __text_end: u8;
+    static __rodata_end: u8;
     static __heap_start: u8;
 }
 
@@ -96,7 +108,7 @@ unsafe fn put(table: *mut Table, i: u64, v: u64) {
 ///
 /// # Safety
 /// Single-threaded boot with the MMU off; nothing else uses `BOOT`.
-unsafe fn boot_map(lo: u64, hi: u64, next_l2: &mut usize) {
+unsafe fn boot_map(lo: u64, hi: u64, kind: u64, next_l2: &mut usize) {
     let t = core::ptr::addr_of_mut!(BOOT);
     let mut a = lo & !(MIB2 - 1);
     while a < hi {
@@ -115,7 +127,7 @@ unsafe fn boot_map(lo: u64, hi: u64, next_l2: &mut usize) {
                 put(l1, g, l2 as u64 | TABLE | VALID);
                 l2
             };
-            put(l2, (a % GIB) / MIB2, a | NORMAL_BLOCK);
+            put(l2, (a % GIB) / MIB2, a | kind);
         }
         a += MIB2;
     }
@@ -132,8 +144,10 @@ pub extern "C" fn early_mmu(dtb: usize) {
     // not read yet (its header lies in memory not mapped as RAM); 4 MiB
     // covers any board's tree.
     unsafe {
-        boot_map(lo, hi, &mut next_l2);
-        boot_map(dtb as u64, dtb as u64 + (4 << 20), &mut next_l2);
+        // The tree first: where both share a 2 MiB block, the image's
+        // executable mapping must win until `init` maps it page by page.
+        boot_map(dtb as u64, dtb as u64 + (4 << 20), NORMAL_BLOCK, &mut next_l2);
+        boot_map(lo, hi, NORMAL_BLOCK & !PXN, &mut next_l2);
         let t = core::ptr::addr_of_mut!(BOOT);
         put(core::ptr::addr_of_mut!((*t).l0), 0, core::ptr::addr_of!((*t).l1) as u64 | TABLE | VALID);
         enable(t as u64, core::mem::size_of::<Tables>() as u64, true);
@@ -239,12 +253,62 @@ pub fn init(fdt: &Fdt) {
         t.l1.0[g as usize] = l2 as *const Table as u64 | TABLE | VALID;
     }
     t.l0.0[0] = &t.l1 as *const Table as u64 | TABLE | VALID;
+    map_image(t);
     // SAFETY: single-threaded boot, the only writer.
     unsafe { NEXT_L2 = next_l2 };
     // SAFETY: the new tables map all RAM, so the kernel image, its stack
     // and the device tree, at themselves with the attributes the boot
     // tables gave them.
     unsafe { enable(t as *const Tables as u64, core::mem::size_of::<Tables>() as u64, false) };
+}
+
+/// The kernel image in 4 KiB pages with its own permissions (Linux
+/// `map_kernel_segment`): text read-only and executable, rodata read-only,
+/// data, bss and the boot stack writable; neither of the last two
+/// executable. Runs on the tables `init` builds, before they are live.
+fn map_image(t: &mut Tables) {
+    // SAFETY: linker symbols; only their addresses are taken.
+    let (base, text_end, ro_end, end) = unsafe {
+        (
+            &__image_base as *const u8 as u64,
+            &__text_end as *const u8 as u64,
+            &__rodata_end as *const u8 as u64,
+            &__heap_start as *const u8 as u64,
+        )
+    };
+    let (lo, hi) = (base & !(MIB2 - 1), end.next_multiple_of(MIB2));
+    if ((hi - lo) / MIB2) as usize > L3_TABLES {
+        crate::kprintln!("[npk] mmu: kernel image {:#x}..{:#x} beyond its page tables; left writable", lo, hi);
+        return;
+    }
+    let mut block = lo;
+    let mut n = 0;
+    while block < hi {
+        let l1 = t.l1.0[(block / GIB) as usize];
+        if l1 & TABLE == 0 {
+            crate::kprintln!("[npk] mmu: kernel image at {:#x} not in a 2 MiB table", block);
+            return;
+        }
+        let l2 = (l1 & 0x0000_ffff_ffff_f000) as *mut u64;
+        let l3 = &mut t.l3[n];
+        n += 1;
+        for i in 0..512u64 {
+            let a = block + i * 4096;
+            l3.0[i as usize] = a | if a < base || a >= end {
+                IMAGE_PAGE | PXN
+            } else if a < text_end {
+                IMAGE_PAGE | RO
+            } else if a < ro_end {
+                IMAGE_PAGE | RO | PXN
+            } else {
+                IMAGE_PAGE | PXN
+            };
+        }
+        // SAFETY: `l2` is one of `t.l2`, identity-mapped static memory not
+        // yet walked by the MMU.
+        unsafe { core::ptr::write_volatile(l2.add(((block % GIB) / MIB2) as usize), l3 as *const Table as u64 | TABLE | VALID) };
+        block += MIB2;
+    }
 }
 
 /// Drop stale translations on every core (inner shareable broadcast).
