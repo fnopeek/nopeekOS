@@ -7,12 +7,13 @@
 //! hotplug probes again and follows.
 //!
 //! The compositor keeps composing on the CPU into its two shadow buffers;
-//! the module presents them (`CAP_COPY | CAP_PRESENT`): a copy of a whole
-//! shadow to the framebuffer becomes a page flip to that shadow, a copy of
-//! part of the shadow on screen is already shown (the kernel wrote the
-//! rectangle back from its caches before handing the copy over). The
-//! driver itself is `gpu_bcm2712_core`, replayed against a Linux run on
-//! the host.
+//! the module presents them (`CAP_COPY | CAP_PRESENT | CAP_FLIP`): a copy
+//! of a whole shadow to the framebuffer becomes a page flip to that
+//! shadow, and the kernel draws every update into the other shadow, never
+//! into the one on screen. A copy of part of the shadow on screen is
+//! already shown (the kernel wrote the rectangle back from its caches
+//! before handing the copy over). The driver itself is `gpu_bcm2712_core`,
+//! replayed against a Linux run on the host.
 
 #![no_std]
 
@@ -57,6 +58,7 @@ const JOB_BYTES: usize = 32;
 /// `npk_gpudev_ready` capabilities (`kernel/src/gpu/gpudev.rs`).
 const CAP_COPY: i32 = 1;
 const CAP_PRESENT: i32 = 16;
+const CAP_FLIP: i32 = 128;
 /// `OP_COPY_RECT`: `a0` source, `a1` target buffer, `a2..a5` x, y, w, h.
 const OP_COPY_RECT: u32 = 1;
 
@@ -147,7 +149,7 @@ pub extern "C" fn _start() {
     // The shadows, if the HVS can show them, are presented by flips;
     // otherwise the compositor copies into the framebuffer on the CPU.
     let shadows = bind_shadows(&kfb);
-    let caps = if shadows.is_some() { CAP_COPY | CAP_PRESENT } else { 0 };
+    let caps = if shadows.is_some() { CAP_COPY | CAP_PRESENT | CAP_FLIP } else { 0 };
     if npk_sys::gpudev_ready(caps) < 0 {
         Line::new().s("the kernel did not take the presenting, the compositor copies on the CPU").say();
     }

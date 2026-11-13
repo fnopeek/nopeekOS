@@ -105,7 +105,75 @@ impl FbConsole {
     pub fn front_gpu(&self) -> u64 {
         if self.front == 0 { self.shadow_a_gpu } else { self.shadow_b_gpu }
     }
+
+    /// Where a partial update draws. With a module that shows the front
+    /// shadow itself (`gpudev::flips`) the display reads it while the CPU
+    /// would draw, so the update goes into the back shadow, brought level
+    /// with the front first where the last presented frame changed it.
+    /// Otherwise the front, copied out by `blit_rect` afterwards.
+    pub fn begin_partial(&mut self) -> *mut u8 {
+        if !crate::gpu::gpudev::flips() {
+            return self.front_ptr();
+        }
+        let (front, back) = (self.front_ptr(), self.shadow_back());
+        for r in STALE.lock().drain(..) {
+            self.copy_rect(front, back, r);
+        }
+        back
+    }
+
+    /// The end of a partial update that drew `damage` (x, y, w, h) into
+    /// what `begin_partial` returned: with `flips` the back shadow becomes
+    /// the front and is presented whole, and the new back lacks `damage`.
+    /// False without `flips`: the caller copies the rectangles out.
+    pub fn end_partial(&mut self, damage: &[(u32, u32, u32, u32)]) -> bool {
+        if !crate::gpu::gpudev::flips() {
+            return false;
+        }
+        self.swap_buffers();
+        if present(self, 0, 0, self.info.width, self.info.height) {
+            self.commit_front();
+            STALE.lock().extend_from_slice(damage);
+        } else {
+            // Not shown: the old front stays on screen and takes the damage.
+            self.swap_buffers();
+            let (front, back) = (self.front_ptr(), self.shadow_back());
+            for &r in damage {
+                self.copy_rect(back, front, r);
+            }
+        }
+        true
+    }
+
+    /// After a full frame was drawn into the back and presented: the new
+    /// back holds the frame before.
+    pub fn note_full_present(&self) {
+        let mut s = STALE.lock();
+        s.clear();
+        s.push((0, 0, self.info.width, self.info.height));
+    }
+
+    /// Copy rectangle `r` between the shadows, clipped to the screen.
+    fn copy_rect(&self, from: *mut u8, to: *mut u8, r: (u32, u32, u32, u32)) {
+        let (x, y) = (r.0.min(self.info.width), r.1.min(self.info.height));
+        let (w, h) = (r.2.min(self.info.width - x), r.3.min(self.info.height - y));
+        if w == 0 || h == 0 {
+            return;
+        }
+        let pitch = self.info.pitch as usize;
+        let (off, len) = (x as usize * 4, w as usize * 4);
+        for row in y as usize..(y + h) as usize {
+            // SAFETY: the rectangle is clipped to the screen, so every row
+            // lies within both shadows (pitch * height bytes each), which are
+            // distinct allocations.
+            unsafe { core::ptr::copy_nonoverlapping(from.add(row * pitch + off), to.add(row * pitch + off), len) };
+        }
+    }
 }
+
+/// Where the back shadow differs from the front under `gpudev::flips`:
+/// the damage of the last presented frame. Touched under `CONSOLE` only.
+static STALE: Mutex<alloc::vec::Vec<(u32, u32, u32, u32)>> = Mutex::new(alloc::vec::Vec::new());
 
 /// Execute a closure with exclusive access to the framebuffer console.
 #[track_caller]

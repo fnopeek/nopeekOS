@@ -527,12 +527,15 @@ fn render_frame_cursor_only() {
     note_render(2);
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
-        let front = fb.front_ptr();
+        let front = fb.begin_partial();
         let old = cursor::saved_pos();
         let had_old = cursor::save_valid();
         cursor::restore_under(front, &info);       // erase old cursor in RAM
         cursor::save_under_and_bake(front, &info);  // save clean + bake new
-        blit_cursor_bbox(fb, old, had_old);         // one atomic small blit
+        let boxed: alloc::vec::Vec<_> = cursor_box(old, had_old).into_iter().collect();
+        if !fb.end_partial(&boxed) {
+            blit_cursor_bbox(fb, old, had_old);     // one atomic small blit
+        }
     });
 }
 
@@ -564,10 +567,17 @@ fn render_frame_mode(cursor_only: bool) {
 /// position in the front buffer is clean scene again (cursor restored +
 /// re-baked at the new spot), so this both erases the old and draws the new.
 fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool) {
+    if let Some((x, y, w, h)) = cursor_box(old, had_old) {
+        framebuffer::blit_rect(fb, x, y, w, h);
+    }
+}
+
+/// The box `blit_cursor_bbox` copies: the cursor at its old and new spot.
+fn cursor_box(old: (i32, i32), had_old: bool) -> Option<(u32, u32, u32, u32)> {
     // The hardware cursor is not in the buffer: unless a baked one was just
     // erased, the box shows what it did.
     if cursor::hw_active() && !cursor::save_valid() && !had_old {
-        return;
+        return None;
     }
     let (cw, ch) = cursor::cursor_size();
     let (cx, cy) = cursor::cursor_origin();
@@ -581,7 +591,7 @@ fn blit_cursor_bbox(fb: &framebuffer::FbConsole, old: (i32, i32), had_old: bool)
     let y0 = y0.max(0) as u32;
     let w = (x1.max(0) as u32).saturating_sub(x0);
     let h = (y1.max(0) as u32).saturating_sub(y0);
-    if w > 0 && h > 0 { framebuffer::blit_rect(fb, x0, y0, w, h); }
+    (w > 0 && h > 0).then_some((x0, y0, w, h))
 }
 
 /// Full recomposite → blit. Scene is composed clean into the back buffer
@@ -628,6 +638,7 @@ fn render_frame_full() {
         if !gpu_ok {
             framebuffer::blit_rect(fb, 0, 0, screen_w, screen_h);
         }
+        fb.note_full_present();
         record_surface_render(t0, t_bg, t_comp, t_cursor);
     });
 }
@@ -642,7 +653,7 @@ fn render_frame_surface() {
     let t0 = crate::time::counter();
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
-        let (front, _) = fb.shadow_ptr();
+        let front = fb.begin_partial();
         let old = cursor::saved_pos();
         let had_old = cursor::save_valid();
         cursor::restore_under(front, &info);
@@ -700,6 +711,10 @@ fn render_frame_surface() {
             bbox = bbox.union(&crate::shade::scene::Rect::new(old.0.max(0) as u32, old.1.max(0) as u32, cw, ch));
         }
         bbox = bbox.intersect(&crate::shade::scene::Rect::new(0, 0, info.width, info.height));
+        if fb.end_partial(&[(bbox.x, bbox.y, bbox.w, bbox.h)]) {
+            record_surface_render(t0, t0, t_comp, t_cursor);
+            return;
+        }
         let gpu_ok = !bbox.is_empty() && crate::gpu::supports_blit() && {
             let src = fb.front_gpu();
             src != 0 && crate::gpu::gpu_blit_rect(src, info.pitch, crate::gpu::fb_gpu_addr(), info.pitch,
@@ -842,7 +857,7 @@ pub fn render_damaged() {
 fn render_damaged_front() {
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
-        let (shadow, _) = fb.shadow_ptr();
+        let shadow = fb.begin_partial();
 
         let mut guard = COMPOSITOR.lock();
         if let Some(comp) = guard.as_mut() {
@@ -863,10 +878,15 @@ fn render_damaged_front() {
 
 /// After a partial repaint, with the compositor released: wait for the GPU,
 /// re-bake the cursor and blit the regions and the cursor's box.
-fn finish_and_blit(fb: &framebuffer::FbConsole, front: *mut u8, info: &crate::framebuffer::FbInfo,
+fn finish_and_blit(fb: &mut framebuffer::FbConsole, front: *mut u8, info: &crate::framebuffer::FbInfo,
                    regions: &[crate::shade::scene::Rect], old: (i32, i32), had_old: bool) {
     crate::shade::gpu_scene::finish();
     cursor::save_under_and_bake(front, info);
+    let mut damage: alloc::vec::Vec<_> = regions.iter().map(|r| (r.x, r.y, r.w, r.h)).collect();
+    damage.extend(cursor_box(old, had_old));
+    if fb.end_partial(&damage) {
+        return;
+    }
     for r in regions {
         framebuffer::blit_rect(fb, r.x, r.y, r.w, r.h);
     }
@@ -889,7 +909,7 @@ pub fn tick_focus_glow() {
 fn render_focus_glow() {
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
-        let (shadow, _) = fb.shadow_ptr();
+        let shadow = fb.begin_partial();
 
         let mut guard = COMPOSITOR.lock();
         if let Some(comp) = guard.as_mut() {
@@ -1346,7 +1366,7 @@ pub fn render_input_line() {
 
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
-        let (front, _) = fb.shadow_ptr();
+        let front = fb.begin_partial();
 
         let mut guard = COMPOSITOR.lock();
         if let Some(comp) = guard.as_mut() {
@@ -1484,7 +1504,7 @@ pub fn poll_render() {
     // composition always paints the whole stack within the damage.
     framebuffer::with_fb(|fb| {
         let info = *fb.info();
-        let (front, _) = fb.shadow_ptr();
+        let front = fb.begin_partial();
 
         // Erase the baked cursor before repainting windows; it's re-baked
         // + blitted at the end so the partial update stays flicker-free.
@@ -1514,7 +1534,10 @@ pub fn poll_render() {
             finish_and_blit(fb, front, &info, &regions, cur_old, cur_had);
         } else {
             cursor::save_under_and_bake(front, &info);
-            blit_cursor_bbox(fb, cur_old, cur_had);
+            let boxed: alloc::vec::Vec<_> = cursor_box(cur_old, cur_had).into_iter().collect();
+            if !fb.end_partial(&boxed) {
+                blit_cursor_bbox(fb, cur_old, cur_had);
+            }
         }
     });
 }

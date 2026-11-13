@@ -118,6 +118,11 @@ pub const CAP_PRESENT: i32 = 16;
 pub const CAP_BACKLIGHT: i32 = 32;
 /// The module decodes JPEG frames into scene buffers (`OP_JPEG`).
 pub const CAP_JPEG: i32 = 64;
+/// With `CAP_PRESENT`: the display scans the shadow a whole-frame copy
+/// names (a flip at the next vblank), so the CPU never draws into the
+/// shadow on screen; every update is drawn into the other one and
+/// presented whole (`framebuffer::begin_partial`).
+pub const CAP_FLIP: i32 = 128;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
@@ -311,6 +316,8 @@ static PRESENT: AtomicBool = AtomicBool::new(false);
 static BACKLIGHT: AtomicBool = AtomicBool::new(false);
 /// It also decodes JPEG frames (`CAP_JPEG`).
 static JPEG: AtomicBool = AtomicBool::new(false);
+/// It presents by flipping between the shadows (`CAP_FLIP`).
+static FLIP: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Every job up to this sequence number is completed. Jobs that touch a
 /// buffer complete in order; a job without buffers (a guest's ccmd waiting
@@ -761,10 +768,12 @@ pub fn ready(dev: DevId, caps: i32) -> i32 {
     PRESENT.store(caps & CAP_PRESENT != 0, Ordering::Release);
     BACKLIGHT.store(caps & CAP_BACKLIGHT != 0, Ordering::Release);
     JPEG.store(caps & CAP_JPEG != 0, Ordering::Release);
+    FLIP.store(caps & CAP_PRESENT != 0 && caps & CAP_FLIP != 0, Ordering::Release);
     crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}{}{}",
         if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
         if caps & CAP_CURSOR != 0 { ", hardware cursor" } else { "" },
-        if caps & CAP_PRESENT != 0 { ", presented by flips" } else { "" },
+        if caps & CAP_FLIP != 0 && caps & CAP_PRESENT != 0 { ", the shadows flipped on screen" }
+        else if caps & CAP_PRESENT != 0 { ", presented by flips" } else { "" },
         if caps & CAP_BACKLIGHT != 0 { ", backlight" } else { "" },
         if caps & CAP_JPEG != 0 { ", JPEG decode" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
@@ -1534,6 +1543,11 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
     };
     wake_module();
     Some(seq)
+}
+
+/// Whether the display scans the front shadow itself (`CAP_FLIP`).
+pub fn flips() -> bool {
+    READY.load(Ordering::Acquire) && FLIP.load(Ordering::Acquire)
 }
 
 /// Whether the display shows the framebuffer only as the module presents
