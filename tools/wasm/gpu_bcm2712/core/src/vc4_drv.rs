@@ -99,6 +99,78 @@ impl Vc4 {
     }
 }
 
+impl Vc4 {
+    /// The modesets of the takeover: the first connected connector on its
+    /// pixel valve, in a mode of the framebuffer's size when the sink has
+    /// one (the firmware drove that size), else in the fbdev client's
+    /// choice `client`. The other pixel valve stays off.
+    pub fn takeover_modesets(&self, client: &drm_client_dev, width: u32, height: u32) -> drm_client_dev {
+        let mut out = drm_client_dev::new(self.crtc.len() as u32);
+        let Some((i, c)) = self.connectors.iter().enumerate()
+            .find(|(_, c)| c.status == drm_connector_status::connector_status_connected)
+        else {
+            return out;
+        };
+        let Some(crtc) = (0..self.crtc.len()).find(|&k| self.crtc[k].data.hdmi as usize == i) else { return out };
+
+        let exact = c.modes.iter().find(|m| m.hdisplay as u32 == width && m.vdisplay as u32 == height).cloned();
+        let mode = exact.or_else(|| client.modesets.get(crtc).and_then(|m| m.mode.clone()));
+        if let Some(mode) = mode {
+            out.modesets[crtc].mode = Some(mode);
+            out.modesets[crtc].connectors.push(i);
+        }
+        out
+    }
+
+    /// `disp_intr`'s chained handler (`brcmstb_l2_intc_irq_handle`): the
+    /// HVS channels' EOF lines.
+    pub fn disp_intr_handler(&mut self, hw: &mut impl Hw) {
+        let mut status = self.disp_intr.pending(hw);
+        while status != 0 {
+            let line = status.trailing_zeros();
+            status &= !(1 << line);
+            if !self.disp_intr.level_enter(hw, line) {
+                continue;
+            }
+            let mut ret = crate::irq_brcmstb_l2::IrqReturn::None;
+            for ch in 0..crate::vc4_hvs::EOF_IRQ.len() {
+                if crate::vc4_hvs::EOF_IRQ[ch] == line && self.hvs.eof_irq_handler(hw, &mut self.disp_intr, ch as u32) {
+                    ret = crate::irq_brcmstb_l2::IrqReturn::Handled;
+                }
+            }
+            self.disp_intr.level_exit(hw, line, ret);
+        }
+    }
+
+    /// `aon_intr`'s chained handler for the HDMI hotplug lines
+    /// (threaded, oneshot): the ports whose plug state changed, as a
+    /// bit mask. The thread's work (`vc4_hdmi_hpd_irq_thread`: probe
+    /// again, commit) is the caller's; each line is unmasked after it.
+    pub fn aon_intr_handler(&mut self, hw: &mut impl Hw) -> u32 {
+        let mut ports = 0;
+        let mut status = self.aon_intr.pending(hw);
+        while status != 0 {
+            let line = status.trailing_zeros();
+            status &= !(1 << line);
+            if !self.aon_intr.level_enter(hw, line) {
+                continue;
+            }
+            let mut ret = crate::irq_brcmstb_l2::IrqReturn::None;
+            for port in 0..2 {
+                if crate::vc4_hdmi::HPD_IRQ[port].contains(&line) {
+                    ports |= 1 << port;
+                    ret = crate::irq_brcmstb_l2::IrqReturn::WakeThread;
+                }
+            }
+            self.aon_intr.level_exit(hw, line, ret);
+            if ret == crate::irq_brcmstb_l2::IrqReturn::WakeThread {
+                self.aon_intr.thread_done(hw, line);
+            }
+        }
+        ports
+    }
+}
+
 /// The device as the DRM core's probe sees it.
 struct Kms<'a, H: Hw> {
     vc4: &'a mut Vc4,

@@ -114,6 +114,11 @@ unsafe extern "C" {
     fn npk_irq_register_gsi(gsi: i32, flags: i32) -> i32;
     fn npk_irq_arm(vector: i32) -> i64;
     fn npk_irq_wait(vector: i32, since: i64, timeout_ms: i32) -> i32;
+    fn npk_dt_bind(compat_ptr: i32, compat_len: i32) -> i32;
+    fn npk_mmio_map_dt(part: i32, reg: i32) -> i32;
+    fn npk_irq_register_dt(part: i32, index: i32) -> i32;
+    fn npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
+    fn npk_fw_display_done() -> i32;
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
 
     fn npk_netdev_register(mac_ptr: i32) -> i32;
@@ -281,6 +286,19 @@ plain! {
     fn irq_register_gsi = npk_irq_register_gsi(gsi: i32, flags: i32) -> i32;
     fn irq_arm = npk_irq_arm(vector: i32) -> i64;
     fn irq_wait = npk_irq_wait(vector: i32, since: i64, timeout_ms: i32) -> i32;
+    /// AArch64: window `reg` of display-set part `part` (0 hvs, 1/2 pixel
+    /// valves, 3 disp_intr, 4 dvp, 5/6 hdmi, 7/8 ddc, 9 bsc_irq,
+    /// 10 aon_intr), after `dt_bind`; a handle for `mmio_*`, or -1.
+    fn mmio_map_dt = npk_mmio_map_dt(part: i32, reg: i32) -> i32;
+    /// AArch64: interrupt `index` of display-set part `part`; a vector for
+    /// `irq_arm`/`irq_wait`, or -1.
+    fn irq_register_dt = npk_irq_register_dt(part: i32, index: i32) -> i32;
+    /// AArch64: a display firmware clock (4 core, 16 disp, 13 M2MC,
+    /// 14 PIXEL_BVB); `op` 0 rate, 1 max, 2 min, 3 set `rate`, 4 enable,
+    /// 5 disable. The rate in Hz, or -1.
+    fn fw_clock = npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
+    /// AArch64: the firmware stops driving the display; 0 or -1.
+    fn fw_display_done = npk_fw_display_done() -> i32;
     fn gpudev_register = npk_gpudev_register(version: i32) -> i32;
     fn gpudev_bo_bound = npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
     /// Buffer `id`'s pages hold a picture only the card reads (tiled).
@@ -350,6 +368,9 @@ macro_rules! fills {
 }
 
 reads! {
+    /// AArch64: bind the device-tree display set whose HVS is compatible
+    /// with `data` (`brcm,bcm2712-hvs`); 0 or -1. HARDWARE.
+    fn dt_bind = npk_dt_bind -> i32;
     /// To the terminal the module runs in (or the boot log).
     fn print = npk_print;
     /// To the boot log.

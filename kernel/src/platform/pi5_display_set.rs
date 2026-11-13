@@ -180,6 +180,9 @@ pub enum ClockOp {
     SetRate(u32),
     /// `raspberrypi_fw_prepare`: on, at the rate it has.
     Enable,
+    /// `raspberrypi_fw_unprepare`'s state change: off (the caller lowers
+    /// the rate first, as Linux does).
+    Disable,
 }
 
 /// `op` on display clock `id`. None for a clock outside the display's, or
@@ -198,6 +201,7 @@ pub fn fw_clock(id: u32, op: ClockOp) -> Option<u32> {
         }
         ClockOp::Enable => rf(fw::RPI_FIRMWARE_SET_CLOCK_STATE, [id, fw::RPI_FIRMWARE_STATE_ENABLE_BIT, 0])
             .map(|a| a[1]),
+        ClockOp::Disable => rf(fw::RPI_FIRMWARE_SET_CLOCK_STATE, [id, 0, 0]).map(|a| a[1]),
     }
 }
 

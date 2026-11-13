@@ -492,3 +492,24 @@ fn fbdev_commit_segment_is_the_whole_commit() {
     let seg = segment(&evs, "drm_fb_helper_set_par", 0);
     assert!(seg.len() > 250, "{} events", seg.len());
 }
+
+/// The takeover keeps the firmware's size when the monitor has a mode of
+/// it (run G's monitor has 1920x1080 at 148.5 MHz), and falls back to
+/// the fbdev client's choice otherwise.
+#[test]
+fn takeover_picks_the_framebuffer_size() {
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    let client = vc4.fbdev_probe(&mut hw);
+
+    let m = vc4.takeover_modesets(&client, 1920, 1080);
+    let mode = m.modesets[0].mode.as_ref().expect("pixel valve 0");
+    assert_eq!((mode.hdisplay, mode.vdisplay, mode.clock), (1920, 1080, 148500));
+    assert_eq!(m.modesets[0].connectors, vec![0]);
+    assert!(m.modesets[1].mode.is_none());
+
+    let m = vc4.takeover_modesets(&client, 1366, 768);
+    assert_eq!(m.modesets[0].mode.as_ref().map(|m| (m.hdisplay, m.vdisplay)), Some((3840, 2160)));
+}

@@ -127,6 +127,20 @@ impl Vc4 {
     /// with `fb` on the primary plane (`__drm_atomic_helper_set_config`),
     /// a CRTC without a mode turned off, then the commit.
     pub fn fbdev_commit(&mut self, hw: &mut impl Hw, client: &drm_client_dev, fb: &drm_framebuffer) -> i32 {
+        self.client_commit(hw, client, fb, false)
+    }
+
+    /// The commit that takes the screen over from the firmware: like the
+    /// fbdev client's, but the primary plane shows all of `fb` (the
+    /// framebuffer the kernel draws into, of the firmware's size) and the
+    /// HVS scales it to the mode when the sizes differ.
+    pub fn takeover_commit(&mut self, hw: &mut impl Hw, client: &drm_client_dev, fb: &drm_framebuffer) -> i32 {
+        self.client_commit(hw, client, fb, true)
+    }
+
+    fn client_commit(&mut self, hw: &mut impl Hw, client: &drm_client_dev, fb: &drm_framebuffer, whole_fb: bool)
+        -> i32
+    {
         let mut s = self.atomic_state_duplicate();
 
         for p in s.planes.iter_mut() {
@@ -174,6 +188,12 @@ impl Vc4 {
                     p.src_y = ms.y << 16;
                     p.src_w = (hdisplay as u32) << 16;
                     p.src_h = (vdisplay as u32) << 16;
+                    if whole_fb {
+                        p.src_x = 0;
+                        p.src_y = 0;
+                        p.src_w = fb.width << 16;
+                        p.src_h = fb.height << 16;
+                    }
                 }
             }
         }

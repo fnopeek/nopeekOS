@@ -1242,7 +1242,7 @@ host_imports! {
 
     // npk_fw_clock(id, op, rate) -> rate in Hz or -1. Firmware clocks 4 core,
     // 16 disp, 13 M2MC, 14 PIXEL_BVB; op 0 get, 1 max, 2 min, 3 set (clamped
-    // to min..max, returns the rate set), 4 enable.
+    // to min..max, returns the rate set), 4 enable, 5 disable.
     #[cfg(target_arch = "aarch64")]
     ctx fn npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
 

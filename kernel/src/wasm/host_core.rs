@@ -2039,7 +2039,7 @@ pub(crate) fn npk_irq_register_dt(ctx: &mut HostState, part: i32, index: i32) ->
 
 /// `npk_fw_clock(id, op, rate) -> rate | -1`: a firmware clock of the
 /// display, through the kernel's mailbox. `op` 0 rate, 1 max, 2 min,
-/// 3 set `rate` (clamped to min..max), 4 enable. Only the bound display's
+/// 3 set `rate` (clamped to min..max), 4 enable, 5 disable. Only the bound display's
 /// clocks: core 4, disp 16, M2MC 13, PIXEL_BVB 14.
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn npk_fw_clock(ctx: &mut HostState, id: i32, op: i32, rate: i64) -> i64 {
@@ -2051,6 +2051,7 @@ pub(crate) fn npk_fw_clock(ctx: &mut HostState, id: i32, op: i32, rate: i64) -> 
         2 => ClockOp::MinRate,
         3 => match u32::try_from(rate) { Ok(r) => ClockOp::SetRate(r), Err(_) => return -1 },
         4 => ClockOp::Enable,
+        5 => ClockOp::Disable,
         _ => return -1,
     };
     let Ok(id) = u32::try_from(id) else { return -1 };
