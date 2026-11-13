@@ -84,6 +84,10 @@ pub const OP_BACKLIGHT: u32 = 13;
 /// `a3` height; the payload is a baseline 4:2:2 JPEG the module decodes
 /// into the target (`CAP_JPEG`).
 pub const OP_JPEG: u32 = 14;
+/// The system goes down: the module turns its outputs off
+/// (`drm_atomic_helper_shutdown`), so the firmware finds the display as at
+/// power-on; an HDMI sink scrambling at 4K is told to stop.
+pub const OP_SHUTDOWN: u32 = 15;
 /// The top of the backlight scale: hundredths of a percent.
 pub const BACKLIGHT_SCALE: u32 = 10_000;
 /// Largest cursor image side (`OP_CURSOR_IMAGE`).
@@ -1598,6 +1602,25 @@ pub fn cursor_supported() -> bool {
 /// Whether the module sets the panel's backlight.
 pub fn backlight_supported() -> bool {
     READY.load(Ordering::Acquire) && BACKLIGHT.load(Ordering::Acquire)
+}
+
+/// How long reboot and halt wait for the module's `OP_SHUTDOWN`.
+const SHUTDOWN_TIMEOUT_MS: u64 = 1000;
+
+/// Before a reboot or power-off: the display module's outputs off
+/// (`OP_SHUTDOWN`), waited for up to `SHUTDOWN_TIMEOUT_MS`. Nothing without
+/// a module.
+pub fn shutdown_display() {
+    let seq = {
+        let mut st = STATE.lock();
+        if st.owner.is_none() {
+            return;
+        }
+        queue_job(&mut st, OP_SHUTDOWN, [0; 6], None, &[])
+    };
+    wake_module();
+    let deadline = crate::time::counter() + SHUTDOWN_TIMEOUT_MS * (crate::time::counter_hz() / 1000);
+    wait_seq_yield(seq, deadline);
 }
 
 /// The panel's backlight on `BACKLIGHT_SCALE`: set to `level`, or only

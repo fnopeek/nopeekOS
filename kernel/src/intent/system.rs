@@ -2137,6 +2137,7 @@ pub fn intent_reboot() -> ! {
     // The reboot notifier, then the devices, then the firmware driver's
     // own shutdown: Linux tells the firmware twice.
     crate::platform::rpi_fw::notify_reboot();
+    crate::gpu::gpudev::shutdown_display();
     crate::xhci::shutdown();
     crate::drivers::mmc_sd::shutdown();
     crate::platform::rpi_fw::notify_reboot();
@@ -2447,6 +2448,7 @@ pub fn intent_halt() -> ! {
     // The reboot notifier, then the devices, then the firmware driver's
     // own shutdown: Linux tells the firmware twice.
     crate::platform::rpi_fw::notify_reboot();
+    crate::gpu::gpudev::shutdown_display();
     crate::xhci::shutdown();
     crate::drivers::mmc_sd::shutdown();
     crate::platform::rpi_fw::notify_reboot();

@@ -70,6 +70,8 @@ const CAP_SCENE: i32 = 2;
 const OP_BO_ADD: u32 = 2;
 const OP_BO_REMOVE: u32 = 3;
 const OP_SCENE: u32 = 4;
+/// `OP_SHUTDOWN`: the system goes down.
+const OP_SHUTDOWN: u32 = 15;
 /// `OP_CURSOR_IMAGE`: `a0` width, `a1` height, `a2`/`a3` hotspot, the
 /// payload premultiplied ARGB8888; `OP_CURSOR_MOVE`: `a0` x, `a1` y,
 /// `a2` shown.
@@ -508,6 +510,21 @@ fn show(vc4: &mut Vc4, hw: &mut PiHw, client: &drm_client_dev, kfb: &mut KernelF
     l.say();
 }
 
+/// `drm_atomic_helper_shutdown` as the system goes down: V3D's interrupts
+/// off, then every output off in one commit, which disables the HDMI
+/// encoders and with them a sink's scrambling, so the firmware starts the
+/// next boot on a display as it was at power-on.
+fn shutdown(vc4: &mut Vc4, hw: &mut PiHw, kfb: &KernelFb, p: &mut Present) -> i32 {
+    if p.scenes.is_some() {
+        gpu_bcm2712_core::v3d::irq_disable(hw);
+    }
+    let off = drm_client_dev::new(vc4.crtc.len() as u32);
+    let ret = vc4.takeover_commit(hw, &off, &framebuffer(kfb));
+    p.shown = 0;
+    Line::new().s("outputs off for the shutdown").s(if ret != 0 { ", failed" } else { "" }).say();
+    ret
+}
+
 /// The kernel's framebuffer as the plane's.
 fn framebuffer(kfb: &KernelFb) -> drm_framebuffer {
     drm_framebuffer {
@@ -589,6 +606,7 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
                 (OP_BO_ADD, _) => p.scenes.as_mut().map_or(-1, |s| s.add(a[0])),
                 (OP_BO_REMOVE, _) => p.scenes.as_mut().map_or(-1, |s| s.remove(a[0])),
                 (OP_SCENE, _) => p.scenes.as_mut().map_or(-1, |s| s.run(hw, word(0) as i32, &a)),
+                (OP_SHUTDOWN, _) => shutdown(vc4, hw, kfb, p),
                 _ => -1,
             };
             npk_sys::gpudev_complete(word(0) as i32, status);
