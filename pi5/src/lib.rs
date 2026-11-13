@@ -28,6 +28,7 @@ pub mod phy;
 pub mod reset;
 pub mod rp1;
 pub mod rpi_fw;
+pub mod v3d;
 pub mod vc4_regs;
 
 #[cfg(test)]
@@ -38,6 +39,8 @@ mod tests_eth;
 mod tests_iommu;
 #[cfg(test)]
 mod tests_fan;
+#[cfg(test)]
+mod tests_v3d;
 
 /// How far bring-up came.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

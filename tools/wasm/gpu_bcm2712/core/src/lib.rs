@@ -30,6 +30,8 @@ pub mod i2c_brcmstb;
 pub mod irq_brcmstb_l2;
 pub mod linux;
 pub mod regs;
+pub mod shaders_gen;
+pub mod v3d;
 pub mod vc4_crtc;
 pub mod vc4_drv;
 pub mod vc4_hdmi;

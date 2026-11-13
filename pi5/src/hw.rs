@@ -25,6 +25,12 @@ pub enum Block {
     /// The AVS monitor with the temperature sensor
     /// (`brcm,bcm2711-avs-monitor`).
     Avs,
+    /// The power and reset controller (`brcm,bcm2712-pm`).
+    Pm,
+    /// V3D's `hub`, `core0` and `sms` windows (`brcm,2712-v3d`).
+    V3dHub,
+    V3dCore,
+    V3dSms,
 }
 
 /// MMIO and delays. Widths are 1, 2 or 4 bytes.

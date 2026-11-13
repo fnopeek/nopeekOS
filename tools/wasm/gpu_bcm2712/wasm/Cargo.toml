@@ -1,6 +1,6 @@
 [package]
 name = "gpu_bcm2712"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 description = "Raspberry Pi 5 display (vc4 on BCM2712), after Linux"
@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 [dependencies]
 gpu_bcm2712_core = { path = "../core" }
 drm_core = { path = "../../drm_core" }
+gpu_scene = { path = "../../gpu_scene" }
 npk_sys = { path = "../../sdk/npk_sys", features = ["alloc"] }
 nopeek_widgets = { path = "../../sdk/widgets", features = ["heap"] }
 

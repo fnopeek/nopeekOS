@@ -38,7 +38,7 @@ with mesa-v3dv-int64.patch applied, built once for v3dv and the drm-shim:
       -Dlmsensors=disabled -Dbuild-tests=false
     ninja -C build-v3d
 
-    python3 gen_shaders.py            # rewrite ../wasm/src/shaders_gen.rs
+    python3 gen_shaders.py            # rewrite ../core/src/shaders_gen.rs
     python3 gen_shaders.py --check    # fail if it is not what it would write
 """
 
@@ -53,7 +53,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SHADERS = os.path.join(HERE, "..", "..", "gpu_shaders")
-OUT = os.path.join(HERE, "..", "wasm", "src", "shaders_gen.rs")
+OUT = os.path.join(HERE, "..", "core", "src", "shaders_gen.rs")
 G = os.path.expanduser("~/.cache/nopeekos/gpu-shaders")
 MESA = os.path.join(G, "src", "mesa")
 BUILD = os.path.join(G, "build-v3d")

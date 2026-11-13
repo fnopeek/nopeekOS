@@ -36,6 +36,11 @@ pub enum Block {
     BscIrq,
     /// The always-on L2 interrupt controller (HDMI hotplug, CEC).
     AonIntr,
+    /// V3D's hub, at its own offsets; the kernel keeps the MMU's
+    /// registers (0x1000 to 0x12ff) out of reach.
+    V3dHub,
+    /// V3D's core 0.
+    V3dCore,
 }
 
 /// The GIC lines of the display set, as `npk_irq_register_dt` names them.
@@ -45,6 +50,8 @@ pub enum Spi {
     DispIntr,
     BscIrq,
     AonIntr,
+    V3dHub,
+    V3dCore,
 }
 
 /// A firmware clock operation (`npk_fw_clock`).

@@ -616,3 +616,22 @@ fn cursor_moves_by_async_update() {
     assert_eq!(vc4.cursor_update(&mut regs, 0, None, 0, 0), 0);
     assert_eq!(vc4.kms.crtcs[0].plane_mask & (1 << n), 0, "the cursor is off");
 }
+
+/// The CSD words the module computes for each program are the ones v3dv
+/// wrote for the same dispatch (`shaders_gen::recorded`).
+#[test]
+fn csd_cfg_is_v3dvs() {
+    use crate::shaders_gen as sg;
+    use crate::v3d::{csd_cfg, CsdProgram};
+    for (p, r) in [(&sg::COMPOSE, &sg::recorded::COMPOSE), (&sg::BLUR_DOWN, &sg::recorded::BLUR_DOWN),
+                   (&sg::BLUR_BOX, &sg::recorded::BLUR_BOX), (&sg::FILL_PATTERN, &sg::recorded::FILL_PATTERN)] {
+        let prog = CsdProgram {
+            threads: p.threads,
+            single_seg: p.single_seg,
+            local_size: p.local_size,
+            can_use_supergroups: p.can_use_supergroups,
+            has_control_barrier: p.has_control_barrier,
+        };
+        assert_eq!(csd_cfg(&prog, r.rev, r.qpu_count, r.grid, r.code_va, r.cfg[6]), r.cfg, "{}", p.name);
+    }
+}

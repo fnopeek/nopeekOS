@@ -35,10 +35,11 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "gpu_bcm2712"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "drm_core",
  "gpu_bcm2712_core",
+ "gpu_scene",
  "nopeek_widgets",
  "npk_sys",
 ]
@@ -49,6 +50,10 @@ version = "0.1.0"
 dependencies = [
  "drm_core",
 ]
+
+[[package]]
+name = "gpu_scene"
+version = "0.1.0"
 
 [[package]]
 name = "lock_api"

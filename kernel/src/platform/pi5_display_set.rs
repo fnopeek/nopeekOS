@@ -19,14 +19,23 @@ use pi5_core::rpi_fw as fw;
 
 /// The parts, by the index `npk_mmio_map_dt` and `npk_irq_register_dt`
 /// take: 0 hvs, 1 pixelvalve0, 2 pixelvalve1, 3 disp_intr, 4 dvp, 5 hdmi0,
-/// 6 hdmi1, 7 ddc0, 8 ddc1, 9 bsc_irq, 10 aon_intr.
-const PARTS: usize = 11;
+/// 6 hdmi1, 7 ddc0, 8 ddc1, 9 bsc_irq, 10 aon_intr, 11 v3d.
+///
+/// V3D's windows are its `hub` below the MMU's registers, the `hub` above
+/// them, and `core0`; its interrupts 0 hub, 1 core (`v3d_irq_init`). The
+/// MMU (`V3D_MMUC_CONTROL` 0x1000 to `V3D_MMU_DEBUG_INFO` 0x1238) and the
+/// `sms` window are the kernel's (`pi5_v3d`): the page table bounds what
+/// V3D reaches. Without a V3D node part 11 has neither.
+const PARTS: usize = 12;
+const V3D: usize = 11;
+const V3D_MMU_START: u64 = 0x1000;
+const V3D_MMU_END: u64 = 0x1300;
 
 struct Block {
     /// The node's `reg` entries, CPU physical, in the binding's order.
     regs: Vec<(u64, u64)>,
-    /// Its GIC interrupt ID, for a node wired straight to the GIC.
-    spi: Option<u32>,
+    /// Its GIC interrupt IDs, for a node wired straight to the GIC.
+    spis: Vec<u32>,
 }
 
 pub struct Set {
@@ -72,15 +81,36 @@ fn block(fdt: &Fdt, node: &Node) -> Option<Block> {
     if regs.is_empty() { return None; }
     // A GIC SPI: no `interrupt-parent` of its own (the consumers of an L2
     // controller have one), cells type 0, line, level-high 4.
-    let spi = match (fdt.prop(node, b"interrupt-parent"), fdt.prop_cell(node, b"interrupts", 0)) {
-        (None, Some(0)) => {
-            let line = fdt.prop_cell(node, b"interrupts", 1)?;
-            if fdt.prop_cell(node, b"interrupts", 2) != Some(4) { return None; }
-            Some(line + 32)
+    let mut spis = Vec::new();
+    if fdt.prop(node, b"interrupt-parent").is_none() {
+        let mut i = 0;
+        while let Some(kind) = fdt.prop_cell(node, b"interrupts", i * 3) {
+            let line = fdt.prop_cell(node, b"interrupts", i * 3 + 1)?;
+            if kind != 0 || fdt.prop_cell(node, b"interrupts", i * 3 + 2) != Some(4) { return None; }
+            spis.push(line + 32);
+            i += 1;
         }
-        _ => None,
+    }
+    Some(Block { regs, spis })
+}
+
+/// Part 11: V3D's `hub` split around the MMU's registers, and `core0`.
+fn v3d_block(fdt: &Fdt) -> Block {
+    let none = Block { regs: Vec::new(), spis: Vec::new() };
+    let Some(node) = compatible(fdt, b"brcm,2712-v3d") else { return none };
+    let Some(b) = block(fdt, &node) else { return none };
+    let named = |name: &[u8]| -> Option<(u64, u64)> {
+        let idx = fdt.prop_str_index(&node, b"reg-names", name)?;
+        b.regs.get(idx).copied()
     };
-    Some(Block { regs, spi })
+    let (Some((ha, hl)), Some(core)) = (named(b"hub"), named(b"core0")) else { return none };
+    if hl <= V3D_MMU_END || b.spis.len() != 2 {
+        return none;
+    }
+    Block {
+        regs: alloc::vec![(ha, V3D_MMU_START), (ha + V3D_MMU_END, hl - V3D_MMU_END), core],
+        spis: b.spis,
+    }
 }
 
 fn resolve(fdt: &Fdt) -> Option<Set> {
@@ -117,6 +147,7 @@ fn resolve(fdt: &Fdt) -> Option<Set> {
         block(fdt, &ddc1)?,
         block(fdt, &bsc_irq)?,
         block(fdt, &aon_intr)?,
+        v3d_block(fdt),
     ];
     // Every window is a device window of the identity map, never RAM.
     if blocks.iter().flat_map(|b| b.regs.iter())
@@ -125,7 +156,7 @@ fn resolve(fdt: &Fdt) -> Option<Set> {
         return None;
     }
     // The pixel valves and the interrupt controllers raise SPIs of their own.
-    if [1, 2, 3, 9, 10].iter().any(|&p: &usize| blocks[p].spi.is_none()) { return None; }
+    if [1, 2, 3, 9, 10].iter().any(|&p: &usize| blocks[p].spis.len() != 1) { return None; }
     Some(Set { hvs: blocks[0].regs[0].0, blocks })
 }
 
@@ -137,8 +168,12 @@ impl Set {
 
     /// The GIC interrupt ID of part `part`'s interrupt `index`.
     pub fn spi(&self, part: usize, index: usize) -> Option<u32> {
-        if index != 0 { return None; }
-        self.blocks.get(part)?.spi
+        self.blocks.get(part)?.spis.get(index).copied()
+    }
+
+    /// Whether the set has V3D (part 11).
+    pub fn has_v3d(&self) -> bool {
+        !self.blocks[V3D].regs.is_empty()
     }
 }
 

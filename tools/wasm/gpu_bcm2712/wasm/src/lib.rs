@@ -23,6 +23,7 @@
 extern crate alloc;
 
 mod hw;
+mod scene;
 
 use drm_core::drm_client_modeset::drm_client_dev;
 use drm_core::drm_fourcc::drm_format_info;
@@ -63,6 +64,12 @@ const CAP_COPY: i32 = 1;
 const CAP_PRESENT: i32 = 16;
 const CAP_FLIP: i32 = 128;
 const CAP_CURSOR: i32 = 8;
+const CAP_SCENE: i32 = 2;
+/// `OP_BO_ADD` / `OP_BO_REMOVE`: `a0` buffer; `OP_SCENE`: `a0` target,
+/// `a1` payload bytes.
+const OP_BO_ADD: u32 = 2;
+const OP_BO_REMOVE: u32 = 3;
+const OP_SCENE: u32 = 4;
 /// `OP_CURSOR_IMAGE`: `a0` width, `a1` height, `a2`/`a3` hotspot, the
 /// payload premultiplied ARGB8888; `OP_CURSOR_MOVE`: `a0` x, `a1` y,
 /// `a2` shown.
@@ -166,11 +173,16 @@ pub extern "C" fn _start() {
     if caps != 0 && cursor.is_some() {
         caps |= CAP_CURSOR;
     }
+    // V3D composes the scenes once its dispatch path proved itself.
+    let scenes = if caps != 0 { Scenes::new(&mut hw) } else { None };
+    if scenes.is_some() {
+        caps |= CAP_SCENE;
+    }
     if npk_sys::gpudev_ready(caps) < 0 {
         Line::new().s("the kernel did not take the presenting, the compositor copies on the CPU").say();
     }
 
-    let mut p = Present { shown: 0, shadows: shadows.unwrap_or([kfb, kfb]), cursor };
+    let mut p = Present { shown: 0, shadows: shadows.unwrap_or([kfb, kfb]), cursor, scenes };
     serve(&mut vc4, &mut hw, &mut kfb, &mut p);
 }
 
@@ -223,6 +235,109 @@ struct Present {
     shown: u32,
     shadows: [KernelFb; 2],
     cursor: Option<Cursor>,
+    scenes: Option<Scenes>,
+}
+
+/// A buffer a scene reads or writes, mapped for V3D.
+#[derive(Clone, Copy)]
+struct SceneBo {
+    id: u32,
+    surface: gpu_scene::scene::surface,
+    /// The mapping, to take away again.
+    va: u32,
+}
+
+/// The scene service: V3D's composer and the buffers the kernel
+/// registered with it, the shadows (1 and 2) first.
+struct Scenes {
+    c: scene::Composer,
+    bos: alloc::vec::Vec<SceneBo>,
+}
+
+/// Buffer `id`'s pages, in order (`npk_gpudev_bo_pages`).
+fn bo_page_list(id: u32, pages: u32) -> Option<alloc::vec::Vec<u64>> {
+    let mut list = alloc::vec![0u64; pages as usize];
+    let mut at = 0;
+    while at < list.len() {
+        let n = npk_sys::gpudev_bo_pages(id as i32, at as i32, &mut list[at..]);
+        if n <= 0 {
+            return None;
+        }
+        at += n as usize;
+    }
+    Some(list)
+}
+
+/// Buffer `id` mapped for V3D: its description and V3D address.
+fn map_bo(id: u32) -> Option<SceneBo> {
+    let mut o = [0u8; 40];
+    if npk_sys::gpudev_bo_info(id as i32, &mut o) < 0 {
+        return None;
+    }
+    let u32_at = |i: usize| u32::from_le_bytes([o[i], o[i + 1], o[i + 2], o[i + 3]]);
+    let size = u64::from_le_bytes([o[8], o[9], o[10], o[11], o[12], o[13], o[14], o[15]]);
+    let (pitch, width, height, offset, pages) = (u32_at(16), u32_at(20), u32_at(24), u32_at(32), u32_at(36));
+    let list = bo_page_list(id, pages)?;
+    let va = npk_sys::v3d_map(&list);
+    if va <= 0 {
+        return None;
+    }
+    let va = va as u32;
+    let surface = gpu_scene::scene::surface { va: (va + offset) as u64, pitch, width, height, size };
+    Some(SceneBo { id, surface, va })
+}
+
+impl Scenes {
+    fn new(hw: &mut PiHw) -> Option<Scenes> {
+        let mut c = scene::composer_init(hw)?;
+        if !c.self_test(hw) {
+            return None;
+        }
+        let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
+        Some(Scenes { c, bos })
+    }
+
+    /// `OP_BO_ADD`: mapped for V3D, its address reported.
+    fn add(&mut self, id: u32) -> i32 {
+        if self.bos.iter().any(|b| b.id == id) {
+            return -22;
+        }
+        let Some(b) = map_bo(id) else { return -22 };
+        if npk_sys::gpudev_bo_bound(id as i32, b.surface.va as i64) < 0 {
+            let _ = npk_sys::v3d_unmap(b.va as i64);
+            return -22;
+        }
+        self.bos.push(b);
+        0
+    }
+
+    /// `OP_BO_REMOVE`: V3D no longer reaches it.
+    fn remove(&mut self, id: u32) -> i32 {
+        let Some(i) = self.bos.iter().position(|b| b.id == id && id > 2) else { return -22 };
+        let b = self.bos.remove(i);
+        let _ = npk_sys::v3d_unmap(b.va as i64);
+        0
+    }
+
+    fn run(&mut self, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> i32 {
+        let bufs = SceneBufs(&self.bos);
+        match self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]) {
+            Ok(_) => 0,
+            Err(e) => {
+                Line::new().s("scene into buffer ").dec(a[0] as u64).s(" refused (").dec(e.unsigned_abs() as u64)
+                    .s(")").say();
+                e
+            }
+        }
+    }
+}
+
+struct SceneBufs<'a>(&'a [SceneBo]);
+
+impl gpu_scene::scene::buffers for SceneBufs<'_> {
+    fn surface(&self, id: u32) -> Option<gpu_scene::scene::surface> {
+        self.0.iter().find(|b| b.id == id).map(|b| b.surface)
+    }
 }
 
 /// The pointer on the cursor plane. Its image lives in one of two slots
@@ -444,6 +559,9 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
                 (OP_COPY_RECT, _) => p.copy(vc4, hw, &a),
                 (OP_CURSOR_IMAGE, Some(c)) => c.image(vc4, hw, word(0) as i32, &a),
                 (OP_CURSOR_MOVE, Some(c)) => c.moved(vc4, hw, &a),
+                (OP_BO_ADD, _) => p.scenes.as_mut().map_or(-1, |s| s.add(a[0])),
+                (OP_BO_REMOVE, _) => p.scenes.as_mut().map_or(-1, |s| s.remove(a[0])),
+                (OP_SCENE, _) => p.scenes.as_mut().map_or(-1, |s| s.run(hw, word(0) as i32, &a)),
                 _ => -1,
             };
             npk_sys::gpudev_complete(word(0) as i32, status);

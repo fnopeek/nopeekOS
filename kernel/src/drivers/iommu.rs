@@ -56,7 +56,10 @@ pub fn grant(dev: DevId, phys: u64, pages: usize) {
             amd_vi::grant(dev, phys, pages);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(base) => crate::drivers::bcm2712_iommu::grant(base, phys, pages),
+        DevId::Dt(base) => {
+            crate::drivers::bcm2712_iommu::grant(base, phys, pages);
+            note_v3d(base, &[phys], pages, true);
+        }
     }
 }
 
@@ -68,7 +71,10 @@ pub fn grant_list(dev: DevId, list: &[u64]) {
             amd_vi::grant_list(dev, list);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(base) => crate::drivers::bcm2712_iommu::grant_list(base, list),
+        DevId::Dt(base) => {
+            crate::drivers::bcm2712_iommu::grant_list(base, list);
+            note_v3d(base, list, 1, true);
+        }
     }
 }
 
@@ -82,7 +88,10 @@ pub fn revoke(dev: DevId, phys: u64, pages: usize) {
             amd_vi::revoke(dev, phys, pages);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(base) => crate::drivers::bcm2712_iommu::revoke(base, phys, pages),
+        DevId::Dt(base) => {
+            note_v3d(base, &[phys], pages, false);
+            crate::drivers::bcm2712_iommu::revoke(base, phys, pages);
+        }
     }
 }
 
@@ -94,7 +103,23 @@ pub fn revoke_list(dev: DevId, list: &[u64]) {
             amd_vi::revoke_list(dev, list);
         }
         #[cfg(target_arch = "aarch64")]
-        DevId::Dt(base) => crate::drivers::bcm2712_iommu::revoke_list(base, list),
+        DevId::Dt(base) => {
+            note_v3d(base, list, 1, false);
+            crate::drivers::bcm2712_iommu::revoke_list(base, list);
+        }
+    }
+}
+
+/// The display device's grants also bound what its V3D may be given
+/// (`pi5_v3d`), whether or not the HVS's IOMMU translates: a revoke takes
+/// V3D's mappings of the pages away first.
+#[cfg(target_arch = "aarch64")]
+fn note_v3d(base: u64, starts: &[u64], pages: usize, grant: bool) {
+    if !crate::platform::pi5_display_set::is_hvs(base) {
+        return;
+    }
+    for &p in starts {
+        crate::platform::pi5_v3d::note(p, pages, grant);
     }
 }
 

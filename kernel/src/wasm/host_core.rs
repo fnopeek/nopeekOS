@@ -2064,6 +2064,45 @@ pub(crate) fn npk_fw_display_done(ctx: &mut HostState) -> i32 {
     if crate::platform::pi5_display_set::display_done() { 0 } else { -1 }
 }
 
+/// Pages one `npk_v3d_map` maps at most: 256 MiB.
+#[cfg(target_arch = "aarch64")]
+const V3D_MAP_MAX_PAGES: i32 = 1 << 16;
+
+/// `npk_v3d_open() -> rev << 8 | QPUs, or -1`: the bound display set's V3D
+/// powered up with the kernel's page table (`pi5_v3d::open`); the number
+/// of QPUs (a program's spill buffer) and the hardware revision (the CSD
+/// batch count).
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_open(ctx: &mut HostState) -> i32 {
+    let Some(s) = bound_set(ctx) else { return -1 };
+    if !s.has_v3d() { return -1; }
+    crate::platform::pi5_v3d::open().map_or(-1, |i| ((i.rev & 0xff) << 8 | (i.qpus & 0xff)) as i32)
+}
+
+/// `npk_v3d_map(pages_ptr, n) -> V3D address | -1`: the `n` 4 KiB pages
+/// whose physical addresses (u64 each) are at `pages_ptr`, mapped in order
+/// at a new V3D address. Every page must be granted to the display device
+/// (a gpudev buffer, a DMA buffer of the module); the mapping goes when
+/// any of its pages is revoked, or with `npk_v3d_unmap`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_map(mem: &mut [u8], ctx: &mut HostState, pages_ptr: i32, n: i32) -> i64 {
+    if bound_set(ctx).is_none() || n <= 0 || n > V3D_MAP_MAX_PAGES { return -1; }
+    let Some(b) = guest(mem, pages_ptr, n as usize * 8) else { return -1 };
+    let pages: alloc::vec::Vec<u64> = b.chunks_exact(8)
+        .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
+        .collect();
+    crate::platform::pi5_v3d::map(&pages).map_or(-1, |va| va as i64)
+}
+
+/// `npk_v3d_unmap(va) -> 0 | -1`: the mapping at V3D address `va` taken
+/// away.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_unmap(ctx: &mut HostState, va: i64) -> i32 {
+    if bound_set(ctx).is_none() { return -1; }
+    let Ok(va) = u32::try_from(va) else { return -1 };
+    if crate::platform::pi5_v3d::unmap(va) { 0 } else { -1 }
+}
+
 /// Is `vector` one this module's driver registered?
 fn owns_vector(ctx: &HostState, vector: i32) -> bool {
     ctx.hw.as_ref().is_some_and(|h| h.irqs.iter().any(|&(v, _)| v != 0 && v as i32 == vector))

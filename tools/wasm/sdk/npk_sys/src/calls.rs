@@ -119,6 +119,9 @@ unsafe extern "C" {
     fn npk_irq_register_dt(part: i32, index: i32) -> i32;
     fn npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
     fn npk_fw_display_done() -> i32;
+    fn npk_v3d_open() -> i32;
+    fn npk_v3d_map(pages_ptr: i32, n: i32) -> i64;
+    fn npk_v3d_unmap(va: i64) -> i32;
     fn npk_gpudev_framebuffer(width: i32, height: i32) -> i32;
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
 
@@ -300,6 +303,11 @@ plain! {
     fn fw_clock = npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
     /// AArch64: the firmware stops driving the display; 0 or -1.
     fn fw_display_done = npk_fw_display_done() -> i32;
+    /// AArch64: the display set's V3D powered up with the kernel's page
+    /// table; `rev << 8 | QPUs`, or -1.
+    fn v3d_open = npk_v3d_open() -> i32;
+    /// AArch64: the V3D mapping at `va` taken away; 0 or -1.
+    fn v3d_unmap = npk_v3d_unmap(va: i64) -> i32;
     /// AArch64: the kernel draws into a framebuffer of `width` x `height`
     /// (32 bpp) from now on, gpudev buffer 0; 0 or -1. Before `gpudev_ready`.
     fn gpudev_framebuffer = npk_gpudev_framebuffer(width: i32, height: i32) -> i32;
@@ -1145,4 +1153,11 @@ pub fn camera_read(reader: i32, buf: &mut [u8]) -> Result<Option<(usize, CameraF
 pub fn camera_close(reader: i32) -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_camera_close(reader) }
+}
+
+/// AArch64: the 4 KiB pages `pages` (physical addresses, granted to the
+/// display device) mapped in order for V3D; the V3D address, or -1.
+pub fn v3d_map(pages: &[u64]) -> i64 {
+    // SAFETY: FFI; the kernel reads `pages.len()` u64s, borrowed for the call.
+    unsafe { npk_v3d_map(pages.as_ptr() as i32, pages.len() as i32) }
 }

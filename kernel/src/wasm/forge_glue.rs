@@ -1251,6 +1251,20 @@ host_imports! {
     #[cfg(target_arch = "aarch64")]
     ctx fn npk_fw_display_done() -> i32;
 
+    // npk_v3d_open() -> rev << 8 | QPUs, or -1: the display set's V3D
+    // powered up with the kernel's page table.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_open() -> i32;
+
+    // npk_v3d_map(pages_ptr, n) -> V3D address or -1: n granted 4 KiB pages
+    // (u64 physical addresses) mapped in order.
+    #[cfg(target_arch = "aarch64")]
+    mem fn npk_v3d_map(pages_ptr: i32, n: i32) -> i64;
+
+    // npk_v3d_unmap(va) -> 0 or -1.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_unmap(va: i64) -> i32;
+
     // npk_irq_arm(vector) -> fired-count snapshot, or -1 on a bad vector. Call
     // before submitting/enabling the device work that triggers the IRQ; pass
     // the result to npk_irq_wait. Also routes the IRQ to the calling core.
