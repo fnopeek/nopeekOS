@@ -267,6 +267,7 @@ DRM_FORMAT_MOD_BROADCOM_PARAM_BITS = __fourcc_mod_broadcom_param_bits
 DRM_FORMAT_YUV444
 DRM_FORMAT_YVU444
 DRM_FORMAT_P030
+DRM_FORMAT_ARGB8888
 DRM_FORMAT_XRGB8888
 DRM_FORMAT_RGB565
 # Plane rotation and blending (uapi/drm/drm_mode.h, drm_blend.h)

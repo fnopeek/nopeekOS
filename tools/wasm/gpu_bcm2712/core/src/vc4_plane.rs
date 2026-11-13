@@ -53,6 +53,8 @@ pub struct Vc4PlaneState {
     pub pos2_offset: u32,
     pub ptr0_offset: [u32; 3],
     pub lbm_offset: u32,
+    /// Where `write_dlist` last put the entry in the HVS's dlist memory.
+    pub hw_dlist: Option<u32>,
     pub crtc_x: i32,
     pub crtc_y: i32,
     pub crtc_w: u32,
@@ -133,7 +135,8 @@ impl Vc4PlaneState {
     }
 
     /// `vc4_plane_write_dlist`: the entry at `dlist` in the HVS's memory.
-    pub fn write_dlist(&self, hw: &mut impl Hw, hvs: &Hvs, dlist: u32) -> u32 {
+    pub fn write_dlist(&mut self, hw: &mut impl Hw, hvs: &Hvs, dlist: u32) -> u32 {
+        self.hw_dlist = Some(dlist);
         for (i, &w) in self.dlist.iter().enumerate() {
             hvs.dlist_write(hw, dlist + i as u32, w);
         }
@@ -1095,4 +1098,65 @@ pub fn vc4_plane_atomic_check(s: &mut Vc4PlaneState, old_enabled: bool, hvs: &mu
     }
 
     vc6_plane_allocate_upm(s, hvs)
+}
+
+/// `vc4_plane_atomic_async_check` after the plane's check built `new`:
+/// only the position words (pos0, pos2) and the pointer word (ptr0) of a
+/// written entry may differ, everything else takes a full commit.
+pub fn vc4_plane_atomic_async_check(old: &Vc4PlaneState, new: &Vc4PlaneState) -> i32 {
+    if old.hw_dlist.is_none() {
+        return -EINVAL;
+    }
+    if old.dlist.len() != new.dlist.len()
+        || old.pos0_offset != new.pos0_offset
+        || old.pos2_offset != new.pos2_offset
+        || old.ptr0_offset[0] != new.ptr0_offset[0]
+        || old.lbm_handle != 0 && old.lbm_offset != new.lbm_offset
+        || (old.lbm_handle == 0) != (new.lbm_handle == 0)
+    {
+        return -EINVAL;
+    }
+    for i in 0..new.dlist.len() as u32 {
+        if i == new.pos0_offset || i == new.pos2_offset || i == new.ptr0_offset[0]
+            || (new.lbm_offset != 0 && i == new.lbm_offset)
+        {
+            continue;
+        }
+        if new.dlist[i as usize] != old.dlist[i as usize] {
+            return -EINVAL;
+        }
+    }
+    0
+}
+
+/// `vc4_plane_atomic_async_update`: the current state takes `new`'s
+/// position, source and framebuffer, and its pos0, pos2 and ptr0 words go
+/// into the entry the HVS reads, in place (writing the whole entry would
+/// smash the context the HVS keeps in it).
+pub fn vc4_plane_atomic_async_update(cur: &mut Vc4PlaneState, new: &Vc4PlaneState, hw: &mut impl Hw, hvs: &Hvs) {
+    let keep_dlist = core::mem::take(&mut cur.dlist);
+    let (hw_dlist, lbm, upm, upm_lines) = (cur.hw_dlist, cur.lbm_handle, cur.upm_handle, cur.upm_buffer_lines);
+    let (pos0, pos2, ptr0, lbm_off) = (cur.pos0_offset, cur.pos2_offset, cur.ptr0_offset, cur.lbm_offset);
+    let mut dlist = keep_dlist;
+    dlist[pos0 as usize] = new.dlist[pos0 as usize];
+    dlist[pos2 as usize] = new.dlist[pos2 as usize];
+    dlist[ptr0[0] as usize] = new.dlist[ptr0[0] as usize];
+    *cur = Vc4PlaneState {
+        dlist,
+        hw_dlist,
+        lbm_handle: lbm,
+        upm_handle: upm,
+        upm_buffer_lines: upm_lines,
+        pos0_offset: pos0,
+        pos2_offset: pos2,
+        ptr0_offset: ptr0,
+        lbm_offset: lbm_off,
+        dlist_initialized: true,
+        ..new.clone()
+    };
+    if let Some(at) = hw_dlist {
+        for off in [pos0, pos2, ptr0[0]] {
+            hvs.dlist_write(hw, at + off, cur.dlist[off as usize]);
+        }
+    }
 }

@@ -575,3 +575,44 @@ fn page_flip_rewrites_only_the_dlist() {
         "no dlist word holds the new address");
     assert_eq!(vc4.kms.planes[0].base.fb.map(|f| f.dma_addr[0]), Some(0x5000_0000));
 }
+
+/// The cursor plane after run G's fbdev commit: showing it is a full
+/// commit with a dlist of both planes, moving it an async update that
+/// writes the entry's pos0, pos2 and ptr0 words in place and nothing else.
+#[test]
+fn cursor_moves_by_async_update() {
+    use drm_core::drm_fourcc::drm_format_info;
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    let client = vc4.fbdev_probe(&mut hw);
+    let mut hw = Strict::new(segment(&evs, "drm_fb_helper_set_par", 0));
+    assert_eq!(vc4.fbdev_commit(&mut hw, &client, &run_g_fb()), 0);
+
+    let cursor = drm_core::drm_plane::drm_framebuffer {
+        format: drm_format_info(drm_core::regs::DRM_FORMAT_ARGB8888).expect("ARGB8888"),
+        width: 64,
+        height: 64,
+        pitches: [256, 0, 0, 0],
+        offsets: [0; 4],
+        modifier: drm_core::regs::DRM_FORMAT_MOD_LINEAR as u64,
+        dma_addr: [0x6000_0000, 0, 0, 0],
+    };
+    let n = vc4.crtc.len();
+    let mut regs = Regs::default();
+    assert_eq!(vc4.cursor_update(&mut regs, 0, Some(&cursor), 100, 200), 0);
+    assert!(vc4.kms.crtcs[0].plane_mask & (1 << n) != 0, "the cursor is on CRTC 0");
+    assert!(vc4.kms.planes[n].hw_dlist.is_some());
+
+    let mut regs = Regs::default();
+    assert_eq!(vc4.cursor_update(&mut regs, 0, Some(&cursor), 300, 400), 0);
+    assert_eq!(regs.writes.len(), 3, "{:x?}", regs.writes);
+    assert!(regs.writes.iter().all(|&(b, _, _)| b == Block::Hvs));
+    let p = &vc4.kms.planes[n];
+    assert_eq!((p.base.crtc_x, p.base.crtc_y), (300, 400));
+
+    let mut regs = Regs::default();
+    assert_eq!(vc4.cursor_update(&mut regs, 0, None, 0, 0), 0);
+    assert_eq!(vc4.kms.crtcs[0].plane_mask & (1 << n), 0, "the cursor is off");
+}

@@ -130,6 +130,10 @@ impl FbConsole {
         if !crate::gpu::gpudev::flips() {
             return false;
         }
+        // Nothing drawn (a pointer the hardware cursor shows): the front stays.
+        if damage.iter().all(|r| r.2 == 0 || r.3 == 0) {
+            return true;
+        }
         self.swap_buffers();
         if present(self, 0, 0, self.info.width, self.info.height) {
             self.commit_front();

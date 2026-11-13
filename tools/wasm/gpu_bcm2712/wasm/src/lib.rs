@@ -14,6 +14,9 @@
 //! already shown (the kernel wrote the rectangle back from its caches
 //! before handing the copy over). The driver itself is `gpu_bcm2712_core`,
 //! replayed against a Linux run on the host.
+//!
+//! The pointer is the HVS's cursor plane (`CAP_CURSOR`): its image in a
+//! buffer of the module's own, a move an async update of the plane.
 
 #![no_std]
 
@@ -59,6 +62,15 @@ const JOB_BYTES: usize = 32;
 const CAP_COPY: i32 = 1;
 const CAP_PRESENT: i32 = 16;
 const CAP_FLIP: i32 = 128;
+const CAP_CURSOR: i32 = 8;
+/// `OP_CURSOR_IMAGE`: `a0` width, `a1` height, `a2`/`a3` hotspot, the
+/// payload premultiplied ARGB8888; `OP_CURSOR_MOVE`: `a0` x, `a1` y,
+/// `a2` shown.
+const OP_CURSOR_IMAGE: u32 = 11;
+const OP_CURSOR_MOVE: u32 = 12;
+/// `gpudev::MAX_CURSOR`: the largest image side.
+const MAX_CURSOR: u32 = 256;
+const CURSOR_SLOT: u32 = MAX_CURSOR * MAX_CURSOR * 4;
 /// `OP_COPY_RECT`: `a0` source, `a1` target buffer, `a2..a5` x, y, w, h.
 const OP_COPY_RECT: u32 = 1;
 
@@ -149,12 +161,16 @@ pub extern "C" fn _start() {
     // The shadows, if the HVS can show them, are presented by flips;
     // otherwise the compositor copies into the framebuffer on the CPU.
     let shadows = bind_shadows(&kfb);
-    let caps = if shadows.is_some() { CAP_COPY | CAP_PRESENT | CAP_FLIP } else { 0 };
+    let cursor = Cursor::new();
+    let mut caps = if shadows.is_some() { CAP_COPY | CAP_PRESENT | CAP_FLIP } else { 0 };
+    if caps != 0 && cursor.is_some() {
+        caps |= CAP_CURSOR;
+    }
     if npk_sys::gpudev_ready(caps) < 0 {
         Line::new().s("the kernel did not take the presenting, the compositor copies on the CPU").say();
     }
 
-    let mut p = Present { shown: 0, shadows: shadows.unwrap_or([kfb, kfb]) };
+    let mut p = Present { shown: 0, shadows: shadows.unwrap_or([kfb, kfb]), cursor };
     serve(&mut vc4, &mut hw, &mut kfb, &mut p);
 }
 
@@ -201,10 +217,86 @@ fn contiguous(id: i32, f: &KernelFb) -> bool {
     true
 }
 
-/// Which buffer the HVS shows: 0 the framebuffer, 1 or 2 a shadow.
+/// Which buffer the HVS shows: 0 the framebuffer, 1 or 2 a shadow; and
+/// the pointer.
 struct Present {
     shown: u32,
     shadows: [KernelFb; 2],
+    cursor: Option<Cursor>,
+}
+
+/// The pointer on the cursor plane. Its image lives in one of two slots
+/// of a DMA buffer, a new image in the slot the HVS does not read (as
+/// Linux's cursor gets a new buffer per image).
+struct Cursor {
+    dma: i32,
+    phys: u64,
+    slot: u32,
+    fb: Option<drm_framebuffer>,
+    hot: (i32, i32),
+    pos: (i32, i32),
+    shown: bool,
+}
+
+impl Cursor {
+    fn new() -> Option<Cursor> {
+        let dma = npk_sys::dma_alloc((2 * CURSOR_SLOT / 4096) as i32);
+        if dma < 0 {
+            return None;
+        }
+        let phys = npk_sys::dma_phys_addr(dma) as u64;
+        Some(Cursor { dma, phys, slot: 0, fb: None, hot: (0, 0), pos: (0, 0), shown: false })
+    }
+
+    /// `OP_CURSOR_IMAGE` of job `seq`.
+    fn image(&mut self, vc4: &mut Vc4, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> i32 {
+        let (w, h) = (a[0], a[1]);
+        if w == 0 || h == 0 || w > MAX_CURSOR || h > MAX_CURSOR {
+            return -22;
+        }
+        let len = (w * h * 4) as usize;
+        let mut px = alloc::vec![0u8; len];
+        let mut at = 0;
+        while at < len {
+            let n = npk_sys::gpudev_job_data(seq, at as i32, &mut px[at..]);
+            if n <= 0 {
+                return -22;
+            }
+            at += n as usize;
+        }
+        self.slot ^= 1;
+        let off = self.slot * CURSOR_SLOT;
+        if npk_sys::dma_write(self.dma, off as i32, &px) < 0 {
+            return -22;
+        }
+        self.fb = Some(drm_framebuffer {
+            format: drm_format_info(drm_core::regs::DRM_FORMAT_ARGB8888).unwrap(),
+            width: w,
+            height: h,
+            pitches: [w * 4, 0, 0, 0],
+            offsets: [0; 4],
+            modifier: drm_core::regs::DRM_FORMAT_MOD_LINEAR as u64,
+            dma_addr: [self.phys + off as u64, 0, 0, 0],
+        });
+        self.hot = (a[2] as i32, a[3] as i32);
+        self.apply(vc4, hw)
+    }
+
+    /// `OP_CURSOR_MOVE`.
+    fn moved(&mut self, vc4: &mut Vc4, hw: &mut PiHw, a: &[u32; 6]) -> i32 {
+        self.pos = (a[0] as i32, a[1] as i32);
+        self.shown = a[2] != 0;
+        self.apply(vc4, hw)
+    }
+
+    /// The cursor plane of the output that shows the desktop: the image
+    /// with its hotspot on the pointer (`drm_mode_cursor_universal`), or
+    /// off.
+    fn apply(&self, vc4: &mut Vc4, hw: &mut PiHw) -> i32 {
+        let Some(crtc) = (0..vc4.crtc.len()).find(|&c| vc4.kms.crtcs[c].active) else { return 0 };
+        let fb = self.fb.as_ref().filter(|_| self.shown);
+        vc4.cursor_update(hw, crtc, fb, self.pos.0 - self.hot.0, self.pos.1 - self.hot.1)
+    }
 }
 
 impl Present {
@@ -318,8 +410,12 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
             if vc4.aon_intr_handler(hw) != 0 {
                 let client = vc4.fbdev_probe(hw);
                 show(vc4, hw, &client, kfb);
-                // The commit showed the framebuffer again.
+                // The commit showed the framebuffer again, without the
+                // cursor plane.
                 p.shown = 0;
+                if let Some(c) = &p.cursor {
+                    c.apply(vc4, hw);
+                }
             }
         }
         seen = hw.arm_all();
@@ -344,7 +440,12 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
             for (k, v) in a.iter_mut().enumerate() {
                 *v = word(2 + k);
             }
-            let status = if word(1) == OP_COPY_RECT { p.copy(vc4, hw, &a) } else { -1 };
+            let status = match (word(1), p.cursor.as_mut()) {
+                (OP_COPY_RECT, _) => p.copy(vc4, hw, &a),
+                (OP_CURSOR_IMAGE, Some(c)) => c.image(vc4, hw, word(0) as i32, &a),
+                (OP_CURSOR_MOVE, Some(c)) => c.moved(vc4, hw, &a),
+                _ => -1,
+            };
             npk_sys::gpudev_complete(word(0) as i32, status);
         }
     }

@@ -1,13 +1,18 @@
 //! `drivers/gpu/drm/vc4/vc4_kms.c` (Linux rpi-6.18) with the parts of
 //! the DRM atomic helpers (`drm_atomic_helper.c`) a vc4 commit runs
-//! through, in their order, for vc4's two pixel valves with one primary
-//! plane each and the two HDMI connectors: the state duplicated from the
-//! current one, `vc4_atomic_check`, then `vc4_atomic_commit_tail`.
+//! through, in their order, for vc4's two pixel valves with a primary and
+//! a cursor plane each (`vc4_plane_create_additional_planes`; the
+//! overlays come with the planes of windows) and the two HDMI connectors:
+//! the state duplicated from the current one, `vc4_atomic_check`, then
+//! `vc4_atomic_commit_tail`. Planes 0..n are the primaries of CRTC 0..n,
+//! planes n..2n their cursors.
 //!
 //! A commit turns outputs off (`vc4_crtc_atomic_disable`), on, or both
 //! for a new mode, and updates their planes. The CTM and the load
 //! tracker's limits are gen 4/5 features and stay off on gen 6, as in
-//! Linux. No userspace: no writeback, no async (cursor) updates.
+//! Linux. No userspace: no writeback. A cursor move that only changes
+//! the cursor plane's position or buffer is an async update
+//! (`drm_atomic_helper_async_commit`).
 
 use crate::hw::{Hw, Spi};
 use crate::linux::{EINVAL, ETIMEDOUT};
@@ -15,7 +20,8 @@ use crate::vc4_crtc::{vc4_crtc_atomic_check, vc4_crtc_mode_valid, CrtcVblank, Vc
 use crate::vc4_drv::Vc4;
 use crate::vc4_hdmi::{vc4_hdmi_connector_atomic_check, vc4_hdmi_encoder_mode_valid};
 use crate::vc4_hvs::Vc4HvsState;
-use crate::vc4_plane::{vc4_plane_atomic_check, PlaneCrtc, Vc4PlaneState};
+use crate::vc4_plane::{vc4_plane_atomic_async_check, vc4_plane_atomic_async_update, vc4_plane_atomic_check,
+    PlaneCrtc, Vc4PlaneState};
 use alloc::vec::Vec;
 use drm_core::drm_client_modeset::drm_client_dev;
 use drm_core::drm_connector::{drm_atomic_connector_check, drm_connector_state};
@@ -26,6 +32,9 @@ use drm_core::drm_vblank::{
     drm_crtc_vblank_on, drm_crtc_vblank_put,
 };
 use drm_core::regs::{DRM_MODE_ROTATE_0, MODE_OK};
+
+/// `VC4_NUM_OVERLAY_PLANES`: the overlays below each CRTC's cursor.
+const VC4_NUM_OVERLAY_PLANES: u32 = 16;
 
 /// How long a commit waits for its flip (`drm_atomic_helper_wait_for_flip_done`).
 const FLIP_DONE_TIMEOUT_MS: u32 = 10_000;
@@ -69,7 +78,17 @@ impl Vc4KmsState {
             .collect();
         Vc4KmsState {
             crtcs: (0..num_crtc).map(|_| Vc4CrtcState::reset()).collect(),
-            planes: (0..num_crtc).map(|_| Vc4PlaneState::default()).collect(),
+            planes: (0..2 * num_crtc)
+                .map(|i| {
+                    let mut p = Vc4PlaneState::default();
+                    // drm_plane_create_zpos_property: the primary at 0, the
+                    // cursor above the overlays.
+                    if i >= num_crtc {
+                        p.base.zpos = VC4_NUM_OVERLAY_PLANES + 1;
+                    }
+                    p
+                })
+                .collect(),
             connectors,
             hvs: Vc4HvsState::default(),
             hvs_load: 0,
@@ -144,7 +163,8 @@ impl Vc4 {
     pub fn page_flip(&mut self, hw: &mut impl Hw, fb: &drm_framebuffer) -> i32 {
         let mut s = self.atomic_state_duplicate();
         let mut any = false;
-        for (c, p) in s.planes.iter_mut().enumerate() {
+        let n = s.crtcs.len();
+        for (c, p) in s.planes.iter_mut().enumerate().take(n) {
             if !s.crtcs[c].active || p.base.fb.is_none() {
                 continue;
             }
@@ -164,13 +184,86 @@ impl Vc4 {
         self.atomic_commit(hw, s)
     }
 
+    /// `drm_mode_cursor_universal` on CRTC `crtc`
+    /// (`drm_atomic_helper_update_plane` with `legacy_cursor_update`): the
+    /// cursor plane shows `fb` whole at (`x`, `y`), or is off with `None`.
+    /// A change of position or buffer alone is an async update
+    /// (`drm_atomic_helper_async_check`, `_async_commit`); anything else a
+    /// full commit that waits for its flip.
+    pub fn cursor_update(&mut self, hw: &mut impl Hw, crtc: usize, fb: Option<&drm_framebuffer>, x: i32, y: i32) -> i32 {
+        let n = self.crtc.len();
+        let cursor = n + crtc;
+        if crtc >= n || !self.kms.crtcs[crtc].active {
+            return -EINVAL;
+        }
+        let mut s = self.atomic_state_duplicate();
+        {
+            let p = &mut s.planes[cursor].base;
+            match fb {
+                Some(fb) => {
+                    p.crtc = Some(crtc as u32);
+                    p.fb = Some(*fb);
+                    p.crtc_x = x;
+                    p.crtc_y = y;
+                    p.crtc_w = fb.width;
+                    p.crtc_h = fb.height;
+                    p.src_x = 0;
+                    p.src_y = 0;
+                    p.src_w = fb.width << 16;
+                    p.src_h = fb.height << 16;
+                }
+                None => {
+                    p.crtc = None;
+                    p.fb = None;
+                }
+            }
+        }
+        let ret = self.atomic_check(&mut s);
+        if ret != 0 {
+            self.atomic_state_put(hw, s);
+            return ret;
+        }
+
+        // drm_atomic_helper_async_check: one plane, no modeset, no change
+        // of CRTC, and the driver's check.
+        let old = &self.kms.planes[cursor];
+        let new = &s.planes[cursor];
+        let async_ok = !s.crtcs.iter().any(|c| c.needs_modeset())
+            && new.base.crtc.is_some()
+            && old.base.crtc == new.base.crtc
+            && (0..s.planes.len()).all(|p| p == cursor || same_plane(&self.kms.planes[p], &s.planes[p]))
+            && vc4_plane_atomic_async_check(old, new) == 0;
+        if !async_ok {
+            return self.atomic_commit(hw, s);
+        }
+
+        let new = s.planes[cursor].clone();
+        vc4_plane_atomic_async_update(&mut self.kms.planes[cursor], &new, hw, &self.hvs);
+        self.atomic_state_put(hw, s);
+        0
+    }
+
     fn client_commit(&mut self, hw: &mut impl Hw, client: &drm_client_dev, fb: &drm_framebuffer, whole_fb: bool)
         -> i32
     {
         let mut s = self.atomic_state_duplicate();
 
-        for p in s.planes.iter_mut() {
+        let n = s.crtcs.len();
+        for (i, p) in s.planes.iter_mut().enumerate() {
             p.base.rotation = DRM_MODE_ROTATE_0;
+            // Disable non-primary (__drm_atomic_helper_disable_plane).
+            if i >= n {
+                p.base.crtc = None;
+                p.base.fb = None;
+                p.base.crtc_x = 0;
+                p.base.crtc_y = 0;
+                p.base.crtc_w = 0;
+                p.base.crtc_h = 0;
+                p.base.src_x = 0;
+                p.base.src_y = 0;
+                p.base.src_w = 0;
+                p.base.src_h = 0;
+            }
         }
 
         for ms in &client.modesets {
@@ -427,8 +520,15 @@ impl Vc4 {
         }
 
         for i in 0..s.crtcs.len() {
-            // The CRTC's planes: its primary.
-            s.crtcs[i].plane_mask = if s.planes[i].base.crtc == Some(i as u32) { 1 << i } else { 0 };
+            // The CRTC's planes, and drm_atomic_normalize_zpos: their
+            // order by zpos, then by plane index.
+            let mut on: Vec<usize> = (0..s.planes.len()).filter(|&p| s.planes[p].base.crtc == Some(i as u32)).collect();
+            on.sort_by_key(|&p| (s.planes[p].base.zpos, p));
+            s.crtcs[i].plane_mask = 0;
+            for (z, &p) in on.iter().enumerate() {
+                s.planes[p].base.normalized_zpos = z as u32;
+                s.crtcs[i].plane_mask |= 1 << p;
+            }
 
             // vc4_hvs_atomic_check: the pixelvalve can only feed one
             // encoder (and encoders are 1:1 with connectors.)
@@ -437,8 +537,8 @@ impl Vc4 {
             }
 
             let mut dlist_count = 0;
-            if s.crtcs[i].plane_mask & (1 << i) != 0 {
-                dlist_count += s.planes[i].dlist_size();
+            for &p in &on {
+                dlist_count += s.planes[p].dlist_size();
             }
 
             dlist_count += 1; // Account for SCALER_CTL0_END.
@@ -677,11 +777,26 @@ impl Vc4 {
         let mut enable_bg_fill = true;
 
         // Copy all the active planes' dlist contents to the hardware
-        // dlist; the CRTC's one plane is its primary.
-        if c.plane_mask & (1 << i) != 0 {
-            let p = &self.kms.planes[i];
-            enable_bg_fill = p.needs_bg_fill;
-            dlist_next += p.write_dlist(hw, &self.hvs, dlist_next);
+        // dlist, by normalized zpos.
+        let mask = c.plane_mask;
+        let mut zpos = 0;
+        loop {
+            let mut found = false;
+            for p in 0..self.kms.planes.len() {
+                if mask & (1 << p) == 0 || self.kms.planes[p].base.normalized_zpos != zpos {
+                    continue;
+                }
+                // Is this the first active plane?
+                if dlist_next == dlist_start {
+                    enable_bg_fill = self.kms.planes[p].needs_bg_fill;
+                }
+                dlist_next += self.kms.planes[p].write_dlist(hw, &self.hvs, dlist_next);
+                found = true;
+            }
+            if !found {
+                break;
+            }
+            zpos += 1;
         }
 
         self.hvs.dlist_write(hw, dlist_next, crate::regs::SCALER_CTL0_END);
@@ -812,4 +927,10 @@ impl Vc4 {
     pub fn vrefresh(&self, i: usize) -> i32 {
         drm_mode_vrefresh(&self.kms.crtcs[i].adjusted_mode)
     }
+}
+
+/// Whether a plane's state in a commit is the current one: the async
+/// update touches no other plane.
+fn same_plane(cur: &Vc4PlaneState, new: &Vc4PlaneState) -> bool {
+    cur.base.crtc == new.base.crtc && cur.base.fb == new.base.fb && cur.dlist == new.dlist
 }
