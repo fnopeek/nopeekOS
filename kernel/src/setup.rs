@@ -164,9 +164,13 @@ fn setup_identity_and_settings() -> bool {
     // where their hardware is missing. A config seed; `set autostart` edits it.
     #[cfg(target_arch = "x86_64")]
     config::set("autostart", "deck acpi audio_hda");
-    // The Pi 5: deck for the desktop to come, and its display.
+    // The Pi 5: deck and its display, and the desktop after login as on
+    // x86 (`set desktop off` keeps the shell).
     #[cfg(target_arch = "aarch64")]
-    config::set("autostart", "deck gpu_bcm2712");
+    {
+        config::set("autostart", "deck gpu_bcm2712");
+        config::set("desktop", "on");
+    }
 
     // Theme follows the wallpaper: `auto` picks light/dark from the
     // background luminance (palette::is_light_theme). `theme light|dark`

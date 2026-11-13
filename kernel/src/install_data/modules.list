@@ -2,8 +2,8 @@
 # One name per line. Read by build.sh (installer staging), the installer
 # kernel (seeding sys/wasm/), `update` (installs one that is missing,
 # as on a board set up without the installer) and `uninstall` (needs
-# --force for these). A name followed by `# x86_64` is that architecture's
-# only.
+# --force for these). A name followed by an architecture (`# x86_64`,
+# `# aarch64`) is that architecture's only.
 # Hardware-specific drivers, optional apps and developer tools are not
 # here: they come with `install <name>`.
 
@@ -28,5 +28,7 @@ volume
 # drivers every x86 machine needs
 acpi  # x86_64
 audio_hda  # x86_64
+# the Raspberry Pi 5's display (its 4K mode, hotplug)
+gpu_bcm2712  # aarch64
 # file systems of external drives (USB sticks)
 extfs

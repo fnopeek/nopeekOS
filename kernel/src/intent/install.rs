@@ -515,14 +515,18 @@ fn is_bundled_module(name: &str) -> bool {
 }
 
 /// True iff `name` is a bundled module this architecture runs: one
-/// marked `# x86_64` in `modules.list` is that architecture's only.
+/// marked with an architecture in `modules.list` is that one's only.
 fn is_bundled_here(name: &str) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    const ARCH: &str = "x86_64";
+    #[cfg(target_arch = "aarch64")]
+    const ARCH: &str = "aarch64";
     include_str!("../install_data/modules.list").lines().any(|l| {
         let (n, note) = l.split_once('#').unwrap_or((l, ""));
         let n = n.trim();
         let arch = note.trim();
         !n.is_empty() && n == name
-            && (arch.is_empty() || (arch == "x86_64") == cfg!(target_arch = "x86_64"))
+            && (arch.is_empty() || arch == ARCH)
     })
 }
 

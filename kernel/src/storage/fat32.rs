@@ -831,42 +831,54 @@ pub fn read_small_file(esp_start: u64, name: &str, buf: &mut [u8]) -> Option<usi
     Some(len)
 }
 
-/// Clusters read in one transfer at most (1 MiB with 4 KiB clusters).
-const READ_RUN_CLUSTERS: u32 = 256;
+/// Clusters read in one transfer at most (1 MiB with 512-byte clusters).
+const READ_RUN_CLUSTERS: u32 = 2048;
 
-/// The whole of root-directory file `name` (8.3), or None when it is
-/// missing, a directory, or its chain is broken. Consecutive clusters are
-/// read in one transfer.
-pub fn read_root_file(esp_start: u64, name: &str) -> Option<alloc::vec::Vec<u8>> {
-    let short = short_name(name)?;
-    let fs = Fat32Reader::from_esp(esp_start).ok()?;
-    let e = fs.scan_dir(fs.root_cluster, &short).ok()?.found?;
-    if e.attr & ATTR_DIR != 0 { return None; }
+/// The whole of root-directory file `name` (8.3), `None` when it is
+/// missing or a directory, an error naming the step when the partition or
+/// the file's chain cannot be read. Consecutive clusters are read in one
+/// transfer.
+pub fn read_root_file(esp_start: u64, name: &str) -> Result<Option<alloc::vec::Vec<u8>>, &'static str> {
+    let short = short_name(name).ok_or("not an 8.3 name")?;
+    let fs = Fat32Reader::from_esp(esp_start)?;
+    let Some(e) = fs.scan_dir(fs.root_cluster, &short)?.found else { return Ok(None) };
+    if e.attr & ATTR_DIR != 0 { return Ok(None); }
     let size = e.size as usize;
     let cluster_bytes = fs.spc as usize * SECTOR_SIZE;
+    // The first FAT in one read: walking a large file's chain sector by
+    // sector costs a card command per cluster.
+    let mut fat = alloc::vec![0u8; fs.fat_size as usize * SECTOR_SIZE];
+    blkdev::read_disk_sectors(fs.part_start + fs.reserved as u64, &mut fat).map_err(|_| "FAT read error")?;
+    let next_of = |c: u32| -> Option<Option<u32>> {
+        if !fs.valid_cluster(c) { return None; }
+        let i = c as usize * 4;
+        let v = u32::from_le_bytes(fat.get(i..i + 4)?.try_into().ok()?) & 0x0FFF_FFFF;
+        if v >= 0x0FFF_FFF8 { return Some(None); }
+        fs.valid_cluster(v).then_some(Some(v))
+    };
     let mut out = alloc::vec![0u8; size.div_ceil(cluster_bytes) * cluster_bytes];
     let mut done = 0usize;
     let mut cl = Some(e.first_cluster);
     while done < size {
-        let first = cl?;
-        if !fs.valid_cluster(first) { return None; }
+        let first = cl.ok_or("cluster chain ends before the file")?;
+        if !fs.valid_cluster(first) { return Err("cluster out of range"); }
         // The run of clusters that follow each other on the disk.
         let mut run = 1u32;
-        let mut next = fs.fat_next(first).ok()?;
+        let mut next = next_of(first).ok_or("corrupt FAT chain")?;
         while run < READ_RUN_CLUSTERS && next == Some(first + run)
             && done + (run as usize) * cluster_bytes < size
         {
             run += 1;
-            next = fs.fat_next(first + run - 1).ok()?;
+            next = next_of(first + run - 1).ok_or("corrupt FAT chain")?;
         }
         let bytes = run as usize * cluster_bytes;
         let sector = fs.part_start + fs.cluster_to_sector(first) as u64;
-        blkdev::read_disk_sectors(sector, &mut out[done..done + bytes]).ok()?;
+        blkdev::read_disk_sectors(sector, &mut out[done..done + bytes]).map_err(|_| "data read error")?;
         done += bytes;
         cl = next;
     }
     out.truncate(size);
-    Some(out)
+    Ok(Some(out))
 }
 
 /// Create or replace `/EFI/NOPEEK/<name>` with `data` (at most

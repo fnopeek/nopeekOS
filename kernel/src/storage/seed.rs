@@ -12,8 +12,15 @@ use crate::{fat32, kprintln, npkfs};
 /// installer's bundled assets are; what exists already is kept.
 pub fn seed_from_esp() {
     const MAGIC: &[u8; 8] = b"NPKSEED1";
-    let Some(esp) = fat32::esp_start() else { return };
-    let Some(seed) = fat32::read_root_file(esp, "SEED.BIN") else { return };
+    let Some(esp) = fat32::esp_start() else {
+        kprintln!("[npk] SEED.BIN: no boot partition found on the SD card");
+        return;
+    };
+    let seed = match fat32::read_root_file(esp, "SEED.BIN") {
+        Ok(Some(s)) => s,
+        Ok(None) => { kprintln!("[npk] SEED.BIN: not on the boot partition"); return; }
+        Err(e) => { kprintln!("[npk] SEED.BIN: {}", e); return; }
+    };
     if seed.len() < MAGIC.len() || &seed[..MAGIC.len()] != MAGIC {
         kprintln!("[npk] SEED.BIN: not a seed, ignored");
         return;
