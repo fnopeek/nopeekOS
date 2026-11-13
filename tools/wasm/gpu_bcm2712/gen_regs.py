@@ -30,7 +30,9 @@ regs.list, one item per line:
 """
 import os
 import re
+import subprocess
 import sys
+import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "pi5"))
@@ -81,6 +83,25 @@ def parse():
     return items
 
 
+def compile_asm(body, headers, src):
+    """g.compile_asm, with a .c file's module identity (build.sh's kmod)
+    when one is included."""
+    flags = []
+    if src:
+        n = os.path.splitext(src)[0]
+        flags = [f'-DKBUILD_MODFILE="{n}"', f'-DKBUILD_BASENAME="{n}"', f'-DKBUILD_MODNAME="{n}"',
+                 f"-D__KBUILD_MODNAME=kmod_{n}", f"-I{g.V}"]
+    with tempfile.TemporaryDirectory() as d:
+        c = os.path.join(d, "g.c")
+        with open(c, "w") as f:
+            for h in headers:
+                f.write(f'#include "{h}"\n')
+            f.write(body)
+        out = os.path.join(d, "g.s")
+        subprocess.run(g.kcc() + flags + ["-S", "-o", out, c], check=True)
+        return open(out).read()
+
+
 def func(name, gen, expr):
     return (f"unsigned {name}(void) {{ struct vc4_dev v_ = {{ .gen = {gen} }}; "
             f"struct vc4_hvs h_ = {{ .vc4 = &v_ }}; struct vc4_hvs *hvs = &h_; struct vc4_dev *vc4 = &v_; "
@@ -111,7 +132,7 @@ def evaluate(items):
                     for i in range(it[2]):
                         body.append(func(f"v{gi}_{it[1]}_{i}", gen, f"({{ unsigned i = {i}; (void)i; {it[3]}; }})"))
         headers = HEADERS + ([f"{g.V}/{src}"] if src else [])
-        asm = g.compile_asm("\n".join(body) + "\n", headers)
+        asm = compile_asm("\n".join(body) + "\n", headers, src)
         got = g.ints(asm)
         for k, v in got.items():
             vals[k] = v

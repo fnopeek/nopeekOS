@@ -11,6 +11,7 @@ use crate::drm_edid::drm_do_probe_ddc_edid;
 use crate::hw::{Block, ClockOp, HdmiReg, Hw, Spi};
 use crate::i2c_brcmstb::{Bsc, Ddc};
 use crate::irq_brcmstb_l2::{L2Intc, L2_2711_LVL_INTC_INIT, L2_LVL_INTC_INIT};
+use crate::vc4_hdmi::Vc4Hdmi;
 use crate::vc4_hvs::{Gen, Hvs};
 use std::collections::VecDeque;
 
@@ -288,4 +289,19 @@ fn edid_read_is_linux() {
     }
     assert_eq!(got.len(), 257);
     assert_eq!(got, model_reads(&evs));
+}
+
+#[test]
+fn hdmi_bind_is_linux() {
+    let evs = parse(LOG);
+    let (mut aon, mut disp, _bsc) = probe_l2(&evs);
+    let mut clocks = register_clocks(&evs);
+    let mut hw = Strict::new(segment(&evs, "vc4_hvs_bind", 0));
+    Hvs::bind(&mut hw, &mut disp, &mut clocks).expect("hvs");
+    for port in 0..2 {
+        let mut hw = Strict::new(segment(&evs, "vc4_hdmi_bind", port as usize));
+        let h = Vc4Hdmi::bind(&mut hw, port, &mut aon, &mut clocks).expect("hdmi");
+        hw.done();
+        assert!(h.scdc_enabled);
+    }
 }

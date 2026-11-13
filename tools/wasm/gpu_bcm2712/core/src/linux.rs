@@ -2,6 +2,7 @@
 
 pub const ENXIO: i32 = 6;
 pub const EIO: i32 = 5;
+pub const EACCES: i32 = 13;
 pub const ENOMEM: i32 = 12;
 pub const EINVAL: i32 = 22;
 pub const ENOSPC: i32 = 28;

@@ -65,3 +65,13 @@ pub const NEAREST_NEIGHBOUR_KERNEL: [u32; 11] = [0x0, 0x0, 0x40000, 0x40201, 0x3
 
 // HDMI registers (vc4_hdmi_regs.h)
 pub const HDMI_VID_CTL: HdmiField = [(HdmiReg::Hd, 0x44), (HdmiReg::Hd, 0x48)];
+pub const HDMI_DVP_CTL: HdmiField = [(HdmiReg::Hd, 0x0), (HdmiReg::Hd, 0x0)];
+pub const HDMI_CLOCK_STOP: HdmiField = [(HdmiReg::Dvp, 0xbc), (HdmiReg::Dvp, 0xbc)];
+pub const HDMI_RAM_PACKET_CONFIG: HdmiField = [(HdmiReg::Hdmi, 0xc4), (HdmiReg::Hdmi, 0xc4)];
+pub const VC4_HD_VID_CTL_ENABLE: u32 = 0x80000000;
+pub const VC4_DVP_HT_CLOCK_STOP_PIXEL: u32 = 0x2;
+pub const VC4_HDMI_RAM_PACKET_ENABLE: u32 = 0x10000;
+
+// vc4_hdmi.c
+pub const HDMI_14_MAX_TMDS_CLK: u32 = 0x1443fd00;
+pub const BCM2712_MAX_PIXEL_CLOCK: u32 = 0x23c34600;
