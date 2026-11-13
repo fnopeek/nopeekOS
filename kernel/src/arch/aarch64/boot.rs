@@ -329,7 +329,22 @@ fn shell() -> ! {
     crate::intent::system::persist_boot_log();
     *SHELL_ARGS.lock() = Some((vault, session));
     crate::smp::fiber::admit_with_stack(0, shell_fiber, 0, 2 * 1024 * 1024);
+    crate::smp::fiber::admit_with_stack(0, autostart_fiber, 0, 256 * 1024);
     crate::smp::per_core::core0_loop()
+}
+
+/// Before the autostart: the shell's first prompt is out.
+const AUTOSTART_DELAY_MS: u64 = 400;
+
+/// The `autostart` list's drivers, in order, as `run` starts them. The
+/// desktop (shade) does not run here yet, so its apps are skipped
+/// (`intent::autostart_driver`).
+fn autostart_fiber(_: u64) {
+    crate::smp::fiber::yield_sleep(AUTOSTART_DELAY_MS);
+    let Some(list) = crate::config::get("autostart") else { return };
+    for name in list.split([',', ' ']).map(str::trim).filter(|s| !s.is_empty()) {
+        crate::intent::autostart_driver(name);
+    }
 }
 
 static SHELL_ARGS: spin::Mutex<Option<(&'static spin::Mutex<crate::capability::Vault>, crate::capability::CapId)>> =

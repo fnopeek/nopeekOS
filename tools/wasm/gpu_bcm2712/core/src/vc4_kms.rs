@@ -4,9 +4,8 @@
 //! plane each and the two HDMI connectors: the state duplicated from the
 //! current one, `vc4_atomic_check`, then `vc4_atomic_commit_tail`.
 //!
-//! A commit here enables outputs and updates their planes. Turning a
-//! running output off goes through `vc4_crtc_atomic_disable`, which is
-//! not ported yet; such a commit is refused. The CTM and the load
+//! A commit turns outputs off (`vc4_crtc_atomic_disable`), on, or both
+//! for a new mode, and updates their planes. The CTM and the load
 //! tracker's limits are gen 4/5 features and stay off on gen 6, as in
 //! Linux. No userspace: no writeback, no async (cursor) updates.
 
@@ -495,13 +494,6 @@ impl Vc4 {
             return ret;
         }
 
-        // A running output being turned off needs vc4_crtc_atomic_disable.
-        for i in 0..s.crtcs.len() {
-            if self.kms.crtcs[i].active && (!s.crtcs[i].active || s.crtcs[i].mode != self.kms.crtcs[i].mode) {
-                return -EINVAL;
-            }
-        }
-
         let ret = self.atomic_helper_check_modeset(s);
         if ret != 0 {
             return ret;
@@ -548,9 +540,16 @@ impl Vc4 {
         self.kms.hvs_load = s.hvs_load;
         self.kms.membus_load = s.membus_load;
 
-        // drm_atomic_helper_commit_modeset_disables: nothing runs that
-        // has to stop (refused at check); the timestamping constants,
-        // then the encoders' mode_set.
+        // drm_atomic_helper_commit_modeset_disables: disable_outputs (the
+        // HDMI encoders have no disable of their own; vc4 stops them from
+        // the CRTC), the timestamping constants, then the encoders'
+        // mode_set.
+        for i in 0..self.crtc.len() {
+            let new = &self.kms.crtcs[i];
+            if old_crtcs[i].active && new.needs_modeset() {
+                self.crtc_atomic_disable(hw, i, &old_crtcs[i]);
+            }
+        }
         for i in 0..self.crtc.len() {
             let c = &self.kms.crtcs[i];
             if c.enable {
@@ -688,6 +687,31 @@ impl Vc4 {
         }
 
         self.crtc[i].current_dlist = self.kms.crtcs[i].mm.map_or(0, |m| m.node.start as u32);
+    }
+
+    /// `vc4_crtc_atomic_disable`: vblank off, the valve, HVS channel and
+    /// HDMI encoder stopped (`vc4_crtc_disable`), the channel stopped
+    /// again (`vc4_hvs_atomic_disable`), then 20 ms for the hardware.
+    fn crtc_atomic_disable(&mut self, hw: &mut impl Hw, i: usize, old: &Vc4CrtcState) {
+        let Some(channel) = old.assigned_channel else { return };
+        let port = self.crtc[i].data.hdmi as usize;
+
+        // require_hvs_enabled
+        let _ = hw.read(crate::hw::Block::Hvs, crate::regs::SCALER6_CONTROL) & crate::regs::SCALER6_CONTROL_HVS_EN;
+
+        // Disable vblank irq handling before crtc is disabled.
+        {
+            let mut f = CrtcVblank { crtc: &self.crtc[i], hvs: &self.hvs, hw, channel };
+            drm_core::drm_vblank::drm_crtc_vblank_off(&mut self.kms.vblank[i], &mut f);
+        }
+
+        self.crtc[i].disable(hw, &self.hvs, &mut self.hdmi[port], &mut self.bsc, &mut self.clocks, channel);
+
+        self.hvs.stop_channel(hw, channel);
+
+        // vc4_crtc_send_vblank: the old state's event went out with its
+        // flip; nobody waits here.
+        hw.delay_us(20_000);
     }
 
     /// `vc4_crtc_atomic_enable` with `vc4_hvs_atomic_enable` and the HDMI

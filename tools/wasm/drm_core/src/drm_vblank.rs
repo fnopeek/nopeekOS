@@ -336,3 +336,18 @@ pub fn drm_calc_timestamping_constants(vblank: &mut drm_vblank_crtc, mode: &drm_
 pub fn drm_crtc_send_vblank_event(vblank: &drm_vblank_crtc) -> (u64, i64) {
     drm_vblank_count_and_time(vblank)
 }
+
+/// `drm_crtc_vblank_off`: the count saved and the interrupt off before the
+/// CRTC stops; a reference held until `drm_crtc_vblank_on` keeps
+/// `drm_crtc_vblank_get` from turning it on meanwhile.
+pub fn drm_crtc_vblank_off(vblank: &mut drm_vblank_crtc, funcs: &mut dyn drm_vblank_funcs) {
+    // An atomic driver: always.
+    drm_vblank_disable_and_save(vblank, funcs);
+
+    if vblank.inmodeset == 0 {
+        vblank.refcount += 1;
+        vblank.inmodeset = 1;
+    }
+
+    vblank.hwmode.crtc_clock = 0;
+}

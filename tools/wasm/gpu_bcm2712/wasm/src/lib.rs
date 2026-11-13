@@ -2,9 +2,9 @@
 //! set of the device tree (HVS, pixel valves, HDMI, DDC and their
 //! interrupt controllers), takes the screen over from the firmware the
 //! way Linux's vc4 does when it binds, and shows the framebuffer the
-//! kernel draws into on the first connected HDMI output: in a mode of
-//! the framebuffer's size when the monitor has one, else in the mode
-//! Linux's fbdev client would pick, with the HVS scaling.
+//! kernel draws into in the mode Linux's fbdev client picks from the
+//! monitor's EDID, the kernel's framebuffer moved to that size. A
+//! hotplug probes again and follows.
 //!
 //! The compositor keeps drawing on the CPU into that framebuffer
 //! (`gpudev_ready` without the copy capability): the module only scans it
@@ -17,6 +17,7 @@ extern crate alloc;
 
 mod hw;
 
+use drm_core::drm_client_modeset::drm_client_dev;
 use drm_core::drm_fourcc::drm_format_info;
 use drm_core::drm_plane::drm_framebuffer;
 use drm_core::linux::Line;
@@ -111,12 +112,8 @@ pub extern "C" fn _start() {
         Line::new().s(why).s(", not binding").say();
         return;
     }
-    let Some(kfb) = kernel_fb() else {
+    let Some(mut kfb) = kernel_fb() else {
         Line::new().s("no framebuffer from the kernel").say();
-        return;
-    };
-    let Some(format) = drm_format_info(kfb.format) else {
-        Line::new().s("framebuffer format not known: ").hex(kfb.format).say();
         return;
     };
 
@@ -130,44 +127,72 @@ pub extern "C" fn _start() {
     };
 
     let client = vc4.fbdev_probe(&mut hw);
-    let modesets = vc4.takeover_modesets(&client, kfb.width, kfb.height);
-    let fb = drm_framebuffer {
-        format,
+    show(&mut vc4, &mut hw, &client, &mut kfb);
+
+    // The compositor stays on the CPU, drawing into the framebuffer the
+    // HVS shows now.
+    npk_sys::gpudev_ready(0);
+
+    serve(&mut vc4, &mut hw, &mut kfb);
+}
+
+/// The fbdev client's choice on screen: the monitor's own mode (Linux's
+/// pick from its EDID), with the kernel's framebuffer moved to that size
+/// first. Outputs are turned off before the kernel lets go of the
+/// framebuffer they read. Without a framebuffer of the mode the HVS
+/// scales the one there is; without a monitor every output goes off.
+fn show(vc4: &mut Vc4, hw: &mut PiHw, client: &drm_client_dev, kfb: &mut KernelFb) {
+    let off = drm_client_dev::new(vc4.crtc.len() as u32);
+    let Some(ms) = client.modesets.iter().find(|m| m.mode.is_some()) else {
+        let ret = vc4.takeover_commit(hw, &off, &framebuffer(kfb));
+        Line::new().s("no monitor connected").s(if ret != 0 { ", turning off failed" } else { "" }).say();
+        return;
+    };
+    let m = ms.mode.clone().unwrap();
+    let (w, h) = (m.hdisplay as u32, m.vdisplay as u32);
+
+    if (w, h) != (kfb.width, kfb.height) {
+        if vc4.kms.crtcs.iter().any(|c| c.active) {
+            vc4.takeover_commit(hw, &off, &framebuffer(kfb));
+        }
+        if npk_sys::gpudev_framebuffer(w as i32, h as i32) == 0
+            && let Some(new) = kernel_fb()
+        {
+            *kfb = new;
+        } else {
+            Line::new().s("no ").dec(w as u64).s("x").dec(h as u64)
+                .s(" framebuffer from the kernel, the HVS scales the one there is").say();
+        }
+    }
+
+    let conn = vc4.connectors[ms.connectors[0]].name.clone();
+    let ret = vc4.takeover_commit(hw, client, &framebuffer(kfb));
+    let mut l = Line::new();
+    l.s(&conn).s(" ").dec(w as u64).s("x").dec(h as u64).s("@")
+        .dec(vc4.vrefresh(ms.crtc as usize) as u64).s(", framebuffer ")
+        .dec(kfb.width as u64).s("x").dec(kfb.height as u64).s(" at ").hex(kfb.phys as u32);
+    if ret != 0 {
+        l.s(": commit failed ").dec(ret.unsigned_abs() as u64);
+    }
+    l.say();
+}
+
+/// The kernel's framebuffer as the plane's.
+fn framebuffer(kfb: &KernelFb) -> drm_framebuffer {
+    drm_framebuffer {
+        format: drm_format_info(kfb.format).unwrap_or(drm_format_info(drm_core::regs::DRM_FORMAT_XRGB8888).unwrap()),
         width: kfb.width,
         height: kfb.height,
         pitches: [kfb.pitch, 0, 0, 0],
         offsets: [0; 4],
         modifier: drm_core::regs::DRM_FORMAT_MOD_LINEAR as u64,
         dma_addr: [kfb.phys, 0, 0, 0],
-    };
-
-    match modesets.modesets.iter().find(|m| m.mode.is_some()) {
-        None => Line::new().s("no monitor connected").say(),
-        Some(ms) => {
-            let m = ms.mode.as_ref().unwrap();
-            let conn = &vc4.connectors[ms.connectors[0]].name.clone();
-            let ret = vc4.takeover_commit(&mut hw, &modesets, &fb);
-            let mut l = Line::new();
-            l.s(conn).s(" ").dec(m.hdisplay as u64).s("x").dec(m.vdisplay as u64).s("@")
-                .dec(vc4.vrefresh(ms.crtc as usize) as u64).s(", framebuffer ")
-                .dec(kfb.width as u64).s("x").dec(kfb.height as u64).s(" at ").hex(kfb.phys as u32);
-            if ret != 0 {
-                l.s(": commit failed ").dec(ret.unsigned_abs() as u64);
-            }
-            l.say();
-        }
     }
-
-    // The compositor stays on the CPU, drawing into the framebuffer the
-    // HVS shows now.
-    npk_sys::gpudev_ready(0);
-
-    serve(&mut vc4, &mut hw);
 }
 
 /// The interrupts and the timed work of a running display, and the GPU
 /// service's queue, which stays empty without the copy capability.
-fn serve(vc4: &mut Vc4, hw: &mut PiHw) {
+fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb) {
     let mut jobs = [0u8; JOB_BYTES * 16];
     let mut seen = hw.arm_all();
     loop {
@@ -191,9 +216,11 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw) {
             vc4.disp_intr_handler(hw);
         }
         if fired.aon_intr {
-            let ports = vc4.aon_intr_handler(hw);
-            if ports != 0 {
-                Line::new().s("hotplug on HDMI port mask ").dec(ports as u64).s(" (not followed yet)").say();
+            // vc4_hdmi_hpd_irq_thread → the fbdev client's hotplug: probe
+            // again, show its choice.
+            if vc4.aon_intr_handler(hw) != 0 {
+                let client = vc4.fbdev_probe(hw);
+                show(vc4, hw, &client, kfb);
             }
         }
         seen = hw.arm_all();

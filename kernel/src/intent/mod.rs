@@ -21,6 +21,8 @@ pub mod install;
 mod python;
 pub(crate) mod wallpaper;
 mod wasm;
+#[cfg(target_arch = "aarch64")]
+pub(crate) use wasm::autostart_driver;
 
 use crate::capability::{CapId, Vault, Rights};
 use crate::{kprint, kprintln, serial};

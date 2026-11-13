@@ -1357,6 +1357,11 @@ host_imports! {
     ctx fn npk_gpudev_bo_gpu_only(id: i32) -> i32;
     // npk_gpudev_ready(caps) -> 0 / -1; bit 0 copies, bit 1 scenes
     ctx fn npk_gpudev_ready(caps: i32) -> i32;
+    // npk_gpudev_framebuffer(width, height) -> 0 / -1: the kernel draws
+    // into a framebuffer of the module's mode from now on, buffer 0.
+    // Before ready.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_gpudev_framebuffer(width: i32, height: i32) -> i32;
     // npk_gpudev_poll(buf_ptr, max) -> jobs / -1; 32 bytes each
     // {seq, op, a0..a5: u32}
     mem fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;

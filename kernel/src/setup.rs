@@ -162,7 +162,11 @@ fn setup_identity_and_settings() -> bool {
     // items, clock), then the drivers every x86 machine needs: acpi (firmware AML:
     // battery, power button, idle states) and audio_hda. Both exit quietly
     // where their hardware is missing. A config seed; `set autostart` edits it.
+    #[cfg(target_arch = "x86_64")]
     config::set("autostart", "deck acpi audio_hda");
+    // The Pi 5: deck for the desktop to come, and its display.
+    #[cfg(target_arch = "aarch64")]
+    config::set("autostart", "deck gpu_bcm2712");
 
     // Theme follows the wallpaper: `auto` picks light/dark from the
     // background luminance (palette::is_light_theme). `theme light|dark`

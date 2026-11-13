@@ -5888,6 +5888,16 @@ pub(crate) fn npk_gpudev_register(ctx: &mut HostState, version: i32) -> i32 {
     }
 }
 
+/// `npk_gpudev_framebuffer(width, height) -> 0 | -1`: a framebuffer of the
+/// module's mode, `gpudev::set_framebuffer`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_gpudev_framebuffer(ctx: &mut HostState, width: i32, height: i32) -> i32 {
+    match gpudev_device(ctx) {
+        Some(dev) => crate::gpu::gpudev::set_framebuffer(dev, width, height),
+        None => -1,
+    }
+}
+
 /// `npk_gpudev_bo_info(id, out) -> 0 | -1`: `{phys, size: u64, pitch,
 /// width, height, format, offset, pages: u32}`, 40 bytes.
 pub(crate) fn npk_gpudev_bo_info(mem: &mut [u8], ctx: &mut HostState, id: i32, out_ptr: i32) -> i32 {

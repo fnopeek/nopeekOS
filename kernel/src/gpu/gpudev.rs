@@ -598,6 +598,83 @@ pub fn bo_gpu_only(dev: DevId, id: i32) -> i32 {
     }
 }
 
+/// The framebuffer the kernel allocated for a module's mode
+/// (`set_framebuffer`): first page, pages. It stays the kernel's, also
+/// after the module is gone, since the display keeps showing it.
+#[cfg(target_arch = "aarch64")]
+static KERNEL_FB: Mutex<Option<(u64, usize)>> = Mutex::new(None);
+
+/// `npk_gpudev_framebuffer(width, height)`: the display module drives a
+/// mode the current framebuffer does not have. The kernel takes a 32 bpp
+/// framebuffer of that size (contiguous, uncached, granted to the device
+/// at its bus address, as the identity-mapped IOMMU needs), moves its
+/// console there and describes it as buffer 0, with new shadows as 1
+/// and 2. The previous one the kernel took for a module goes back, its
+/// grant first. Before `ready`.
+#[cfg(target_arch = "aarch64")]
+pub fn set_framebuffer(dev: DevId, width: i32, height: i32) -> i32 {
+    const MAX_SIDE: i32 = 8192;
+    if !(1..=MAX_SIDE).contains(&width) || !(1..=MAX_SIDE).contains(&height) {
+        return -1;
+    }
+    if !owned_by(dev) || READY.load(Ordering::Acquire) {
+        return -1;
+    }
+    let (width, height) = (width as u32, height as u32);
+    let pitch = width * 4;
+    let pages = (pitch as u64 * height as u64).div_ceil(PAGE) as usize;
+    let Some(phys) = crate::arch::aarch64::dma::alloc(pages, 1, 1 << 32) else {
+        crate::kprintln!("[npk] gpudev: no {} MiB for a {}x{} framebuffer", pages / 256, width, height);
+        return -1;
+    };
+    // SAFETY: freshly allocated, mapped (uncached) and owned by nobody yet.
+    unsafe { core::ptr::write_bytes(phys as *mut u8, 0, pages * PAGE as usize) }
+    crate::drivers::iommu::grant(dev, phys, pages);
+
+    // The shadows move with the console; their old grants go first.
+    {
+        let st = STATE.lock();
+        for id in [1, 2] {
+            if let Some(g) = grant_of(&st, id) {
+                g.apply(dev, false);
+            }
+        }
+    }
+    // Lock order of the compositor is framebuffer, then GPU; never both here.
+    crate::drivers::framebuffer::init_from_firmware(phys, width, height, pitch, 32);
+    let fb = FramebufferInfo { addr: phys, pitch, width, height, bpp: 32 };
+    super::init_from_firmware(fb);
+    let Some((pa, pb, shadow_pages)) = crate::drivers::framebuffer::shadow_phys_info() else { return -1 };
+
+    {
+        let mut st = STATE.lock();
+        st.fb = Some(fb);
+        let shadow = |addr| Bo {
+            addr,
+            size: shadow_pages as u64 * PAGE,
+            pitch,
+            width,
+            height,
+            format: FORMAT_XRGB8888,
+            gpu_addr: None,
+            state: BoState::Adding,
+            fence: 0,
+        };
+        st.bos.insert(0, Bo { addr: 0, size: pitch as u64 * height as u64, ..shadow(0) });
+        st.bos.insert(1, shadow(pa));
+        st.bos.insert(2, shadow(pb));
+    }
+    Grant::Range(pa, shadow_pages as usize).apply(dev, true);
+    Grant::Range(pb, shadow_pages as usize).apply(dev, true);
+
+    if let Some((old, old_pages)) = KERNEL_FB.lock().replace((phys, pages)) {
+        crate::drivers::iommu::revoke(dev, old, old_pages);
+        crate::arch::aarch64::dma::free(old, old_pages);
+    }
+    crate::kprintln!("[npk] gpudev: {}x{} framebuffer for the display module", width, height);
+    0
+}
+
 /// `npk_gpudev_ready`: with a passed self-test and the fixed buffers bound,
 /// the compositor's copies go to the module from the next frame on, and with
 /// `CAP_SCENE` its scenes may (`shade::gpu_scene` checks them first).
@@ -606,7 +683,7 @@ pub fn ready(dev: DevId, caps: i32) -> i32 {
         if !owned_by(dev) {
             return -1;
         }
-        crate::kprintln!("[npk] gpudev: module self-test failed, compositor stays on the CPU");
+        crate::kprintln!("[npk] gpudev: the module offers no GPU copies (none built, or its self-test failed), compositor on the CPU");
         return 0;
     }
     let (fb, a, b) = {

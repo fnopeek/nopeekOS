@@ -119,6 +119,7 @@ unsafe extern "C" {
     fn npk_irq_register_dt(part: i32, index: i32) -> i32;
     fn npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
     fn npk_fw_display_done() -> i32;
+    fn npk_gpudev_framebuffer(width: i32, height: i32) -> i32;
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
 
     fn npk_netdev_register(mac_ptr: i32) -> i32;
@@ -299,6 +300,9 @@ plain! {
     fn fw_clock = npk_fw_clock(id: i32, op: i32, rate: i64) -> i64;
     /// AArch64: the firmware stops driving the display; 0 or -1.
     fn fw_display_done = npk_fw_display_done() -> i32;
+    /// AArch64: the kernel draws into a framebuffer of `width` x `height`
+    /// (32 bpp) from now on, gpudev buffer 0; 0 or -1. Before `gpudev_ready`.
+    fn gpudev_framebuffer = npk_gpudev_framebuffer(width: i32, height: i32) -> i32;
     fn gpudev_register = npk_gpudev_register(version: i32) -> i32;
     fn gpudev_bo_bound = npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
     /// Buffer `id`'s pages hold a picture only the card reads (tiled).

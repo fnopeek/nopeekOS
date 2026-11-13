@@ -121,7 +121,7 @@ impl Vc4Crtc {
     }
 
     /// `vc4_crtc_disable`.
-    fn disable(&self, hw: &mut impl Hw, hvs: &Hvs, hdmi: &mut Vc4Hdmi, bsc: &mut Bsc, clocks: &mut FwClocks, channel: u32) {
+    pub fn disable(&self, hw: &mut impl Hw, hvs: &Hvs, hdmi: &mut Vc4Hdmi, bsc: &mut Bsc, clocks: &mut FwClocks, channel: u32) {
         let v = self.read(hw, PV_V_CONTROL);
         self.write(hw, PV_V_CONTROL, v & !PV_VCONTROL_VIDEN);
         // wait_for(!VIDEN, 1): Linux WARNs once on a timeout.

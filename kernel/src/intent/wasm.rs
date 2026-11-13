@@ -22,6 +22,22 @@ fn fetch_store_module(name: &str) -> Option<(alloc::vec::Vec<u8>, [u8; 32])> {
     }
 }
 
+/// Start installed module `name` as `run <name>` does, if it is a driver
+/// (declares HARDWARE): the autostart of a board without the desktop,
+/// where a window app has nowhere to go. A module that is not installed
+/// is skipped quietly.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn autostart_driver(name: &str) {
+    if name.is_empty() || name.contains('/') || name.starts_with('.') {
+        return;
+    }
+    let Ok((bytes, _)) = crate::npkfs::fetch(&alloc::format!("sys/wasm/{}", name)) else { return };
+    if !crate::capability::widget_rights_from_wasm(&bytes).contains(crate::capability::Rights::HARDWARE) {
+        return;
+    }
+    intent_run(name);
+}
+
 pub fn intent_run(args: &str) {
     use crate::{wasm, capability};
     use wasmi::Val;
