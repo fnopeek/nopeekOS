@@ -5,7 +5,7 @@
 //! Only VC4_GEN_6_C and VC4_GEN_6_D exist here; the gen 4/5 branches of
 //! Linux are for older boards. The debugfs register sets are not ported.
 
-use crate::clk::{rpi_firmware_clk_get_max_rate, FwClk};
+use crate::clk::{rpi_firmware_clk_get_max_rate, Clk, FwClocks};
 use crate::drm_mm::{DrmMm, DrmMmNode};
 use crate::hw::{Block, Hw, RPI_FIRMWARE_CORE_CLK_ID, RPI_FIRMWARE_DISP_CLK_ID};
 use crate::irq_brcmstb_l2::L2Intc;
@@ -42,8 +42,8 @@ pub struct Hvs {
     pub upm_mm: DrmMm,
     pub mitchell_netravali_filter: DrmMmNode,
     pub nearest_neighbour_filter: DrmMmNode,
-    pub core_clk: FwClk,
-    pub disp_clk: FwClk,
+    pub core_clk: Clk,
+    pub disp_clk: Clk,
     pub max_core_rate: u32,
     pub vc5_hdmi_enable_hdmi_20: bool,
     pub vc5_hdmi_enable_4096by2160: bool,
@@ -66,7 +66,7 @@ impl Hvs {
     /// `__vc4_hvs_alloc` for gen 6, with `vc4->gen` still VC4_GEN_6_C (the
     /// compatible's) as when Linux calls it. Linux sets `dlist_mm` up twice;
     /// the second, from `SCALER_DLIST_SIZE`, is the one that stays.
-    fn alloc(hw: &mut impl Hw) -> Self {
+    fn alloc(hw: &mut impl Hw, clocks: &mut FwClocks) -> Self {
         let dlist_mem_size = hw.read(Block::Hvs, SCALER6_CXM_SIZE);
         Hvs {
             generation: Gen::Gen6C,
@@ -77,8 +77,8 @@ impl Hvs {
             upm_mm: DrmMm::new(0, 1024 * HVS_UBM_WORD_SIZE as u64),
             mitchell_netravali_filter: DrmMmNode::default(),
             nearest_neighbour_filter: DrmMmNode::default(),
-            core_clk: FwClk::new(RPI_FIRMWARE_CORE_CLK_ID),
-            disp_clk: FwClk::new(RPI_FIRMWARE_DISP_CLK_ID),
+            core_clk: clocks.get(RPI_FIRMWARE_CORE_CLK_ID),
+            disp_clk: clocks.get(RPI_FIRMWARE_DISP_CLK_ID),
             max_core_rate: 0,
             vc5_hdmi_enable_hdmi_20: false,
             vc5_hdmi_enable_4096by2160: false,
@@ -158,8 +158,8 @@ impl Hvs {
 
     /// `vc4_hvs_bind` for gen 6. The three EOF lines are requested
     /// disabled (`IRQF_NO_AUTOEN`) on `disp_intr`.
-    pub fn bind(hw: &mut impl Hw, disp_intr: &mut L2Intc) -> Result<Self, i32> {
-        let mut hvs = Hvs::alloc(hw);
+    pub fn bind(hw: &mut impl Hw, disp_intr: &mut L2Intc, clocks: &mut FwClocks) -> Result<Self, i32> {
+        let mut hvs = Hvs::alloc(hw, clocks);
         if field_get(SCALER6_VERSION_MASK, hvs.read(hw, SCALER6_VERSION)) == SCALER6_VERSION_D0 {
             hvs.generation = Gen::Gen6D;
         }
@@ -167,8 +167,8 @@ impl Hvs {
         hvs.vc5_hdmi_enable_hdmi_20 = max_rate >= 550_000_000;
         hvs.vc5_hdmi_enable_4096by2160 = max_rate >= 600_000_000;
         hvs.max_core_rate = max_rate;
-        hvs.core_clk.prepare_enable(hw)?;
-        hvs.disp_clk.prepare_enable(hw)?;
+        clocks.prepare_enable(hw, hvs.core_clk)?;
+        clocks.prepare_enable(hw, hvs.disp_clk)?;
         hvs.hw_init(hw);
         hvs.mitchell_netravali_filter = hvs.upload_linear_kernel(hw, &MITCHELL_NETRAVALI_1_3_1_3_KERNEL)?;
         hvs.nearest_neighbour_filter = hvs.upload_linear_kernel(hw, &NEAREST_NEIGHBOUR_KERNEL)?;

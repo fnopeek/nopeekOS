@@ -55,6 +55,7 @@ pub enum ClockOp {
     MinRate,
     SetRate(u32),
     Enable,
+    Disable,
 }
 
 /// `enum rpi_firmware_clk_id`, the display's clocks.

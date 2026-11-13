@@ -6,6 +6,7 @@
 //! functions, `FW` lines at the firmware property interface. The port
 //! must repeat it access for access.
 
+use crate::clk::FwClocks;
 use crate::drm_edid::drm_do_probe_ddc_edid;
 use crate::hw::{Block, ClockOp, HdmiReg, Hw, Spi};
 use crate::i2c_brcmstb::{Bsc, Ddc};
@@ -184,6 +185,7 @@ impl Hw for Strict {
             ClockOp::MinRate => (GET_MIN_CLOCK_RATE, 0),
             ClockOp::SetRate(r) => (SET_CLOCK_RATE, r),
             ClockOp::Enable => (SET_CLOCK_STATE, 1),
+            ClockOp::Disable => (SET_CLOCK_STATE, 0),
         };
         match self.evs.pop_front() {
             Some(Ev::Fw { tag: t, req, ans }) if t == tag && req[0] == id && req[1] == req1 => Some(ans[1]),
@@ -218,12 +220,34 @@ fn probe_bsc(evs: &[Ev]) -> Bsc {
     probe_l2(evs).2
 }
 
+const GET_CLOCKS: u32 = 0x0001_0007;
+const V3D_CLK: u32 = 5;
+
+/// `raspberrypi_clk_probe` for the display's clocks: the module neither
+/// asks `GET_CLOCKS` (no module may) nor registers V3D's clock.
+fn register_clocks(evs: &[Ev]) -> FwClocks {
+    let seg: Vec<Ev> = segment(evs, "raspberrypi_clk_driver_init", 0).into_iter().filter(|e| match e {
+        Ev::Fw { tag, req, .. } => *tag != GET_CLOCKS && req.first() != Some(&V3D_CLK),
+        _ => true,
+    }).collect();
+    let mut hw = Strict::new(seg);
+    let clocks = FwClocks::register(&mut hw).expect("register");
+    hw.done();
+    clocks
+}
+
+#[test]
+fn clock_registration_is_linux() {
+    register_clocks(&parse(LOG));
+}
+
 #[test]
 fn hvs_bind_is_linux() {
     let evs = parse(LOG);
     let (_aon, mut disp, _bsc) = probe_l2(&evs);
+    let mut clocks = register_clocks(&evs);
     let mut hw = Strict::new(segment(&evs, "vc4_hvs_bind", 0));
-    let hvs = Hvs::bind(&mut hw, &mut disp).expect("bind");
+    let hvs = Hvs::bind(&mut hw, &mut disp, &mut clocks).expect("bind");
     hw.done();
     assert_eq!(hvs.generation, Gen::Gen6D);
     assert_eq!(hvs.dlist_mem_size, 0x1000);
