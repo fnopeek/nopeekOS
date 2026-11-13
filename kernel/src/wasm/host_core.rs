@@ -929,8 +929,8 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
         if mask & WAIT_WIFI_CMD != 0 && hw.registered_as_netdev && crate::wifi::cmd_pending() {
             r |= WAIT_WIFI_CMD;
         }
-        if mask & WAIT_GPU_CMD != 0 && hw.is_pci
-            && (crate::gpu::gpudev::pending(crate::drivers::DevId::Pci(hw.pci_addr))
+        if mask & WAIT_GPU_CMD != 0 && let Some(dev) = hw.dev
+            && (crate::gpu::gpudev::pending(dev)
                 || owned_pci_class(ctx) == Some(0x03) && crate::audio::display_audio_pending())
         {
             r |= WAIT_GPU_CMD;
@@ -1018,8 +1018,8 @@ pub(crate) fn npk_wait(ctx: &mut HostState, mask: i32, timeout_ms: i32) -> i32 {
                 crate::wifi::set_cmd_waker(w);
                 sig |= SIG_WIFI;
             }
-            if mask & WAIT_GPU_CMD != 0 && hw.is_pci {
-                crate::gpu::gpudev::set_waker(crate::drivers::DevId::Pci(hw.pci_addr), w);
+            if mask & WAIT_GPU_CMD != 0 && let Some(dev) = hw.dev {
+                crate::gpu::gpudev::set_waker(dev, w);
                 sig |= crate::smp::fiber::SIG_GPU;
             }
         }
@@ -1493,8 +1493,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
     }
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
     ctx.hw = Some(HwDriverState {
-        is_pci: true,
-        pci_addr: dev.addr,
+        dev: Some(crate::drivers::DevId::Pci(dev.addr)),
         vendor_id: vid,
         device_id: did,
         mmio_maps: Vec::new(),
@@ -1520,7 +1519,7 @@ pub(crate) fn npk_pci_bind(ctx: &mut HostState, vendor: i32, device: i32) -> i32
 /// buffers and vector are released. Binding the same device again releases
 /// the old state first: releasing it afterwards would give the device away.
 fn take_binding(ctx: &mut HostState, addr: pci::PciAddr) -> bool {
-    if ctx.hw.as_ref().is_some_and(|h| h.is_pci && h.pci_addr == addr) {
+    if ctx.hw.as_ref().is_some_and(|h| h.pci() == Some(addr)) {
         if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
     }
     if !take_device(ctx.pid, addr) {
@@ -1579,8 +1578,7 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
         a.bus, a.device, a.function, dev.vendor_id, dev.device_id);
     crate::smp::per_core::mark_driver_core(crate::smp::per_core::current_core_id());
     ctx.hw = Some(HwDriverState {
-        is_pci: true,
-        pci_addr: dev.addr,
+        dev: Some(crate::drivers::DevId::Pci(dev.addr)),
         vendor_id: dev.vendor_id,
         device_id: dev.device_id,
         mmio_maps: Vec::new(),
@@ -1598,16 +1596,17 @@ pub(crate) fn npk_pci_bind_class_n(ctx: &mut HostState, class: i32, subclass: i3
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pci_read_config(ctx: &mut HostState, offset: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
-        Some(h) if h.is_pci => h,
-        // Without a PCI device there is no config address; answering
-        // would access 00:00.0.
-        _ => return -1,
+        Some(h) => h,
+        None => return -1,
     };
+    // Without a PCI device there is no config address; answering
+    // would access 00:00.0.
+    let Some(addr) = hw.pci() else { return -1 };
     if offset < 0 || offset > 0xFFF { return -1; }
     if offset > 255 {
-        return pci::read32_ext(hw.pci_addr, offset as u16).map_or(-1, |v| v as i32);
+        return pci::read32_ext(addr, offset as u16).map_or(-1, |v| v as i32);
     }
-    pci::read32(hw.pci_addr, offset as u8) as i32
+    pci::read32(addr, offset as u8) as i32
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -1639,34 +1638,36 @@ pub(crate) fn npk_pci_read_config_at(ctx: &mut HostState, bdf: i32, offset: i32)
 /// sized it: `npk_pci_bar_size` returns the size (0 = no such BAR).
 pub(crate) fn npk_pci_bar_size(ctx: &mut HostState, bar: i32) -> i64 {
     let hw = match ctx.hw.as_ref() {
-        Some(h) if h.is_pci => h,
-        _ => return -1,
+        Some(h) => h,
+        None => return -1,
     };
+    let Some(addr) = hw.pci() else { return -1 };
     if !(0..6).contains(&bar) { return -1; }
-    pci::bar(hw.pci_addr, bar as usize).map_or(0, |b| b.size as i64)
+    pci::bar(addr, bar as usize).map_or(0, |b| b.size as i64)
 }
 
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
-        Some(h) if h.is_pci => h,
-        // Without a PCI device there is no config address; answering
-        // would access 00:00.0.
-        _ => return -1,
+        Some(h) => h,
+        None => return -1,
     };
+    // Without a PCI device there is no config address; answering
+    // would access 00:00.0.
+    let Some(addr) = hw.pci() else { return -1 };
     if offset < 0 || offset > 0xFFF { return -1; }
     if offset > 255 {
-        if offset & 3 != 0 || ext_write_refused(hw.pci_addr, offset as u16) {
+        if offset & 3 != 0 || ext_write_refused(addr, offset as u16) {
             kprintln!("[npk] WASM: PCI extended config write at {:#x} refused", offset);
             return -1;
         }
-        return if pci::write32_ext(hw.pci_addr, offset as u16, value as u32) { 0 } else { -1 };
+        return if pci::write32_ext(addr, offset as u16, value as u32) { 0 } else { -1 };
     }
-    if config_write_refused(hw.pci_addr, offset as u8 & !3) {
+    if config_write_refused(addr, offset as u8 & !3) {
         kprintln!("[npk] WASM: PCI config write at {:#x} refused (address or interrupt routing)", offset);
         return -1;
     }
-    pci::write32(hw.pci_addr, offset as u8, value as u32);
+    pci::write32(addr, offset as u8, value as u32);
     0
 }
 
@@ -1675,15 +1676,16 @@ pub(crate) fn npk_pci_write_config(ctx: &mut HostState, offset: i32, value: i32)
 /// device's config space, with the same refusals as the dword form.
 pub(crate) fn npk_pci_write_config16(ctx: &mut HostState, offset: i32, value: i32) -> i32 {
     let hw = match ctx.hw.as_ref() {
-        Some(h) if h.is_pci => h,
-        _ => return -1,
+        Some(h) => h,
+        None => return -1,
     };
+    let Some(addr) = hw.pci() else { return -1 };
     if offset < 0 || offset > 254 || offset & 1 != 0 { return -1; }
-    if config_write_refused(hw.pci_addr, offset as u8 & !3) {
+    if config_write_refused(addr, offset as u8 & !3) {
         kprintln!("[npk] WASM: PCI config write at {:#x} refused (address or interrupt routing)", offset);
         return -1;
     }
-    pci::write16(hw.pci_addr, offset as u8, value as u16);
+    pci::write16(addr, offset as u8, value as u16);
     0
 }
 
@@ -1695,10 +1697,11 @@ pub(crate) fn npk_pci_write_config16(ctx: &mut HostState, offset: i32, value: i3
 /// written is the one read back, so the legacy decode does not change.
 pub(crate) fn npk_vga_msr_touch(ctx: &mut HostState) -> i32 {
     let hw = match ctx.hw.as_ref() {
-        Some(h) if h.is_pci => h,
-        _ => return -1,
+        Some(h) => h,
+        None => return -1,
     };
-    if pci::read8(hw.pci_addr, 0x0B) != 0x03 || pci::read8(hw.pci_addr, 0x0A) != 0x00 {
+    let Some(addr) = hw.pci() else { return -1 };
+    if pci::read8(addr, 0x0B) != 0x03 || pci::read8(addr, 0x0A) != 0x00 {
         return -1;
     }
     // SAFETY: the VGA MSR belongs to the legacy VGA decode of the display
@@ -1762,33 +1765,34 @@ fn config_write_refused(dev: pci::PciAddr, dword: u8) -> bool {
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
     let hw = match ctx.hw.as_mut() {
-        Some(h) if h.is_pci => h,
-        // Without a PCI device there is no config address; answering
-        // would access 00:00.0.
-        _ => return -1,
+        Some(h) => h,
+        None => return -1,
     };
+    // Without a PCI device there is no config address; answering
+    // would access 00:00.0.
+    let Some(addr) = hw.pci() else { return -1 };
     // A display controller goes behind its IOMMU before it masters
     // anything the driver hands it: from here on it reaches only what the
     // kernel grants (`drivers::iommu`).
-    if pci::read8(hw.pci_addr, 0x0B) == 0x03 && crate::gpu::iommu_wanted() {
-        match crate::drivers::iommu::protect(crate::drivers::DevId::Pci(hw.pci_addr)) {
+    if pci::read8(addr, 0x0B) == 0x03 && crate::gpu::iommu_wanted() {
+        match crate::drivers::iommu::protect(crate::drivers::DevId::Pci(addr)) {
             Ok(()) => {
                 for &(phys, pages) in &hw.dma_allocs {
-                    crate::drivers::iommu::grant(crate::drivers::DevId::Pci(hw.pci_addr), phys, pages);
+                    crate::drivers::iommu::grant(crate::drivers::DevId::Pci(addr), phys, pages);
                 }
             }
             Err(e) => crate::kprintln!("[npk] iommu: {:02x}:{:02x}.{} not protected: {}",
-                hw.pci_addr.bus, hw.pci_addr.device, hw.pci_addr.function, e),
+                addr.bus, addr.device, addr.function, e),
         }
     }
-    pci::enable_bus_master(hw.pci_addr);
+    pci::enable_bus_master(addr);
     // Also enable memory space
-    let cmd = pci::read32(hw.pci_addr, 0x04);
-    pci::write32(hw.pci_addr, 0x04, cmd | 0x06);
+    let cmd = pci::read32(addr, 0x04);
+    pci::write32(addr, 0x04, cmd | 0x06);
     // And on every bridge above: without bus mastering there, the bridge
     // does not forward the device's requests upstream and the device gets
     // a master abort on valid RAM.
-    pci::enable_bus_master_path(hw.pci_addr);
+    pci::enable_bus_master_path(addr);
     hw.bus_master_enabled = true;
     0
 }
@@ -1796,12 +1800,13 @@ pub(crate) fn npk_pci_enable_bus_master(ctx: &mut HostState) -> i32 {
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_irq_register(ctx: &mut HostState, entry: i32) -> i32 {
     // Without a PCI device there is no config address.
-    let hw = match ctx.hw.as_mut() { Some(h) if h.is_pci => h, _ => return -1 };
+    let hw = match ctx.hw.as_mut() { Some(h) => h, None => return -1 };
+    let Some(addr) = hw.pci() else { return -1 };
     if !(0..2048).contains(&entry) { return -1; }
     // One interrupt per driver: registering again returns the same one, so
     // a loop around this call cannot take the vectors of its core.
     if hw.irq_vector != 0 { return hw.irq_vector as i32; }
-    match crate::irq::register(hw.pci_addr, entry as u16) {
+    match crate::irq::register(addr, entry as u16) {
         Some(v) => { hw.irq_vector = v; v as i32 }
         None => -1,
     }
@@ -1846,8 +1851,7 @@ pub(crate) fn npk_sci_arm(ctx: &mut HostState, gpe: i32) -> i32 {
         // vector stay taken for the rest of the boot.
         if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
         ctx.hw = Some(HwDriverState {
-            is_pci: false,
-            pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },
+            dev: None,
             vendor_id: 0,
             device_id: 0,
             mmio_maps: Vec::new(),
@@ -1959,21 +1963,22 @@ pub(crate) fn npk_irq_wait(ctx: &mut HostState, vector: i32, since: i64, timeout
 #[cfg(target_arch = "x86_64")]
 pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) -> i32 {
     let hw = match ctx.hw.as_mut() {
-        Some(h) if h.is_pci => h,
-        // Without a PCI device there is no config address; answering
-        // would access 00:00.0.
-        _ => return -1,
+        Some(h) => h,
+        None => return -1,
     };
+    // Without a PCI device there is no config address; answering
+    // would access 00:00.0.
+    let Some(addr) = hw.pci() else { return -1 };
     // Up to 16 MB: a GPU's register BAR holds its registers and, in the
     // upper half, the GGTT (TGL GTTMMADR is 16 MB).
     if bar_idx < 0 || bar_idx > 5 || pages <= 0 || pages > 4096 { return -1; }
     if hw.mmio_maps.len() >= MAX_MMIO_MAPS { return -1; }
 
     let bar_offset = 0x10 + (bar_idx as u8) * 4;
-    let bar_raw = pci::read32(hw.pci_addr, bar_offset);
+    let bar_raw = pci::read32(addr, bar_offset);
     let is_64bit = bar_raw & 0x04 != 0;
     let mut bar_base = if is_64bit {
-        pci::read_bar64(hw.pci_addr, bar_offset)
+        pci::read_bar64(addr, bar_offset)
     } else {
         (bar_raw & 0xFFFF_FFF0) as u64
     };
@@ -1981,7 +1986,7 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
     // If BAR is unassigned (UEFI didn't configure it), assign it now.
     // assign_bar_mmio sizes the BAR internally; we just need the base.
     if bar_base == 0 && bar_raw & 0x01 == 0 {
-        bar_base = pci::assign_bar_mmio(hw.pci_addr, bar_offset);
+        bar_base = pci::assign_bar_mmio(addr, bar_offset);
         if bar_base == 0 { return -1; }
     }
     if bar_base == 0 { return -1; }
@@ -1990,16 +1995,16 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
     // unassigned (placed just above) is sized here, before anyone uses it;
     // measuring a live device would turn its decoding off under whoever
     // is using it (a GPU's aperture holds the picture on screen).
-    let bar_size = match pci::bar(hw.pci_addr, bar_idx as usize) {
+    let bar_size = match pci::bar(addr, bar_idx as usize) {
         Some(b) if b.base == bar_base => b.size,
         _ => {
-            let cmd = pci::read32(hw.pci_addr, 0x04);
-            pci::write32(hw.pci_addr, 0x04, cmd & !0x02);
-            let saved_lo = pci::read32(hw.pci_addr, bar_offset);
-            pci::write32(hw.pci_addr, bar_offset, 0xFFFF_FFFF);
-            let size_lo = pci::read32(hw.pci_addr, bar_offset);
-            pci::write32(hw.pci_addr, bar_offset, saved_lo);
-            pci::write32(hw.pci_addr, 0x04, cmd);
+            let cmd = pci::read32(addr, 0x04);
+            pci::write32(addr, 0x04, cmd & !0x02);
+            let saved_lo = pci::read32(addr, bar_offset);
+            pci::write32(addr, bar_offset, 0xFFFF_FFFF);
+            let size_lo = pci::read32(addr, bar_offset);
+            pci::write32(addr, bar_offset, saved_lo);
+            pci::write32(addr, 0x04, cmd);
             (!((size_lo & !0xF) as u64)).wrapping_add(1) & 0xFFFF_FFFF
         }
     };
@@ -2130,8 +2135,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
         // vector stay taken for the rest of the boot.
         if let Some(old) = ctx.hw.take() { crate::wasm::release_hw(old); }
         ctx.hw = Some(HwDriverState {
-            is_pci: false,
-            pci_addr: pci::PciAddr { bus: 0, device: 0, function: 0 },
+            dev: None,
             vendor_id: 0,
             device_id: 0,
             mmio_maps: Vec::new(),
@@ -2345,7 +2349,7 @@ pub(crate) fn npk_mmio_writeq(ctx: &mut HostState, handle: i32, offset: i32, val
 /// per 2 MB bound, and keeps a compute heap, scene and blur buffers; the
 /// cap still protects the frame pool from a runaway module.
 fn dma_caps(hw: &HwDriverState) -> (usize, usize) {
-    if hw.is_pci && pci::read8(hw.pci_addr, 0x0B) == 0x03 {
+    if hw.is_display() {
         (MAX_DMA_ALLOCS_GPU, MAX_DMA_PAGES_GPU)
     } else {
         (MAX_DMA_ALLOCS, MAX_DMA_PAGES)
@@ -2391,8 +2395,8 @@ pub(crate) fn npk_dma_free(ctx: &mut HostState, handle: i32) -> i32 {
     let Some(hw) = ctx.hw.as_mut() else { return -1 };
     let Some(&(phys, pages)) = usize::try_from(handle).ok().and_then(|h| hw.dma_allocs.get(h)) else { return -1 };
     if pages == 0 { return -1; }
-    if hw.is_pci {
-        crate::drivers::iommu::revoke(crate::drivers::DevId::Pci(hw.pci_addr), phys, pages);
+    if let Some(dev) = hw.dev {
+        crate::drivers::iommu::revoke(dev, phys, pages);
     }
     crate::memory::deallocate_contiguous(phys, pages);
     hw.dma_allocs[handle as usize] = (0, 0);
@@ -2421,8 +2425,8 @@ pub(crate) fn npk_dma_alloc(ctx: &mut HostState, pages: i32) -> i32 {
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
-    if hw.is_pci {
-        crate::drivers::iommu::grant(crate::drivers::DevId::Pci(hw.pci_addr), phys, page_count);
+    if let Some(dev) = hw.dev {
+        crate::drivers::iommu::grant(dev, phys, page_count);
     }
     handle as i32
 }
@@ -2466,8 +2470,8 @@ pub(crate) fn npk_dma_alloc_below(ctx: &mut HostState, pages: i32, limit_mb: i32
     unsafe { core::ptr::write_bytes(phys as *mut u8, 0, page_count * 4096) }
     let handle = dma_slot(hw, phys, page_count);
     hw.dma_pages += page_count;
-    if hw.is_pci {
-        crate::drivers::iommu::grant(crate::drivers::DevId::Pci(hw.pci_addr), phys, page_count);
+    if let Some(dev) = hw.dev {
+        crate::drivers::iommu::grant(dev, phys, page_count);
     }
     handle as i32
 }
@@ -3937,8 +3941,8 @@ pub(crate) fn npk_audio_poll_mix(mem: &mut [u8], ctx: &mut HostState, ptr: i32, 
 /// The PCI class (config 0x0B) of the device this driver owns, if it owns
 /// one.
 fn owned_pci_class(ctx: &HostState) -> Option<u8> {
-    let hw = ctx.hw.as_ref().filter(|h| h.is_pci)?;
-    (pci::owner(hw.pci_addr) == Some(pci::Owner::Module(ctx.pid))).then(|| pci::read8(hw.pci_addr, 0x0b))
+    let addr = ctx.hw.as_ref()?.pci()?;
+    (pci::owner(addr) == Some(pci::Owner::Module(ctx.pid))).then(|| pci::read8(addr, 0x0b))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -5763,10 +5767,10 @@ fn gpudev_device(ctx: &HostState) -> Option<crate::drivers::DevId> {
         return None;
     }
     let hw = ctx.hw.as_ref()?;
-    if !hw.is_pci || pci::read8(hw.pci_addr, 0x0B) != 0x03 {
+    if !hw.is_display() {
         return None;
     }
-    Some(crate::drivers::DevId::Pci(hw.pci_addr))
+    hw.dev
 }
 
 #[cfg(target_arch = "x86_64")]

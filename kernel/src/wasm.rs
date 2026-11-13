@@ -93,12 +93,11 @@ pub struct WasmResult {
 #[cfg(target_arch = "x86_64")]
 /// Hardware driver state for WASM modules that access PCI devices.
 pub(crate) struct HwDriverState {
-    /// Whether this state belongs to a PCI device. A driver using
-    /// `npk_mmio_map_phys` may drive non-PCI hardware (e.g. the DesignWare
-    /// I2C in the AMD FCH); then `pci_addr` is meaningless and every
-    /// config-space access must be refused instead of landing on 00:00.0.
-    is_pci: bool,
-    pci_addr: pci::PciAddr,
+    /// The device this driver is bound to. None for a driver using
+    /// `npk_mmio_map_phys` on hardware that is no device of its own (the
+    /// DesignWare I2C in the AMD FCH): every config-space access is then
+    /// refused instead of landing on 00:00.0.
+    dev: Option<crate::drivers::DevId>,
     #[allow(dead_code)] // populated for future audit/debug, not yet read
     vendor_id: u16,
     #[allow(dead_code)]
@@ -122,6 +121,16 @@ pub(crate) struct HwDriverState {
 
 #[cfg(target_arch = "x86_64")]
 impl HwDriverState {
+    /// The PCI function, when the driver is bound to one.
+    pub(crate) fn pci(&self) -> Option<pci::PciAddr> {
+        self.dev.and_then(crate::drivers::DevId::pci)
+    }
+
+    /// A display controller: PCI class 0x03.
+    pub(crate) fn is_display(&self) -> bool {
+        self.pci().is_some_and(|a| pci::read8(a, 0x0B) == 0x03)
+    }
+
     /// DMA buffers the driver holds (`npk_dma_free` empties a slot).
     pub(crate) fn dma_live(&self) -> usize {
         self.dma_allocs.iter().filter(|&&(_, p)| p != 0).count()
@@ -1262,24 +1271,26 @@ pub(crate) fn release_hw(hw: HwDriverState) {
         // is still being scanned out. Bus mastering stays on, so nothing
         // stops the card from reading the driver's buffers either; they are
         // kept until reboot instead of going back to the allocator.
-        let display = hw.is_pci && crate::drivers::pci::read8(hw.pci_addr, 0x0B) == 0x03;
+        let display = hw.is_display();
         // Behind its IOMMU the card no longer reaches the buffers once their
         // grants are gone, so they can go back even while it scans out.
-        let confined = hw.is_pci && crate::drivers::iommu::protected(crate::drivers::DevId::Pci(hw.pci_addr));
-        if hw.is_pci {
-            if display {
-                crate::gpu::gpudev::module_gone(crate::drivers::DevId::Pci(hw.pci_addr));
-            }
+        let confined = hw.dev.is_some_and(crate::drivers::iommu::protected);
+        if display && let Some(dev) = hw.dev {
+            crate::gpu::gpudev::module_gone(dev);
+        }
+        if let Some(addr) = hw.pci() {
             if !display {
-                let cmd = crate::drivers::pci::read32(hw.pci_addr, 0x04);
-                crate::drivers::pci::write32(hw.pci_addr, 0x04, cmd & !0x4);
+                let cmd = crate::drivers::pci::read32(addr, 0x04);
+                crate::drivers::pci::write32(addr, 0x04, cmd & !0x4);
             }
-            crate::drivers::pci::release_module(hw.pci_addr);
+            crate::drivers::pci::release_module(addr);
         }
         let mut total_pages = 0usize;
         for &(phys, pages) in hw.dma_allocs.iter().filter(|&&(_, p)| p != 0) {
             if confined {
-                crate::drivers::iommu::revoke(crate::drivers::DevId::Pci(hw.pci_addr), phys, pages);
+                if let Some(dev) = hw.dev {
+                    crate::drivers::iommu::revoke(dev, phys, pages);
+                }
             }
             if !display || confined {
                 crate::memory::deallocate_contiguous(phys, pages);
