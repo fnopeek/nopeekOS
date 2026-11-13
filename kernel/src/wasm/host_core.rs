@@ -2034,7 +2034,7 @@ pub(crate) fn npk_mmio_map_bar(ctx: &mut HostState, bar_idx: i32, pages: i32) ->
         }
     };
     let handle = hw.mmio_maps.len();
-    hw.mmio_maps.push((virt, page_count));
+    hw.mmio_maps.push((virt, page_count * 4096));
     crate::kdebug!("[npk] WASM driver: MMIO BAR{} mapped at {:#x} — BAR size {:#x}, requested {} pages, mapped {} pages",
         bar_idx, bar_base, bar_size, requested, page_count);
     handle as i32
@@ -2166,7 +2166,7 @@ pub(crate) fn npk_mmio_map_phys(ctx: &mut HostState, hi: i32, lo: i32, pages: i3
         }
     };
     let handle = hw.mmio_maps.len();
-    hw.mmio_maps.push((virt, n));
+    hw.mmio_maps.push((virt, n * 4096));
     crate::kdebug!("[npk] WASM driver: MMIO {:#x}+{:#x} mapped (handle {})",
         base, n * 4096, handle);
     handle as i32
@@ -2245,22 +2245,23 @@ impl HwAddr {
     }
 }
 
-/// `width` bytes at `offset` in region `handle` of `regions` (base, pages).
-fn hw_addr(regions: &[(u64, usize)], handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
-    let &(base, pages) = regions.get(usize::try_from(handle).ok()?)?;
+/// `width` bytes at `offset` in a region of `len` bytes at `base`.
+fn hw_addr(base: u64, len: usize, offset: i32, width: usize) -> Option<HwAddr> {
     let off = usize::try_from(offset).ok()?;
-    if off.checked_add(width)? > pages.checked_mul(4096)? { return None; }
+    if off.checked_add(width)? > len { return None; }
     Some(HwAddr(base + off as u64))
 }
 
 #[cfg(target_arch = "x86_64")]
 fn mmio_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
-    hw_addr(&ctx.hw.as_ref()?.mmio_maps, handle, offset, width)
+    let &(base, len) = ctx.hw.as_ref()?.mmio_maps.get(usize::try_from(handle).ok()?)?;
+    hw_addr(base, len, offset, width)
 }
 
 #[cfg(target_arch = "x86_64")]
 fn dma_at(ctx: &HostState, handle: i32, offset: i32, width: usize) -> Option<HwAddr> {
-    hw_addr(&ctx.hw.as_ref()?.dma_allocs, handle, offset, width)
+    let &(phys, pages) = ctx.hw.as_ref()?.dma_allocs.get(usize::try_from(handle).ok()?)?;
+    hw_addr(phys, pages.checked_mul(4096)?, offset, width)
 }
 
 #[cfg(target_arch = "x86_64")]

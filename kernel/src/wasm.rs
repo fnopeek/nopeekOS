@@ -102,7 +102,10 @@ pub(crate) struct HwDriverState {
     vendor_id: u16,
     #[allow(dead_code)]
     device_id: u16,
-    mmio_maps: Vec<(u64, usize)>,   // handle -> (base_virt, page_count)
+    /// Handle -> (base, length in bytes): a window ends where its device's
+    /// registers end, not at the page, since other devices' registers may
+    /// share the page.
+    mmio_maps: Vec<(u64, usize)>,
     dma_allocs: Vec<(u64, usize)>,  // handle -> (phys_addr, page_count)
     /// Pages in `dma_allocs`.
     dma_pages: usize,
