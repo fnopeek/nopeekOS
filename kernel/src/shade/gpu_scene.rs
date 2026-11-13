@@ -364,6 +364,9 @@ fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bo
             let mut diffs = 0u64;
             let mut skipped = 0u64;
             let mut shown = Vec::new();
+            // Where they lie: the box around them and the rows with most.
+            let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+            let mut rows: Vec<(u32, u32)> = Vec::new();
             for y in 0..info.height {
                 let row = y as usize * info.pitch as usize;
                 for x in 0..info.width {
@@ -382,6 +385,11 @@ fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bo
                         if shown.len() < DIFFS_SHOWN {
                             shown.push((x, y, c, g));
                         }
+                        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+                        match rows.last_mut() {
+                            Some((ry, n)) if *ry == y => *n += 1,
+                            _ => rows.push((y, 1)),
+                        }
                     }
                 }
             }
@@ -395,8 +403,13 @@ fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bo
                 }
             } else {
                 MODE.store(MODE_OFF, Ordering::Release);
-                crate::kprintln!("[npk] gpu: scene differs in {} of {} pixels, composing on the CPU",
-                    diffs, info.width as u64 * info.height as u64);
+                crate::kprintln!("[npk] gpu: scene differs in {} of {} pixels, composing on the CPU (GPU {} us, CPU {} us)",
+                    diffs, info.width as u64 * info.height as u64, us(gpu), us(cpu));
+                crate::kprintln!("[npk] gpu:   within ({}, {})..({}, {}) on {} rows", x0, y0, x1, y1, rows.len());
+                rows.sort_by(|a, b| b.1.cmp(&a.1));
+                for (y, n) in rows.iter().take(6) {
+                    crate::kprintln!("[npk] gpu:   row {}: {} pixels", y, n);
+                }
                 for (x, y, c, g) in shown {
                     crate::kprintln!("[npk] gpu:   ({}, {}) CPU {:08x} GPU {:08x}, under {}", x, y, c, g,
                         kinds_at(frame, x, y));

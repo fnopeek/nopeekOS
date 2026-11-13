@@ -73,6 +73,15 @@ impl Bufs {
 
 /// The CPU side of the deliveries `rx_poll` makes.
 static RX: Mutex<VecDeque<(Vec<u8>, bool)>> = Mutex::new(VecDeque::new());
+/// Frames handed to the stack, dropped for a full backlog, and sent.
+static RX_FRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RX_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static TX_FRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Frames received, dropped for a full backlog, and sent, since boot.
+pub fn counters() -> (u64, u64, u64) {
+    (RX_FRAMES.load(Ordering::Relaxed), RX_DROPPED.load(Ordering::Relaxed), TX_FRAMES.load(Ordering::Relaxed))
+}
 
 impl gem::Dma for Bufs {
     fn read(&mut self, ring: Ring, index: usize, word: usize) -> u32 {
@@ -100,6 +109,9 @@ impl gem::Dma for Bufs {
         if q.len() < RX_BACKLOG {
             q.push_back((frame, csum_ok));
             crate::netdev::note_rx_available(1);
+            RX_FRAMES.fetch_add(1, Ordering::Relaxed);
+        } else {
+            RX_DROPPED.fetch_add(1, Ordering::Relaxed);
         }
     }
     fn rx_free(&mut self, _slot: usize, _bus: u64) {}
@@ -304,7 +316,10 @@ pub fn send(frame: &[u8]) -> Result<(), NetError> {
     bufs.tx.copy_in(off, &buf[..len]);
     let bus = bufs.tx.bus() + off as u64;
     match eth.gem.xmit(regs, bufs, bus, len) {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            TX_FRAMES.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
         Err(gem::Busy) => {
             bufs.tx_free.push(i);
             Err(NetError::QueueFull)

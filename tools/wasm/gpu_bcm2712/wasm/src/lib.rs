@@ -252,7 +252,12 @@ struct SceneBo {
 struct Scenes {
     c: scene::Composer,
     bos: alloc::vec::Vec<SceneBo>,
+    /// Scenes whose cost was logged.
+    logged: u32,
 }
+
+/// Scenes after the start whose cost goes to the log.
+const SCENES_LOGGED: u32 = 8;
 
 /// Buffer `id`'s pages, in order (`npk_gpudev_bo_pages`).
 fn bo_page_list(id: u32, pages: u32) -> Option<alloc::vec::Vec<u64>> {
@@ -294,7 +299,7 @@ impl Scenes {
             return None;
         }
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
-        Some(Scenes { c, bos })
+        Some(Scenes { c, bos, logged: 0 })
     }
 
     /// `OP_BO_ADD`: mapped for V3D, its address reported.
@@ -321,8 +326,18 @@ impl Scenes {
 
     fn run(&mut self, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> i32 {
         let bufs = SceneBufs(&self.bos);
+        let t0 = npk_sys::now_us() as u64;
         match self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]) {
-            Ok(_) => 0,
+            Ok(n) => {
+                // The first scenes say what they cost: the measure of the
+                // V3D path.
+                if self.logged < SCENES_LOGGED {
+                    self.logged += 1;
+                    Line::new().s("scene: ").dec(n as u64).s(" dispatches in ")
+                        .dec(npk_sys::now_us() as u64 - t0).s(" us").say();
+                }
+                0
+            }
             Err(e) => {
                 Line::new().s("scene into buffer ").dec(a[0] as u64).s(" refused (").dec(e.unsigned_abs() as u64)
                     .s(")").say();

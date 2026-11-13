@@ -32,12 +32,23 @@ pub fn intent_gpu(args: &str) {
         "iommu test" => iommu_test(),
         "iommu" => iommu_show(),
         "set" => set_show(),
+        "verify" => {
+            crate::shade::gpu_scene::request_verify();
+            crate::shade::force_redraw();
+            kprintln!("[npk] gpu: the next whole frame is composed on both and compared");
+        }
+        "cpu" => {
+            crate::shade::gpu_scene::force_cpu();
+            kprintln!("[npk] gpu: composing on the CPU until `gpu verify`");
+        }
         _ => {
             kprintln!("  gpu survey       the display hardware as the firmware set it up (read only), also stored in {}", SURVEY_PATH);
             kprintln!("  gpu iommu on     put the HVS behind its IOMMU, no pass-through, the firmware framebuffer granted");
             kprintln!("  gpu iommu test   take the framebuffer from the HVS for 2 s (screen dark), then give it back");
             kprintln!("  gpu iommu        the IOMMU's state and counters");
             kprintln!("  gpu set          the display set a driver module binds: windows and interrupts");
+            kprintln!("  gpu verify       compose the next whole frame on both the GPU and the CPU and compare");
+            kprintln!("  gpu cpu          compose on the CPU until `gpu verify`");
         }
     }
 }

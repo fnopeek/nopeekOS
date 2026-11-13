@@ -745,6 +745,12 @@ pub fn intent_net_info() {
         // State reflects the real carrier (WiFi: associated + keyed; wired:
         // present), not whether this is the primary interface.
         kprintln!("    State   {}", if iface.link_up { "UP" } else { "DOWN" });
+        // The Pi's one wired interface: RP1's GEM.
+        #[cfg(target_arch = "aarch64")]
+        {
+            let (rx, dropped, tx) = crate::platform::pi5_eth::counters();
+            kprintln!("    Frames  {} in ({} dropped, backlog full), {} out", rx, dropped, tx);
+        }
         kprintln!();
     }
 
