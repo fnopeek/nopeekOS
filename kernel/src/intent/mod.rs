@@ -57,7 +57,6 @@ const INPUT_BUF_SIZE: usize = 512;
 static CANCEL_REQUESTED: [core::sync::atomic::AtomicBool; MAX_TERMS] =
     [const { core::sync::atomic::AtomicBool::new(false) }; MAX_TERMS];
 /// IRQ-safe: Ctrl+C, cancel the active terminal's foreground intent.
-#[cfg(target_arch = "x86_64")]
 pub fn request_cancel() {
     request_cancel_for(crate::shade::terminal::active_idx());
 }

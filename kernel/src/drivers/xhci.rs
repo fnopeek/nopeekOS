@@ -270,17 +270,14 @@ fn inject_pointer(evt: MouseEvent, cheap: bool) {
     crate::arch::without_interrupts(|| {
         let _g = POINTER_LOCK.lock();
         MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
-        #[cfg(target_arch = "x86_64")]
         crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
         push_mouse_locked(evt);
     });
-    #[cfg(target_arch = "x86_64")]
     if cheap {
         crate::shade::request_cursor_move();
     } else {
         crate::shade::request_render();
     }
-    let _ = cheap;
 }
 
 /// Put the pointer at an absolute position (0..=65535 per axis of the
@@ -290,13 +287,10 @@ pub fn inject_pointer_abs(x: u16, y: u16, buttons: u8) {
     crate::arch::without_interrupts(|| {
         let _g = POINTER_LOCK.lock();
         MOUSE_AVAILABLE.store(true, Ordering::Relaxed);
-        #[cfg(target_arch = "x86_64")]
         crate::shade::cursor::set_atomic_abs(x, y, buttons);
         push_mouse_locked(MouseEvent { buttons, dx: 0, dy: 0, scroll: 0, hscroll: 0 });
     });
-    #[cfg(target_arch = "x86_64")]
     crate::shade::request_render();
-    let _ = (x, y);
 }
 
 /// Inject a mouse event from another input source (e.g. the PS/2 touchpad on
@@ -4900,14 +4894,12 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
         // focused Input/TextArea). Routed as a ShadeAction so the actual
         // copy runs in the main loop, not this poll/IRQ context. In a
         // terminal Ctrl+C must stay SIGINT, so copy is the Shift variant.
-        #[cfg(target_arch = "x86_64")]
         if ctrl && shift && key == 0x06 {
             crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::Copy);
             continue;
         }
         // Ctrl+Shift+V → paste the clipboard (terminal input line or focused
         // Input/TextArea). Plain Ctrl+V still reaches widgets as 'v'+ctrl.
-        #[cfg(target_arch = "x86_64")]
         if ctrl && shift && key == 0x19 {
             crate::shade::input::push_action_direct(crate::shade::input::ShadeAction::Paste);
             continue;
@@ -4919,14 +4911,12 @@ fn process_hid_report(modifiers: u8, keys: &[u8], state: &mut KbdState) {
         // a copy when a text widget is focused. Elsewhere the loop consumes
         // it as ^C. HID 0x06 = 'c'.
         if ctrl && key == 0x06 {
-            #[cfg(target_arch = "x86_64")]
             crate::intent::request_cancel();
             push_key(0x03);
             continue;
         }
 
         // Mod+special keys: push shade actions directly (avoids ESC sequence race)
-        #[cfg(target_arch = "x86_64")]
         if super_held && crate::shade::is_active() {
             let handled = match key {
                 0x4F => { crate::shade::input::push_action_direct(if ctrl { crate::shade::input::ShadeAction::ResizeRight } else if shift { crate::shade::input::ShadeAction::SwapRight } else { crate::shade::input::ShadeAction::FocusRight }); true }
