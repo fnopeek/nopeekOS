@@ -258,6 +258,8 @@ struct Scenes {
 
 /// Scenes after the start whose cost goes to the log.
 const SCENES_LOGGED: u32 = 8;
+/// Of those, the scenes logged dispatch by dispatch.
+const SCENES_TRACED: u32 = 2;
 
 /// Buffer `id`'s pages, in order (`npk_gpudev_bo_pages`).
 fn bo_page_list(id: u32, pages: u32) -> Option<alloc::vec::Vec<u64>> {
@@ -327,14 +329,24 @@ impl Scenes {
     fn run(&mut self, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> i32 {
         let bufs = SceneBufs(&self.bos);
         let t0 = npk_sys::now_us() as u64;
-        match self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]) {
+        let traced = self.logged < SCENES_TRACED;
+        if traced {
+            self.c.trace = Some(alloc::vec::Vec::new());
+        }
+        let r = self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]);
+        let trace = self.c.trace.take();
+        match r {
             Ok(n) => {
                 // The first scenes say what they cost: the measure of the
-                // V3D path.
+                // V3D path, dispatch by dispatch for the first ones.
                 if self.logged < SCENES_LOGGED {
                     self.logged += 1;
                     Line::new().s("scene: ").dec(n as u64).s(" dispatches in ")
                         .dec(npk_sys::now_us() as u64 - t0).s(" us").say();
+                    for (name, g, us) in trace.unwrap_or_default() {
+                        Line::new().s("scene:   ").s(name).s(" ").dec(g[0] as u64).s("x").dec(g[1] as u64)
+                            .s(" groups, ").dec(us).s(" us").say();
+                    }
                 }
                 0
             }

@@ -81,6 +81,9 @@ pub struct Composer {
     spill: Option<Buf>,
     /// Dispatches since the composer started.
     pub dispatches: u64,
+    /// While set, each dispatch's program, grid and time (submit to done,
+    /// caches cleaned) are kept here.
+    pub trace: Option<Vec<(&'static str, [u32; 3], u64)>>,
 }
 
 fn program_index(p: &Program) -> usize {
@@ -132,9 +135,15 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         tmp: Buf::new(PLANE_PAGES)?,
         spill,
         dispatches: 0,
+        trace: None,
     };
     Line::new().s("v3d: ").dec(qpus as u64).s(" QPUs, rev ").dec(rev as u64).s(", ")
         .dec(total as u64).s(" bytes of programs at ").hex(c.code.va).say();
+    for p in sg::PROGRAMS {
+        Line::new().s("v3d:   ").s(p.name).s(" ").dec(p.qpu.len() as u64).s(" instructions, ")
+            .dec(p.threads as u64).s(" threads, ").dec(p.uniforms.len() as u64).s(" uniforms, spills ")
+            .dec(p.spill_size as u64).s(" bytes a thread").say();
+    }
     Some(c)
 }
 
@@ -183,6 +192,7 @@ impl Composer {
         let cfg = v3d::csd_cfg(&cp, self.rev, self.qpus, grid, self.code_va[program_index(p)], self.uniforms.va);
         let hub = hw.irq_arm(Spi::V3dHub);
         let mut since = hw.irq_arm(Spi::V3dCore);
+        let t0 = npk_sys::now_us() as u64;
         if !v3d::csd_job_run(hw, &cfg) {
             return Ok(());
         }
@@ -207,6 +217,9 @@ impl Composer {
         }
         if !clean {
             return Err(-EIO);
+        }
+        if let Some(t) = self.trace.as_mut() {
+            t.push((p.name, grid, npk_sys::now_us() as u64 - t0));
         }
         Ok(())
     }
