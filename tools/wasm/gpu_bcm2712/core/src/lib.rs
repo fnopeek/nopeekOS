@@ -21,7 +21,6 @@
 extern crate alloc;
 
 pub mod clk;
-pub mod drm_edid;
 pub mod drm_mm;
 pub mod drm_scdc_helper;
 pub mod hw;

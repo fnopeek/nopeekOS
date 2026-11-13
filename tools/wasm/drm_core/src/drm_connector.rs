@@ -1,4 +1,4 @@
-//! include/drm/drm_connector.h (Linux 6.18.55): the members of
+//! include/drm/drm_connector.h (Linux rpi-6.18): the members of
 //! `struct drm_connector` and `struct drm_display_info` that EDID reading and
 //! parsing write. DRM's userspace interface (properties, modes list) is not
 //! a part: the EDID blob a property would carry is kept as `edid_blob`.
@@ -31,15 +31,73 @@ pub struct drm_luminance_range_info {
     pub max_luminance: u32,
 }
 
-/// `struct drm_hdmi_info`: filled by the HDMI and HDMI Forum parsers of a
-/// CTA extension, which grow it when they land; reset with the display info.
+/// `struct drm_scrambling`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct drm_hdmi_info {}
+pub struct drm_scrambling {
+    pub supported: bool,
+    pub low_rates: bool,
+}
 
-/// `struct hdr_sink_metadata`: filled by the HDR static metadata parser
-/// (as `drm_hdmi_info`); reset with the display info.
+/// `struct drm_scdc`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct hdr_sink_metadata {}
+pub struct drm_scdc {
+    pub supported: bool,
+    pub read_request: bool,
+    pub scrambling: drm_scrambling,
+}
+
+/// `struct drm_hdmi_dsc_cap`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct drm_hdmi_dsc_cap {
+    pub v_1p2: bool,
+    pub native_420: bool,
+    pub all_bpp: bool,
+    pub bpc_supported: u8,
+    pub max_slices: u8,
+    pub clk_per_slice: i32,
+    pub max_lanes: u8,
+    pub max_frl_rate_per_lane: u8,
+    pub total_chunk_kbytes: u8,
+}
+
+/// `struct drm_hdmi_info`. The two VIC bitmaps are 256 bits each.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct drm_hdmi_info {
+    pub scdc: drm_scdc,
+    pub y420_vdb_modes: [u64; 4],
+    pub y420_cmdb_modes: [u64; 4],
+    pub y420_dc_modes: u8,
+    pub max_frl_rate_per_lane: u8,
+    pub max_lanes: u8,
+    pub dsc_cap: drm_hdmi_dsc_cap,
+}
+
+/// `bitmap_set(map, bit, 1)` / `test_bit(bit, map)` on a 256-bit map.
+pub fn bitmap_set(map: &mut [u64; 4], bit: u8) {
+    map[bit as usize / 64] |= 1 << (bit % 64);
+}
+
+pub fn test_bit(bit: u8, map: &[u64; 4]) -> bool {
+    map[bit as usize / 64] & (1 << (bit % 64)) != 0
+}
+
+/// `struct hdr_static_metadata` (include/linux/hdmi.h).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct hdr_static_metadata {
+    pub eotf: u8,
+    pub metadata_type: u8,
+    pub max_cll: u16,
+    pub max_fall: u16,
+    pub min_cll: u16,
+}
+
+/// `struct hdr_sink_metadata`: the HDMI type 1 member of its union, the
+/// only one EDID fills.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct hdr_sink_metadata {
+    pub metadata_type: u32,
+    pub hdmi_type1: hdr_static_metadata,
+}
 
 /// `struct drm_display_info`.
 #[derive(Clone, Debug, Default)]
@@ -103,6 +161,9 @@ pub struct drm_connector {
     /// `edid_blob_ptr`'s data: the EDID the connector last saw.
     pub edid_blob: Option<Vec<u8>>,
     pub epoch_counter: u64,
+    /// The connector runs on Raspberry Pi's tree, whose patches to these
+    /// helpers apply (`drm_reset_display_info`); off, mainline's.
+    pub rpi_downstream: bool,
 }
 
 impl drm_connector {
@@ -131,6 +192,7 @@ impl drm_connector {
             tile_v_size: 0,
             edid_blob: None,
             epoch_counter: 0,
+            rpi_downstream: false,
         }
     }
 }

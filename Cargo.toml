@@ -9,6 +9,7 @@ exclude = [
     "tools/wasm/gpu_amd_renoir",
     "tools/wasm/gpu_bcm2712",
     "tools/wasm/gpu_bcm2712/core",
+    "tools/wasm/drm_core",
     "tools/wasm/audio_hda",
     "tools/wasm/audio_acp",
     "tools/wasm/uvc",

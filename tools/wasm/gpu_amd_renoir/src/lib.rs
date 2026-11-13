@@ -40,8 +40,7 @@ mod link_dp_capability;
 mod dc_dp_types;
 mod dc_sink;
 mod amdgpu_dm_helpers;
-mod drm_edid;
-mod drm_connector;
+use drm_core::{drm_connector, drm_edid};
 mod i2c;
 mod drm_dp_helper;
 mod link_dpcd;
@@ -200,6 +199,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() {
+    drm_core::linux::set_printk(linux::drm_core_printk);
     Line::new().s("v").s(DRIVER_VERSION).s(", stage 5: the GPU service, copies on SDMA").say();
 
     match npk_sys::pci_bind(AMD_VENDOR as i32, LUCIENNE as i32) {

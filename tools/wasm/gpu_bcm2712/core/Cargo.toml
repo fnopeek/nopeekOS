@@ -9,6 +9,9 @@ description = "Raspberry Pi 5 display (vc4 on BCM2712), after Linux"
 [lib]
 crate-type = ["rlib"]
 
+[dependencies]
+drm_core = { path = "../../drm_core" }
+
 [profile.release]
 opt-level = "s"
 lto = true

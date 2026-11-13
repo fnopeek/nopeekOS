@@ -283,10 +283,7 @@ mod link_dpcd;
 mod drm_dp_helper;
 #[path = "../src/i2c.rs"]
 mod i2c;
-#[path = "../src/drm_connector.rs"]
-mod drm_connector;
-#[path = "../src/drm_edid.rs"]
-mod drm_edid;
+use drm_core::{drm_connector, drm_edid};
 #[path = "../src/amdgpu_dm_helpers.rs"]
 mod amdgpu_dm_helpers;
 #[path = "../src/dc_sink.rs"]

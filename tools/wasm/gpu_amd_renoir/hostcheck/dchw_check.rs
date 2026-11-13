@@ -309,6 +309,7 @@ fn dump_bw(tag: &str, ctx: &dc_state::dc_state) {
 }
 
 fn main() {
+    drm_core::linux::set_printk(linux::drm_core_printk);
     let mut args = std::env::args().skip(1);
     let bios = std::fs::read(args.next().expect("vbios.bin")).expect("read");
     let mode = args.next().unwrap_or_default();

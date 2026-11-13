@@ -1,4 +1,4 @@
-//! drivers/gpu/drm/drm_edid.c + drm_displayid.c (Linux 6.18.55): reading an
+//! drivers/gpu/drm/drm_edid.c + drm_displayid.c (Linux rpi-6.18): reading an
 //! EDID over DDC block by block, validating it, and what
 //! `drm_edid_connector_update` derives from it (display info, ELD, tiles),
 //! with the base and extension block, CTA data block and DisplayID
@@ -11,9 +11,8 @@
 #![allow(dead_code)]
 
 use crate::drm_connector::*;
-use crate::i2c::{i2c_bus, i2c_msg, i2c_transfer, I2C_M_RD};
-use crate::amdgpu_dm_helpers::dm_ctx;
-use crate::linux::Line;
+use crate::i2c::{i2c_msg, i2c_transfer_fn, I2C_M_RD};
+use crate::linux::{Line, ENXIO};
 use crate::regs::*;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -442,7 +441,7 @@ pub const DDC_ADDR: u16 = 0x50;
 
 /// `drm_do_probe_ddc_edid`: one block over DDC, the segment pointer only
 /// when the block needs it. 0, or -1.
-pub fn drm_do_probe_ddc_edid(bus: &mut i2c_bus, ctx: &mut dm_ctx, buf: &mut [u8], block: u32) -> i32 {
+pub fn drm_do_probe_ddc_edid(i2c_transfer: &mut i2c_transfer_fn, buf: &mut [u8], block: u32) -> i32 {
     let len = buf.len();
     let mut start = [(block as usize * EDID_LENGTH) as u8];
     let mut segment = [(block >> 1) as u8];
@@ -464,9 +463,9 @@ pub fn drm_do_probe_ddc_edid(bus: &mut i2c_bus, ctx: &mut dm_ctx, buf: &mut [u8]
 
         // Avoid sending the segment addr to not upset non-compliant
         // DDC monitors.
-        ret = i2c_transfer(bus, ctx, &mut msgs[3 - xfers..]);
+        ret = i2c_transfer(&mut msgs[3 - xfers..]);
 
-        if ret == -(crate::linux::ENXIO as i32) {
+        if ret == -ENXIO {
             break;
         }
         retries -= 1;
@@ -646,10 +645,10 @@ fn _drm_edid_alloc(edid: Vec<u8>, size: usize) -> Option<drm_edid> {
 }
 
 /// `drm_probe_ddc`: is something answering on the DDC?
-pub fn drm_probe_ddc(bus: &mut i2c_bus, ctx: &mut dm_ctx) -> bool {
+pub fn drm_probe_ddc(i2c_transfer: &mut i2c_transfer_fn) -> bool {
     let mut out = [0u8; 1];
 
-    drm_do_probe_ddc_edid(bus, ctx, &mut out, 0) == 0
+    drm_do_probe_ddc_edid(i2c_transfer, &mut out, 0) == 0
 }
 
 /// `drm_edid_read_custom`.
@@ -660,17 +659,17 @@ pub fn drm_edid_read_custom(connector: &mut drm_connector, read_block: &mut read
 }
 
 /// `drm_edid_read_ddc`: read over the adapter, after a probe.
-pub fn drm_edid_read_ddc(connector: &mut drm_connector, bus: &mut i2c_bus, ctx: &mut dm_ctx) -> Option<drm_edid> {
+pub fn drm_edid_read_ddc(connector: &mut drm_connector, i2c_transfer: &mut i2c_transfer_fn) -> Option<drm_edid> {
     if connector.force == drm_connector_force::DRM_FORCE_OFF {
         return None;
     }
 
-    if connector.force == drm_connector_force::DRM_FORCE_UNSPECIFIED && !drm_probe_ddc(bus, ctx) {
+    if connector.force == drm_connector_force::DRM_FORCE_UNSPECIFIED && !drm_probe_ddc(i2c_transfer) {
         return None;
     }
 
     // Note: Do *not* call connector updates here.
-    drm_edid_read_custom(connector, &mut |buf, block| drm_do_probe_ddc_edid(bus, ctx, buf, block))
+    drm_edid_read_custom(connector, &mut |buf, block| drm_do_probe_ddc_edid(i2c_transfer, buf, block))
 }
 
 /// `drm_edid_get_panel_id`.
@@ -887,15 +886,10 @@ fn edid_get_quirks(drm_edid: &drm_edid) -> u32 {
     0
 }
 
-/// `edid_quirk_list` as (panel_id, quirks): the static as GCC lays it
-/// out, a u32 panel id, the name pointer, then the quirks.
+/// `edid_quirk_list` as (panel_id, quirks) (regs.rs).
 fn edid_quirk_list() -> impl Iterator<Item = (u32, u32)> {
-    let t = &crate::tables::edid_quirk_list;
-    t.chunks(EDID_QUIRK_WORDS).map(|e| (e[0], e[EDID_QUIRK_WORDS - 2]))
+    crate::regs::edid_quirk_list.iter().copied()
 }
-
-/// The words of one `struct edid_quirk` (24 bytes).
-const EDID_QUIRK_WORDS: usize = 6;
 
 /// `drm_edid_has_internal_quirk`.
 fn drm_edid_has_internal_quirk(connector: &drm_connector, quirk: u32) -> bool {
@@ -1413,7 +1407,15 @@ fn drm_reset_display_info(connector: &mut drm_connector) {
     info.height_mm = 0;
 
     info.bpc = 0;
-    info.color_formats = 0;
+    // Raspberry Pi's tree only: an HDMI sink without EDID still takes RGB.
+    if connector.rpi_downstream
+        && (connector.connector_type == DRM_MODE_CONNECTOR_HDMIA
+            || connector.connector_type == DRM_MODE_CONNECTOR_HDMIB)
+    {
+        info.color_formats = DRM_COLOR_FORMAT_RGB444;
+    } else {
+        info.color_formats = 0;
+    }
     info.cea_rev = 0;
     info.max_tmds_clock = 0;
     info.dvi_dual = false;

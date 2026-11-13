@@ -17,7 +17,8 @@ B=$DEV/hostcheck-build
 python3 "$MOD/dmlgen.py" --check
 rustc --edition 2024 -O --crate-type rlib --crate-name npk_sys "$HERE/npk_sys.rs" -o "$B/libnpk_sys.rlib"
 rustc --edition 2024 -O --crate-type rlib --crate-name gpu_scene "$MOD/../gpu_scene/src/lib.rs" -o "$B/libgpu_scene.rlib"
-RF="--edition 2024 -O --cap-lints allow -A dead_code -A non_camel_case_types -A non_snake_case --extern npk_sys=$B/libnpk_sys.rlib --extern gpu_scene=$B/libgpu_scene.rlib"
+rustc --edition 2024 -O --crate-type rlib --crate-name drm_core "$MOD/../drm_core/src/lib.rs" -o "$B/libdrm_core.rlib"
+RF="--edition 2024 -O --cap-lints allow -A dead_code -A non_camel_case_types -A non_snake_case --extern npk_sys=$B/libnpk_sys.rlib --extern gpu_scene=$B/libgpu_scene.rlib --extern drm_core=$B/libdrm_core.rlib"
 fail=0
 check() {
     name=$1; oracle=$2; port=$3; input=$4

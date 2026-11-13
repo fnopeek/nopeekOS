@@ -7,7 +7,7 @@
 //! must repeat it access for access.
 
 use crate::clk::FwClocks;
-use crate::drm_edid::drm_do_probe_ddc_edid;
+use drm_core::drm_edid::drm_do_probe_ddc_edid;
 use crate::hw::{Block, ClockOp, HdmiReg, Hw, Spi};
 use crate::i2c_brcmstb::{Bsc, Ddc};
 use crate::irq_brcmstb_l2::{L2Intc, L2_2711_LVL_INTC_INIT, L2_LVL_INTC_INIT};
@@ -284,7 +284,8 @@ fn edid_read_is_linux() {
     for (nth, len, block) in [(0, 1, 0), (1, 128, 0), (2, 128, 1)] {
         let mut hw = Strict::new(segment(&evs, "drm_do_probe_ddc_edid", nth));
         let mut buf = vec![0u8; len];
-        drm_do_probe_ddc_edid(&mut hw, &mut Ddc { bsc: &mut bsc, n: 0 }, &mut buf, block).expect("read");
+        let mut ddc = Ddc { bsc: &mut bsc, n: 0 };
+        assert_eq!(drm_do_probe_ddc_edid(&mut |m| ddc.i2c_transfer(&mut hw, m), &mut buf, block), 0, "read");
         hw.done();
         got.extend(buf);
     }

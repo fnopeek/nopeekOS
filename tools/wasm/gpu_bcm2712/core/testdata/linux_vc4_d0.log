@@ -29286,4 +29286,42 @@ GIC eoi intid 133 (SPI 101)
 } vc4_load_tracker_destroy_state
 } drm_client_modeset_commit_locked
 } drm_fb_helper_set_par
+# kms: connector HDMI-A-1 status 1
+# kms: info 700x390 mm bpc 8 color_formats 0x7 is_hdmi 1 has_audio 1 max_tmds_clock 600000 dvi_dual 0 cea_rev 3 non_desktop 0 quirks 0x0 spa 0x1000 rgb_qrs 0 dc_rgb444 0x0 dc_ycbcr444 0x0
+# kms: hdmi scdc 1 read_request 0 scrambling 1 low_rates 0 y420_dc 0x0 frl 0 lanes 0
+# kms: vics 0 16 4 3 1
+# kms: eld 10 00 07 00 69 10 00 00 00 00 00 00 00 00 00 00 3a c4 60 21 4f 52 41 43 4c 45 20 34 4b 09 07 07
+# kms: mode "3840x2160": 594000 3840 4016 4104 4400 0 2160 2168 2178 2250 0 flags 0x5 type 0x48 aspect 0
+# kms: mode "3840x2160": 593407 3840 4016 4104 4400 0 2160 2168 2178 2250 0 flags 0x5 type 0x40 aspect 2
+# kms: mode "1920x1080": 148500 1920 2008 2052 2200 0 1080 1084 1089 1125 0 flags 0x5 type 0x40 aspect 2
+# kms: mode "1920x1080": 148352 1920 2008 2052 2200 0 1080 1084 1089 1125 0 flags 0x5 type 0x40 aspect 2
+# kms: mode "1280x720": 74250 1280 1390 1430 1650 0 720 725 730 750 0 flags 0x5 type 0x40 aspect 2
+# kms: mode "1280x720": 74176 1280 1390 1430 1650 0 720 725 730 750 0 flags 0x5 type 0x40 aspect 2
+# kms: mode "1024x768": 65000 1024 1048 1184 1344 0 768 771 777 806 0 flags 0xa type 0x40 aspect 0
+# kms: mode "800x600": 40000 800 840 968 1056 0 600 601 605 628 0 flags 0x5 type 0x40 aspect 0
+# kms: mode "720x480": 27027 720 736 798 858 0 480 489 495 525 0 flags 0xa type 0x40 aspect 2
+# kms: mode "720x480": 27000 720 736 798 858 0 480 489 495 525 0 flags 0xa type 0x40 aspect 2
+# kms: mode "640x480": 25200 640 656 752 800 0 480 490 492 525 0 flags 0xa type 0x40 aspect 1
+# kms: mode "640x480": 25175 640 656 752 800 0 480 490 492 525 0 flags 0xa type 0x40 aspect 0
+# kms: mode "640x480": 25175 640 656 752 800 0 480 490 492 525 0 flags 0xa type 0x40 aspect 1
+# kms: connector HDMI-A-2 status 2
+# kms: info 0x0 mm bpc 0 color_formats 0x1 is_hdmi 0 has_audio 0 max_tmds_clock 0 dvi_dual 0 cea_rev 0 non_desktop 0 quirks 0x0 spa 0xffff rgb_qrs 0 dc_rgb444 0x0 dc_ycbcr444 0x0
+# kms: hdmi scdc 0 read_request 0 scrambling 0 low_rates 0 y420_dc 0x0 frl 0 lanes 0
+# kms: vics
+# kms: eld 00 00 00 00
+# kms: connector Writeback-1 status 3
+# kms: info 0x0 mm bpc 0 color_formats 0x0 is_hdmi 0 has_audio 0 max_tmds_clock 0 dvi_dual 0 cea_rev 0 non_desktop 0 quirks 0x0 spa 0x0 rgb_qrs 0 dc_rgb444 0x0 dc_ycbcr444 0x0
+# kms: hdmi scdc 0 read_request 0 scrambling 0 low_rates 0 y420_dc 0x0 frl 0 lanes 0
+# kms: vics
+# kms: eld 00 00 00 00
+# kms: connector Writeback-2 status 3
+# kms: info 0x0 mm bpc 0 color_formats 0x0 is_hdmi 0 has_audio 0 max_tmds_clock 0 dvi_dual 0 cea_rev 0 non_desktop 0 quirks 0x0 spa 0x0 rgb_qrs 0 dc_rgb444 0x0 dc_ycbcr444 0x0
+# kms: hdmi scdc 0 read_request 0 scrambling 0 low_rates 0 y420_dc 0x0 frl 0 lanes 0
+# kms: vics
+# kms: eld 00 00 00 00
+# kms: modeset crtc 0 x 0 y 0 connectors 0
+# kms: modeset crtc 1 x 0 y 0 connectors 0
+# kms: modeset crtc 2 x 0 y 0 connectors 1 HDMI-A-1
+# kms: chosen "3840x2160": 594000 3840 4016 4104 4400 0 2160 2168 2178 2250 0 flags 0x5 type 0x48 aspect 0
+# kms: modeset crtc 3 x 0 y 0 connectors 0
 == run g end

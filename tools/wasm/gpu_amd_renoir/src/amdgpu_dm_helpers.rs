@@ -15,10 +15,14 @@ use crate::dc_types::dc_edid_status;
 use crate::drm_connector::*;
 use crate::drm_dp_helper::*;
 use crate::drm_edid::*;
-use crate::i2c::{i2c_adapter, i2c_algo, i2c_bus, i2c_msg};
+use crate::i2c::{i2c_adapter, i2c_algo, i2c_bus, i2c_msg, i2c_transfer};
 use crate::link_ddc::link_aux_transfer_raw;
 use crate::linux::{Line, EBUSY, EIO, ENODEV, ETIMEDOUT};
 use crate::regs::*;
+use drm_core::regs::{
+    DRM_MODE_CONNECTOR_DVID, DRM_MODE_CONNECTOR_DisplayPort, DRM_MODE_CONNECTOR_HDMIA, DRM_MODE_CONNECTOR_LVDS,
+    DRM_MODE_CONNECTOR_Unknown, DRM_MODE_CONNECTOR_VGA, DRM_MODE_CONNECTOR_VIRTUAL, DRM_MODE_CONNECTOR_eDP,
+};
 use alloc::boxed::Box;
 use alloc::format;
 
@@ -391,10 +395,11 @@ pub fn dm_helpers_read_local_edid(adev: &amdgpu_device, dc: &mut dc, li: usize, 
             if drm_edid.is_some() {
                 Line::new().s("Using ACPI provided EDID for ").s(&a.base.name).say();
             } else if aux_mode {
-                drm_edid = drm_edid_read_ddc(&mut a.base, &mut i2c_bus::aux(&mut a.dm_dp_aux.aux), ctx);
+                let aux = &mut a.dm_dp_aux.aux;
+                drm_edid = drm_edid_read_ddc(&mut a.base, &mut |msgs| i2c_transfer(&mut i2c_bus::aux(aux), ctx, msgs));
             } else {
                 let i2c = a.i2c.as_deref_mut().unwrap();
-                drm_edid = drm_edid_read_ddc(&mut a.base, &mut i2c_bus::dm(i2c), ctx);
+                drm_edid = drm_edid_read_ddc(&mut a.base, &mut |msgs| i2c_transfer(&mut i2c_bus::dm(i2c), ctx, msgs));
             }
             drm_edid_connector_update(&mut a.base, drm_edid.as_ref());
 

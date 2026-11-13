@@ -54,18 +54,12 @@ const COND_START_STOP: u32 = COND_RESTART | COND_NOSTART | COND_NOSTOP;
 const DTF_WR_MASK: u32 = 0x0000_0000;
 const DTF_RD_MASK: u32 = 0x0000_0001;
 
+pub use drm_core::i2c::{i2c_msg, I2C_M_RD};
+
 /// `include/uapi/linux/i2c.h`.
-pub const I2C_M_RD: u16 = 0x0001;
 pub const I2C_M_TEN: u16 = 0x0010;
 pub const I2C_M_IGNORE_NAK: u16 = 0x1000;
 pub const I2C_M_NOSTART: u16 = 0x4000;
-
-/// `struct i2c_msg`.
-pub struct I2cMsg<'a> {
-    pub addr: u16,
-    pub flags: u16,
-    pub buf: &'a mut [u8],
-}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum BscXferCmd {
@@ -348,7 +342,7 @@ impl Bsc {
     }
 
     /// `brcmstb_i2c_do_addr`.
-    fn do_addr(&mut self, hw: &mut impl Hw, n: usize, msg: &I2cMsg) -> Result<(), i32> {
+    fn do_addr(&mut self, hw: &mut impl Hw, n: usize, msg: &i2c_msg) -> Result<(), i32> {
         let block = self.d(n).block;
         if msg.flags & I2C_M_TEN != 0 {
             // `i2c_10bit_addr_hi_from_msg`, `i2c_10bit_addr_lo_from_msg`.
@@ -374,7 +368,7 @@ impl Bsc {
     /// `brcmstb_i2c_xfer` (through `__i2c_transfer`, whose single try the
     /// adapter's zero `retries` leaves): the number of messages, or an
     /// errno.
-    pub fn xfer(&mut self, hw: &mut impl Hw, n: usize, msgs: &mut [I2cMsg]) -> Result<usize, i32> {
+    pub fn xfer(&mut self, hw: &mut impl Hw, n: usize, msgs: &mut [i2c_msg]) -> Result<usize, i32> {
         let num = msgs.len();
         let xfersz = self.d(n).get_xfersz();
         for i in 0..num {
@@ -422,7 +416,16 @@ pub struct Ddc<'a> {
 
 impl Ddc<'_> {
     /// `i2c_transfer`.
-    pub fn transfer(&mut self, hw: &mut impl Hw, msgs: &mut [I2cMsg]) -> Result<usize, i32> {
+    pub fn transfer(&mut self, hw: &mut impl Hw, msgs: &mut [i2c_msg]) -> Result<usize, i32> {
         self.bsc.xfer(hw, self.n, msgs)
+    }
+
+    /// `i2c_transfer`: the messages transferred, or a negative errno. The
+    /// adapter has no retries (`i2c_register_adapter` leaves them 0).
+    pub fn i2c_transfer(&mut self, hw: &mut impl Hw, msgs: &mut [i2c_msg]) -> i32 {
+        match self.transfer(hw, msgs) {
+            Ok(n) => n as i32,
+            Err(e) => e,
+        }
     }
 }

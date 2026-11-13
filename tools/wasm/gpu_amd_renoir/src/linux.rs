@@ -187,6 +187,11 @@ impl Line {
     }
 }
 
+/// drm_core's printk: its lines as this module's.
+pub fn drm_core_printk(line: &[u8]) {
+    Line::new().bytes(line).say();
+}
+
 pub fn say(s: &str) {
     Line::new().s(s).say();
 }

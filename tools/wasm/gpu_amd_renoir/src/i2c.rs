@@ -9,17 +9,7 @@ use crate::drm_dp_helper::{drm_dp_aux, drm_dp_i2c_xfer};
 use crate::linux::{EAGAIN, EINVAL, EOPNOTSUPP};
 use alloc::string::String;
 
-/// `I2C_M_RD` / `I2C_M_STOP` (uapi/linux/i2c.h).
-pub const I2C_M_RD: u16 = 0x0001;
-pub const I2C_M_STOP: u16 = 0x8000;
-
-/// `struct i2c_msg`. `len` is the buffer's.
-pub struct i2c_msg<'a> {
-    pub addr: u16,
-    pub flags: u16,
-    pub len: u16,
-    pub buf: &'a mut [u8],
-}
+pub use drm_core::i2c::{i2c_msg, I2C_M_RD, I2C_M_STOP};
 
 /// Which `struct i2c_algorithm` an adapter has.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

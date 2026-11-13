@@ -45,6 +45,7 @@ fn ccmd(cmd: u32, seqno: u32, body: &[u32]) -> Vec<u8> {
 }
 
 fn main() {
+    drm_core::linux::set_printk(linux::drm_core_printk);
     let mut adev = fake_renoir();
     fake_gpu();
     fake_gpu_hqd_banks();

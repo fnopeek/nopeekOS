@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "drm_core"
+version = "0.1.0"
+
+[[package]]
 name = "gpu_bcm2712_core"
 version = "0.1.0"
+dependencies = [
+ "drm_core",
+]

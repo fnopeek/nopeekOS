@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 npk_sys = { path = "../sdk/npk_sys", features = ["alloc"] }
 gpu_scene = { path = "../gpu_scene" }
+drm_core = { path = "../drm_core" }
 nopeek_widgets = { path = "../sdk/widgets", features = ["heap"] }
 
 [build-dependencies]

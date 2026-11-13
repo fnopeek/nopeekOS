@@ -4,7 +4,7 @@
 use alloc::vec;
 
 use crate::hw::Hw;
-use crate::i2c_brcmstb::{Ddc, I2cMsg, I2C_M_RD};
+use crate::i2c_brcmstb::{i2c_msg, Ddc, I2C_M_RD};
 
 /// `include/drm/display/drm_scdc.h`.
 pub const SCDC_I2C_SLAVE_ADDRESS: u16 = 0x54;
@@ -18,8 +18,8 @@ const EPROTO: i32 = 71;
 pub fn drm_scdc_read(hw: &mut impl Hw, ddc: &mut Ddc, offset: u8, buffer: &mut [u8]) -> Result<(), i32> {
     let mut off = [offset];
     let mut msgs = [
-        I2cMsg { addr: SCDC_I2C_SLAVE_ADDRESS, flags: 0, buf: &mut off },
-        I2cMsg { addr: SCDC_I2C_SLAVE_ADDRESS, flags: I2C_M_RD, buf: buffer },
+        i2c_msg { addr: SCDC_I2C_SLAVE_ADDRESS, flags: 0, len: 1, buf: &mut off },
+        i2c_msg { addr: SCDC_I2C_SLAVE_ADDRESS, flags: I2C_M_RD, len: buffer.len() as u16, buf: buffer },
     ];
     match ddc.transfer(hw, &mut msgs)? {
         2 => Ok(()),
@@ -31,7 +31,8 @@ pub fn drm_scdc_read(hw: &mut impl Hw, ddc: &mut Ddc, offset: u8, buffer: &mut [
 pub fn drm_scdc_write(hw: &mut impl Hw, ddc: &mut Ddc, offset: u8, buffer: &[u8]) -> Result<(), i32> {
     let mut data = vec![offset];
     data.extend_from_slice(buffer);
-    let mut msgs = [I2cMsg { addr: SCDC_I2C_SLAVE_ADDRESS, flags: 0, buf: &mut data }];
+    let len = data.len() as u16;
+    let mut msgs = [i2c_msg { addr: SCDC_I2C_SLAVE_ADDRESS, flags: 0, len, buf: &mut data }];
     match ddc.transfer(hw, &mut msgs)? {
         1 => Ok(()),
         _ => Err(-EPROTO),
