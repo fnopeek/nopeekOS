@@ -1,0 +1,32 @@
+# Indirect calls in vc4 resolved for the Raspberry Pi 5 display (BCM2712 D0,
+# VC4_GEN_6_D), raspberrypi/linux rpi-6.18.y. Each line names the source
+# that makes the choice; read by tools/linux-callgraph.py --follow-file.
+# Lines are those of the upstream tree: tools/bcm2712-vc4-specialize.py
+# keeps every line number of the pinned copy.
+#
+# Platform facts used below:
+#   dtoverlay=vc4-kms-v3d binds hvs, pixelvalve0/1, hdmi0/1, mop, moplet
+#   (GPU_BCM2712.md 1.2). HDMI0/1 use bcm2712_hdmi0/1_variant
+#   (vc4_hdmi.c:3387/3415, matched at vc4_hdmi_dt_match 3447/3448); both
+#   have the same hooks. In the pinned copy the variant hooks
+#   (init_resources, csc_setup, reset, set_timings, phy_init, phy_disable,
+#   channel_map, hp_detect) are direct calls already, so they need no line
+#   here; phy_rng_enable/phy_rng_disable are NULL in both bcm2712 variants.
+
+# --- vc4_encoder hooks called by the pixelvalve (vc4_crtc.c). The only
+#     encoder behind PV0/PV1 on BCM2712 is HDMI0/HDMI1
+#     (bcm2712_pv0_data / pv1_data encoder_types, vc4_crtc.c:1330/1344).
+#     vc4_hdmi_bind installs the hooks, vc4_hdmi.c:3187-3191.
+@vc4_crtc.c:541 = vc4_hdmi_encoder_post_crtc_disable
+@vc4_crtc.c:547 = vc4_hdmi_encoder_post_crtc_powerdown
+@vc4_crtc.c:685 = vc4_hdmi_encoder_pre_crtc_configure
+@vc4_crtc.c:692 = vc4_hdmi_encoder_pre_crtc_enable
+@vc4_crtc.c:701 = vc4_hdmi_encoder_post_crtc_enable
+# @vc4_crtc.c:880 vc4_encoder->vblank: not followed. Only vc4_dsi.c:1756
+#     sets it; HDMI (vc4_hdmi.c:3186-3191) and TXP (vc4_txp_bind) leave it
+#     NULL, so the call never happens on BCM2712.
+
+# --- connector reset during init: connector->funcs is
+#     vc4_hdmi_connector_funcs (vc4_hdmi.c:551 drmm_connector_hdmi_init),
+#     whose .reset is vc4_hdmi_connector_reset (vc4_hdmi.c:525).
+@vc4_hdmi.c:577 = vc4_hdmi.c:vc4_hdmi_connector_reset

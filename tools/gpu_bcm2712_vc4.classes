@@ -1,0 +1,117 @@
+# Classes for the BCM2712 (Pi 5, VC4_GEN_6_D) vc4 call graph, by defining
+# file (first match wins); read by tools/linux-callgraph.py --classes.
+# Function-level entries (@name) are checked before the file rules.
+# Unmatched files are B.
+#   A  programs the hardware or encodes its limits and sequence: port 1:1
+#   N  not on BCM2712, or not ported by decision (reason after #)
+#   B  Linux bookkeeping: own counterpart on gpudev, same effect on hardware
+
+# --- N: debugfs and debug printing (no function for the display)
+N ^vc4_debugfs\.
+N ^vc4_bo\.                  # vc4_bo_debugfs_init, reached only from vc4_debugfs_init
+N ^vc4_v3d\.                 # vc4_v3d_debugfs_init, same; BCM2712 3D is the v3d driver
+N @vc4_hvs_debugfs_init
+N @vc4_hvs_debugfs_underrun
+N @vc4_hvs_debugfs_dlist_allocs
+N @vc4_hvs_debugfs_lbm_allocs
+N @vc6_hvs_debugfs_dlist
+N @vc6_hvs_debugfs_upm_allocs
+N @vc4_crtc_late_register    # debugfs regset of the pixelvalve
+N @vc4_hdmi_late_register    # debugfs regset of the HDMI block
+N @vc4_hdmi_debugfs_regs
+N @vc4_hdmi_build_regset     # debugfs regset copy of the variant's field table
+N @vc4_hdmi_free_regset
+N @vc4_hvs_channels_print_state   # drm_state_dump only
+
+# --- N: HDMI audio (ALSA/ASoC, MAI): not ported by decision
+N @vc4_hdmi_audio_init
+N @vc4_hdmi_audio_startup
+N @vc4_hdmi_audio_prepare
+N @vc4_hdmi_audio_shutdown
+N @vc4_hdmi_audio_reset
+N @vc4_hdmi_audio_can_stream
+N @vc4_hdmi_audio_set_mai_clock
+N @vc4_hdmi_audio_cpu_dai_probe
+N @vc4_hdmi_audio_cpu_dai_startup
+N @vc4_hdmi_codec_init
+N @vc4_hdmi_set_n_cts
+N @sample_rate_to_mai_fmt
+N @dai_to_hdmi
+N @vc5_hdmi_channel_map      # variant hook, only called from vc4_hdmi_audio_prepare
+
+# --- N: HDMI CEC: not ported by decision
+N @vc4_hdmi_cec_update_clk_div   # CEC bit clock divider; also called from pre_crtc_configure and runtime_resume
+N @vc4_hdmi_cec_register
+N @vc4_hdmi_cec_init
+N @vc4_hdmi_cec_enable
+N @vc4_hdmi_cec_disable
+N @vc4_hdmi_cec_adap_enable
+N @vc4_hdmi_cec_adap_log_addr
+N @vc4_hdmi_cec_adap_transmit
+N @vc4_cec_read_msg
+N @vc4_cec_irq_handler_rx_bare
+N @vc4_cec_irq_handler_rx_bare_locked
+N @vc4_cec_irq_handler_rx_thread
+N @vc4_cec_irq_handler_tx_bare
+N @vc4_cec_irq_handler_tx_bare_locked
+N @vc4_cec_irq_handler_tx_thread
+
+# --- B inside hardware files: DRM objects, atomic state, driver model
+B @vc4_hvs_dev_probe
+B @vc4_hvs_dev_remove
+B @vc4_crtc_dev_probe
+B @vc4_crtc_dev_remove
+B @vc4_crtc_reset
+B @vc4_crtc_duplicate_state
+B @vc4_crtc_destroy_state
+B @vc4_crtc_send_vblank      # drm event delivery
+B @vc4_crtc_get_margins      # reads connector state
+B @vc4_get_crtc_encoder      # state lookup
+B @vc4_set_crtc_possible_masks
+B @__vc4_crtc_init           # drmm_crtc_init_with_planes, properties
+B @vc4_crtc_init
+B @vc4_async_page_flip_fence_complete   # dma_fence callback, hands over to vc4_async_page_flip_complete
+B @vc4_async_set_fence_cb
+B @vc4_plane_reset
+B @vc4_plane_duplicate_state
+B @vc4_plane_destroy_state
+B @vc4_plane_release_lbm_ida
+B @vc4_plane_release_upm_ida
+B @vc4_plane_init            # drm_universal_plane_init, format list, properties
+B @vc4_plane_create_additional_planes
+B @vc4_plane_calc_load       # feeds the load tracker and core_clock_rate, both unused on GEN_6
+B @vc4_hdmi_dev_probe
+B @vc4_hdmi_dev_remove
+B @vc4_hdmi_put_ddc_device
+B @vc4_hdmi_connector_init   # drmm_connector_hdmi_init, properties
+B @vc4_hdmi_connector_reset
+B @vc4_hdmi_connector_atomic_check
+B @vc4_hdmi_connector_get_modes   # EDID over DDC through drm_edid (i2c-brcmstb)
+B @vc4_hdmi_encoder_atomic_mode_set   # copies the adjusted mode under the mutex
+B @vc4_hdmi_hpd_irq_thread   # only forwards to drm_connector_helper_hpd_irq_event
+B @vc4_txp_probe
+B @vc4_txp_remove
+B @vc4_txp_connector_get_modes
+B @vc4_txp_connector_mode_valid
+B @vc4_txp_connector_detect
+B @vc4_txp_connector_reset
+B @vc4_txp_enable_vblank
+B @vc4_txp_disable_vblank
+
+# --- A inside bookkeeping files: bring-up order, PV muxing, commit order
+A @vc4_drm_bind              # DMA mask 36 bit, NOTIFY_DISPLAY_DONE, bind order
+A @vc4_atomic_commit_tail    # order of disable / muxing / planes / enable
+A @vc6_hvs_pv_muxing_commit  # SCALER6_CONTROL DSP1_TARGET
+A @vc4_pv_muxing_atomic_check  # HVS channel to pixelvalve assignment
+
+# --- files
+A ^vc4_hvs\.
+A ^vc4_crtc\.
+A ^vc4_plane\.
+A ^vc4_hdmi\.c
+A ^vc4_hdmi_phy\.
+A ^vc4_hdmi_regs\.h
+A ^vc4_txp\.                 # MOP/MOPLET writeback: bound by vc4-kms-v3d on BCM2712
+B ^vc4_kms\.                 # atomic state objects; CTM and load tracker have no register effect on GEN_6
+B ^vc4_drv\.
+B ^vc4_hdmi\.h

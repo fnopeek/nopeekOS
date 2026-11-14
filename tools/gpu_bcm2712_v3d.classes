@@ -1,0 +1,47 @@
+# Classes for the BCM2712 V3D call graph (V3D_GEN_71), by defining file
+# (first match wins); read by tools/linux-callgraph.py --classes.
+# Unmatched files are B.
+#   A  programs the hardware: port 1:1
+#   N  not on BCM2712 (reason after #)
+#   B  Linux bookkeeping (drm_sched, GEM, fences, syncobj, ioctl copy-in):
+#      own counterpart on gpudev / our kernel, same effect on hardware
+
+# Function-level overrides (@name), checked before the file rules.
+
+# Empty on V3D_GEN_71 after pinning. v3d_idle_gca is global, so GCC keeps
+# the node (body: return); the two static ones vanish from the pinned graph
+# and are listed for the unpinned one.
+N @v3d_idle_gca              # GCA only before 4.1: return at v3d_gem.c:67
+N @v3d_flush_l3              # GCA L3 only before 4.1: v3d_gem.c:160
+N @v3d_invalidate_l2c        # L2C only before 3.3: return at v3d_gem.c:179
+
+# v3d_drv.c: bring-up order and identity reads
+A @v3d_platform_drm_probe    # order: irq, scratch page, PT, PM resume, MMU_DEBUG_INFO PA/VA width, IDENT1/3, init_hw_state
+A @v3d_platform_drm_remove   # order: runtime suspend, PT/scratch free
+B @v3d_get_param_ioctl       # ioctl; its register reads are the HUB/CORE IDENT words probe reads too
+# v3d_gem.c: the page table + VA range are allocated here
+A @v3d_gem_init              # 4 MiB PT (dma_alloc_wc, write-combined), VA pages [1, 1M-1] (drm_mm_init, page 0 never handed out)
+B @v3d_gem_destroy
+# v3d_irq.c: line selection is bookkeeping, fence signalling is ours
+B @v3d_irq_init              # request_irq: SPI 249 core (index 1), SPI 250 hub (index 0)
+B @v3d_irq_signal_fence
+# v3d_sched.c: the run_job bodies write the registers that start a job
+A @v3d_bin_job_run
+A @v3d_render_job_run
+A @v3d_tfu_job_run
+A @v3d_csd_job_run
+A @v3d_cache_clean_job_run
+A @v3d_cl_job_timedout       # reads CLE CTnCA/CTnRA to decide hang vs progress
+A @v3d_csd_job_timedout      # reads CSD_CURRENT_CFG4 (batches left)
+A @v3d_switch_perfmon        # optional: perfmon only
+# v3d_perfmon.c: the counter programming is hardware, the rest is idr/refcount
+A @v3d_perfmon_start         # optional: PCTR_0_SRC_x, EN, CLR, OVERFLOW
+A @v3d_perfmon_stop          # optional: PCTR_0_PCTRx read, EN = 0
+A @v3d_perfmon_init          # optional: selects the 7.1 counter table
+# v3d_bo.c: VA allocation with the page-size alignment the PTE format needs
+B @v3d_bo_create_finish      # drm_mm VA: 1M/64K/4K alignment only with gemfs (THP); ours: kernel IOVA allocator
+
+A ^v3d_power\.c              # SMS power, GMP idle, clock enable/disable (runtime PM)
+A ^v3d_mmu\.c                # PT base, MMU_CTL, ILLEGAL_ADDR, MMUC flush, TLB clear, PTE format
+A ^v3d_gem\.c                # init_core, idle_axi, reset, reset_sms, cache flush/clean/invalidate
+A ^v3d_irq\.c                # core/hub interrupt handlers, mask/clear, binner overflow memory

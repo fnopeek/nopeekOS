@@ -1,0 +1,30 @@
+# Indirect calls in v3d resolved for the Raspberry Pi 5 (BCM2712,
+# "brcm,2712-v3d", V3D_GEN_71), raspberrypi/linux rpi-6.18.y. Each line
+# names the source that makes the choice; read by
+# tools/linux-callgraph.py --follow-file. Sites are lines of the pinned copy
+# (tools/bcm2712-v3d-specialize.py keeps line numbers).
+#
+# GCC sees exactly two indirect calls inside the driver; everything else the
+# driver hands out as a pointer (drm_driver, ioctl table, drm_sched backend
+# ops, gem object funcs, dma_fence ops, dev_pm_ops, request_irq, INIT_WORK,
+# kref release, idr_for_each) is called by Linux core code that is not in
+# the graph, so those functions are roots of the reach command instead.
+
+# --- v3d_sched.c:704 v3d_cpu_job_run: cpu_job_function[job->job_type](job)
+#     (table v3d_sched.c:681-688). job_type is set by the extension the
+#     client sends to v3d_submit_cpu_ioctl (v3d_submit.c v3d_get_extensions,
+#     job->job_type = ... at :469 :512 :578 :642 :775 and the copy-performance
+#     setter); the CPU queue exists on every generation
+#     (v3d_sched.c:923, DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE = 1, v3d_drv.c:113),
+#     so all six run on BCM2712.
+@v3d_sched.c:704 = v3d_rewrite_csd_job_wg_counts_from_indirect
+@v3d_sched.c:704 = v3d_timestamp_query
+@v3d_sched.c:704 = v3d_reset_timestamp_queries
+@v3d_sched.c:704 = v3d_copy_query_results
+@v3d_sched.c:704 = v3d_reset_performance_queries
+@v3d_sched.c:704 = v3d_copy_performance_query
+
+# --- v3d_irq.c:94 v3d_irq_signal_fence: trace_irq(&v3d->drm, seqno), the
+#     tracepoint passed by the caller (trace_v3d_bcl_irq, trace_v3d_rcl_irq,
+#     trace_v3d_csd_irq, trace_v3d_tfu_irq; v3d_irq.c:123 128 133 165).
+#     Not followed: tracing only.
