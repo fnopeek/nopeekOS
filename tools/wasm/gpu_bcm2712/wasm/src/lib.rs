@@ -477,6 +477,8 @@ struct Cursor {
     hot: (i32, i32),
     pos: (i32, i32),
     shown: bool,
+    /// The kernel's move count last followed (`follow`).
+    moves: Option<i32>,
 }
 
 impl Cursor {
@@ -486,7 +488,7 @@ impl Cursor {
             return None;
         }
         let phys = npk_sys::dma_phys_addr(dma) as u64;
-        Some(Cursor { dma, phys, slot: 0, fb: None, hot: (0, 0), pos: (0, 0), shown: false })
+        Some(Cursor { dma, phys, slot: 0, fb: None, hot: (0, 0), pos: (0, 0), shown: false, moves: None })
     }
 
     /// `OP_CURSOR_IMAGE` of job `seq`.
@@ -521,6 +523,22 @@ impl Cursor {
         });
         self.hot = (a[2] as i32, a[3] as i32);
         self.apply(vc4, hw)
+    }
+
+    /// The plane to where the input left the pointer, read from the kernel
+    /// instead of a job per move, as Linux's async cursor update bypasses
+    /// the commit queue: a scene in flight does not hold the pointer back.
+    fn follow(&mut self, vc4: &mut Vc4, hw: &mut PiHw) {
+        let Some((x, y, shown, moves)) = npk_sys::gpudev_cursor() else { return };
+        if self.moves == Some(moves) {
+            return;
+        }
+        self.moves = Some(moves);
+        if (self.pos, self.shown) != ((x, y), shown) {
+            self.pos = (x, y);
+            self.shown = shown;
+            self.apply(vc4, hw);
+        }
     }
 
     /// `OP_CURSOR_MOVE`.
@@ -658,6 +676,9 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
         }
 
         let woke = npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout_ms.max(1) as i32);
+        if let Some(c) = p.cursor.as_mut() {
+            c.follow(vc4, hw);
+        }
 
         let fired = hw.fired(&mut seen);
         if let Some(s) = p.scenes.as_mut() {

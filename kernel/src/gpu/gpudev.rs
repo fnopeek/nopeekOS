@@ -899,7 +899,8 @@ pub fn complete(dev: DevId, seq: u32, status: i32) -> i32 {
 /// Jobs waiting for the module (`npk_wait(WAIT_GPU_CMD)`).
 pub fn pending(dev: DevId) -> bool {
     let st = STATE.lock();
-    st.owner == Some(dev) && !st.queue.is_empty()
+    st.owner == Some(dev)
+        && (!st.queue.is_empty() || CURSOR_GEN.load(Ordering::Acquire) != CURSOR_SEEN.load(Ordering::Relaxed))
 }
 
 pub fn set_waker(dev: DevId, w: Waker) {
@@ -920,6 +921,8 @@ pub fn module_gone(dev: DevId) {
             return;
         }
         st.owner = None;
+        CURSOR_PULLED.store(false, Ordering::Release);
+        CURSOR_SHOWN.store(false, Ordering::Relaxed);
         STALLED.store(false, Ordering::Release);
         st.queue.clear();
         st.payloads.clear();
@@ -1732,11 +1735,56 @@ pub fn cursor_image(width: u32, height: u32, hot_x: u32, hot_y: u32, pixels: Vec
     true
 }
 
+/// Bumped on every pointer move while the module reads the pointer itself
+/// (`cursor_pos`), the plane following the input as Linux's async cursor
+/// update does, not the compositor: no job per move, and nothing waits
+/// for a scene.
+static CURSOR_GEN: AtomicU32 = AtomicU32::new(0);
+static CURSOR_SHOWN: AtomicBool = AtomicBool::new(false);
+static CURSOR_PULLED: AtomicBool = AtomicBool::new(false);
+/// The move count the module last read.
+static CURSOR_SEEN: AtomicU32 = AtomicU32::new(0);
+
+/// The pointer moved. Lock-free, for the input path: wakes the module when
+/// it reads the pointer itself.
+pub fn pointer_moved() {
+    if CURSOR_PULLED.load(Ordering::Acquire) && CURSOR_SHOWN.load(Ordering::Relaxed) {
+        CURSOR_GEN.fetch_add(1, Ordering::Release);
+        wake_module();
+    }
+}
+
+/// `npk_gpudev_cursor`: the pointer's position (x, y as i32) and whether
+/// it is shown (u32) into `out`, and the move count it belongs to. From the
+/// first call on, the module follows the pointer this way and
+/// `OP_CURSOR_MOVE` stays for the images' order only.
+pub fn cursor_pos(dev: DevId, out: &mut [u8]) -> i32 {
+    if out.len() < 12 || STATE.lock().owner != Some(dev) {
+        return -1;
+    }
+    CURSOR_PULLED.store(true, Ordering::Release);
+    let generation = CURSOR_GEN.load(Ordering::Acquire);
+    CURSOR_SEEN.store(generation, Ordering::Relaxed);
+    let (x, y) = crate::shade::cursor::atomic_pos();
+    out[..4].copy_from_slice(&x.to_le_bytes());
+    out[4..8].copy_from_slice(&y.to_le_bytes());
+    out[8..12].copy_from_slice(&(CURSOR_SHOWN.load(Ordering::Relaxed) as u32).to_le_bytes());
+    (generation & 0x7fff_ffff) as i32
+}
+
 /// Tell the module where the pointer is. A move the module has not taken
 /// yet is replaced, so moves never pile up behind a busy module.
 pub fn cursor_move(x: i32, y: i32, shown: bool) -> bool {
     if !cursor_supported() {
         return false;
+    }
+    if CURSOR_PULLED.load(Ordering::Acquire) {
+        let was = CURSOR_SHOWN.swap(shown, Ordering::Relaxed);
+        if was != shown {
+            CURSOR_GEN.fetch_add(1, Ordering::Release);
+            wake_module();
+        }
+        return true;
     }
     {
         let mut st = STATE.lock();

@@ -6007,6 +6007,14 @@ pub(crate) fn npk_gpudev_bo_bound(ctx: &mut HostState, id: i32, gpu_addr: i64) -
     }
 }
 
+/// `npk_gpudev_cursor(out_ptr) -> moves | -1`: the pointer, 12 bytes
+/// {x i32, y i32, shown u32}.
+pub(crate) fn npk_gpudev_cursor(mem: &mut [u8], ctx: &mut HostState, out_ptr: i32) -> i32 {
+    let Some(dev) = gpudev_device(ctx) else { return -1 };
+    let Some(out) = guest_mut(mem, out_ptr, 12) else { return -1 };
+    crate::gpu::gpudev::cursor_pos(dev, out)
+}
+
 /// `npk_gpudev_bo_gpu_only(id) -> 0 | -1`.
 pub(crate) fn npk_gpudev_bo_gpu_only(ctx: &mut HostState, id: i32) -> i32 {
     match gpudev_device(ctx) {

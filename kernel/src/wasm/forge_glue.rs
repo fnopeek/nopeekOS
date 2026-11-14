@@ -1382,6 +1382,8 @@ host_imports! {
     ctx fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
     // npk_gpudev_bo_gpu_only(id) -> 0 / -1; its pages hold a picture only the card reads
     ctx fn npk_gpudev_bo_gpu_only(id: i32) -> i32;
+    // npk_gpudev_cursor(out_ptr) -> moves / -1; 12 bytes {x i32, y i32, shown u32}
+    mem fn npk_gpudev_cursor(out_ptr: i32) -> i32;
     // npk_gpudev_ready(caps) -> 0 / -1; bit 0 copies, bit 1 scenes
     ctx fn npk_gpudev_ready(caps: i32) -> i32;
     // npk_gpudev_framebuffer(width, height) -> 0 / -1: the kernel draws

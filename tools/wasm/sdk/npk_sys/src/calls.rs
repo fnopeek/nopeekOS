@@ -135,6 +135,7 @@ unsafe extern "C" {
     fn npk_gpudev_job_data(seq: i32, offset: i32, out_ptr: i32, len: i32) -> i32;
     fn npk_gpudev_bo_bound(id: i32, gpu_addr: i64) -> i32;
     fn npk_gpudev_bo_gpu_only(id: i32) -> i32;
+    fn npk_gpudev_cursor(out_ptr: i32) -> i32;
     fn npk_gpudev_ready(ok: i32) -> i32;
     fn npk_gpudev_poll(buf_ptr: i32, max: i32) -> i32;
     fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
@@ -837,6 +838,20 @@ pub fn gpudev_tt_read(tt: i32, offset: u64, out: &mut [u8]) -> i32 {
     // SAFETY: FFI; the kernel writes at most `out.len()` bytes into `out`,
     // borrowed for the call.
     unsafe { npk_gpudev_tt_read(tt, offset as i64, out.as_mut_ptr() as i32, out.len() as i32) }
+}
+
+/// The pointer as the input left it: its position, whether it is shown,
+/// and a count that changes with every move (`npk_gpudev_cursor`). None
+/// when this module is not the GPU service.
+pub fn gpudev_cursor() -> Option<(i32, i32, bool, i32)> {
+    let mut b = [0u8; 12];
+    // SAFETY: FFI; the kernel writes 12 bytes into `b`, borrowed for the call.
+    let n = unsafe { npk_gpudev_cursor(b.as_mut_ptr() as i32) };
+    if n < 0 {
+        return None;
+    }
+    let w = |i: usize| [b[i], b[i + 1], b[i + 2], b[i + 3]];
+    Some((i32::from_le_bytes(w(0)), i32::from_le_bytes(w(4)), u32::from_le_bytes(w(8)) != 0, n))
 }
 
 /// Bytes of job `seq`'s payload from `offset` on (`npk_gpudev_job_data`);

@@ -273,6 +273,8 @@ fn inject_pointer(evt: MouseEvent, cheap: bool) {
         crate::shade::cursor::update_atomic(evt.dx, evt.dy, evt.buttons);
         push_mouse_locked(evt);
     });
+    // The hardware cursor follows at once, whatever Core 0 is busy with.
+    crate::gpu::gpudev::pointer_moved();
     if cheap {
         crate::shade::request_cursor_move();
     } else {
@@ -290,6 +292,7 @@ pub fn inject_pointer_abs(x: u16, y: u16, buttons: u8) {
         crate::shade::cursor::set_atomic_abs(x, y, buttons);
         push_mouse_locked(MouseEvent { buttons, dx: 0, dy: 0, scroll: 0, hscroll: 0 });
     });
+    crate::gpu::gpudev::pointer_moved();
     crate::shade::request_render();
 }
 

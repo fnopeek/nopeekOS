@@ -164,6 +164,22 @@ fn submit(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     }
 }
 
+/// Scenes the module refused whose items were logged.
+static REFUSED_SHOWN: AtomicU32 = AtomicU32::new(0);
+const REFUSED_SHOWN_MAX: u32 = 2;
+
+/// The items and damage of a scene the module refused as invalid, so the
+/// log shows which one its checks (gpu_scene::scene::check_scene) reject.
+fn show_refused(scene: &Scene, damage: &[Rect]) {
+    if REFUSED_SHOWN.fetch_add(1, Ordering::Relaxed) >= REFUSED_SHOWN_MAX {
+        return;
+    }
+    crate::kprintln!("[npk] gpu: refused scene, damage {:?}", damage);
+    for (i, item) in scene.items.iter().enumerate() {
+        crate::kprintln!("[npk] gpu:   item {}: {:?}", i, item);
+    }
+}
+
 /// Count and report a scene the module did not compose.
 fn failed(status: Result<i32, &str>) {
     if SCENES_FAILED.fetch_add(1, Ordering::Relaxed) < FAILURES_LOGGED {
@@ -253,14 +269,30 @@ fn settle(p: Pending) -> Option<Redo> {
                 }
                 return None;
             }
+            if status == -22 {
+                show_refused(&scene, &damage);
+            }
             failed(Ok(status));
             Some(Redo { scene, target, info, damage })
         }
         Pending::Verify { seq, tid, scene, target, info, copy, pages, cpu, t0, left_out, damage, partial } => {
-            let ok = seq.map(|s| gpudev::wait_scene_bound(s) == 0);
+            let status = seq.map(gpudev::wait_scene_bound);
             if let Some(t) = tid {
                 from_device(t, &damage);
             }
+            if status == Some(-22) {
+                show_refused(&scene, &damage);
+            }
+            // A partial scene the module refused tells nothing about its
+            // pixels; it counts as a failed scene.
+            if partial && let Some(st) = status.filter(|&st| st < 0 && st != -62) {
+                failed(Ok(st));
+                if gpudev::release(copy, copy, pages) {
+                    crate::memory::deallocate_contiguous(copy, pages);
+                }
+                return None;
+            }
+            let ok = status.map(|st| st == 0);
             let gpu = crate::time::counter() - t0;
             judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu, &left_out, &damage, partial);
             if gpudev::release(copy, copy, pages) {
