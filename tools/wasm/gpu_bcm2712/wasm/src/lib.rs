@@ -329,6 +329,7 @@ impl Scenes {
     fn new(hw: &mut PiHw) -> Option<Scenes> {
         let mut c = scene::composer_init(hw)?;
         if !c.self_test(hw) || !c.draw_self_test(hw) {
+            c.free(hw);
             return None;
         }
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];

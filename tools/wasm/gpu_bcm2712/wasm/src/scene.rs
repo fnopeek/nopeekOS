@@ -331,6 +331,27 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
     Some(c)
 }
 
+impl Composer {
+    /// Everything the composer holds given back, V3D idle (a start that
+    /// failed its self-test).
+    pub fn free(mut self, hw: &mut PiHw) {
+        self.drain(hw);
+        for (_, b) in self.overflow.drain(..) {
+            b.free();
+        }
+        let held: Vec<Buf> = self.bos.held.drain(..).flat_map(|(_, b)| b).collect();
+        for b in self.bos.free.drain(..).chain(self.bos.job.drain(..)).chain(held) {
+            b.free();
+        }
+        for b in [self.code, self.draw_code, self.uniforms, self.scene, self.planes, self.tmp] {
+            b.free();
+        }
+        if let Some(b) = self.spill {
+            b.free();
+        }
+    }
+}
+
 /// The compute programs the module dispatches: the panels' blur and the
 /// self-test. compose.comp is the AMD and Intel modules'; here items are
 /// drawn.
@@ -821,7 +842,12 @@ impl Composer {
         let before = self.dispatches;
         let lim = plan::limits { bins_words: 0, plane_blocks: PLANE_BLOCKS };
         let mut s = Sink { c: self, hw, ck: &ck };
-        plan::plan_draws(&mut s, &lim, &ck.screen, &ck.damage, &ck.shapes, ck.radius)?;
+        if let Err(e) = plan::plan_draws(&mut s, &lim, &ck.screen, &ck.damage, &ck.shapes, ck.radius) {
+            // Segments queued before the refusal still write the target:
+            // the CPU redraws it only once they are done.
+            self.drain(hw);
+            return Err(e);
+        }
         Ok(((self.dispatches - before) as u32, self.last))
     }
 }

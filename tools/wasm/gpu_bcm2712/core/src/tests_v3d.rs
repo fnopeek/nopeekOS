@@ -198,11 +198,16 @@ mod sched {
         s.pump(&mut r, 2 * JOB_TIMEOUT_US, &mut ev);
         assert_eq!(r.writes.len(), n);
         ev.clear();
-        // The hung job fails; what depends on it fails without running.
+        // The hung job fails; what depends on it runs all the same (no
+        // entity is guilty in v3d), as a later scene must.
         s.reset_done(Queue::Csd, 2 * JOB_TIMEOUT_US, &mut ev);
         s.pump(&mut r, 2 * JOB_TIMEOUT_US, &mut ev);
-        assert_eq!(done(&ev), vec![(a, false), (after, false)]);
-        assert_eq!(r.writes.len(), n);
+        assert_eq!(done(&ev), vec![(a, false)]);
+        assert!(s.failed(a) && !s.signaled(after));
+        assert!(r.writes.len() > n);
+        ev.clear();
+        s.irq(CoreIrq::default(), HubIrq { tfu_done: true, ..Default::default() }, 2 * JOB_TIMEOUT_US, &mut ev);
+        assert_eq!(done(&ev), vec![(after, true)]);
         assert!(s.idle());
     }
 

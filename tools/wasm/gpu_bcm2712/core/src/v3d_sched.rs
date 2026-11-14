@@ -25,7 +25,7 @@ pub enum Queue {
 }
 
 const QUEUES: usize = 5;
-/// Failed fences remembered for jobs that depend on them.
+/// Failed fences remembered for `failed`.
 const FAILED_KEPT: usize = 64;
 const ALL: [Queue; QUEUES] = [Queue::Bin, Queue::Render, Queue::Tfu, Queue::Csd, Queue::CacheClean];
 
@@ -214,13 +214,10 @@ impl Sched {
                 if !ready {
                     continue;
                 }
+                // A dependency that signalled with an error does not cancel
+                // the job: drm_sched cancels only an entity marked guilty,
+                // and v3d's entities have no guilty flag.
                 let job = self.pending[i].pop_front().expect("a front job");
-                if job.deps.iter().any(|d| self.failed.contains(d)) {
-                    let a = Active { job, started_us: now_us, deadline_us: now_us, progress: (0, 0) };
-                    self.signal(a, false, now_us, out);
-                    started = true;
-                    continue;
-                }
                 let runs = match &job.work {
                     Work::Bin(b) => { v3d::bin_job_run(hw, b); true }
                     Work::Render { start, end } => { v3d::render_job_run(hw, *start, *end); true }
