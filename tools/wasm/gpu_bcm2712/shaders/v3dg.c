@@ -18,9 +18,12 @@
  * fragment shader reads the tile buffer through VK_EXT_shader_tile_image
  * and mixes exactly).
  *
- * Usage: v3dg <vs.spv> <fs.spv> <width> <height> <push bytes> <out dir>
- * Writes <out dir>/meta ("key value" lines), vs.bin, fs.bin, cs.bin (the
- * coordinate shader), and bo-<offset>.bin for each buffer of the job.
+ * Usage: v3dg <vs.spv> <fs.spv> <width> <height> <out dir> <draw>...
+ * A draw is "kind:x0,y0,x1,y1": the fragment shader's specialization
+ * constant 0 (one pipeline per kind) and the rectangle in pixels, the
+ * first four push-constant words; the others are tagged 0xc0de0000 |
+ * index. Writes <out dir>/meta ("key value" lines), <stage>-<kind>.bin for
+ * each pipeline's programs, and bo-<offset>.bin for each buffer of the job.
  */
 
 #include <stdio.h>
@@ -60,6 +63,9 @@ die(const char *what, VkResult r)
    fprintf(stderr, "v3dg: %s failed (%d)\n", what, r);
    exit(1);
 }
+
+/* v3dv's maxPushConstantsSize. */
+#define PUSH_BYTES 128
 
 #define GET(inst, name) PFN_##name name = (PFN_##name)vk_icdGetInstanceProcAddr(inst, #name)
 
@@ -119,8 +125,8 @@ dump_bos(FILE *m, const char *what, struct list_head *list)
 int
 main(int argc, char **argv)
 {
-   if (argc != 7) {
-      fprintf(stderr, "usage: v3dg <vs.spv> <fs.spv> <width> <height> <push bytes> <out dir>\n");
+   if (argc < 7) {
+      fprintf(stderr, "usage: v3dg <vs.spv> <fs.spv> <width> <height> <out dir> <kind:x0,y0,x1,y1>...\n");
       return 2;
    }
    size_t vs_size, fs_size;
@@ -132,8 +138,20 @@ main(int argc, char **argv)
    }
    uint32_t width = atoi(argv[3]);
    uint32_t height = atoi(argv[4]);
-   uint32_t push_bytes = atoi(argv[5]);
-   out_dir = argv[6];
+   const uint32_t push_bytes = PUSH_BYTES;
+   out_dir = argv[5];
+   uint32_t ndraws = argc - 6;
+   struct draw {
+      uint32_t kind;
+      uint32_t rect[4];
+   } *draws = calloc(ndraws, sizeof(*draws));
+   for (uint32_t i = 0; i < ndraws; i++) {
+      if (sscanf(argv[6 + i], "%u:%u,%u,%u,%u", &draws[i].kind, &draws[i].rect[0], &draws[i].rect[1],
+                 &draws[i].rect[2], &draws[i].rect[3]) != 5) {
+         fprintf(stderr, "v3dg: bad draw %s\n", argv[6 + i]);
+         return 2;
+      }
+   }
    VkResult r;
 
    GET(NULL, vkCreateInstance);
@@ -201,8 +219,14 @@ main(int argc, char **argv)
       .queueCount = 1,
       .pQueuePriorities = &prio,
    };
+   VkPhysicalDeviceVulkan12Features f12 = {
+      .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+      .bufferDeviceAddress = VK_TRUE,
+   };
+   VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &f12};
    VkDeviceCreateInfo dci = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+      .pNext = &f2,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &qci,
    };
@@ -264,11 +288,14 @@ main(int argc, char **argv)
    if ((r = vkCreateRenderPass(dev, &rpci, NULL, &rp)))
       die("vkCreateRenderPass", r);
 
+   uint32_t kind_value = 0;
+   VkSpecializationMapEntry entry = {.constantID = 0, .offset = 0, .size = 4};
+   VkSpecializationInfo spec = {.mapEntryCount = 1, .pMapEntries = &entry, .dataSize = 4, .pData = &kind_value};
    VkPipelineShaderStageCreateInfo stages[2] = {
       {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT,
        .module = vs, .pName = "main"},
       {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
-       .module = fs, .pName = "main"},
+       .module = fs, .pName = "main", .pSpecializationInfo = &spec},
    };
    VkPipelineVertexInputStateCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
    VkPipelineInputAssemblyStateCreateInfo ia = {
@@ -315,19 +342,33 @@ main(int argc, char **argv)
       .renderPass = rp,
       .subpass = 0,
    };
-   VkPipeline pipeline;
-   if ((r = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL, &pipeline)))
-      die("vkCreateGraphicsPipelines", r);
-   struct v3dv_pipeline *pl = v3dv_pipeline_from_handle(pipeline);
-
    FILE *m = out("meta", "w");
    fprintf(m, "ver %u\n", pdev->devinfo.ver);
    fprintf(m, "rev %u\n", pdev->devinfo.rev);
    fprintf(m, "qpu_count %u\n", pdev->devinfo.qpu_count);
    fprintf(m, "size %u %u\n", width, height);
-   dump_variant(m, pl, BROADCOM_SHADER_VERTEX, "vs");
-   dump_variant(m, pl, BROADCOM_SHADER_VERTEX_BIN, "cs");
-   dump_variant(m, pl, BROADCOM_SHADER_FRAGMENT, "fs");
+   VkPipeline pipelines[16] = {0};
+   for (uint32_t i = 0; i < ndraws; i++) {
+      uint32_t k = draws[i].kind;
+      if (k >= 16) {
+         fprintf(stderr, "v3dg: kind %u\n", k);
+         return 2;
+      }
+      if (pipelines[k])
+         continue;
+      kind_value = k;
+      if ((r = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL, &pipelines[k])))
+         die("vkCreateGraphicsPipelines", r);
+      struct v3dv_pipeline *pl = v3dv_pipeline_from_handle(pipelines[k]);
+      char name[16];
+      fprintf(m, "pipeline %u\n", k);
+      snprintf(name, sizeof(name), "vs-%u", k);
+      dump_variant(m, pl, BROADCOM_SHADER_VERTEX, name);
+      snprintf(name, sizeof(name), "cs-%u", k);
+      dump_variant(m, pl, BROADCOM_SHADER_VERTEX_BIN, name);
+      snprintf(name, sizeof(name), "fs-%u", k);
+      dump_variant(m, pl, BROADCOM_SHADER_FRAGMENT, name);
+   }
 
    VkImageCreateInfo imci = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
@@ -405,14 +446,16 @@ main(int argc, char **argv)
       .renderArea = {{0, 0}, {width, height}},
    };
    vkCmdBeginRenderPass(cmdb, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
-   vkCmdBindPipeline(cmdb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-   uint32_t push[64];
-   for (uint32_t i = 0; i < 64; i++)
-      push[i] = 0xc0de0000 | i;
-   if (push_bytes)
+   for (uint32_t i = 0; i < ndraws; i++) {
+      vkCmdBindPipeline(cmdb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelines[draws[i].kind]);
+      uint32_t push[PUSH_BYTES / 4];
+      for (uint32_t j = 0; j < PUSH_BYTES / 4; j++)
+         push[j] = 0xc0de0000 | j;
+      memcpy(push, draws[i].rect, sizeof(draws[i].rect));
       vkCmdPushConstants(cmdb, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, push_bytes,
                          push);
-   vkCmdDraw(cmdb, 4, 1, 0, 0);
+      vkCmdDraw(cmdb, 4, 1, 0, 0);
+   }
    vkCmdEndRenderPass(cmdb);
    if ((r = vkEndCommandBuffer(cmdb)))
       die("vkEndCommandBuffer", r);
