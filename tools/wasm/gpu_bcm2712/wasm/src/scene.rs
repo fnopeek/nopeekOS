@@ -700,6 +700,71 @@ impl Composer {
         (self.sched.signaled(f), self.sched.failed(f))
     }
 
+    /// What a 3840x2160 pass costs, once at start, into a buffer of the
+    /// module's: the pass with and without loading its tiles, then per item
+    /// kind (fill, background colour, chrome with and without its content,
+    /// glow) one draw over the whole image on top of an opaque fill, and
+    /// eight translucent fills. Logged, for where a scene's time goes.
+    pub fn draw_bench(&mut self, hw: &mut PiHw) {
+        const W: u32 = 3840;
+        const H: u32 = 2160;
+        let Some(dst) = Buf::new((W * H * 4).div_ceil(PAGE)) else {
+            Line::new().s("v3d: bench skipped, no buffer").say();
+            return;
+        };
+        let draw = |kind: u32, words: &[u32]| {
+            let mut push = [0u32; v3d_draw::PUSH_WORDS];
+            push[..4].copy_from_slice(&[0, 0, W, H]);
+            push[4] = kind;
+            push[5..9].copy_from_slice(&[0, 0, W, H]);
+            push[9..9 + words.len()].copy_from_slice(words);
+            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = W;
+            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = H;
+            v3d_draw::Draw { pipeline: kind as usize - 1, push, vertex_count: 4 }
+        };
+        // Item::Fill: color, alpha, radius.
+        let opaque = draw(8, &[0x0020_3040, 255, 0]);
+        let half = draw(8, &[0x00c0_8040, 128, 0]);
+        // Item::Chrome: border_a, border_b, bg, rounding, border, border and
+        // bg opacity, paint_content.
+        let chrome = |content: u32| draw(4, &[0x0080_80ff, 0x00ff_8080, 0x0010_1018, 24, 2, 255, 200, content]);
+        // Item::Glow over a window in the middle: radius, color, band, alpha.
+        let mut glow = draw(2, &[24, 0x0040_80ff, 48, 160]);
+        glow.push[5..9].copy_from_slice(&[200, 200, W - 400, H - 400]);
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 8] = [
+            ("fill, tiles loaded", true, alloc::vec![opaque]),
+            ("fill", false, alloc::vec![opaque]),
+            ("background colour", false, alloc::vec![draw(1, &[])]),
+            ("fill + 8 translucent fills", false, alloc::vec![opaque; 1].into_iter()
+                .chain(core::iter::repeat_n(half, 8)).collect()),
+            ("fill + chrome with content", false, alloc::vec![opaque, chrome(1)]),
+            ("fill + chrome without content", false, alloc::vec![opaque, chrome(0)]),
+            ("fill + glow", false, alloc::vec![opaque, glow]),
+            ("fill + 8 chromes with content", false, alloc::vec![opaque; 1].into_iter()
+                .chain(core::iter::repeat_n(chrome(1), 8)).collect()),
+        ];
+        let image = v3d_draw::Image { va: dst.va, stride: W * 4, width: W, height: H };
+        let area = v3d_draw::Rect { x: 0, y: 0, width: W, height: H };
+        for (name, load, draws) in runs.iter() {
+            // The second run counts: the first may pay for power and caches.
+            let mut us = 0;
+            for _ in 0..2 {
+                let t0 = npk_sys::now_us() as u64;
+                let r = self.submit_draws(hw, image, *load, area, draws).and_then(|f| self.wait_fence(hw, f));
+                if let Err(e) = r {
+                    Line::new().s("v3d: bench ").s(name).s(" failed (").dec(e.unsigned_abs() as u64).s(")").say();
+                    self.drain(hw);
+                    dst.free();
+                    return;
+                }
+                us = npk_sys::now_us() as u64 - t0;
+            }
+            Line::new().s("v3d: bench 3840x2160 ").s(name).s(": ").dec(us).s(" us").say();
+        }
+        self.drain(hw);
+        dst.free();
+    }
+
     /// The draw path proved: one render pass into a 64x48 buffer of the
     /// module's, an opaque fill over all of it and a half-transparent one
     /// over part, read back against render::blend. 48 rows end inside a

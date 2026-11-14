@@ -332,6 +332,7 @@ impl Scenes {
             c.free(hw);
             return None;
         }
+        c.draw_bench(hw);
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
         Some(Scenes { c, bos, logged: 0, pending: alloc::vec::Vec::new(), slow_logged: 0, perf_logged: 0 })
     }
