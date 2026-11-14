@@ -750,24 +750,6 @@ impl Composer {
             d.push[5..9].copy_from_slice(&[x0, 0, x1 - x0, height]);
             d
         }).collect();
-        // The same chrome as the module draws it in a scene: its straight
-        // rows by kind 10, the ring by kind 4.
-        let split = {
-            let c = chrome(1);
-            let straight = plan::chrome_straight(&c.push[4..20]);
-            let whole = rect { x: 0, y: 0, w: width, h: height };
-            let mut ring = Vec::new();
-            plan::subtract(&whole, &straight, &mut ring);
-            let part = |pipeline: usize, r: &rect| {
-                let mut d = c;
-                d.pipeline = pipeline;
-                d.push[..4].copy_from_slice(&[r.x, r.y, r.x + r.w, r.y + r.h]);
-                d
-            };
-            let mut v = alloc::vec![opaque, part(KIND_CHROME_INSIDE - 1, &straight)];
-            v.extend(ring.iter().map(|r| part(3, r)));
-            v
-        };
         // A window's inside as a scene has it: the straight rows of a chrome
         // with a glass source, and a text layer over it, both reading this
         // buffer as the pass before left it (glass; text whose coverage is
@@ -796,14 +778,13 @@ impl Composer {
             d.push[ITEM2_PUSH..ITEM2_PUSH + 16].copy_from_slice(&text.push[4..20]);
             d
         };
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 15] = [
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 14] = [
             ("fill + chrome inside over glass", false, alloc::vec![opaque, glass_inside]),
             ("fill + chrome inside over glass + empty text", false, alloc::vec![opaque, glass_inside, text]),
             ("fill + both in one pass", false, alloc::vec![opaque, window_inside]),
             ("fill + empty text", false, alloc::vec![opaque, text]),
             ("background colour + covering text + background colour", false,
              alloc::vec![draw(1, &[]), text, draw(1, &[])]),
-            ("fill + chrome with content, straight rows apart", false, split),
             ("fill + 8 translucent fills side by side", false, core::iter::once(opaque).chain(strips).collect()),
             ("fill, tiles loaded", true, alloc::vec![opaque]),
             ("fill", false, alloc::vec![opaque]),
@@ -1040,7 +1021,7 @@ impl plan::draw_sink for Sink<'_> {
         let mut fused: Vec<Option<(usize, rect)>> = alloc::vec![None; end];
         let mut fused_into: Vec<rect> = alloc::vec![plan::EMPTY; end];
         for i in 0..end {
-            if ck.items[i][0] == gpu_scene::scene::KIND_CHROME {
+            if ck.items[i][0] == gpu_scene::scene::KIND_CHROME && over_glass(ck, i) {
                 if let Some((j, f)) = window_text(ck, i) {
                     fused[i] = Some((j, f));
                     fused_into[j] = f;
@@ -1062,11 +1043,10 @@ impl plan::draw_sink for Sink<'_> {
                 }
                 draws.push(v3d_draw::Draw { pipeline: kind - 1, push, vertex_count: 4 });
             };
-            // Only where no later item paints over it opaquely; a chrome
-            // item's straight rows by their own short program, with its
-            // window's text in the same pass, which the text item then
-            // leaves out.
-            let straight = if kind == gpu_scene::scene::KIND_CHROME as usize {
+            // Only where no later item paints over it opaquely; the straight
+            // rows of a window's glass by their own short program, with its
+            // text in the same pass, which the text item then leaves out.
+            let straight = if kind == gpu_scene::scene::KIND_CHROME as usize && over_glass(ck, i) {
                 plan::chrome_straight(&ck.items[i][..])
             } else {
                 plan::EMPTY
@@ -1123,15 +1103,25 @@ impl plan::draw_sink for Sink<'_> {
     }
 }
 
+/// Whether chrome item `i`'s straight rows take items.glsl's glass branch,
+/// which kinds 10 and 11 alone paint (`chrome_glass`): it paints its
+/// content, translucently, and the scene has a glass source.
+fn over_glass(ck: &gpu_scene::scene::checked, i: usize) -> bool {
+    let w = &ck.items[i];
+    w[12] != 0 && w[11].min(255) < 255 && ck.frame[gpu_scene::scene::F_FLAGS] & gpu_scene::scene::FLAG_GLASS != 0
+}
+
 /// The text item a chrome item `i` can paint in its own pass, and where:
 /// the largest overlap of a later text item with the chrome's straight
 /// rows that no item between them reaches, so painting the text there
-/// with the chrome changes no order of painting.
+/// with the chrome changes no order of painting, and whose source covers
+/// its rect (kind 11 paints it by items.glsl `text_inside`).
 fn window_text(ck: &gpu_scene::scene::checked, i: usize) -> Option<(usize, rect)> {
     let straight = plan::chrome_straight(&ck.items[i][..]);
     let mut best: Option<(usize, rect)> = None;
     for j in i + 1..ck.items.len() {
-        if ck.items[j][0] != gpu_scene::scene::KIND_TEXT {
+        let t = &ck.items[j];
+        if t[0] != gpu_scene::scene::KIND_TEXT || t[7] < t[3] || t[8] < t[4] {
             continue;
         }
         let f = ck.shapes[j].reach.intersect(&straight);

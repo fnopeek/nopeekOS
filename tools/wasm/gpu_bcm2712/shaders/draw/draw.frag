@@ -4,9 +4,9 @@
 // it (VK_EXT_shader_tile_image) as compose.comp paints it, written back. The attachment is R32_UINT, one
 // XRGB8888 word per pixel, so the mixing is the CPU executor's, exactly.
 // KIND selects the item kind at compile time: one small program per kind,
-// 10 for the straight-row part of a chrome item (items.glsl
-// `chrome_inside`), and 11 for that part with a text item over it, mixed
-// in one pass (the window's inside).
+// 10 for the straight-row part of a chrome item over glass (items.glsl
+// `chrome_glass`), and 11 for that part with a text item over it, mixed in
+// one pass (the window's inside).
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_tile_image : require
@@ -16,6 +16,9 @@ layout(constant_id = 0) const uint KIND = 0u;
 
 layout(location = 0) tileImageEXT highp uattachmentEXT dst;
 layout(location = 0) out uint color;
+// rect.vert: a chrome item's glass fill and its luma, for kinds 10 and 11.
+layout(location = 0) flat in uint v_fill;
+layout(location = 1) flat in uint v_fill_luma;
 
 #include "draw.h.glsl"
 
@@ -67,8 +70,11 @@ void main() {
     case 7u: o = text(it, x, y); break;
     case 8u: o = fill(it, x, y); break;
     case 9u: o = close_glyph(it, x, y); break;
-    case 10u: o = chrome_inside(it, x, y); break;
-    case 11u: o = chrome_inside(it, x, y); o2 = text(p.item2, x, y); break;
+    case 10u: o = chrome_glass(x, y, v_fill, v_fill_luma, min(it[11], 255u)); break;
+    case 11u:
+        o = chrome_glass(x, y, v_fill, v_fill_luma, min(it[11], 255u));
+        o2 = text_inside(p.item2, x, y);
+        break;
     default: break;
     }
     uint c = apply(o, colorAttachmentReadEXT(dst).x);

@@ -54,7 +54,7 @@ const KIND_CLOSE_GLYPH: u32 = 9;
 /// The frame block at the start of the scene buffer, in words (compose.comp).
 const F_TARGET: usize = 0;
 const F_TARGET_PITCH: usize = 2;
-const F_FLAGS: usize = 3;
+pub const F_FLAGS: usize = 3;
 const F_WALL: usize = 4;
 const F_WALL_PITCH: usize = 6;
 const F_BLUR: usize = 7;
@@ -70,7 +70,7 @@ const F_GLYPHS: usize = 18;
 pub const FRAME_BYTES: u32 = 128;
 const FLAG_WALL: u32 = 1;
 const FLAG_BLURRED: u32 = 2;
-const FLAG_GLASS: u32 = 4;
+pub const FLAG_GLASS: u32 = 4;
 
 /// Header flags of the scene.
 const HDR_WALL: u32 = 1;

@@ -9,9 +9,10 @@ use crate::v3d_draw::*;
 use crate::shaders_gen::DRAW_PIPELINES;
 use std::collections::{BTreeMap, VecDeque};
 
-const SCENARIOS: [(&str, &str); 11] = [
+const SCENARIOS: [(&str, &str); 12] = [
     ("one_64x64", include_str!("../testdata/draw/one_64x64.txt")),
     ("nine_kinds_256x128", include_str!("../testdata/draw/nine_kinds_256x128.txt")),
+    ("glass_kinds_256x128", include_str!("../testdata/draw/glass_kinds_256x128.txt")),
     ("three_1920x1080", include_str!("../testdata/draw/three_1920x1080.txt")),
     ("three_3840x2160", include_str!("../testdata/draw/three_3840x2160.txt")),
     ("sub_area_256x128", include_str!("../testdata/draw/sub_area_256x128.txt")),

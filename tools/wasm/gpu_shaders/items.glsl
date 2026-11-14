@@ -65,10 +65,9 @@ uint luma(uint c) {
     return DIV1000(((c >> 16) & 255u) * 299u + ((c >> 8) & 255u) * 587u + (c & 255u) * 114u);
 }
 
-// render::glass_blend.
-uint glass_blend(uint fg, uint bg, uint alpha, uint ceil_) {
+// render::glass_blend, with `lf` the luma of `fg`.
+uint glass_blend_l(uint fg, uint lf, uint bg, uint alpha, uint ceil_) {
     uint a = min(alpha, 256u);
-    uint lf = luma(fg);
     uint lb = luma(bg);
     if (ceil_ < 255u && lb > ceil_ && lf < ceil_) {
         uint d = lb - lf;
@@ -76,6 +75,11 @@ uint glass_blend(uint fg, uint bg, uint alpha, uint ceil_) {
         a = max(a, min(need, 256u));
     }
     return blend(fg, bg, a);
+}
+
+// render::glass_blend.
+uint glass_blend(uint fg, uint bg, uint alpha, uint ceil_) {
+    return glass_blend_l(fg, luma(fg), bg, alpha, ceil_);
 }
 
 // GlassInk::fill.
@@ -273,20 +277,6 @@ ITEM_RESULT glass_backdrop(Blk it, uint x, uint y ITEM_PIXEL) {
     return SET(g_blur.v[y * g_blur_pitch + x]);
 }
 
-// render::fill_rounded_chrome_aa's straight-row path, shared by `chrome`
-// and `chrome_inside`.
-#define CHROME_STRAIGHT \
-        if (!paint_content) \
-            return KEEP; \
-        if (go >= 255u) \
-            return SET(bg); \
-        if ((g_flags & FLAG_GLASS) != 0u) { \
-            uint wpx = g_glass.v[py * g_glass_pitch + px]; \
-            return SET(glass_blend(glass_fill, wpx, go, ceil_)); \
-        } \
-        uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max); \
-        return BLEND_GLASS(bc, bo, glass_fill, go, ceil_);
-
 // render::fill_rounded_chrome_aa at one pixel.
 ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     uint x = BC(it, 1), y = BC(it, 2), w = BC(it, 3), h = BC(it, 4);
@@ -315,7 +305,16 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     uint skip_lo = inner_x + 2u;
     uint skip_hi = inner_x + inner_w >= 2u ? inner_x + inner_w - 2u : 0u;
     if (py >= straight_lo && py < straight_hi && px >= skip_lo && px < skip_hi) {
-        CHROME_STRAIGHT
+        if (!paint_content)
+            return KEEP;
+        if (go >= 255u)
+            return SET(bg);
+        if ((g_flags & FLAG_GLASS) != 0u) {
+            uint wpx = g_glass.v[py * g_glass_pitch + px];
+            return SET(glass_blend(glass_fill, wpx, go, ceil_));
+        }
+        uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max);
+        return BLEND_GLASS(bc, bo, glass_fill, go, ceil_);
     }
 
     uint outer = rect_coverage(px, py, x, y, w, h, r_out);
@@ -335,20 +334,12 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     return BLEND_GLASS(border_color, bo, glass_fill, min(go * inner / 256u, 255u), ceil_);
 }
 
-// `chrome` where it takes the straight-row path (plan.rs chrome_straight):
-// a draw over that part alone skips the ring's arithmetic.
-ITEM_RESULT chrome_inside(Blk it, uint px, uint py ITEM_PIXEL) {
-    uint x = BC(it, 1), y = BC(it, 2), w = BC(it, 3), h = BC(it, 4);
-    uint border_a = BC(it, 5), border_b = BC(it, 6), bg = BC(it, 7);
-    uint bo = min(BC(it, 10), 255u);
-    uint go = min(BC(it, 11), 255u);
-    bool paint_content = BC(it, 12) != 0u;
-    bool solid = border_a == border_b;
-    uint ceil_ = paint_content ? g_ceil : 255u;
-    uint tint_w = paint_content ? g_tint_w : 0u;
-    uint glass_fill = ink_fill(bg, g_tint, tint_w);
-    uint diag_max = max(w + h, 1u);
-    CHROME_STRAIGHT
+// `chrome` where it takes the straight-row path (plan.rs chrome_straight)
+// of a window that paints its content translucently over a glass source:
+// that path's glass branch, with the tinted fill (`glass_fill`) and
+// its luma worked out once for the draw.
+ITEM_RESULT chrome_glass(uint px, uint py, uint fill, uint fill_luma, uint go) {
+    return SET(glass_blend_l(fill, fill_luma, g_glass.v[py * g_glass_pitch + px], go, g_ceil));
 }
 
 // scene::yuv_pixel: one pixel of packed YUYV as 0xFFRRGGBB; kind 2 full
@@ -432,18 +423,30 @@ ITEM_RESULT panel(Blk it, uint x, uint y ITEM_PIXEL) {
 }
 
 // scene::text at one pixel.
+// scene::text over a pixel within both the item's rect and its source.
+// The alpha byte is glyph coverage (0..255), `blend` takes 0..256.
+#define TEXT_PIXEL \
+    uint pv = src.v[(y - dy) * spitch + (x - dx)]; \
+    uint a = pv >> 24; \
+    if (a == 0u) \
+        return KEEP; \
+    return BLEND(pv & 0xFFFFFFu, a + (a >> 7u));
+
 ITEM_RESULT text(Blk it, uint x, uint y ITEM_PIXEL) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
     Words src = mkaddr(BC(it, 5), BC(it, 6));
     uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh || x >= dx + sw || y >= dy + sh)
         return KEEP;
-    uint pv = src.v[(y - dy) * spitch + (x - dx)];
-    // The alpha byte is glyph coverage (0..255), `blend` takes 0..256.
-    uint a = pv >> 24;
-    if (a == 0u)
-        return KEEP;
-    return BLEND(pv & 0xFFFFFFu, a + (a >> 7u));
+    TEXT_PIXEL
+}
+
+// `text` where the draw lies within the item's rect and its source.
+ITEM_RESULT text_inside(Blk it, uint x, uint y ITEM_PIXEL) {
+    uint dx = BC(it, 1), dy = BC(it, 2);
+    Words src = mkaddr(BC(it, 5), BC(it, 6));
+    uint spitch = BC(it, 9);
+    TEXT_PIXEL
 }
 
 // Item::Fill at one pixel.
