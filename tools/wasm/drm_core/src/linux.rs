@@ -64,6 +64,19 @@ impl Line {
         self.bytes(&b)
     }
 
+    /// `0x%llx`.
+    pub fn hex64(&mut self, v: u64) -> &mut Self {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut b = [0u8; 18];
+        b[0] = b'0';
+        b[1] = b'x';
+        let digits = (16 - v.leading_zeros() as usize / 4).max(1);
+        for i in 0..digits {
+            b[1 + digits - i] = HEX[((v >> (i * 4)) & 0xf) as usize];
+        }
+        self.bytes(&b[..2 + digits])
+    }
+
     /// `%llu`.
     pub fn dec(&mut self, mut v: u64) -> &mut Self {
         let mut b = [0u8; 20];

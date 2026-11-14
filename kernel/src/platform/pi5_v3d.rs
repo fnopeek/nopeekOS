@@ -60,8 +60,16 @@ struct State {
     regs: Regs,
     /// The page table: `PT_ENTRIES` words, uncached.
     pt: u64,
+    /// Where an access outside the page table lands (`ILLEGAL_ADDR`).
+    scratch: u64,
     va: Va,
     ident: Ident,
+    /// Powered and its state programmed (runtime-active, in Linux's terms).
+    /// The page table may change while it is off; resuming programs it.
+    powered: bool,
+    /// The clock's lowest and highest rate (`raspberrypi_clk_register`).
+    min_rate: u32,
+    max_rate: u32,
     /// Mappings by first V3D page.
     maps: BTreeMap<u32, Mapping>,
     /// Physical page to the mapping that holds it.
@@ -92,14 +100,57 @@ fn named(fdt: &Fdt, node: &super::dt::Node, name: &[u8]) -> Option<(u64, u64)> {
     found
 }
 
-/// `v3d_platform_drm_probe` up to the first resume: the windows, the
-/// clock (prepared and raised to its maximum, as clk-raspberrypi does for
-/// it), the GRAFX and V3D power domains, the SMS, the invariant state and
-/// the page table. Once; later calls return what the first found.
+/// `raspberrypi_fw_prepare` with `maximize`: the clock on, at its highest
+/// rate. The firmware may park the caller: never under `STATE`.
+fn clock_prepare(max: u32) -> Option<()> {
+    super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_STATE,
+        [V3D_CLK, pi5_core::rpi_fw::RPI_FIRMWARE_STATE_ENABLE_BIT, 0])?;
+    super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_RATE, [V3D_CLK, max, 0])?;
+    Some(())
+}
+
+/// `raspberrypi_fw_unprepare`: the rate to its lowest (the firmware does
+/// not stop the clock), then the clock off. Not under `STATE`.
+fn clock_unprepare(min: u32) {
+    let _ = super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_RATE, [V3D_CLK, min, 0]);
+    let _ = super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_STATE, [V3D_CLK, 0, 0]);
+}
+
+/// The GRAFX domain, then GRAFX_V3D, on (genpd before the device's
+/// resume).
+fn domains_on(regs: &mut Regs) -> bool {
+    if let Err(e) = v3d::grafx_power_on(regs) {
+        kprintln!("[npk] v3d: GRAFX power: {:?}", e);
+        return false;
+    }
+    v3d::v3d_domain_on(regs);
+    true
+}
+
+/// `v3d_power_resume` after the clock is on: the SMS, the invariant state,
+/// the page table. The interrupts are the module's.
+fn resume_locked(s: &mut State) -> bool {
+    if let Err(e) = v3d::resume_sms(&mut s.regs) {
+        kprintln!("[npk] v3d: {:?}", e);
+        return false;
+    }
+    v3d::init_hw_state(&mut s.regs);
+    if let Err(e) = v3d::mmu_set_page_table(&mut s.regs, s.pt, s.scratch) {
+        kprintln!("[npk] v3d: {:?}", e);
+        return false;
+    }
+    s.powered = true;
+    true
+}
+
+/// `v3d_platform_drm_probe` up to the first resume: the windows, the GRAFX
+/// and V3D power domains, the clock (prepared and raised to its maximum, as
+/// clk-raspberrypi does for it), the SMS, the identification, the page
+/// table. Once; later calls return what the first found, powering V3D up
+/// again if it was suspended.
 pub fn open() -> Option<Ident> {
-    let mut g = STATE.lock();
-    if let Some(s) = g.as_ref() {
-        return Some(s.ident);
+    if STATE.lock().is_some() {
+        return power(true).then(|| STATE.lock().as_ref().map(|s| s.ident)).flatten();
     }
     let fdt = super::dt::boot()?;
     let node = fdt.find_compatible(b"brcm,2712-v3d")?;
@@ -117,27 +168,12 @@ pub fn open() -> Option<Ident> {
         core: map_window(ca, cl)?,
         sms: map_window(sa, sl)?,
     };
-
-    // raspberrypi_fw_prepare with `maximize`.
-    let max = super::rpi_fw::clock_max_rate(V3D_CLK)?;
-    super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_STATE,
-        [V3D_CLK, pi5_core::rpi_fw::RPI_FIRMWARE_STATE_ENABLE_BIT, 0])?;
-    super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_RATE, [V3D_CLK, max, 0])?;
-
-    if let Err(e) = v3d::grafx_power_on(&mut regs) {
-        kprintln!("[npk] v3d: GRAFX power: {:?}", e);
+    let max_rate = super::rpi_fw::clock_max_rate(V3D_CLK)?;
+    let min_rate = super::rpi_fw::clock_min_rate(V3D_CLK)?;
+    if !domains_on(&mut regs) {
         return None;
     }
-    v3d::v3d_domain_on(&mut regs);
-    if let Err(e) = v3d::resume_sms(&mut regs) {
-        kprintln!("[npk] v3d: {:?}", e);
-        return None;
-    }
-    let ident = match v3d::ident(&mut regs) {
-        Ok(i) => i,
-        Err(e) => { kprintln!("[npk] v3d: {:?}", e); return None; }
-    };
-    v3d::init_hw_state(&mut regs);
+    clock_prepare(max_rate)?;
 
     let pt_pages = (PT_ENTRIES * 4) / PAGE as usize;
     let pt = crate::arch::aarch64::dma::alloc(pt_pages, 1, 1 << 40)?;
@@ -150,21 +186,129 @@ pub fn open() -> Option<Ident> {
         core::ptr::write_bytes(pt as *mut u8, 0, pt_pages * PAGE as usize);
         core::ptr::write_bytes(scratch as *mut u8, 0, PAGE as usize);
     }
-    if let Err(e) = v3d::mmu_set_page_table(&mut regs, pt, scratch) {
+    if let Err(e) = v3d::resume_sms(&mut regs) {
         kprintln!("[npk] v3d: {:?}", e);
         return None;
     }
-    kprintln!("[npk] v3d: V3D {}.{} rev {}, {} QPUs, {}-bit addresses",
-        ident.ver / 10, ident.ver % 10, ident.rev, ident.qpus, ident.va_width);
-    *g = Some(State {
+    let ident = match v3d::ident(&mut regs) {
+        Ok(i) => i,
+        Err(e) => { kprintln!("[npk] v3d: {:?}", e); return None; }
+    };
+    let mut st = State {
         regs,
         pt,
+        scratch,
         va: Va::new(1, PT_ENTRIES as u32),
         ident,
+        powered: false,
+        min_rate,
+        max_rate,
         maps: BTreeMap::new(),
         by_page: BTreeMap::new(),
-    });
+    };
+    v3d::init_hw_state(&mut st.regs);
+    if let Err(e) = v3d::mmu_set_page_table(&mut st.regs, st.pt, st.scratch) {
+        kprintln!("[npk] v3d: {:?}", e);
+        return None;
+    }
+    st.powered = true;
+    kprintln!("[npk] v3d: V3D {}.{} rev {}, {} QPUs, {}-bit addresses, clock {}..{} MHz",
+        ident.ver / 10, ident.ver % 10, ident.rev, ident.qpus, ident.va_width,
+        min_rate / 1_000_000, max_rate / 1_000_000);
+    *STATE.lock() = Some(st);
     Some(ident)
+}
+
+/// Runtime PM of V3D (`v3d_power_resume` / `v3d_power_suspend` with the
+/// genpd domains and the firmware clock around them). The module has
+/// masked V3D's interrupts and cleaned its caches before a suspend
+/// (`v3d_irq_disable`, `v3d_clean_caches`) and enables them after a
+/// resume. False when the transition failed; a failed suspend leaves V3D
+/// powered, as Linux stays active.
+pub fn power(on: bool) -> bool {
+    let (min, max) = match STATE.lock().as_ref() {
+        Some(s) if s.powered == on => return true,
+        Some(s) => (s.min_rate, s.max_rate),
+        None => return false,
+    };
+    if on {
+        {
+            let mut g = STATE.lock();
+            let Some(s) = g.as_mut() else { return false };
+            if !domains_on(&mut s.regs) {
+                return false;
+            }
+        }
+        if clock_prepare(max).is_none() {
+            return false;
+        }
+        let mut g = STATE.lock();
+        let Some(s) = g.as_mut() else { return false };
+        resume_locked(s)
+    } else {
+        {
+            let mut g = STATE.lock();
+            let Some(s) = g.as_mut() else { return false };
+            if !v3d::idle_axi(&mut s.regs) {
+                kprintln!("[npk] v3d: Failed to wait for safe GMP shutdown");
+            }
+            if let Err(e) = v3d::suspend_sms(&mut s.regs) {
+                kprintln!("[npk] v3d: {:?}", e);
+                v3d::gmp_resume(&mut s.regs);
+                return false;
+            }
+            s.powered = false;
+        }
+        clock_unprepare(min);
+        let mut g = STATE.lock();
+        let Some(s) = g.as_mut() else { return false };
+        v3d::v3d_domain_off(&mut s.regs);
+        v3d::grafx_power_off(&mut s.regs);
+        true
+    }
+}
+
+/// The kernel's share of `v3d_reset` after a hang: the SMS reset, V3D
+/// reset through its power domain (`reset_control_reset`) with the
+/// invariant state again, then the page table. The module has disabled
+/// V3D's interrupts and resets them after (`v3d_irq_disable`,
+/// `v3d_irq_reset`).
+pub fn reset() -> bool {
+    let mut g = STATE.lock();
+    let Some(s) = g.as_mut() else { return false };
+    if !s.powered {
+        return false;
+    }
+    if !v3d::reset_sms(&mut s.regs) {
+        kprintln!("[npk] v3d: Failed to wait for SMS reset");
+    }
+    v3d::reset_v3d_domain(&mut s.regs);
+    v3d::init_hw_state(&mut s.regs);
+    if let Err(e) = v3d::mmu_set_page_table(&mut s.regs, s.pt, s.scratch) {
+        kprintln!("[npk] v3d: {:?}", e);
+        return false;
+    }
+    true
+}
+
+/// `v3d_hub_irq` after an MMU interrupt: the client and address, the error
+/// cleared. None when V3D is not powered.
+pub fn mmu_fault() -> Option<v3d::MmuFault> {
+    let mut g = STATE.lock();
+    let s = g.as_mut()?;
+    if !s.powered {
+        return None;
+    }
+    let w = s.ident.va_width;
+    Some(v3d::mmu_fault(&mut s.regs, w))
+}
+
+/// `v3d_mmu_flush_all`: only while V3D is powered; a resume programs the
+/// page table and flushes.
+fn flush(s: &mut State) {
+    if s.powered {
+        let _ = v3d::mmu_flush_all(&mut s.regs);
+    }
 }
 
 fn pt(s: &mut State) -> &mut [u32] {
@@ -202,7 +346,7 @@ pub fn map(pages: &[u64]) -> Option<u32> {
         s.va.free(start, n);
         return None;
     }
-    let _ = v3d::mmu_flush_all(&mut s.regs);
+    flush(s);
     for &p in pages {
         s.by_page.insert(p, start);
     }
@@ -213,7 +357,7 @@ pub fn map(pages: &[u64]) -> Option<u32> {
 fn unmap_locked(s: &mut State, start: u32) {
     let Some(m) = s.maps.remove(&start) else { return };
     v3d::remove_ptes(pt(s), m.va, m.pages.len() as u32);
-    let _ = v3d::mmu_flush_all(&mut s.regs);
+    flush(s);
     for p in &m.pages {
         s.by_page.remove(p);
     }

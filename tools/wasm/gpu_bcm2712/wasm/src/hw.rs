@@ -128,13 +128,22 @@ impl PiHw {
     }
 
     /// The fired counts of the lines the main loop serves, each line
-    /// unmasked again.
-    pub fn arm_all(&mut self) -> [i64; 4] {
-        [Spi::Pv(0), Spi::Pv(1), Spi::DispIntr, Spi::AonIntr].map(|s| npk_sys::irq_arm(self.vector(s)))
+    /// unmasked again; V3D's two (once `map_v3d` ran) wake the loop, which
+    /// serves V3D on every pass.
+    pub fn arm_all(&mut self) -> [i64; 6] {
+        let v3d = |h: &mut Self, s: Spi| if h.v3d_vectors[0] >= 0 { npk_sys::irq_arm(h.vector(s)) } else { -1 };
+        [
+            npk_sys::irq_arm(self.vector(Spi::Pv(0))),
+            npk_sys::irq_arm(self.vector(Spi::Pv(1))),
+            npk_sys::irq_arm(self.vector(Spi::DispIntr)),
+            npk_sys::irq_arm(self.vector(Spi::AonIntr)),
+            v3d(self, Spi::V3dCore),
+            v3d(self, Spi::V3dHub),
+        ]
     }
 
     /// Which of the main loop's lines fired since `seen`.
-    pub fn fired(&mut self, seen: &mut [i64; 4]) -> Fired {
+    pub fn fired(&mut self, seen: &mut [i64; 6]) -> Fired {
         let now = self.arm_all();
         let f = Fired {
             pv: [now[0] != seen[0], now[1] != seen[1]],

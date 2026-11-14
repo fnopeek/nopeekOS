@@ -84,7 +84,7 @@ const CURSOR_SLOT: u32 = MAX_CURSOR * MAX_CURSOR * 4;
 const OP_COPY_RECT: u32 = 1;
 
 /// The mask bits of `npk_sys::wait`.
-const WAIT_IRQ: i32 = 2;
+pub(crate) const WAIT_IRQ: i32 = 2;
 const WAIT_GPU_CMD: i32 = 64;
 
 fn printk(b: &[u8]) {
@@ -256,6 +256,8 @@ struct Scenes {
     bos: alloc::vec::Vec<SceneBo>,
     /// Scenes whose cost was logged.
     logged: u32,
+    /// Queued scenes: job, last fence, start (us), dispatches, traced.
+    pending: alloc::vec::Vec<(i32, u64, u64, u32, bool)>,
 }
 
 /// Scenes after the start whose cost goes to the log.
@@ -303,7 +305,7 @@ impl Scenes {
             return None;
         }
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
-        Some(Scenes { c, bos, logged: 0 })
+        Some(Scenes { c, bos, logged: 0, pending: alloc::vec::Vec::new() })
     }
 
     /// `OP_BO_ADD`: mapped for V3D, its address reported.
@@ -321,42 +323,68 @@ impl Scenes {
     }
 
     /// `OP_BO_REMOVE`: V3D no longer reaches it.
-    fn remove(&mut self, id: u32) -> i32 {
+    fn remove(&mut self, hw: &mut PiHw, id: u32) -> i32 {
         let Some(i) = self.bos.iter().position(|b| b.id == id && id > 2) else { return -22 };
+        self.c.drain(hw);
+        self.reap(hw);
         let b = self.bos.remove(i);
         let _ = npk_sys::v3d_unmap(b.va as i64);
         0
     }
 
-    fn run(&mut self, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> i32 {
+    /// `OP_SCENE`: queued on V3D. None while it runs (`reap` completes
+    /// it), or its status when it was refused.
+    fn run(&mut self, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> Option<i32> {
         let bufs = SceneBufs(&self.bos);
         let t0 = npk_sys::now_us() as u64;
         let traced = self.logged < SCENES_TRACED;
-        if traced {
+        if traced && self.c.trace.is_none() {
             self.c.trace = Some(alloc::vec::Vec::new());
         }
-        let r = self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]);
-        let trace = self.c.trace.take();
-        match r {
-            Ok(n) => {
-                // The first scenes say what they cost: the measure of the
-                // V3D path, dispatch by dispatch for the first ones.
-                if self.logged < SCENES_LOGGED {
+        match self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]) {
+            Ok((n, f)) => {
+                self.pending.push((seq, f, t0, n, traced));
+                if traced {
                     self.logged += 1;
-                    Line::new().s("scene: ").dec(n as u64).s(" dispatches in ")
-                        .dec(npk_sys::now_us() as u64 - t0).s(" us").say();
-                    for (name, g, us) in trace.unwrap_or_default() {
-                        Line::new().s("scene:   ").s(name).s(" ").dec(g[0] as u64).s("x").dec(g[1] as u64)
-                            .s(" groups, ").dec(us).s(" us").say();
-                    }
                 }
-                0
+                None
             }
             Err(e) => {
                 Line::new().s("scene into buffer ").dec(a[0] as u64).s(" refused (").dec(e.unsigned_abs() as u64)
                     .s(")").say();
-                e
+                Some(e)
             }
+        }
+    }
+
+    /// V3D's interrupts and timeouts served; every queued scene whose last
+    /// fence signalled completed. The first scenes say what they cost: the
+    /// measure of the V3D path, dispatch by dispatch for the first ones.
+    fn reap(&mut self, hw: &mut PiHw) {
+        self.c.service(hw);
+        let mut i = 0;
+        while i < self.pending.len() {
+            let (seq, f, t0, n, traced) = self.pending[i];
+            let (done, failed) = self.c.fence_state(f);
+            if !done {
+                i += 1;
+                continue;
+            }
+            self.pending.remove(i);
+            if traced || self.logged < SCENES_LOGGED {
+                Line::new().s("scene: ").dec(n as u64).s(" dispatches in ")
+                    .dec(npk_sys::now_us() as u64 - t0).s(" us").s(if failed { ", failed" } else { "" }).say();
+            }
+            if traced {
+                for (name, g, us) in self.c.trace.take().unwrap_or_default() {
+                    Line::new().s("scene:   ").s(name).s(" ").dec(g[0] as u64).s("x").dec(g[1] as u64)
+                        .s(" groups, ").dec(us).s(" us").say();
+                }
+            }
+            if !traced && self.logged < SCENES_LOGGED {
+                self.logged += 1;
+            }
+            npk_sys::gpudev_complete(seq, if failed { -5 } else { 0 });
         }
     }
 }
@@ -515,7 +543,9 @@ fn show(vc4: &mut Vc4, hw: &mut PiHw, client: &drm_client_dev, kfb: &mut KernelF
 /// encoders and with them a sink's scrambling, so the firmware starts the
 /// next boot on a display as it was at power-on.
 fn shutdown(vc4: &mut Vc4, hw: &mut PiHw, kfb: &KernelFb, p: &mut Present) -> i32 {
-    if p.scenes.is_some() {
+    if let Some(s) = p.scenes.as_mut() {
+        s.c.drain(hw);
+        s.reap(hw);
         gpu_bcm2712_core::v3d::irq_disable(hw);
     }
     let off = drm_client_dev::new(vc4.crtc.len() as u32);
@@ -552,9 +582,19 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
             }
         }
 
+        if let Some(s) = p.scenes.as_ref() {
+            if let Some(us) = s.c.next_due(now) {
+                timeout_ms = timeout_ms.min(us.div_ceil(1000));
+            }
+        }
+
         npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout_ms.max(1) as i32);
 
         let fired = hw.fired(&mut seen);
+        if let Some(s) = p.scenes.as_mut() {
+            s.reap(hw);
+            s.c.autosuspend(hw, npk_sys::now_us() as u64);
+        }
         for pv in 0..vc4.crtc.len() {
             if fired.pv[pv] {
                 vc4.crtc_irq_handler(hw, pv);
@@ -604,8 +644,14 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
                 (OP_CURSOR_IMAGE, Some(c)) => c.image(vc4, hw, word(0) as i32, &a),
                 (OP_CURSOR_MOVE, Some(c)) => c.moved(vc4, hw, &a),
                 (OP_BO_ADD, _) => p.scenes.as_mut().map_or(-1, |s| s.add(a[0])),
-                (OP_BO_REMOVE, _) => p.scenes.as_mut().map_or(-1, |s| s.remove(a[0])),
-                (OP_SCENE, _) => p.scenes.as_mut().map_or(-1, |s| s.run(hw, word(0) as i32, &a)),
+                (OP_BO_REMOVE, _) => p.scenes.as_mut().map_or(-1, |s| s.remove(hw, a[0])),
+                (OP_SCENE, _) => match p.scenes.as_mut() {
+                    Some(s) => match s.run(hw, word(0) as i32, &a) {
+                        Some(st) => st,
+                        None => continue,
+                    },
+                    None => -1,
+                },
                 (OP_SHUTDOWN, _) => shutdown(vc4, hw, kfb, p),
                 _ => -1,
             };

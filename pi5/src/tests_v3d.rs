@@ -91,3 +91,67 @@ fn the_page_table_goes_in_as_linux_programs_it() {
     assert_eq!(w[3], (0x1000, 1));
     assert_eq!(w[4], (0x1000, 3));
 }
+
+#[test]
+fn grafx_and_v3d_go_down_as_linux_takes_them_down() {
+    let mut r = Regs::default();
+    r.vals.insert(("Pm".into(), 0x10c), 1 | 2 | 4 | 32);
+    r.vals.insert(("Pm".into(), 0x304), 1 << 6);
+    v3d_domain_off(&mut r);
+    grafx_power_off(&mut r);
+    let pm: Vec<(u64, u32)> = r.writes.iter().filter(|w| w.0 == Block::Pm).map(|w| (w.1, w.2)).collect();
+    // bcm2835_asb_power_off: the V3D reset asserted.
+    assert_eq!(pm[0], (0x304, 0x5a00_0000));
+    // bcm2835_power_power_off: ISFUNC, then ISPOW, then POWUP cleared.
+    assert_eq!(pm[1].1 & 32, 0);
+    assert!(pm[1].1 & 4 != 0 && pm[1].1 & 1 != 0);
+    assert_eq!(pm[2].1 & (4 | 32), 0);
+    assert!(pm[2].1 & 1 != 0);
+    assert_eq!(pm[3].1 & (1 | 4 | 32), 0);
+    // bcm2835_reset_reset: off, then on.
+    let mut r = Regs::default();
+    r.vals.insert(("Pm".into(), 0x304), 1 << 6);
+    reset_v3d_domain(&mut r);
+    let pm: Vec<u32> = r.writes.iter().map(|w| w.2).collect();
+    assert_eq!(pm, vec![0x5a00_0000, 0x5a00_0000 | (1 << 6)]);
+}
+
+#[test]
+fn the_sms_powers_off_and_the_gmp_idles_as_linux_waits_for_them() {
+    let mut r = Regs::default();
+    // The model keeps what was written: POWER_OFF (bit 30) reads back with
+    // state 0, not POWER_OFF_STATE.
+    assert_eq!(suspend_sms(&mut r), Err(Error::SmsOff));
+    assert_eq!(r.writes[0], (Block::V3dSms, 0x400, 1 << 30));
+    let mut r = Regs::default();
+    r.vals.insert(("V3dSms".into(), 0x400), 0xd);
+    r.writes.clear();
+    // A register that reads POWER_OFF_STATE after the write.
+    struct Sms(Regs);
+    impl Hw for Sms {
+        fn read(&mut self, b: Block, off: u64, w: u8) -> u32 {
+            if b == Block::V3dSms && off == 0x400 { 0xd } else { self.0.read(b, off, w) }
+        }
+        fn write(&mut self, b: Block, off: u64, w: u8, v: u32) { self.0.write(b, off, w, v) }
+        fn delay_us(&mut self, _: u64) {}
+    }
+    let mut s = Sms(r);
+    assert_eq!(suspend_sms(&mut s), Ok(()));
+    // idle_axi: STOP_REQ at GMP_CFG, then GMP_STATUS read until idle.
+    let mut r = Regs::default();
+    assert!(idle_axi(&mut r));
+    assert_eq!(r.writes, vec![(Block::V3dHub, 0x604, 1 << 1)]);
+    gmp_resume(&mut r);
+    assert_eq!(r.writes[1], (Block::V3dHub, 0x604, 0));
+}
+
+#[test]
+fn an_mmu_fault_is_read_and_cleared_as_v3d_hub_irq_does() {
+    let mut r = Regs::default();
+    r.vals.insert(("V3dHub".into(), 0x122c), 0x3a);
+    r.vals.insert(("V3dHub".into(), 0x1234), 0x0012_3456);
+    r.vals.insert(("V3dHub".into(), 0x1200), 0x060d_0c01 | (1 << 12));
+    let f = mmu_fault(&mut r, 36);
+    assert_eq!(f, MmuFault { axi_id: 0x3a, addr: 0x0012_3456 << 4 });
+    assert_eq!(r.writes, vec![(Block::V3dHub, 0x1200, 0x060d_0c01 | (1 << 12))]);
+}

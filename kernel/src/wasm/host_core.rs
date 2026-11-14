@@ -2103,6 +2103,40 @@ pub(crate) fn npk_v3d_unmap(ctx: &mut HostState, va: i64) -> i32 {
     if crate::platform::pi5_v3d::unmap(va) { 0 } else { -1 }
 }
 
+/// `npk_v3d_power(on) -> 0 | -1`: V3D's runtime PM (`pi5_v3d::power`).
+/// Before `on = 0` the module masks V3D's interrupts and cleans its
+/// caches; after `on = 1` it enables them.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_power(ctx: &mut HostState, on: i32) -> i32 {
+    let Some(s) = bound_set(ctx) else { return -1 };
+    if !s.has_v3d() { return -1; }
+    if crate::platform::pi5_v3d::power(on != 0) { 0 } else { -1 }
+}
+
+/// `npk_v3d_reset() -> 0 | -1`: the kernel's share of `v3d_reset` after a
+/// hang (`pi5_v3d::reset`), between the module's `v3d_irq_disable` and
+/// `v3d_irq_reset`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_reset(ctx: &mut HostState) -> i32 {
+    let Some(s) = bound_set(ctx) else { return -1 };
+    if !s.has_v3d() { return -1; }
+    if crate::platform::pi5_v3d::reset() { 0 } else { -1 }
+}
+
+/// `npk_v3d_mmu_fault(out_ptr) -> 0 | -1`: after an MMU interrupt, the
+/// violating AXI ID (u32) and address (u64) at `out_ptr`, the error cleared
+/// (`v3d_hub_irq`).
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_mmu_fault(mem: &mut [u8], ctx: &mut HostState, out_ptr: i32) -> i32 {
+    let Some(s) = bound_set(ctx) else { return -1 };
+    if !s.has_v3d() { return -1; }
+    let Some(f) = crate::platform::pi5_v3d::mmu_fault() else { return -1 };
+    let Some(out) = guest_mut(mem, out_ptr, 12) else { return -1 };
+    out[..4].copy_from_slice(&f.axi_id.to_le_bytes());
+    out[4..12].copy_from_slice(&f.addr.to_le_bytes());
+    0
+}
+
 /// Is `vector` one this module's driver registered?
 fn owns_vector(ctx: &HostState, vector: i32) -> bool {
     ctx.hw.as_ref().is_some_and(|h| h.irqs.iter().any(|&(v, _)| v != 0 && v as i32 == vector))

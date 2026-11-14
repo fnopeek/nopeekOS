@@ -1,8 +1,10 @@
 //! The gpudev scene executor on V3D: the scene checked and planned by
 //! gpu_scene, run by compose.comp, blur_down.comp and blur_box.comp as v3dv
-//! compiled them (`shaders_gen`), one CSD job per dispatch the way
-//! `v3d_csd_job_run` starts it, each waited for and the caches cleaned
-//! after it (`gpu_bcm2712_core::v3d`). Not a Linux file.
+//! compiled them (`shaders_gen`), one CSD job per dispatch with its
+//! cache-clean job, queued on V3D's scheduler
+//! (`gpu_bcm2712_core::v3d_sched`) and finished by its interrupts. The
+//! module is also V3D's runtime PM (50 ms autosuspend, as v3d_drv.c sets
+//! it), its overflow-memory worker and its reset path. Not a Linux file.
 //!
 //! Every buffer V3D reads or writes is mapped by the kernel
 //! (`npk_v3d_map`): the module's own (programs, uniforms, the scene, bins,
@@ -15,13 +17,12 @@ use drm_core::linux::Line;
 use gpu_bcm2712_core::hw::{Hw, Spi};
 use gpu_bcm2712_core::shaders_gen::{self as sg, Program, U};
 use gpu_bcm2712_core::v3d::{self, CsdProgram};
+use gpu_bcm2712_core::v3d_sched::{Event, Fence, Queue, Sched};
 use gpu_scene::plan::{self, bin_table, grid, rect};
 
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
 const EIO: i32 = 5;
-const EFAULT: i32 = 14;
-const ETIMEDOUT: i32 = 110;
 const PAGE: u32 = 4096;
 
 const SCENE_PAGES: u32 = 16;
@@ -31,8 +32,12 @@ const PLANE_PAGES: u32 = 128;
 const PLANE_BLOCKS: u32 = PLANE_PAGES * PAGE / 4;
 /// Programs start at this alignment in the code buffer.
 const CODE_ALIGN: u32 = 256;
-/// How long one job may run.
-const JOB_TIMEOUT_MS: u32 = 1000;
+/// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
+const AUTOSUSPEND_US: u64 = 50_000;
+/// Uniform streams: one slot per dispatch that may be in flight.
+const UNIFORM_SLOTS: u32 = 16;
+/// `v3d_overflow_mem_work`'s buffer: 256 KiB.
+const OVERFLOW_PAGES: u32 = 64;
 
 /// A DMA buffer of the module, mapped for V3D.
 pub struct Buf {
@@ -64,6 +69,12 @@ impl Buf {
     fn read(&self, off: u32, out: &mut [u8]) -> bool {
         off as usize + out.len() <= self.bytes as usize && npk_sys::dma_read(self.dma, off as i32, out) >= 0
     }
+
+    /// Unmapped for V3D, the pages given back.
+    fn free(self) {
+        let _ = npk_sys::v3d_unmap(self.va as i64);
+        npk_sys::dma_free(self.dma);
+    }
 }
 
 /// What the module knows of V3D and its programs.
@@ -73,7 +84,24 @@ pub struct Composer {
     code: Buf,
     /// Per `sg::PROGRAMS` entry, its V3D address.
     code_va: Vec<u32>,
+    /// `UNIFORM_SLOTS` uniform streams of `uslot` bytes; the fence that last
+    /// used each slot (0: never).
     uniforms: Buf,
+    uslot: u32,
+    uslots: [Fence; UNIFORM_SLOTS as usize],
+    sched: Sched,
+    /// The fence of the last submission, which the next one waits for.
+    last: Fence,
+    /// Dispatches by fence, for the trace.
+    names: Vec<(Fence, &'static str, [u32; 3])>,
+    /// Overflow buffers handed to the binner, by handle.
+    overflow: Vec<(u32, Buf)>,
+    next_overflow: u32,
+    /// Runtime PM: powered, and idle since (us) while powered.
+    powered: bool,
+    idle_since: u64,
+    /// `logged_error` of v3d_hub_irq: an MMU fault is logged once.
+    mmu_logged: bool,
     scene: Buf,
     bins: Buf,
     planes: Buf,
@@ -119,6 +147,7 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         }
     }
     let max_uniforms = sg::PROGRAMS.iter().map(|p| p.uniforms.len() as u32).max().unwrap_or(0);
+    let uslot = (max_uniforms * 4).div_ceil(CODE_ALIGN) * CODE_ALIGN;
     let spill_size = sg::PROGRAMS.iter().map(|p| p.spill_size).max().unwrap_or(0);
     // pipeline_check_spill_size: the thread index picks the area, (core <<
     // 6) | (qpu << 2) | thread, so four threads per QPU at any thread count.
@@ -128,7 +157,17 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         rev,
         code_va: offs.iter().map(|&o| code.va + o).collect(),
         code,
-        uniforms: Buf::new((max_uniforms * 4).div_ceil(PAGE))?,
+        uniforms: Buf::new((uslot * UNIFORM_SLOTS).div_ceil(PAGE))?,
+        uslot,
+        uslots: [0; UNIFORM_SLOTS as usize],
+        sched: Sched::new(),
+        last: 0,
+        names: Vec::new(),
+        overflow: Vec::new(),
+        next_overflow: 1,
+        powered: true,
+        idle_since: npk_sys::now_us() as u64,
+        mmu_logged: false,
         scene: Buf::new(SCENE_PAGES)?,
         bins: Buf::new(BINS_PAGES)?,
         planes: Buf::new(PLANE_PAGES)?,
@@ -162,10 +201,60 @@ fn push_words(p: &Program, members: &[(&str, &[u8])]) -> Result<[u32; 32], i32> 
 }
 
 impl Composer {
-    /// One dispatch of `p` over `grid` with `push`: the uniform stream
-    /// filled as v3dv_write_uniforms_wg_offsets fills it, the CSD job run
-    /// and waited for, the caches cleaned.
-    pub fn dispatch(&mut self, hw: &mut PiHw, p: &Program, push: &[u32; 32], grid: [u32; 3]) -> Result<(), i32> {
+    /// `v3d_power_resume` as the module's share: V3D powered (the kernel)
+    /// and its interrupts on (`pm_runtime_resume_and_get` before a job).
+    fn power_up(&mut self, hw: &mut PiHw) -> Result<(), i32> {
+        if !self.powered {
+            if npk_sys::v3d_power(1) != 0 {
+                Line::new().s("v3d: power-up failed").say();
+                return Err(-EIO);
+            }
+            v3d::irq_enable(hw);
+            self.powered = true;
+        }
+        Ok(())
+    }
+
+    /// The autosuspend: idle for `AUTOSUSPEND_US`, `v3d_power_suspend` (the
+    /// interrupts off and the caches cleaned here, the rest the kernel's).
+    pub fn autosuspend(&mut self, hw: &mut PiHw, now_us: u64) {
+        if !self.powered || !self.sched.idle() || now_us < self.idle_since + AUTOSUSPEND_US {
+            return;
+        }
+        v3d::irq_disable(hw);
+        v3d::clean_caches(hw);
+        if npk_sys::v3d_power(0) == 0 {
+            self.powered = false;
+        } else {
+            v3d::irq_enable(hw);
+            self.idle_since = now_us;
+        }
+    }
+
+    /// When the module's loop must look again: the next job timeout or the
+    /// autosuspend, in us from `now_us`.
+    pub fn next_due(&self, now_us: u64) -> Option<u64> {
+        let pm = (self.powered && self.sched.idle()).then_some(self.idle_since + AUTOSUSPEND_US);
+        [self.sched.next_deadline(), pm].into_iter().flatten().min().map(|t| t.saturating_sub(now_us))
+    }
+
+    /// One dispatch of `p` over `grid` with `push`, queued after the last
+    /// submission: the uniform stream filled as
+    /// v3dv_write_uniforms_wg_offsets fills it, the CSD job and its
+    /// cache-clean job submitted. The clean job's fence.
+    pub fn submit_dispatch(&mut self, hw: &mut PiHw, p: &'static Program, push: &[u32; 32], grid: [u32; 3])
+        -> Result<Fence, i32> {
+        self.power_up(hw)?;
+        // A uniform slot whose dispatch finished; the oldest one waited for
+        // when all are in flight.
+        let slot = match self.uslots.iter().position(|&f| f == 0 || self.sched.signaled(f)) {
+            Some(i) => i,
+            None => {
+                let (i, &f) = self.uslots.iter().enumerate().min_by_key(|(_, f)| **f).expect("slots");
+                self.wait_fence(hw, f)?;
+                i
+            }
+        };
         let spill_va = self.spill.as_ref().map_or(0, |s| s.va);
         let mut stream: Vec<u8> = Vec::with_capacity(p.uniforms.len() * 4);
         for u in p.uniforms {
@@ -179,7 +268,8 @@ impl Composer {
             };
             stream.extend_from_slice(&v.to_le_bytes());
         }
-        if !self.uniforms.write(0, &stream) {
+        let off = slot as u32 * self.uslot;
+        if !self.uniforms.write(off, &stream) {
             return Err(-ENOMEM);
         }
         let cp = CsdProgram {
@@ -189,39 +279,145 @@ impl Composer {
             can_use_supergroups: p.can_use_supergroups,
             has_control_barrier: p.has_control_barrier,
         };
-        let cfg = v3d::csd_cfg(&cp, self.rev, self.qpus, grid, self.code_va[program_index(p)], self.uniforms.va);
-        let hub = hw.irq_arm(Spi::V3dHub);
-        let mut since = hw.irq_arm(Spi::V3dCore);
-        let t0 = npk_sys::now_us() as u64;
-        if !v3d::csd_job_run(hw, &cfg) {
-            return Ok(());
-        }
+        let cfg = v3d::csd_cfg(&cp, self.rev, self.qpus, grid, self.code_va[program_index(p)], self.uniforms.va + off);
+        let deps: &[Fence] = if self.last != 0 { &[self.last] } else { &[] };
+        let deps = deps.to_vec();
+        let f = self.sched.submit_csd(cfg, &deps);
+        self.uslots[slot] = f;
+        self.last = f;
         self.dispatches += 1;
+        if self.trace.is_some() {
+            self.names.push((f - 1, p.name, grid));
+        }
+        self.pump(hw);
+        Ok(f)
+    }
+
+    /// Start what can run, and act on what the queues report.
+    fn pump(&mut self, hw: &mut PiHw) {
+        let mut ev = Vec::new();
+        let now = npk_sys::now_us() as u64;
+        self.sched.pump(hw, now, &mut ev);
+        self.handle(hw, ev);
+    }
+
+    /// V3D's interrupts (`v3d_irq`, `v3d_hub_irq`) and the timeouts, then
+    /// whatever may run next.
+    pub fn service(&mut self, hw: &mut PiHw) {
+        if !self.powered {
+            return;
+        }
+        let mut ev = Vec::new();
+        let now = npk_sys::now_us() as u64;
+        let core = v3d::core_irq(hw);
+        let hub = v3d::hub_irq(hw);
+        self.sched.irq(core, hub, now, &mut ev);
+        self.sched.check_timeouts(hw, now, &mut ev);
+        self.handle(hw, ev);
+        self.pump(hw);
+        if self.sched.idle() {
+            self.idle_since = now;
+        }
+    }
+
+    fn handle(&mut self, hw: &mut PiHw, ev: Vec<Event>) {
+        for e in ev {
+            match e {
+                Event::Done { fence, us, unref, .. } => {
+                    for h in unref {
+                        if let Some(i) = self.overflow.iter().position(|(k, _)| *k == h) {
+                            self.overflow.swap_remove(i).1.free();
+                        }
+                    }
+                    if let Some(t) = self.trace.as_mut() {
+                        if let Some(&(_, name, grid)) = self.names.iter().find(|n| n.0 == fence) {
+                            t.push((name, grid, us));
+                        }
+                    }
+                    self.names.retain(|n| n.0 != fence);
+                }
+                Event::OutOfMemory => self.overflow_mem_work(hw),
+                Event::MmuFault { write_violation, pte_invalid, cap_exceeded } => {
+                    if let Some((axi_id, addr)) = npk_sys::v3d_mmu_fault() {
+                        if !self.mmu_logged {
+                            Line::new().s("v3d: MMU error from client ").s(v3d::axi_client(axi_id)).s(" (")
+                                .dec((axi_id & 0x7f) as u64).s(") at ").hex64(addr)
+                                .s(if write_violation { ", write violation" } else { "" })
+                                .s(if pte_invalid { ", pte invalid" } else { "" })
+                                .s(if cap_exceeded { ", cap exceeded" } else { "" }).say();
+                        }
+                        self.mmu_logged = true;
+                    }
+                }
+                Event::GmpViolation => Line::new().s("v3d: GMP Violation").say(),
+                Event::Reset { queue, err_stat } => self.reset(hw, queue, err_stat),
+            }
+        }
+    }
+
+    /// `v3d_overflow_mem_work`: 256 KiB for the binner, given to the
+    /// running bin job's render job; dropped when no bin job runs.
+    fn overflow_mem_work(&mut self, hw: &mut PiHw) {
+        let Some(b) = Buf::new(OVERFLOW_PAGES) else {
+            Line::new().s("v3d: Couldn't allocate binner overflow mem").say();
+            return;
+        };
+        let h = self.next_overflow;
+        self.next_overflow += 1;
+        if !self.sched.attach_overflow(h) {
+            b.free();
+            return;
+        }
+        v3d::overflow_mem(hw, b.va, b.bytes);
+        self.overflow.push((h, b));
+    }
+
+    /// `v3d_gpu_reset_for_timeout` with `v3d_reset`: the module's and the
+    /// kernel's share, then the queues again.
+    fn reset(&mut self, hw: &mut PiHw, queue: Queue, err_stat: u32) {
+        Line::new().s("v3d: Resetting GPU for hang.").say();
+        Line::new().s("v3d: V3D_ERR_STAT: ").hex(err_stat).say();
+        v3d::irq_disable(hw);
+        if npk_sys::v3d_reset() != 0 {
+            Line::new().s("v3d: the kernel could not reset V3D").say();
+        }
+        v3d::irq_reset(hw);
+        let mut ev = Vec::new();
+        self.sched.reset_done(queue, npk_sys::now_us() as u64, &mut ev);
+        self.handle(hw, ev);
+    }
+
+    /// Serve V3D until `f` signalled. False when it failed.
+    pub fn wait_fence(&mut self, hw: &mut PiHw, f: Fence) -> Result<(), i32> {
         loop {
-            if !hw.irq_wait(Spi::V3dCore, since, JOB_TIMEOUT_MS) {
-                Line::new().s("v3d: ").s(p.name).s(" did not finish").say();
-                return Err(-ETIMEDOUT);
+            if self.sched.signaled(f) {
+                return Ok(());
             }
-            since = hw.irq_arm(Spi::V3dCore);
-            if v3d::core_irq(hw).csd_done {
-                break;
+            let since = [hw.irq_arm(Spi::V3dCore), hw.irq_arm(Spi::V3dHub)];
+            self.service(hw);
+            if self.sched.signaled(f) {
+                return Ok(());
             }
-        }
-        let clean = v3d::clean_caches(hw);
-        if hw.irq_arm(Spi::V3dHub) != hub {
-            let h = v3d::hub_irq(hw);
-            if h.mmu_fault || h.gmp_violation {
-                Line::new().s("v3d: ").s(p.name).s(" faulted on an address the kernel did not map").say();
-                return Err(-EFAULT);
+            let now = npk_sys::now_us() as u64;
+            let ms = self.sched.next_deadline().map_or(10, |d| d.saturating_sub(now).div_ceil(1000).max(1));
+            if hw.irq_arm(Spi::V3dCore) == since[0] && hw.irq_arm(Spi::V3dHub) == since[1] {
+                npk_sys::wait(crate::WAIT_IRQ, ms.min(1000) as i32);
             }
         }
-        if !clean {
-            return Err(-EIO);
+    }
+
+    /// Serve V3D until everything submitted finished: before a buffer the
+    /// queued jobs may still reach goes away (a job holds its BOs in
+    /// Linux until it is freed).
+    pub fn drain(&mut self, hw: &mut PiHw) {
+        if self.last != 0 {
+            let _ = self.wait_fence(hw, self.last);
         }
-        if let Some(t) = self.trace.as_mut() {
-            t.push((p.name, grid, npk_sys::now_us() as u64 - t0));
-        }
-        Ok(())
+    }
+
+    /// Has fence `f` signalled, and did its job fail?
+    pub fn fence_state(&self, f: Fence) -> (bool, bool) {
+        (self.sched.signaled(f), self.sched.failed(f))
     }
 
     /// The dispatch path proved: fill_pattern over 64x64 into a buffer of
@@ -240,7 +436,8 @@ impl Composer {
                 ("seed", &SEED.to_le_bytes()),
             ])?;
             let t0 = npk_sys::now_us() as u64;
-            self.dispatch(hw, &sg::FILL_PATTERN, &push, [W.div_ceil(sg::WIDTH), H, 1])?;
+            let f = self.submit_dispatch(hw, &sg::FILL_PATTERN, &push, [W.div_ceil(sg::WIDTH), H, 1])?;
+            self.wait_fence(hw, f)?;
             let us = npk_sys::now_us() as u64 - t0;
             let mut row = [0u8; (W * 4) as usize];
             for y in 0..H {
@@ -273,16 +470,21 @@ impl Composer {
     }
 
     /// `OP_SCENE` of job `seq`: `bytes` of scene into buffer `target`,
-    /// checked, planned and composed. Every dispatch is done when it returns.
+    /// checked, planned and queued. The dispatches and the fence of the
+    /// last; the scene memory is the previous scene's until that finished,
+    /// so it is waited for first.
     pub fn run_scene(&mut self, hw: &mut PiHw, bufs: &dyn gpu_scene::scene::buffers, seq: u32, target: u32,
-                     bytes: u32) -> Result<u32, i32> {
+                     bytes: u32) -> Result<(u32, Fence), i32> {
+        if self.last != 0 {
+            self.wait_fence(hw, self.last)?;
+        }
         let mut mem = SceneMem(&self.scene);
         let ck = gpu_scene::scene::check_scene(&JobPayload(seq), bytes, bufs, &mut mem, target)?;
         let before = self.dispatches;
         let lim = plan::limits { bins_words: BINS_WORDS, plane_blocks: PLANE_BLOCKS };
         let mut s = Sink { c: self, hw, target: ck.target, width: ck.width, height: ck.height, radius: ck.radius };
         plan::plan(&mut s, &lim, &ck.screen, &ck.damage, &ck.shapes, ck.radius)?;
-        Ok((self.dispatches - before) as u32)
+        Ok(((self.dispatches - before) as u32, self.last))
     }
 }
 
@@ -353,7 +555,7 @@ impl plan::sink for Sink<'_> {
             ("bsw", &a.bsw.to_le_bytes()),
             ("bsh", &a.bsh.to_le_bytes()),
         ])?;
-        self.c.dispatch(self.hw, &sg::COMPOSE, &push, grid)
+        self.c.submit_dispatch(self.hw, &sg::COMPOSE, &push, grid).map(|_| ())
     }
 
     fn blur_down(&mut self, g0: grid) -> Result<(), i32> {
@@ -370,7 +572,7 @@ impl plan::sink for Sink<'_> {
             ("sw", &a.sw.to_le_bytes()),
             ("sh", &a.sh.to_le_bytes()),
         ])?;
-        self.c.dispatch(self.hw, &sg::BLUR_DOWN, &push, grid)
+        self.c.submit_dispatch(self.hw, &sg::BLUR_DOWN, &push, grid).map(|_| ())
     }
 
     fn blur_box(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32> {
@@ -386,6 +588,6 @@ impl plan::sink for Sink<'_> {
             ("step", &a.step.to_le_bytes()),
             ("radius", &a.radius.to_le_bytes()),
         ])?;
-        self.c.dispatch(self.hw, &sg::BLUR_BOX, &push, grid)
+        self.c.submit_dispatch(self.hw, &sg::BLUR_BOX, &push, grid).map(|_| ())
     }
 }

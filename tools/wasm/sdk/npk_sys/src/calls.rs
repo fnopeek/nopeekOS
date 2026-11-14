@@ -122,6 +122,9 @@ unsafe extern "C" {
     fn npk_v3d_open() -> i32;
     fn npk_v3d_map(pages_ptr: i32, n: i32) -> i64;
     fn npk_v3d_unmap(va: i64) -> i32;
+    fn npk_v3d_power(on: i32) -> i32;
+    fn npk_v3d_reset() -> i32;
+    fn npk_v3d_mmu_fault(out_ptr: i32) -> i32;
     fn npk_gpudev_framebuffer(width: i32, height: i32) -> i32;
     fn npk_driver_report(buf_ptr: i32, len: i32) -> i32;
 
@@ -308,6 +311,13 @@ plain! {
     fn v3d_open = npk_v3d_open() -> i32;
     /// AArch64: the V3D mapping at `va` taken away; 0 or -1.
     fn v3d_unmap = npk_v3d_unmap(va: i64) -> i32;
+    /// AArch64: V3D powered up (`on` 1) or down (0), as runtime PM does;
+    /// before 0 the caller has masked V3D's interrupts and cleaned its
+    /// caches, after 1 it enables them. 0 or -1.
+    fn v3d_power = npk_v3d_power(on: i32) -> i32;
+    /// AArch64: the kernel's share of a V3D reset after a hang, between
+    /// masking and resetting V3D's interrupts; 0 or -1.
+    fn v3d_reset = npk_v3d_reset() -> i32;
     /// AArch64: the kernel draws into a framebuffer of `width` x `height`
     /// (32 bpp) from now on, gpudev buffer 0; 0 or -1. Before `gpudev_ready`.
     fn gpudev_framebuffer = npk_gpudev_framebuffer(width: i32, height: i32) -> i32;
@@ -1153,6 +1163,18 @@ pub fn camera_read(reader: i32, buf: &mut [u8]) -> Result<Option<(usize, CameraF
 pub fn camera_close(reader: i32) -> i32 {
     // SAFETY: FFI without pointers.
     unsafe { npk_camera_close(reader) }
+}
+
+/// AArch64: after an MMU interrupt, the violating client's AXI ID and the
+/// address, the error cleared; None when V3D is off.
+pub fn v3d_mmu_fault() -> Option<(u32, u64)> {
+    let mut b = [0u8; 12];
+    // SAFETY: FFI; the kernel writes 12 bytes into `b`, borrowed for the call.
+    if unsafe { npk_v3d_mmu_fault(b.as_mut_ptr() as i32) } != 0 {
+        return None;
+    }
+    Some((u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+          u64::from_le_bytes([b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]])))
 }
 
 /// AArch64: the 4 KiB pages `pages` (physical addresses, granted to the

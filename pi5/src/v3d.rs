@@ -57,11 +57,21 @@ const V3D_MMU_VA_WIDTH_MASK: u32 = 0xf << 4;
 const V3D_SMS_REE_CS: u64 = 0x00000;
 const V3D_SMS_TEE_CS: u64 = 0x00400;
 const V3D_SMS_CLEAR_POWER_OFF: u32 = 1 << 29;
+const V3D_SMS_POWER_OFF: u32 = 1 << 30;
+const V3D_GMP_STATUS: u64 = 0x00600;
+const V3D_GMP_STATUS_WR_COUNT_MASK: u32 = 0x7f << 24;
+const V3D_GMP_STATUS_RD_COUNT_MASK: u32 = 0x7f << 16;
+const V3D_GMP_STATUS_CFG_BUSY: u32 = 1 << 3;
+const V3D_GMP_CFG: u64 = 0x00604;
+const V3D_GMP_CFG_STOP_REQ: u32 = 1 << 1;
+const V3D_MMU_VIO_ID: u64 = 0x0122c;
+const V3D_MMU_VIO_ADDR: u64 = 0x01234;
 const V3D_SMS_STATE_MASK: u32 = 0xf;
 // v3d_drv.h
 const V3D_SMS_IDLE: u32 = 0x0;
 const V3D_SMS_ISOLATING_FOR_RESET: u32 = 0xa;
 const V3D_SMS_RESETTING: u32 = 0xb;
+const V3D_SMS_POWER_OFF_STATE: u32 = 0xd;
 // v3d_mmu.c
 pub const V3D_MMU_PAGE_SHIFT: u32 = 12;
 const V3D_PTE_SUPERPAGE: u32 = 1 << 31;
@@ -82,6 +92,8 @@ pub enum Error {
     MemRepair,
     /// `Failed to power up SMS`.
     Sms,
+    /// `Failed to power off SMS`.
+    SmsOff,
     /// `MMUC flush wait idle failed` / `MMU TLB clear wait idle failed`.
     Flush,
     /// Not V3D 7.1.
@@ -151,6 +163,32 @@ pub fn grafx_power_on(hw: &mut impl Hw) -> Result<(), Error> {
     Ok(())
 }
 
+/// `bcm2835_power_power_off` for the GRAFX domain: functional, then
+/// electrical isolation, then the power switches opened.
+pub fn grafx_power_off(hw: &mut impl Hw) {
+    let reg = PM_GRAFX;
+    let v = pm_read(hw, reg) & !PM_ISFUNC;
+    pm_write(hw, reg, v);
+    let v = pm_read(hw, reg) & !PM_ISPOW;
+    pm_write(hw, reg, v);
+    let v = pm_read(hw, reg) & !PM_POWUP;
+    pm_write(hw, reg, v);
+}
+
+/// `bcm2835_asb_power_off` for GRAFX_V3D on BCM2712 (no async bridges, no
+/// domain clock): the V3D reset asserted.
+pub fn v3d_domain_off(hw: &mut impl Hw) {
+    let v = pm_read(hw, PM_GRAFX_2712) & !PM_V3DRSTN;
+    pm_write(hw, PM_GRAFX_2712, v);
+}
+
+/// `bcm2835_reset_reset` for `BCM2835_RESET_V3D`: the V3D domain off and
+/// on again.
+pub fn reset_v3d_domain(hw: &mut impl Hw) {
+    v3d_domain_off(hw);
+    v3d_domain_on(hw);
+}
+
 /// `bcm2835_asb_power_on` for GRAFX_V3D on BCM2712 (`PM_GRAFX_2712`, no
 /// async bridges, no domain clock): 1 us for the reset to propagate, then
 /// the V3D reset deasserted.
@@ -170,6 +208,50 @@ pub fn resume_sms(hw: &mut impl Hw) -> Result<(), Error> {
     }
     reset_sms(hw);
     Ok(())
+}
+
+/// `v3d_suspend_sms`.
+pub fn suspend_sms(hw: &mut impl Hw) -> Result<(), Error> {
+    hw.w32(Block::V3dSms, V3D_SMS_TEE_CS, V3D_SMS_POWER_OFF);
+    if !wait_for(hw, 100, |r| sms_state(r(Block::V3dSms, V3D_SMS_TEE_CS)) == V3D_SMS_POWER_OFF_STATE) {
+        return Err(Error::SmsOff);
+    }
+    Ok(())
+}
+
+/// `v3d_idle_axi` on V3D 7.1: the GMP asked to stop, then waited for until
+/// no read or write is outstanding. False on a timeout (Linux reports it
+/// and goes on).
+pub fn idle_axi(hw: &mut impl Hw) -> bool {
+    hw.w32(Block::V3dHub, V3D_GMP_CFG, V3D_GMP_CFG_STOP_REQ);
+    wait_for(hw, 100, |r| r(Block::V3dHub, V3D_GMP_STATUS)
+        & (V3D_GMP_STATUS_RD_COUNT_MASK | V3D_GMP_STATUS_WR_COUNT_MASK | V3D_GMP_STATUS_CFG_BUSY) == 0)
+}
+
+/// `v3d_power_suspend` staying active after a failed SMS power-off: the
+/// GMP stop request of `idle_axi` taken back.
+pub fn gmp_resume(hw: &mut impl Hw) {
+    let v = hw.r32(Block::V3dHub, V3D_GMP_CFG) & !V3D_GMP_CFG_STOP_REQ;
+    hw.w32(Block::V3dHub, V3D_GMP_CFG, v);
+}
+
+/// What `v3d_hub_irq` reads after an MMU fault.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MmuFault {
+    /// `V3D_MMU_VIO_ID`, the AXI ID of the client.
+    pub axi_id: u32,
+    /// `V3D_MMU_VIO_ADDR` shifted by `va_width - 32`.
+    pub addr: u64,
+}
+
+/// `v3d_hub_irq`'s MMU part: the violating client and address read, the
+/// error cleared by writing `V3D_MMU_CTL` back.
+pub fn mmu_fault(hw: &mut impl Hw, va_width: u32) -> MmuFault {
+    let axi_id = hw.r32(Block::V3dHub, V3D_MMU_VIO_ID);
+    let addr = (hw.r32(Block::V3dHub, V3D_MMU_VIO_ADDR) as u64) << va_width.saturating_sub(32);
+    let ctl = hw.r32(Block::V3dHub, V3D_MMU_CTL);
+    hw.w32(Block::V3dHub, V3D_MMU_CTL, ctl);
+    MmuFault { axi_id, addr }
 }
 
 /// `v3d_reset_sms`: a timeout is only reported by Linux.

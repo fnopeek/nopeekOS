@@ -1,9 +1,12 @@
-//! V3D 7.1's compute jobs as Linux runs them, the module's share of
-//! `drivers/gpu/drm/v3d` (rpi-6.18): `v3d_irq_enable`, the caches around a
-//! job (`v3d_invalidate_caches` before, `v3d_clean_caches` after, as the
-//! cache-clean job a CSD submission with `DRM_V3D_SUBMIT_CL_FLUSH_CACHE`
-//! queues), `v3d_csd_job_run` and the core and hub interrupts. Power, the
-//! SMS and the MMU are the kernel's (`pi5_v3d`).
+//! V3D 7.1's jobs as Linux runs them, the module's share of
+//! `drivers/gpu/drm/v3d` (rpi-6.18): the interrupts (`v3d_irq`,
+//! `v3d_hub_irq`, enable, disable, reset), the caches around a job
+//! (`v3d_invalidate_caches` before; `v3d_clean_caches`, the cache-clean
+//! job), the job runs of every queue (`v3d_bin_job_run`,
+//! `v3d_render_job_run`, `v3d_tfu_job_run`, `v3d_csd_job_run`), the
+//! binner's overflow memory, what the timeout handlers compare, and the
+//! performance counters (`v3d_perfmon_start/stop`). Power, the SMS, the
+//! reset controller and the MMU are the kernel's (`pi5_v3d`).
 
 use crate::hw::{Block, Hw};
 
@@ -32,6 +35,35 @@ const V3D_L2TCACTL_FLM_FLUSH: u32 = 0;
 const V3D_L2TCACTL_FLM_CLEAN: u32 = 2;
 const V3D_L2TCACTL_FLM_SHIFT: u32 = 1;
 const V3D_L2TCACTL_L2TFLS: u32 = 1 << 0;
+const V3D_CLE_CT0CA: u32 = 0x00110;
+const V3D_CLE_CT0RA: u32 = 0x00118;
+const V3D_CLE_CT0QTS: u32 = 0x0015c;
+const V3D_CLE_CT0QTS_ENABLE: u32 = 1 << 1;
+const V3D_CLE_CT0QBA: u32 = 0x00160;
+const V3D_CLE_CT1QBA: u32 = 0x00164;
+const V3D_CLE_CT0QEA: u32 = 0x00168;
+const V3D_CLE_CT1QEA: u32 = 0x0016c;
+const V3D_CLE_CT0QMA: u32 = 0x00170;
+const V3D_CLE_CT0QMS: u32 = 0x00174;
+const V3D_PTB_BPOA: u32 = 0x00308;
+const V3D_PTB_BPOS: u32 = 0x0030c;
+const V3D_V4_PCTR_0_EN: u32 = 0x00650;
+const V3D_V4_PCTR_0_CLR: u32 = 0x00654;
+const V3D_PCTR_0_OVERFLOW: u32 = 0x00658;
+const V3D_V4_PCTR_0_SRC_0_3: u32 = 0x00660;
+const V3D_PCTR_0_PCTR0: u32 = 0x00680;
+const V3D_TFU_ICFG: u32 = 0x00708;
+const V3D_TFU_ICFG_IOC: u32 = 1 << 0;
+const V3D_TFU_IIA: u32 = 0x0070c;
+const V3D_TFU_ICA: u32 = 0x00710;
+const V3D_TFU_IIS: u32 = 0x00714;
+const V3D_TFU_IUA: u32 = 0x00718;
+const V3D_V7_TFU_IOC: u32 = 0x0071c;
+const V3D_TFU_IOA: u32 = 0x00720;
+const V3D_TFU_IOS: u32 = 0x00724;
+const V3D_TFU_COEF0: u32 = 0x00728;
+const V3D_CSD_CURRENT_CFG4: u32 = 0x00968;
+const V3D_ERR_STAT: u32 = 0x00f20;
 const V3D_CSD_QUEUED_CFG0: u32 = 0x00930;
 const V3D_V7_CSD_QUEUED_CFG7: u32 = 0x0094c;
 const V3D_CSD_QUEUED_CFG0_NUM_WGS_MASK: u32 = 0xffff << 16;
@@ -66,10 +98,19 @@ pub fn irq_enable(hw: &mut impl Hw) {
     hw.write(Block::V3dHub, V3D_HUB_INT_MSK_CLR, HUB_IRQS);
 }
 
-/// `v3d_irq_disable`.
+/// `v3d_irq_disable`: everything masked, then what was pending cleared.
+/// The caller has no interrupt handler in flight (its fiber is the
+/// handler) and drops any overflow work it has queued.
 pub fn irq_disable(hw: &mut impl Hw) {
     hw.write(Block::V3dCore, V3D_CTL_INT_MSK_SET, !0);
     hw.write(Block::V3dHub, V3D_HUB_INT_MSK_SET, !0);
+    hw.write(Block::V3dCore, V3D_CTL_INT_CLR, CORE_IRQS);
+    hw.write(Block::V3dHub, V3D_HUB_INT_CLR, HUB_IRQS);
+}
+
+/// `v3d_irq_reset`: after a GPU reset.
+pub fn irq_reset(hw: &mut impl Hw) {
+    irq_enable(hw);
 }
 
 /// `v3d_invalidate_caches` on V3D 7.1: no L3 and no L2C; the texture L2
@@ -108,36 +149,293 @@ pub fn csd_job_run(hw: &mut impl Hw, cfg: &[u32; 7]) -> bool {
     true
 }
 
-/// What the core interrupt said (`v3d_irq`).
+/// What the core interrupt said (`v3d_irq`): which queue's job finished,
+/// and whether the binner ran out of memory (edge signalled: it comes
+/// again only once memory was added; FLDONE waits until it is cleared).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CoreIrq {
-    pub csd_done: bool,
-    /// The binner ran out of memory: not a compute job's.
     pub out_of_memory: bool,
+    pub bin_done: bool,
+    pub render_done: bool,
+    pub csd_done: bool,
 }
 
-/// `v3d_irq`: the status read and cleared.
+/// `v3d_irq`: the status read and acknowledged.
 pub fn core_irq(hw: &mut impl Hw) -> CoreIrq {
     let sts = hw.read(Block::V3dCore, V3D_CTL_INT_STS);
     hw.write(Block::V3dCore, V3D_CTL_INT_CLR, sts);
-    CoreIrq { csd_done: sts & V3D_INT_CSDDONE != 0, out_of_memory: sts & V3D_INT_OUTOMEM != 0 }
+    CoreIrq {
+        out_of_memory: sts & V3D_INT_OUTOMEM != 0,
+        bin_done: sts & V3D_INT_FLDONE != 0,
+        render_done: sts & V3D_INT_FRDONE != 0,
+        csd_done: sts & V3D_INT_CSDDONE != 0,
+    }
 }
 
-/// What the hub interrupt said (`v3d_hub_irq`): an MMU fault aborted the
-/// job (the address is in the kernel's registers), or a GMP violation.
+/// What the hub interrupt said (`v3d_hub_irq`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HubIrq {
-    pub mmu_fault: bool,
+    pub tfu_done: bool,
+    pub write_violation: bool,
+    pub pte_invalid: bool,
+    pub cap_exceeded: bool,
     pub gmp_violation: bool,
 }
 
+impl HubIrq {
+    /// An MMU interrupt: the kernel reads the address and clears the error.
+    pub fn mmu_fault(&self) -> bool {
+        self.write_violation || self.pte_invalid || self.cap_exceeded
+    }
+}
+
+/// `v3d_hub_irq`: the status read and acknowledged.
 pub fn hub_irq(hw: &mut impl Hw) -> HubIrq {
     let sts = hw.read(Block::V3dHub, V3D_HUB_INT_STS);
     hw.write(Block::V3dHub, V3D_HUB_INT_CLR, sts);
     HubIrq {
-        mmu_fault: sts & (V3D_HUB_INT_MMU_WRV | V3D_HUB_INT_MMU_PTI | V3D_HUB_INT_MMU_CAP) != 0,
+        tfu_done: sts & V3D_HUB_INT_TFUC != 0,
+        write_violation: sts & V3D_HUB_INT_MMU_WRV != 0,
+        pte_invalid: sts & V3D_HUB_INT_MMU_PTI != 0,
+        cap_exceeded: sts & V3D_HUB_INT_MMU_CAP != 0,
         gmp_violation: sts & V3D_V7_HUB_INT_GMPV != 0,
     }
+}
+
+/// `v3d71_axi_ids`: the client behind an MMU fault's AXI ID.
+pub fn axi_client(axi_id: u32) -> &'static str {
+    const IDS: [(u32, u32, &str); 9] = [
+        (0x00, 0x30, "L2T"),
+        (0x30, 0x38, "CLE"),
+        (0x38, 0x39, "PTB"),
+        (0x39, 0x3A, "PSE"),
+        (0x3A, 0x3B, "CSD"),
+        (0x40, 0x60, "TLB"),
+        (0x60, 0x70, "MMU"),
+        (0x7C, 0x7E, "TFU"),
+        (0x7F, 0x80, "GMP"),
+    ];
+    let id = axi_id & 0x7f;
+    IDS.iter().find(|&&(b, e, _)| id >= b && id < e).map_or("?", |&(_, _, c)| c)
+}
+
+/// A bin job (`drm_v3d_submit_cl`'s binner half): the control list from
+/// `start` to `end`, the tile-alloc memory and size (`qma`, `qms`) and the
+/// tile state (`qts`), 0 when the list sets them itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BinJob {
+    pub start: u32,
+    pub end: u32,
+    pub qma: u32,
+    pub qms: u32,
+    pub qts: u32,
+}
+
+/// `v3d_bin_job_run`: last job's overflow memory dropped, the caches
+/// invalidated, the list started by writing its end address.
+pub fn bin_job_run(hw: &mut impl Hw, job: &BinJob) {
+    hw.write(Block::V3dCore, V3D_PTB_BPOS, 0);
+    invalidate_caches(hw);
+    if job.qma != 0 {
+        hw.write(Block::V3dCore, V3D_CLE_CT0QMA, job.qma);
+        hw.write(Block::V3dCore, V3D_CLE_CT0QMS, job.qms);
+    }
+    if job.qts != 0 {
+        hw.write(Block::V3dCore, V3D_CLE_CT0QTS, V3D_CLE_CT0QTS_ENABLE | job.qts);
+    }
+    hw.write(Block::V3dCore, V3D_CLE_CT0QBA, job.start);
+    hw.write(Block::V3dCore, V3D_CLE_CT0QEA, job.end);
+}
+
+/// `v3d_render_job_run`: the caches invalidated, the render list from
+/// `start` to `end` started by its end address.
+pub fn render_job_run(hw: &mut impl Hw, start: u32, end: u32) {
+    invalidate_caches(hw);
+    hw.write(Block::V3dCore, V3D_CLE_CT1QBA, start);
+    hw.write(Block::V3dCore, V3D_CLE_CT1QEA, end);
+}
+
+/// `v3d_overflow_mem_work` after the buffer is mapped: `size` bytes at V3D
+/// address `va` handed to the binner.
+pub fn overflow_mem(hw: &mut impl Hw, va: u32, size: u32) {
+    hw.write(Block::V3dCore, V3D_PTB_BPOA, va);
+    hw.write(Block::V3dCore, V3D_PTB_BPOS, size);
+}
+
+/// `drm_v3d_submit_tfu` on V3D 7.1.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TfuJob {
+    pub icfg: u32,
+    pub iia: u32,
+    pub iis: u32,
+    pub ica: u32,
+    pub iua: u32,
+    pub ioa: u32,
+    pub ios: u32,
+    pub coef: [u32; 4],
+    pub ioc: u32,
+}
+
+/// `v3d_tfu_job_run`: the input and output registers, all four
+/// coefficient words on 7.1, then ICFG with IOC, which starts it. No cache
+/// invalidation: the TFU reads and writes memory itself.
+pub fn tfu_job_run(hw: &mut impl Hw, job: &TfuJob) {
+    hw.write(Block::V3dHub, V3D_TFU_IIA, job.iia);
+    hw.write(Block::V3dHub, V3D_TFU_IIS, job.iis);
+    hw.write(Block::V3dHub, V3D_TFU_ICA, job.ica);
+    hw.write(Block::V3dHub, V3D_TFU_IUA, job.iua);
+    hw.write(Block::V3dHub, V3D_TFU_IOA, job.ioa);
+    hw.write(Block::V3dHub, V3D_V7_TFU_IOC, job.ioc);
+    hw.write(Block::V3dHub, V3D_TFU_IOS, job.ios);
+    for (i, &c) in job.coef.iter().enumerate() {
+        hw.write(Block::V3dHub, V3D_TFU_COEF0 + 4 * i as u32, c);
+    }
+    hw.write(Block::V3dHub, V3D_TFU_ICFG, job.icfg | V3D_TFU_ICFG_IOC);
+}
+
+/// Where a control list thread is (`CTnCA`, `CTnRA`): `v3d_cl_job_timedout`
+/// resets only when neither moved since the last timeout. `q` 0 bin, 1
+/// render.
+pub fn cl_progress(hw: &mut impl Hw, q: u32) -> (u32, u32) {
+    (hw.read(Block::V3dCore, V3D_CLE_CT0CA + 4 * q), hw.read(Block::V3dCore, V3D_CLE_CT0RA + 4 * q))
+}
+
+/// The batches left of the running dispatch (`V3D_CSD_CURRENT_CFG4`):
+/// `v3d_csd_job_timedout` resets only when it did not change.
+pub fn csd_progress(hw: &mut impl Hw) -> u32 {
+    hw.read(Block::V3dCore, V3D_CSD_CURRENT_CFG4)
+}
+
+/// `V3D_ERR_STAT`, which `v3d_reset` reports.
+pub fn err_stat(hw: &mut impl Hw) -> u32 {
+    hw.read(Block::V3dCore, V3D_ERR_STAT)
+}
+
+/// `v3d_v71_performance_counters`: the name of each counter source.
+pub const PERF_COUNTERS_71: [&str; 93] = [
+    "cycle-count",
+    "core-active",
+    "CLE-bin-thread-active-cycles",
+    "CLE-render-thread-active-cycles",
+    "compute-active-cycles",
+    "FEP-valid-primitives-no-rendered-pixels",
+    "FEP-valid-primitives-rendered-pixels",
+    "FEP-clipped-quads",
+    "FEP-valid-quads",
+    "TLB-quads-not-passing-stencil-test",
+    "TLB-quads-not-passing-z-and-stencil-test",
+    "TLB-quads-passing-z-and-stencil-test",
+    "TLB-quads-written-to-color-buffer",
+    "TLB-partial-quads-written-to-color-buffer",
+    "PTB-primitives-need-clipping",
+    "PTB-primitives-discarded-outside-viewport",
+    "PTB-primitives-binned",
+    "PTB-primitives-discarded-reversed",
+    "QPU-total-instr-cache-hit",
+    "QPU-total-instr-cache-miss",
+    "QPU-total-uniform-cache-hit",
+    "QPU-total-uniform-cache-miss",
+    "TMU-active-cycles",
+    "TMU-stalled-cycles",
+    "TMU-total-text-quads-access",
+    "TMU-cache-x4-active-cycles",
+    "TMU-cache-x4-stalled-cycles",
+    "TMU-total-text-quads-x4-access",
+    "L2T-total-cache-hit",
+    "L2T-total-cache-miss",
+    "L2T-local",
+    "L2T-writeback",
+    "L2T-zero",
+    "L2T-merge",
+    "L2T-fill",
+    "L2T-stalls-no-wid",
+    "L2T-stalls-no-rid",
+    "L2T-stalls-queue-full",
+    "L2T-stalls-wrightback",
+    "L2T-stalls-mem",
+    "L2T-stalls-fill",
+    "L2T-hitq",
+    "L2T-hitq-full",
+    "L2T-stalls-read-data",
+    "L2T-TMU-read-hits",
+    "L2T-TMU-read-miss",
+    "L2T-VCD-read-hits",
+    "L2T-VCD-read-miss",
+    "L2T-SLC-read-hits",
+    "L2T-SLC-read-miss",
+    "AXI-writes-seen-watch-0",
+    "AXI-reads-seen-watch-0",
+    "AXI-writes-stalled-seen-watch-0",
+    "AXI-reads-stalled-seen-watch-0",
+    "AXI-write-bytes-seen-watch-0",
+    "AXI-read-bytes-seen-watch-0",
+    "AXI-writes-seen-watch-1",
+    "AXI-reads-seen-watch-1",
+    "AXI-writes-stalled-seen-watch-1",
+    "AXI-reads-stalled-seen-watch-1",
+    "AXI-write-bytes-seen-watch-1",
+    "AXI-read-bytes-seen-watch-1",
+    "core-memory-writes",
+    "L2T-memory-writes",
+    "PTB-memory-writes",
+    "TLB-memory-writes",
+    "core-memory-reads",
+    "L2T-memory-reads",
+    "PTB-memory-reads",
+    "PSE-memory-reads",
+    "TLB-memory-reads",
+    "PTB-memory-words-writes",
+    "TLB-memory-words-writes",
+    "PSE-memory-words-reads",
+    "TLB-memory-words-reads",
+    "AXI-read-trans",
+    "AXI-write-trans",
+    "AXI-read-wait-cycles",
+    "AXI-write-wait-cycles",
+    "AXI-max-outstanding-reads",
+    "AXI-max-outstanding-writes",
+    "QPU-wait-bubble",
+    "QPU-ic-miss-bubble",
+    "QPU-active",
+    "QPU-total-active-clk-cycles-fragment-shading",
+    "QPU-stalls",
+    "QPU-total-clk-cycles-waiting-fragment-shading",
+    "QPU-stalls-TMU",
+    "QPU-stalls-TLB",
+    "QPU-stalls-VPM",
+    "QPU-stalls-uniforms",
+    "QPU-stalls-SFU",
+    "QPU-stalls-other",
+];
+
+/// `v3d_perfmon_start`: up to 32 counters, the sources of four in each
+/// `PCTR_0_SRC` word, then enabled, cleared, overflow cleared.
+pub fn perfmon_start(hw: &mut impl Hw, counters: &[u8]) {
+    let n = counters.len().min(32);
+    for src in 0..n.div_ceil(4) {
+        let mut channel = 0;
+        for k in 0..4 {
+            let i = src * 4 + k;
+            let c = if i < n { counters[i] as u32 } else { 0 };
+            channel |= (c & 0xff) << (8 * k);
+        }
+        hw.write(Block::V3dCore, V3D_V4_PCTR_0_SRC_0_3 + 4 * src as u32, channel);
+    }
+    let mask = if n == 32 { !0 } else { (1u32 << n) - 1 };
+    hw.write(Block::V3dCore, V3D_V4_PCTR_0_EN, mask);
+    hw.write(Block::V3dCore, V3D_V4_PCTR_0_CLR, mask);
+    hw.write(Block::V3dCore, V3D_PCTR_0_OVERFLOW, mask);
+}
+
+/// `v3d_perfmon_stop`: the `values.len()` counters added to `values` when
+/// `capture`, then the counters disabled.
+pub fn perfmon_stop(hw: &mut impl Hw, values: &mut [u64], capture: bool) {
+    if capture {
+        for (i, v) in values.iter_mut().enumerate().take(32) {
+            *v += hw.read(Block::V3dCore, V3D_PCTR_0_PCTR0 + 4 * i as u32) as u64;
+        }
+    }
+    hw.write(Block::V3dCore, V3D_V4_PCTR_0_EN, 0);
 }
 
 /// `v3d_csd_choose_workgroups_per_supergroup` (Mesa `v3d_util.c`).

@@ -1265,6 +1265,19 @@ host_imports! {
     #[cfg(target_arch = "aarch64")]
     ctx fn npk_v3d_unmap(va: i64) -> i32;
 
+    // npk_v3d_power(on) -> 0 or -1: V3D's runtime PM.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_power(on: i32) -> i32;
+
+    // npk_v3d_reset() -> 0 or -1: the kernel's share of v3d_reset.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_reset() -> i32;
+
+    // npk_v3d_mmu_fault(out_ptr) -> 0 or -1: AXI ID (u32) and address (u64)
+    // of an MMU fault, the error cleared.
+    #[cfg(target_arch = "aarch64")]
+    mem fn npk_v3d_mmu_fault(out_ptr: i32) -> i32;
+
     // npk_irq_arm(vector) -> fired-count snapshot, or -1 on a bad vector. Call
     // before submitting/enabling the device work that triggers the IRQ; pass
     // the result to npk_irq_wait. Also routes the IRQ to the calling core.
