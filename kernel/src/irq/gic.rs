@@ -26,8 +26,9 @@ pub trait Chained: Sync {
     /// Keep `line` from sending (`irq_mask` of the chip).
     fn mask(&self, line: u32);
     fn unmask(&self, line: u32);
-    /// The chained handler's work after the line's handler ran, e.g.
-    /// acknowledging a level line so it can send again.
+    /// The chained handler's work after the line's handler ran and the
+    /// line is unmasked, e.g. acknowledging a level line so it can send
+    /// again.
     fn handled(&self, line: u32);
 }
 
@@ -120,12 +121,12 @@ fn spi_isr(intid: u32) {
     let irq = INTID_IRQ.get(intid as usize).map_or(0, |a| a.load(Ordering::Acquire));
     let Some(d) = desc(irq) else { return };
     match chained(intid) {
-        // rp1_chained_handle_irq → handle_level_irq: mask, handle, then the
-        // controller's own acknowledge.
+        // rp1_chained_handle_irq → handle_level_irq: mask, then the handler,
+        // which is the driver's fiber. The unmask and the controller's own
+        // acknowledge follow when it has serviced the device (`unmask`).
         Some((chip, line)) => {
             chip.mask(line);
             note_fired(d);
-            chip.handled(line);
         }
         // handle_fasteoi_irq with IRQF_ONESHOT.
         None => {
@@ -157,7 +158,13 @@ pub fn route_to_current(irq: Irq) {
 pub fn unmask(_irq: Irq, d: &Desc) {
     let intid = d.hwirq.load(Ordering::Relaxed);
     match chained(intid) {
-        Some((chip, line)) => chip.unmask(line),
+        // handle_level_irq's unmask, then rp1_chained_handle_irq's
+        // acknowledge: a level line acknowledged while it is masked and
+        // still asserted may never send again.
+        Some((chip, line)) => {
+            chip.unmask(line);
+            chip.handled(line);
+        }
         None => gic::unmask(intid),
     }
 }

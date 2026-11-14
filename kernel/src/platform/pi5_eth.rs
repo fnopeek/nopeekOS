@@ -256,7 +256,6 @@ fn eth_fiber(irq: u64) {
     let mut next_poll = crate::time::uptime_us();
     let mut lpi_due: Option<u64> = None;
     loop {
-        let since = crate::irq::arm(irq);
         let now = crate::time::uptime_us();
         let mut rx = false;
         if let Some(d) = DEV.lock().as_mut() {
@@ -304,6 +303,9 @@ fn eth_fiber(irq: u64) {
         if rx {
             crate::net::poll_rx_only();
         }
+        // Armed after the device was serviced, as handle_level_irq unmasks
+        // after the handler; the line stays masked until then.
+        let since = crate::irq::arm(irq);
         let due = lpi_due.map_or(next_poll, |t| t.min(next_poll));
         let ms = due.saturating_sub(crate::time::uptime_us()).div_ceil(1000).max(1);
         fired = crate::irq::wait(irq, since, ms);
