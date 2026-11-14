@@ -548,7 +548,7 @@ impl Compositor {
         self.controls.hover = None;
         if let Some(z) = zone { self.extra_damage.push(z); }
         self.damage_controls(&[Some(id)]);
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Mod+F and the Fullscreen button: fullscreen on or back to a tile.
@@ -574,7 +574,7 @@ impl Compositor {
             self.focus_window(id);
         }
         self.retile();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Scene items of `win`'s pill, painted right after its content.
@@ -969,7 +969,7 @@ impl Compositor {
             self.toggle_fullscreen(id);
         }
         self.controls.hover = None;
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
         true
     }
 

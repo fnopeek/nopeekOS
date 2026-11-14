@@ -483,7 +483,7 @@ pub fn screen_resized() {
             c.retile();
         }
         c.aurora_drawn = false;
-        c.needs_full_redraw = true;
+        c.want_full_redraw();
     });
     cursor::init_atomic(w, h);
     crate::intent::apply_startup_wallpaper();
@@ -507,15 +507,47 @@ pub fn force_redraw() {
     }
     with_compositor(|comp| {
         comp.aurora_drawn = false;
-        comp.needs_full_redraw = true;
+        comp.want_full_redraw();
     });
     render_frame();
 }
 
 /// Draw the entire compositor state to the framebuffer.
+#[track_caller]
 pub fn render_frame() {
+    render_frame_for(core::panic::Location::caller());
+}
+
+/// A whole frame, for what `at` asked.
+fn render_frame_for(at: &core::panic::Location<'static>) {
+    note_whole(at);
     render_frame_mode(false);
 }
+
+/// Whole frames whose cause was logged, at most `WHOLE_LOGGED`, and the
+/// last cause said.
+static WHOLE_LOG: Mutex<(u32, String)> = Mutex::new((0, String::new()));
+const WHOLE_LOGGED: u32 = 64;
+
+/// What composes the whole screen, said once per change of cause, so a
+/// device log shows which paths still do.
+pub(crate) fn note_whole(at: &core::panic::Location<'static>) {
+    note_whole_for(format_args!("{}:{}", at.file(), at.line()));
+}
+
+pub(crate) fn note_whole_for(cause: core::fmt::Arguments) {
+    let cause = alloc::format!("{}", cause);
+    let mut g = WHOLE_LOG.lock();
+    if g.0 >= WHOLE_LOGGED || g.1 == cause {
+        return;
+    }
+    g.0 += 1;
+    crate::kprintln!("[npk] shade: whole screen for {}", cause);
+    g.1 = cause;
+}
+
+/// Where the pending `request_render` was asked for.
+static RENDER_ASKED: Mutex<Option<&'static core::panic::Location<'static>>> = Mutex::new(None);
 
 /// Move the cursor without recompositing the scene. The front buffer
 /// already holds the composed scene with the cursor baked in at its old
@@ -942,7 +974,9 @@ pub fn take_deferred_render() -> bool {
 /// Request a full shade render on the next Core-0 poll cycle. Safe to
 /// call from any core (worker cores executing WASM etc.) — actual
 /// MMIO work still runs on Core 0.
+#[track_caller]
 pub fn request_render() {
+    *RENDER_ASKED.lock() = Some(core::panic::Location::caller());
     // The shell loop on Core 0 renders; wake it on the edge.
     if !DEFERRED_RENDER.swap(true, Ordering::AcqRel) {
         crate::intent::wake_shell();
@@ -1475,7 +1509,10 @@ pub fn poll_render() {
     if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
         SURFACE_DIRTY.store(false, Ordering::Relaxed); // a full render covers the tile too
         DAMAGE_PENDING.store(false, Ordering::Relaxed);
-        render_frame();
+        match RENDER_ASKED.lock().take() {
+            Some(at) => render_frame_for(at),
+            None => render_frame(),
+        }
         CURSOR_MOVED.store(false, Ordering::Relaxed);
     } else if DAMAGE_PENDING.swap(false, Ordering::Relaxed) {
         render_damaged();
@@ -1797,21 +1834,24 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
             comp.mouse.buttons = btn;
             comp.mouse.prev_buttons = prev;
             let redraw = comp.handle_mouse_buttons();
-            let full = comp.needs_full_redraw;
+            // Where the full redraw was asked for; here when nobody said.
+            let full = comp.needs_full_redraw
+                .then(|| comp.full_from.take().unwrap_or(core::panic::Location::caller()));
             comp.needs_full_redraw = false;
             (redraw, full, comp.drag.is_some() || comp.pending_move.is_some())
-        }).unwrap_or((false, false, false));
+        }).unwrap_or((false, None, false));
 
         DRAG_ACTIVE.store(dragging, Ordering::Relaxed);
 
         if needs_redraw {
-            if needs_full {
+            if let Some(at) = needs_full {
                 if dragging {
                     // Defer: don't render inside the event loop (blocks the
                     // cursor). poll_render renders after all events are drained.
+                    *RENDER_ASKED.lock() = Some(at);
                     DEFERRED_RENDER.store(true, Ordering::Relaxed);
                 } else {
-                    render_frame();
+                    render_frame_for(at);
                 }
             } else {
                 terminal::mark_dirty();

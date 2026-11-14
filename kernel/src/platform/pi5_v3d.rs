@@ -383,14 +383,18 @@ pub fn map(pages: &[u64]) -> Option<u32> {
     }
     {
         let g = GRANTED.lock();
-        if pages.iter().any(|p| !g.contains_key(p)) {
+        if let Some(p) = pages.iter().find(|p| !g.contains_key(p)) {
+            kprintln!("[npk] v3d: map of {} pages refused, page {:#x} not granted", pages.len(), p);
             return None;
         }
     }
     let mut guard = STATE.lock();
     let s = guard.as_mut()?;
     let n = pages.len() as u32;
-    let start = s.va.alloc(n)?;
+    let Some(start) = s.va.alloc(n) else {
+        kprintln!("[npk] v3d: no {} free pages of V3D addresses", n);
+        return None;
+    };
     // The pages as contiguous runs, as a scatterlist hands them over.
     let mut runs: Vec<(u64, u64)> = Vec::new();
     for &p in pages {

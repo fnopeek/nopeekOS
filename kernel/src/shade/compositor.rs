@@ -157,6 +157,8 @@ pub struct Compositor {
     pub rounding: u32,
     /// Full redraw needed (including aurora background).
     pub needs_full_redraw: bool,
+    /// Where the pending full redraw was asked for (`want_full_redraw`).
+    pub full_from: Option<&'static core::panic::Location<'static>>,
     /// Background has been drawn (skip on partial updates).
     pub aurora_drawn: bool,
     /// Mouse cursor state.
@@ -224,6 +226,7 @@ impl Compositor {
             focus_told: None,
             rounding,
             needs_full_redraw: true,
+            full_from: None,
             aurora_drawn: false,
             mouse: {
                 let mut m = MouseState::new();
@@ -549,7 +552,7 @@ impl Compositor {
         self.z_order.insert(0, id);
         self.focus_window(id);
         self.retile();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
 
         Some(id)
     }
@@ -576,7 +579,7 @@ impl Compositor {
         // But this insert(0) put us above the panel, so re-pin it on top.
         self.retile();
         self.pin_overlays_to_front();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
 
         id
     }
@@ -608,7 +611,7 @@ impl Compositor {
         }
         self.retile();
         self.pin_overlays_to_front();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
 
         id
     }
@@ -643,7 +646,7 @@ impl Compositor {
         if first || guest_focused {
             self.focus_window(id);
         }
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Convert the Terminal-kind window backing `terminal_idx` into a
@@ -690,7 +693,7 @@ impl Compositor {
         // Overlay/panel apps (volume, deck) call set_overlay/set_panel
         // right after, which un-tiles them again, so this is a no-op for them.
         self.retile();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
         Some(id)
     }
 
@@ -726,7 +729,7 @@ impl Compositor {
             // Retile so tiled windows reclaim any space the window used
             // to occupy (if it was previously tiled).
             self.retile();
-            self.needs_full_redraw = true;
+            self.want_full_redraw();
         }
         changed
     }
@@ -769,7 +772,7 @@ impl Compositor {
             (self.gaps, self.border, self.rounding) = lengths;
             self.retile();
         }
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// The UI scale changed from `old` to `new` (1/120 units): apps sized
@@ -795,7 +798,7 @@ impl Compositor {
             win.dirty = true;
         }
         self.retile();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Toggle the `modal` flag on a window.
@@ -836,7 +839,7 @@ impl Compositor {
         };
         if changed {
             self.retile();
-            self.needs_full_redraw = true;
+            self.want_full_redraw();
         }
         changed
     }
@@ -906,7 +909,7 @@ impl Compositor {
         self.z_order.retain(|&wid| wid != id);
         self.z_order.insert(0, id);
         self.pin_overlays_to_front();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
         true
     }
 
@@ -1153,7 +1156,7 @@ impl Compositor {
             self.bottom_strut = None;
             crate::shade::widgets::palette::set_panel_window(None);
             self.retile();
-            self.needs_full_redraw = true;
+            self.want_full_redraw();
         }
         // Free session + terminal buffer + process before removing window
         if let Some(win) = self.windows.iter().find(|w| w.id == id) {
@@ -1197,7 +1200,7 @@ impl Compositor {
         }
 
         self.retile();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Hand `id`'s children to its own parent, in its place — for every path
@@ -1291,7 +1294,7 @@ impl Compositor {
             .any(|w| w.id == id && w.popup_of.is_none() && !w.is_overlay);
         if real && !self.clear_fullscreen_except(Some(id)).is_empty() {
             self.retile();
-            self.needs_full_redraw = true;
+            self.want_full_redraw();
         }
         // Popups and modals must stay above the just-focused window.
         self.pin_overlays_to_front();
@@ -1307,7 +1310,7 @@ impl Compositor {
         else { return false };
         self.switch_workspace(ws);
         self.focus_window(id);
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
         true
     }
 
@@ -1383,7 +1386,7 @@ impl Compositor {
         win.height = h;
         win.visible = true;
         win.dirty = true;
-        if moved { self.needs_full_redraw = true; }
+        if moved { self.want_full_redraw(); }
     }
 
     /// Take a popup off the screen, telling its app when `done`. Focus is
@@ -1402,7 +1405,7 @@ impl Compositor {
         self.windows.retain(|w| w.id != id);
         self.z_order.retain(|&w| w != id);
         if self.focused == Some(id) { self.focused = None; }
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Close a popup. The keyboard goes to another popup if one is left,
@@ -1507,7 +1510,7 @@ impl Compositor {
 
         self.retile();
         self.pin_overlays_to_front();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Move the focused window to a different workspace: unhook it from this
@@ -1557,7 +1560,7 @@ impl Compositor {
         // second root.
         self.switch_workspace(ws);
         self.focus_window(fid);
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Dwindle tiling: every window splits the one that was focused when it
@@ -1732,6 +1735,7 @@ impl Compositor {
     pub fn render(&mut self, target: *mut u8, info: &FbInfo) {
         self.compose(target, info, alloc::vec![Rect::new(0, 0, info.width, info.height)]);
         self.extra_damage.clear();
+        self.full_from = None;
         for win in &mut self.windows {
             win.dirty = false;
         }
@@ -1977,10 +1981,18 @@ impl Compositor {
         Some(Rect::new(text.x + x, text.y + y, w, h))
     }
 
+    /// A full redraw on the next compose, noted where it was asked for.
+    #[track_caller]
+    pub fn want_full_redraw(&mut self) {
+        self.needs_full_redraw = true;
+        self.full_from = Some(core::panic::Location::caller());
+    }
+
     /// Compose the dirty windows (and their halo bands) into `target`.
     /// Returns the rects painted.
     pub fn render_damaged(&mut self, target: *mut u8, info: &FbInfo) -> Vec<Rect> {
         if self.needs_full_redraw {
+            crate::shade::note_whole(self.full_from.take().unwrap_or(core::panic::Location::caller()));
             self.render(target, info);
             return alloc::vec![Rect::new(0, 0, self.screen_w, self.screen_h)];
         }
@@ -2001,6 +2013,13 @@ impl Compositor {
             .collect();
         damage.extend(extra.iter().map(|r| r.intersect(&screen)).filter(|r| !r.is_empty()));
         if damage.is_empty() { return damage; }
+        if let Some(w) = self.windows.iter().find(|w| w.dirty && w.workspace == self.active_workspace && w.visible
+            && Rect::new(w.x, w.y, w.width, w.height).grow(self.glow_for(w).band).intersect(&screen) == screen)
+        {
+            crate::shade::note_whole_for(format_args!("window {:?} '{}' marked dirty", w.id, w.title));
+        } else if extra.iter().any(|r| r.intersect(&screen) == screen) {
+            crate::shade::note_whole_for(format_args!("a frame over the whole screen"));
+        }
         let painted = self.compose(target, info, damage);
         for win in &mut self.windows {
             win.dirty = false;
@@ -2197,13 +2216,13 @@ impl Compositor {
                         self.apply_resize_drag(&drag, dx, dy);
                         self.drag = Some(drag); // Keep drag alive
                         self.retile();
-                        self.needs_full_redraw = true;
+                        self.want_full_redraw();
                         return true;
                     }
                     DragMode::Move | DragMode::Edge(_) => {
                         self.apply_float_drag(&drag, mx, my);
                         self.drag = Some(drag);
-                        self.needs_full_redraw = true;
+                        self.want_full_redraw();
                         return true;
                     }
                 }
@@ -2211,7 +2230,7 @@ impl Compositor {
                 self.drag = None;
                 if drag.mode == DragMode::Move { self.finish_move(drag.window); }
                 self.sync_surface_tile_sizes();
-                if drag.mode != DragMode::Swap { self.needs_full_redraw = true; }
+                if drag.mode != DragMode::Swap { self.want_full_redraw(); }
                 return drag.mode != DragMode::Swap;
             }
         }
@@ -2492,7 +2511,7 @@ impl Compositor {
         }
         if moved {
             self.retile();
-            self.needs_full_redraw = true;
+            self.want_full_redraw();
         }
     }
 
@@ -2509,7 +2528,7 @@ impl Compositor {
             win.resize_h = 0;
         }
         self.retile();
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Resolve the split lines a Mod+RMB drag will move and remember where
@@ -2652,7 +2671,7 @@ impl Compositor {
                 duration: 15, // 150ms at 100Hz
             });
         }
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Advance swap animation. Returns true if a frame was updated.
@@ -2691,7 +2710,7 @@ impl Compositor {
             w.height = lerp(anim.b_from.3, anim.b_to.3);
             w.dirty = true;
         }
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
         true
     }
 
@@ -2721,7 +2740,7 @@ impl Compositor {
     pub fn start_flash(&mut self) {
         if Self::flash_peak() == 0 { return; }
         self.flash = Some(crate::time::ticks());
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
     }
 
     /// Advance the flash. True while it still needs frames — including the
@@ -2730,7 +2749,7 @@ impl Compositor {
     pub fn flash_tick(&mut self) -> bool {
         let start = match self.flash { Some(s) => s, None => return false };
         let elapsed = crate::time::ticks().saturating_sub(start);
-        self.needs_full_redraw = true;
+        self.want_full_redraw();
         if elapsed >= Self::FLASH_TICKS {
             self.flash = None;
         }
@@ -2764,7 +2783,7 @@ impl Compositor {
                 w.width = anim.b_to.2; w.height = anim.b_to.3;
                 w.dirty = true;
             }
-            self.needs_full_redraw = true;
+            self.want_full_redraw();
         }
     }
 

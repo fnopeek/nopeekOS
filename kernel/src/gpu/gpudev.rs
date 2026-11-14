@@ -847,6 +847,8 @@ pub fn complete(dev: DevId, seq: u32, status: i32) -> i32 {
             if status < 0 {
                 if let Some(bo) = st.bos.get_mut(&id) {
                     bo.state = BoState::Failed;
+                    crate::kprintln!("[npk] gpudev: buffer {} ({}x{}, pitch {}, {} B at {:#x}) not bound ({})",
+                        id, bo.width, bo.height, bo.pitch, bo.size, bo.addr, status);
                 }
             }
         }
