@@ -1035,7 +1035,22 @@ impl plan::draw_sink for Sink<'_> {
             return Err(-EINVAL);
         }
         let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: ck.width, height: ck.height };
+        // Over the background every pixel of the area is written, by it or
+        // by an item that covers it opaquely: an area of whole tiles needs
+        // no load (loadOp DONT_CARE, as v3dv loads only the tiles a partial
+        // area cuts).
+        let load = !(ck.items.first().is_some_and(|it| it[0] == gpu_scene::scene::KIND_BACKGROUND)
+            && whole_tiles(area, ck.width, ck.height));
         let area = v3d_draw::Rect { x: area.x, y: area.y, width: area.w, height: area.h };
-        self.c.submit_draws(self.hw, image, true, area, &draws).map(|_| ())
+        self.c.submit_draws(self.hw, image, load, area, &draws).map(|_| ())
     }
+}
+
+/// v3d_draw's tile-aligned render area: whole tiles, or reaching the
+/// image's right and bottom edges.
+fn whole_tiles(a: &rect, width: u32, height: u32) -> bool {
+    let (gw, gh) = v3d_draw::tile_size();
+    a.x.is_multiple_of(gw) && a.y.is_multiple_of(gh)
+        && (a.w.is_multiple_of(gw) || a.x + a.w >= width)
+        && (a.h.is_multiple_of(gh) || a.y + a.h >= height)
 }
