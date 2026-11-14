@@ -1770,9 +1770,11 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if from_intent {
             from_intent = false;
             need_prompt = true;
-            // Flush worker output before printing prompt
+            // Flush worker output before printing prompt, and what the
+            // intent changed on screen.
             if shade_active() {
-                crate::shade::render_frame();
+                crate::shade::render_requested();
+                crate::shade::render_terminal_output();
             }
         }
         if from_wasm {
@@ -1890,8 +1892,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // Read input into session
         let line = read_line_with_tab(session, vault, session_id);
 
+        // The line typed; a focus or window change is the whole screen.
         if shade_active() {
-            crate::shade::render_frame();
+            if line.is_some() {
+                crate::shade::render_terminal_output();
+            } else {
+                crate::shade::render_frame();
+            }
         }
 
         let len = match line {

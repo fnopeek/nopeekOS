@@ -1551,6 +1551,11 @@ pub fn poll_render() {
         render_frame_cursor_only();
     }
 
+    render_terminal_output();
+}
+
+/// Compose the windows of the terminals with new output, not the screen.
+pub fn render_terminal_output() {
     if !terminal::is_dirty() && !terminal::any_term_dirty() { return; }
     terminal::clear_dirty();
     CURSOR_MOVED.store(false, Ordering::Relaxed);
