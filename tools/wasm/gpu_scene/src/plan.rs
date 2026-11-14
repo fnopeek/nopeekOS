@@ -264,6 +264,64 @@ fn draw_segment(s: &mut dyn draw_sink, items: &[item_shape], clip: &rect, first:
     s.draw(&area, first, end, blur)
 }
 
+/// Pieces an item's draw is split into at most; a cover that would split
+/// it further is not cut out.
+pub const MAX_PIECES: usize = 16;
+
+/// Where item `i` of `first..end` must be drawn over `area`: its reach
+/// within the area, less every part a later item of the segment covers
+/// opaquely (`cover`: there the later item's result does not depend on
+/// what lies beneath). At most `MAX_PIECES` rectangles, disjoint.
+pub fn visible_parts(items: &[item_shape], end: usize, i: usize, area: &rect) -> alloc::vec::Vec<rect> {
+    let mut parts = alloc::vec::Vec::new();
+    let r = items[i].reach.intersect(area);
+    if r.is_empty() {
+        return parts;
+    }
+    parts.push(r);
+    for it in &items[i + 1..end] {
+        for c in [it.cover.0, it.cover.1] {
+            if c.is_empty() {
+                continue;
+            }
+            let mut next = alloc::vec::Vec::with_capacity(parts.len() + 4);
+            for p in &parts {
+                subtract(p, &c, &mut next);
+            }
+            if next.len() > MAX_PIECES {
+                return parts;
+            }
+            parts = next;
+            if parts.is_empty() {
+                return parts;
+            }
+        }
+    }
+    parts
+}
+
+/// `a` less `b`, as up to four disjoint rectangles: the rows above and
+/// below `b`, then the columns left and right of it in between.
+fn subtract(a: &rect, b: &rect, out: &mut alloc::vec::Vec<rect>) {
+    let i = a.intersect(b);
+    if i.is_empty() {
+        out.push(*a);
+        return;
+    }
+    if i.y > a.y {
+        out.push(rect { x: a.x, y: a.y, w: a.w, h: i.y - a.y });
+    }
+    if i.y1() < a.y1() {
+        out.push(rect { x: a.x, y: i.y1(), w: a.w, h: a.y1() - i.y1() });
+    }
+    if i.x > a.x {
+        out.push(rect { x: a.x, y: i.y, w: i.x - a.x, h: i.h });
+    }
+    if i.x1() < a.x1() {
+        out.push(rect { x: i.x1(), y: i.y, w: a.x1() - i.x1(), h: i.h });
+    }
+}
+
 /// The dispatches of a scene: `items` in order, `damage` already checked.
 pub fn plan(s: &mut dyn sink, lim: &limits, screen: &rect, damage: &[rect], items: &[item_shape], radius: u32)
             -> Result<(), i32> {

@@ -910,18 +910,17 @@ impl plan::draw_sink for Sink<'_> {
         let ck = self.ck;
         let mut draws = Vec::with_capacity(end - first);
         for i in first..end {
-            let r = ck.shapes[i].reach.intersect(area);
-            if r.is_empty() {
-                continue;
-            }
             let kind = ck.items[i][0] as usize;
             if !(1..=DRAW_KINDS).contains(&kind) {
                 return Err(-EINVAL);
             }
             // A segment starts at its panel, the one item the blur is for.
             let b = if i == first { blur } else { None };
-            let push = gpu_scene::scene::draw_push(ck, i, &r, self.c.planes.va as u64, b);
-            draws.push(v3d_draw::Draw { pipeline: kind - 1, push, vertex_count: 4 });
+            // Only where no later item of the segment paints over it opaquely.
+            for r in plan::visible_parts(&ck.shapes, end, i, area) {
+                let push = gpu_scene::scene::draw_push(ck, i, &r, self.c.planes.va as u64, b);
+                draws.push(v3d_draw::Draw { pipeline: kind - 1, push, vertex_count: 4 });
+            }
         }
         if draws.is_empty() {
             return Ok(());

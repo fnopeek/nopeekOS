@@ -156,3 +156,59 @@ fn draw_push_layout() {
         assert_eq!(src(k, None), [0; 6]);
     }
 }
+
+/// A small deterministic generator for the property test.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self, n: u32) -> u32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        ((self.0 >> 33) % n as u64) as u32
+    }
+    fn rect(&mut self) -> rect {
+        let (x, y) = (self.next(60), self.next(60));
+        r(x, y, 1 + self.next(40), 1 + self.next(40))
+    }
+}
+
+#[test]
+fn visible_parts_are_the_reach_less_later_covers_pixel_for_pixel() {
+    let mut g = Lcg(7);
+    for _ in 0..2000 {
+        let n = 1 + g.next(6) as usize;
+        let items: Vec<item_shape> = (0..n).map(|_| {
+            let reach = g.rect();
+            let c0 = if g.next(2) == 0 { reach.intersect(&g.rect()) } else { EMPTY };
+            let c1 = if g.next(3) == 0 { reach.intersect(&g.rect()) } else { EMPTY };
+            item_shape { kind: 8, reach, cover: (c0, c1) }
+        }).collect();
+        let area = g.rect();
+        for i in 0..n {
+            let parts = visible_parts(&items, n, i, &area);
+            let mut seen = [[0u8; 100]; 100];
+            for p in &parts {
+                assert!(!p.is_empty());
+                for y in p.y..p.y1() {
+                    for x in p.x..p.x1() {
+                        seen[y as usize][x as usize] += 1;
+                    }
+                }
+            }
+            for y in 0..100u32 {
+                for x in 0..100u32 {
+                    let px = r(x, y, 1, 1);
+                    let reached = items[i].reach.intersect(&area).contains(&px);
+                    let covered = items[i + 1..].iter().any(|it| it.cover.0.contains(&px) || it.cover.1.contains(&px));
+                    let n = seen[y as usize][x as usize];
+                    // Never twice, never outside the reach; every pixel no
+                    // later item covers is drawn.
+                    assert!(n <= 1);
+                    assert!(n == 0 || reached);
+                    if reached && !covered {
+                        assert_eq!(n, 1, "pixel {},{} of item {} missing", x, y, i);
+                    }
+                }
+            }
+        }
+    }
+}
