@@ -1530,7 +1530,8 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
     };
     finish_job(window_id, job, LayoutMode::Reuse);
     sync_caret(window_id);
-    mark_dirty(window_id);
+    // The caller holds the compositor and marks the window dirty.
+    crate::shade::request_damaged();
     true
 }
 
@@ -1659,7 +1660,8 @@ pub fn release_at(window_id: u32) -> bool {
         RenderJob::take(s, LayoutMode::Reuse)
     };
     finish_job(window_id, job, LayoutMode::Reuse);
-    mark_dirty(window_id);
+    // The caller holds the compositor and marks the window dirty.
+    crate::shade::request_damaged();
     true
 }
 
