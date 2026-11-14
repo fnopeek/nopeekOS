@@ -47,7 +47,7 @@ const KIND_GLASS_BACKDROP: u32 = 3;
 pub const KIND_CHROME: u32 = 4;
 const KIND_CONTENT: u32 = 5;
 const KIND_PANEL: u32 = 6;
-const KIND_TEXT: u32 = 7;
+pub const KIND_TEXT: u32 = 7;
 const KIND_FILL: u32 = 8;
 const KIND_CLOSE_GLYPH: u32 = 9;
 

@@ -35,11 +35,16 @@ const SCENE_PAGES: u32 = 16;
 /// Render-job buffers kept for reuse once their job finished (v3dv's BO
 /// cache); more are given back.
 const FREE_BOS_KEPT: usize = 24;
-/// draw.frag's kinds: the scene's item kinds 1..=9, and 10, the straight-row
-/// part of a chrome item; the pipeline of kind k is at k - 1.
-const DRAW_KINDS: usize = 10;
+/// draw.frag's kinds: the scene's item kinds 1..=9, 10, the straight-row
+/// part of a chrome item, and 11; the pipeline of kind k is at k - 1.
+const DRAW_KINDS: usize = 11;
 const ITEM_KINDS: usize = 9;
 const KIND_CHROME_INSIDE: usize = 10;
+/// The straight-row part of a chrome item with a text item over it
+/// (`window_text`), the text's words at push word `ITEM2_PUSH`
+/// (draw.h.glsl `item2`).
+const KIND_WINDOW_INSIDE: usize = 11;
+const ITEM2_PUSH: usize = gpu_scene::scene::DRAW_PUSH_WORDS;
 /// Programs start at this alignment in the code buffer.
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
@@ -784,8 +789,17 @@ impl Composer {
             d.push[9..14].copy_from_slice(&[dst.va, 0, width, height, width]);
             d
         };
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 13] = [
+        // Both in one pass, as kind 11 draws a window's inside.
+        let window_inside = {
+            let mut d = glass_inside;
+            d.pipeline = KIND_WINDOW_INSIDE - 1;
+            d.push[ITEM2_PUSH..ITEM2_PUSH + 16].copy_from_slice(&text.push[4..20]);
+            d
+        };
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 15] = [
             ("fill + chrome inside over glass", false, alloc::vec![opaque, glass_inside]),
+            ("fill + chrome inside over glass + empty text", false, alloc::vec![opaque, glass_inside, text]),
+            ("fill + both in one pass", false, alloc::vec![opaque, window_inside]),
             ("fill + empty text", false, alloc::vec![opaque, text]),
             ("background colour + covering text + background colour", false,
              alloc::vec![draw(1, &[]), text, draw(1, &[])]),
@@ -1020,6 +1034,20 @@ impl plan::draw_sink for Sink<'_> {
         let ck = self.ck;
         let end = ck.items.len();
 
+        // Per chrome item, the text item painted over its straight rows in
+        // the same draw (kind 11): where they overlap and no item between
+        // them reaches.
+        let mut fused: Vec<Option<(usize, rect)>> = alloc::vec![None; end];
+        let mut fused_into: Vec<rect> = alloc::vec![plan::EMPTY; end];
+        for i in 0..end {
+            if ck.items[i][0] == gpu_scene::scene::KIND_CHROME {
+                if let Some((j, f)) = window_text(ck, i) {
+                    fused[i] = Some((j, f));
+                    fused_into[j] = f;
+                }
+            }
+        }
+
         let mut draws = Vec::with_capacity(end);
         for i in 0..end {
             let kind = ck.items[i][0] as usize;
@@ -1029,22 +1057,46 @@ impl plan::draw_sink for Sink<'_> {
             let mut draw = |kind: usize, r: &rect| {
                 let mut push = [0u32; v3d_draw::PUSH_WORDS];
                 push[..gpu_scene::scene::DRAW_PUSH_WORDS].copy_from_slice(&gpu_scene::scene::draw_push(ck, i, r));
+                if let (KIND_WINDOW_INSIDE, Some((j, _))) = (kind, fused[i]) {
+                    push[ITEM2_PUSH..ITEM2_PUSH + 16].copy_from_slice(&ck.items[j]);
+                }
                 draws.push(v3d_draw::Draw { pipeline: kind - 1, push, vertex_count: 4 });
             };
             // Only where no later item paints over it opaquely; a chrome
-            // item's straight rows by their own short program.
+            // item's straight rows by their own short program, with its
+            // window's text in the same pass, which the text item then
+            // leaves out.
             let straight = if kind == gpu_scene::scene::KIND_CHROME as usize {
                 plan::chrome_straight(&ck.items[i][..])
             } else {
                 plan::EMPTY
             };
+            let with_text = fused[i].map_or(plan::EMPTY, |(_, f)| f);
             for r in plan::visible_parts(&ck.shapes, end, i, area) {
+                if !fused_into[i].is_empty() {
+                    let mut rest = Vec::new();
+                    plan::subtract(&r, &fused_into[i], &mut rest);
+                    for p in &rest {
+                        draw(kind, p);
+                    }
+                    continue;
+                }
                 let inside = r.intersect(&straight);
                 if inside.is_empty() {
                     draw(kind, &r);
                     continue;
                 }
-                draw(KIND_CHROME_INSIDE, &inside);
+                let both = inside.intersect(&with_text);
+                if both.is_empty() {
+                    draw(KIND_CHROME_INSIDE, &inside);
+                } else {
+                    draw(KIND_WINDOW_INSIDE, &both);
+                    let mut glass = Vec::new();
+                    plan::subtract(&inside, &with_text, &mut glass);
+                    for p in &glass {
+                        draw(KIND_CHROME_INSIDE, p);
+                    }
+                }
                 let mut ring = Vec::new();
                 plan::subtract(&r, &straight, &mut ring);
                 for p in &ring {
@@ -1069,6 +1121,28 @@ impl plan::draw_sink for Sink<'_> {
         let area = v3d_draw::Rect { x: area.x, y: area.y, width: area.w, height: area.h };
         self.c.submit_draws(self.hw, image, load, area, &draws).map(|_| ())
     }
+}
+
+/// The text item a chrome item `i` can paint in its own pass, and where:
+/// the largest overlap of a later text item with the chrome's straight
+/// rows that no item between them reaches, so painting the text there
+/// with the chrome changes no order of painting.
+fn window_text(ck: &gpu_scene::scene::checked, i: usize) -> Option<(usize, rect)> {
+    let straight = plan::chrome_straight(&ck.items[i][..]);
+    let mut best: Option<(usize, rect)> = None;
+    for j in i + 1..ck.items.len() {
+        if ck.items[j][0] != gpu_scene::scene::KIND_TEXT {
+            continue;
+        }
+        let f = ck.shapes[j].reach.intersect(&straight);
+        if f.is_empty() || ck.shapes[i + 1..j].iter().any(|s| !s.reach.intersect(&f).is_empty()) {
+            continue;
+        }
+        if best.is_none_or(|(_, b)| f.w as u64 * f.h as u64 > b.w as u64 * b.h as u64) {
+            best = Some((j, f));
+        }
+    }
+    best
 }
 
 /// v3d_draw's tile-aligned render area: whole tiles, or reaching the

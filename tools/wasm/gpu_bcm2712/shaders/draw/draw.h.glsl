@@ -1,5 +1,6 @@
 // The push constants of one draw: the rectangle it covers, the item it
-// paints (compose.rs ITEM_WORDS) and the frame values that item reads.
+// paints (compose.rs ITEM_WORDS), the frame values that item reads, and a
+// second item for kind 11.
 layout(push_constant, std430) uniform Draw {
     // x0, y0, x1, y1 in pixels; 0..4.
     uint rect[4];
@@ -18,4 +19,6 @@ layout(push_constant, std430) uniform Draw {
     // The viewport in pixels.
     uint width;
     uint height;
+    // Kind 11: the text item painted over the chrome item's straight rows.
+    uint item2[16];
 } p;

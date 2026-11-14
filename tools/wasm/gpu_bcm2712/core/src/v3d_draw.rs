@@ -42,7 +42,7 @@ const MAX_SAMPLES: u32 = 4;
 /// `devinfo->clipper_xy_granularity` on V3D 7.1.
 pub const CLIPPER_XY_GRANULARITY: f32 = 64.0;
 /// `maxPushConstantsSize`, in words.
-pub const PUSH_WORDS: usize = 32;
+pub const PUSH_WORDS: usize = 64;
 /// `ARRAY_SIZE(v3d_fs_prog_data.flat_shade_flags)` (64 inputs, 24 per word).
 pub const VARYING_FLAG_WORDS: usize = 3;
 

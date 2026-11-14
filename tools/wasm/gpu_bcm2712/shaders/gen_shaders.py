@@ -281,7 +281,7 @@ def compile_all():
     return progs
 
 
-DRAW_KINDS = range(1, 11)
+DRAW_KINDS = range(1, 12)
 
 
 def compile_draws():

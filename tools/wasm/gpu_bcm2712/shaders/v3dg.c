@@ -74,7 +74,7 @@ die(const char *what, VkResult r)
 }
 
 /* v3dv's maxPushConstantsSize. */
-#define PUSH_BYTES 128
+#define PUSH_BYTES 256
 
 #define GET(inst, name) PFN_##name name = (PFN_##name)vk_icdGetInstanceProcAddr(inst, #name)
 

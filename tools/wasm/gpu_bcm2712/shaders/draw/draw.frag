@@ -4,8 +4,9 @@
 // it (VK_EXT_shader_tile_image) as compose.comp paints it, written back. The attachment is R32_UINT, one
 // XRGB8888 word per pixel, so the mixing is the CPU executor's, exactly.
 // KIND selects the item kind at compile time: one small program per kind,
-// and 10 for the straight-row part of a chrome item (items.glsl
-// `chrome_inside`).
+// 10 for the straight-row part of a chrome item (items.glsl
+// `chrome_inside`), and 11 for that part with a text item over it, mixed
+// in one pass (the window's inside).
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_tile_image : require
@@ -56,6 +57,7 @@ void main() {
     // The item's own loads and arithmetic first, the tile buffer last: a
     // read before them would hold the scoreboard through all of it.
     Op o = op_keep();
+    Op o2 = op_keep();
     switch (KIND) {
     case 2u: o = glow(it, x, y); break;
     case 3u: o = glass_backdrop(it, x, y); break;
@@ -66,7 +68,9 @@ void main() {
     case 8u: o = fill(it, x, y); break;
     case 9u: o = close_glyph(it, x, y); break;
     case 10u: o = chrome_inside(it, x, y); break;
+    case 11u: o = chrome_inside(it, x, y); o2 = text(p.item2, x, y); break;
     default: break;
     }
-    color = apply(o, colorAttachmentReadEXT(dst).x);
+    uint c = apply(o, colorAttachmentReadEXT(dst).x);
+    color = KIND == 11u ? apply(o2, c) : c;
 }
