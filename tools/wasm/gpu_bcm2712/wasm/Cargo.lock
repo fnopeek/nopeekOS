@@ -35,7 +35,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "gpu_bcm2712"
-version = "0.18.0"
+version = "0.18.1"
 dependencies = [
  "drm_core",
  "gpu_bcm2712_core",

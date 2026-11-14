@@ -45,6 +45,8 @@ void main() {
     g_ceil = p.ceil_;
     g_tint = p.tint;
     g_tint_w = p.tint_w;
+    g_width = p.width;
+    g_height = p.height;
     Words src = mkaddr(p.src_lo, p.src_hi);
     g_wall = src;
     g_wall_pitch = p.src_pitch;

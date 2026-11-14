@@ -33,6 +33,9 @@ uint g_blur_pitch;
 Words g_glass;
 uint g_glass_pitch;
 Words g_glyphs;
+// The screen in pixels (draw.frag).
+uint g_width;
+uint g_height;
 
 // Division by 1000 of 0..=255000 and by 255 of 0..=65280, the ranges the
 // kinds divide, and factors known to fit `mask` (FIT). With V3D_ARITH
@@ -339,7 +342,10 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
 // that path's glass branch, with the tinted fill (`glass_fill`) and
 // its luma worked out once for the draw.
 ITEM_RESULT chrome_glass(uint px, uint py, uint fill, uint fill_luma, uint go) {
-    return SET(glass_blend_l(fill, fill_luma, g_glass.v[py * g_glass_pitch + px], go, g_ceil));
+    // A helper pixel past the screen's edge reads its last pixel instead,
+    // as in `text_inside`.
+    uint at = min(py, g_height - 1u) * g_glass_pitch + min(px, g_width - 1u);
+    return SET(glass_blend_l(fill, fill_luma, g_glass.v[at], go, g_ceil));
 }
 
 // scene::yuv_pixel: one pixel of packed YUYV as 0xFFRRGGBB; kind 2 full
@@ -423,10 +429,11 @@ ITEM_RESULT panel(Blk it, uint x, uint y ITEM_PIXEL) {
 }
 
 // scene::text at one pixel.
-// scene::text over a pixel within both the item's rect and its source.
-// The alpha byte is glyph coverage (0..255), `blend` takes 0..256.
-#define TEXT_PIXEL \
-    uint pv = src.v[(y - dy) * spitch + (x - dx)]; \
+// scene::text over a pixel within both the item's rect and its source,
+// word `at` of the source. The alpha byte is glyph coverage (0..255),
+// `blend` takes 0..256.
+#define TEXT_PIXEL(at) \
+    uint pv = src.v[at]; \
     uint a = pv >> 24; \
     if (a == 0u) \
         return KEEP; \
@@ -438,15 +445,18 @@ ITEM_RESULT text(Blk it, uint x, uint y ITEM_PIXEL) {
     uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh || x >= dx + sw || y >= dy + sh)
         return KEEP;
-    TEXT_PIXEL
+    TEXT_PIXEL((y - dy) * spitch + (x - dx))
 }
 
-// `text` where the draw lies within the item's rect and its source.
+// `text` where the draw lies within the item's rect and its source. The
+// helper pixels of a 2x2 quad at the draw's edge run too and their loads
+// are made: the clamp keeps them within the source, and changes nothing
+// for a pixel of the draw.
 ITEM_RESULT text_inside(Blk it, uint x, uint y ITEM_PIXEL) {
     uint dx = BC(it, 1), dy = BC(it, 2);
     Words src = mkaddr(BC(it, 5), BC(it, 6));
-    uint spitch = BC(it, 9);
-    TEXT_PIXEL
+    uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
+    TEXT_PIXEL(min(y - dy, sh - 1u) * spitch + min(x - dx, sw - 1u))
 }
 
 // Item::Fill at one pixel.
