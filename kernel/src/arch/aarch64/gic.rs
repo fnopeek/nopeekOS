@@ -27,6 +27,8 @@ const GIC_DIST_CTR: u64 = 0x004;
 const GIC_DIST_ENABLE_SET: u64 = 0x100;
 const GIC_DIST_ENABLE_CLEAR: u64 = 0x180;
 const GIC_DIST_ACTIVE_CLEAR: u64 = 0x380;
+const GIC_DIST_PENDING_SET: u64 = 0x200;
+const GIC_DIST_ACTIVE_SET: u64 = 0x300;
 const GIC_DIST_PRI: u64 = 0x400;
 const GIC_DIST_TARGET: u64 = 0x800;
 const GIC_DIST_CONFIG: u64 = 0xc00;
@@ -224,6 +226,13 @@ pub fn clear_handler(irq: u32) {
 pub fn unmask(irq: u32) {
     if irq as usize >= MAX_IRQS { return; }
     wr(&DIST, GIC_DIST_ENABLE_SET + (irq / 32) as u64 * 4, 1 << (irq % 32));
+}
+
+/// Whether `irq` is enabled, pending and active at the distributor.
+pub fn state(irq: u32) -> (bool, bool, bool) {
+    if irq as usize >= MAX_IRQS { return (false, false, false); }
+    let bit = |base: u64| rd(&DIST, base + (irq / 32) as u64 * 4) >> (irq % 32) & 1 != 0;
+    (bit(GIC_DIST_ENABLE_SET), bit(GIC_DIST_PENDING_SET), bit(GIC_DIST_ACTIVE_SET))
 }
 
 /// gic_mask_irq.

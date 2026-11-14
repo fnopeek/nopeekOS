@@ -223,6 +223,21 @@ pub(super) fn rp1_irq_map(fdt: &Fdt, node: &Node) -> Option<(crate::irq::Irq, u3
 
 /// RP1 as probed, with the board's register blocks and the offset RP1's
 /// DMA adds to a physical address; None before `init` brought it up.
+/// RP1 line `line` on its way to the GIC, for a report: the raw line,
+/// its `MSIX_CFG` word, its MSI-X vector control, the MIP's host status
+/// and the SPI's enabled, pending and active bits.
+pub(super) fn rp1_irq_report(line: u32) -> Option<alloc::string::String> {
+    let (chip, b0, b1) = RP1_IRQS.rp1.get()?;
+    let mip = MIP.get()?;
+    let spi = crate::arch::aarch64::gic::SPI_BASE + mip.msi(line)?.spi;
+    let (raw, cfg, vctrl) = chip.irq_state(&mut Bars(*b0, *b1), line);
+    let (_, mut board, _) = rp1()?;
+    let (ml, mh) = mip.status(&mut board);
+    let (en, pend, act) = crate::arch::aarch64::gic::state(spi);
+    Some(alloc::format!("RP1 line {} raw {} cfg {:#x} vector {:#x}, MIP {:#010x}{:08x}, INTID {} enabled {} pending {} active {}",
+        line, raw as u8, cfg, vctrl, mh, ml, spi, en as u8, pend as u8, act as u8))
+}
+
 pub(super) fn rp1() -> Option<(pi5_core::rp1::Rp1, Board, u64)> {
     let (rp1, ..) = RP1_IRQS.rp1.get()?;
     let (board, dma_off) = BOARD.get()?;

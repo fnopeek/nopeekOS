@@ -255,6 +255,11 @@ impl MsixTable {
     pub fn unmask(&self, hw: &mut impl Hw, i: u32) {
         hw.w32(self.block, self.ctrl(i), 0);
     }
+
+    /// Vector `i`'s control word; bit 0 masks it.
+    pub fn vector_ctrl(&self, hw: &mut impl Hw, i: u32) -> u32 {
+        hw.r32(self.block, self.ctrl(i))
+    }
 }
 
 /// `msix_capability_init`: enable with every vector masked, write `n`

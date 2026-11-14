@@ -26,6 +26,7 @@ const MACB_RSR: u64 = 0x020;
 const MACB_ISR: u64 = 0x024;
 const MACB_IER: u64 = 0x028;
 const MACB_IDR: u64 = 0x02c;
+const MACB_IMR: u64 = 0x030;
 const MACB_MAN: u64 = 0x034;
 const GEM_PBUFRXCUT: u64 = 0x044;
 const GEM_JML: u64 = 0x048;
@@ -916,6 +917,11 @@ impl Gem {
             }
             self.stats[i] += v;
         }
+    }
+
+    /// The interrupt mask register: a set bit is a masked source.
+    pub fn imr(&self, hw: &mut impl Hw) -> u32 {
+        r(hw, MACB_IMR)
     }
 
     /// `macb_rx_pending`, for a caller that only counts.

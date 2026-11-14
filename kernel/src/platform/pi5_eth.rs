@@ -26,6 +26,9 @@ const TX_BUF_BYTES: usize = 2048;
 const RX_BACKLOG: usize = 1000;
 /// NAPI's weight for one poll.
 const NAPI_WEIGHT: usize = 64;
+/// Timer wakes that found a frame without an interrupt and say how the
+/// interrupt's way looked.
+const UNSIGNALLED_REPORTS: u64 = 8;
 /// `PHY_STATE_TIME`.
 const PHY_POLL_US: u64 = 1_000_000;
 /// The flag cell of a `gpios` specifier.
@@ -243,15 +246,16 @@ pub fn init(fdt: &Fdt) -> bool {
         m[0], m[1], m[2], m[3], m[4], m[5], line, intid, irq);
     *DEV.lock() = Some(Device { eth, bufs, regs });
     PRESENT.store(true, Ordering::Release);
-    crate::smp::scheduler::spawn_fiber(eth_fiber, irq as u64);
+    crate::smp::scheduler::spawn_fiber(eth_fiber, irq as u64 | (line as u64) << 32);
     true
 }
 
 /// The interrupt thread with NAPI and phylib's poll: services the GEM when
 /// its line fired, polls the PHY every `PHY_POLL_US`, runs the LPI work
 /// when it is due, hands received frames to the stack.
-fn eth_fiber(irq: u64) {
-    let irq = irq as crate::irq::Irq;
+fn eth_fiber(arg: u64) {
+    let irq = arg as u32 as crate::irq::Irq;
+    let line = (arg >> 32) as u32;
     let mut fired = false;
     let mut next_poll = crate::time::uptime_us();
     let mut lpi_due: Option<u64> = None;
@@ -271,7 +275,14 @@ fn eth_fiber(irq: u64) {
                     rx = true;
                 }
             } else if eth.gem.rx_waiting(bufs) {
-                RX_UNSIGNALLED.fetch_add(1, Ordering::Relaxed);
+                let n = RX_UNSIGNALLED.fetch_add(1, Ordering::Relaxed);
+                if n < UNSIGNALLED_REPORTS {
+                    let imr = eth.gem.imr(regs);
+                    let fired = crate::irq::fired_count(irq);
+                    let chain = super::pi5::rp1_irq_report(line).unwrap_or_default();
+                    kprintln!("[npk] eth: frame waiting, no interrupt: GEM IMR {:#x} (RX {}), irq count {}, {}",
+                        imr, if imr & gem::MACB_RCOMP != 0 { "masked" } else { "enabled" }, fired, chain);
+                }
             }
             if now >= next_poll {
                 next_poll = now + PHY_POLL_US;

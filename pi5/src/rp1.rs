@@ -25,6 +25,9 @@ fn msix_cfg(hwirq: u32) -> u64 { 0x8 + 4 * hwirq as u64 }
 const MSIX_CFG_IACK_EN: u32 = 1 << 3;
 const MSIX_CFG_IACK: u32 = 1 << 2;
 const MSIX_CFG_ENABLE: u32 = 1 << 0;
+/// Raw interrupt status of the 61 lines, `INTSTATL` and `INTSTATH`.
+const INTSTATL: u64 = 0x108;
+const INTSTATH: u64 = 0x10c;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -88,6 +91,15 @@ impl Rp1 {
     /// acknowledged so RP1 can send it again.
     pub fn irq_ack(&self, hw: &mut impl Hw, hwirq: u32) {
         hw.w32(Block::Rp1Bar1, RP1_PCIE_APBS_BASE + REG_SET + msix_cfg(hwirq), MSIX_CFG_IACK);
+    }
+
+    /// Line `hwirq`'s raw status, its `MSIX_CFG` word and its MSI-X
+    /// vector control word, for a report.
+    pub fn irq_state(&self, hw: &mut impl Hw, hwirq: u32) -> (bool, u32, u32) {
+        let reg = if hwirq < 32 { INTSTATL } else { INTSTATH };
+        let raw = hw.r32(Block::Rp1Bar1, RP1_PCIE_APBS_BASE + reg) >> (hwirq % 32) & 1 != 0;
+        let cfg = hw.r32(Block::Rp1Bar1, RP1_PCIE_APBS_BASE + msix_cfg(hwirq));
+        (raw, cfg, self.msix.vector_ctrl(hw, hwirq))
     }
 
     /// `rp1_mask_irq`: the line's MSI-X vector masked (`pci_msi_mask_irq`).

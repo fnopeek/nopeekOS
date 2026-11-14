@@ -10,6 +10,8 @@ const MIP_INT_MASKL_HOST: u64 = 0x40;
 const MIP_INT_MASKH_HOST: u64 = 0x50;
 const MIP_INT_MASKL_VPU: u64 = 0x60;
 const MIP_INT_MASKH_VPU: u64 = 0x70;
+const MIP_INT_STATUSL_HOST: u64 = 0x80;
+const MIP_INT_STATUSH_HOST: u64 = 0x90;
 
 /// What `mip_parse_dt` reads.
 #[derive(Clone, Copy, Debug)]
@@ -34,6 +36,11 @@ pub struct Msi {
 }
 
 impl Mip {
+    /// `MIP_INT_STATUSL_HOST` and `MIP_INT_STATUSH_HOST`, for a report.
+    pub fn status(&self, hw: &mut impl Hw) -> (u32, u32) {
+        (hw.r32(Block::Mip, MIP_INT_STATUSL_HOST), hw.r32(Block::Mip, MIP_INT_STATUSH_HOST))
+    }
+
     /// `mip_init_domains`: every vector unmasked for the host, masked for
     /// the VPU, edge-triggered.
     pub fn init(&self, hw: &mut impl Hw) {
