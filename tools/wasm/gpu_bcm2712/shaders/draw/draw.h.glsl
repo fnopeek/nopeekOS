@@ -11,14 +11,10 @@ layout(push_constant, std430) uniform Draw {
     uint tint;
     uint tint_w;
     // The source the item kind reads beside its own: the wallpaper, the
-    // blurred wallpaper, the glass, the glyphs, or the panel's planes; its
-    // pitch in words, or for the planes their width, height and origin.
+    // blurred wallpaper, the glass or the glyphs, and its pitch in words.
     uint src_lo;
     uint src_hi;
     uint src_pitch;
-    uint planes_h;
-    uint planes_x0;
-    uint planes_y0;
     // The viewport in pixels.
     uint width;
     uint height;

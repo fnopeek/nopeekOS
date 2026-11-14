@@ -623,8 +623,7 @@ fn cursor_moves_by_async_update() {
 fn csd_cfg_is_v3dvs() {
     use crate::shaders_gen as sg;
     use crate::v3d::{csd_cfg, CsdProgram};
-    for (p, r) in [(&sg::COMPOSE, &sg::recorded::COMPOSE), (&sg::BLUR_DOWN, &sg::recorded::BLUR_DOWN),
-                   (&sg::BLUR_BOX, &sg::recorded::BLUR_BOX), (&sg::FILL_PATTERN, &sg::recorded::FILL_PATTERN)] {
+    for (p, r) in [(&sg::COMPOSE, &sg::recorded::COMPOSE), (&sg::FILL_PATTERN, &sg::recorded::FILL_PATTERN)] {
         let prog = CsdProgram {
             threads: p.threads,
             single_seg: p.single_seg,

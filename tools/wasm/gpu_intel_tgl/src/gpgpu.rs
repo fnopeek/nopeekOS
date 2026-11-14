@@ -28,11 +28,9 @@ use crate::regs::*;
 use npk_sys::Dma;
 
 /// The programs, in the order `kernel_off` holds them.
-pub const KERNELS: [&Kernel; 4] = [&g::FILL_PATTERN, &g::COMPOSE, &g::BLUR_DOWN, &g::BLUR_BOX];
+pub const KERNELS: [&Kernel; 2] = [&g::FILL_PATTERN, &g::COMPOSE];
 pub const K_FILL_PATTERN: usize = 0;
 pub const K_COMPOSE: usize = 1;
-pub const K_BLUR_DOWN: usize = 2;
-pub const K_BLUR_BOX: usize = 3;
 
 const PAGE: u32 = 4096;
 const BATCH_PAGES: u32 = 16;

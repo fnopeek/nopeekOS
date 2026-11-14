@@ -30,8 +30,6 @@ layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
 layout(push_constant, std430) uniform Params {
     // Frame block and items (compose.rs F_*, ITEMS).
     Words frame;
-    // The blurred planes of the panel this segment starts with.
-    Words planes;
     // Per bin {list offset, count | opaque << 31}, then the lists.
     Words bins;
     uint clip_x;
@@ -46,11 +44,6 @@ layout(push_constant, std430) uniform Params {
     uint bin_x0;
     uint bin_y0;
     uint nbx;
-    uint bx0;
-    uint by0;
-    // 0: no blur, the panel sits on the pixel beneath.
-    uint bsw;
-    uint bsh;
 } p;
 
 // Word offsets in the frame block (compose.rs).
@@ -88,11 +81,6 @@ Blk blk_load(Words w, uint base) {
 #define SH(b, n) subgroupShuffle(b, n)
 // BLOCKS-END
 
-#define PANEL_PLANES p.planes
-#define PANEL_BSW p.bsw
-#define PANEL_BSH p.bsh
-#define PANEL_BX0 p.bx0
-#define PANEL_BY0 p.by0
 #include "items.glsl"
 
 void main() {

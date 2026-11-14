@@ -7,7 +7,7 @@
 //! The kernel's CPU executor is the reference (kernel/src/shade/scene.rs):
 //! for each damage rectangle, every item in order.
 
-use crate::plan::{bin_table, grid, item_shape, rect};
+use crate::plan::{bin_table, item_shape, rect};
 use alloc::vec::Vec;
 
 const EINVAL: i32 = 22;
@@ -111,7 +111,6 @@ pub struct checked {
     pub screen: rect,
     pub width: u32,
     pub height: u32,
-    pub radius: u32,
     pub target: surface,
     pub damage: Vec<rect>,
     /// The items kept, in order.
@@ -182,10 +181,6 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
     let wall = screen_src(rd(&hdr, 5))?;
     let blur = screen_src(rd(&hdr, 6))?;
     let glass = screen_src(rd(&hdr, 7))?;
-    let radius = rd(&hdr, 8);
-    if radius > 64 {
-        return Err(-EINVAL);
-    }
     let mut frame = [0u32; FRAME_BYTES as usize / 4];
     set64(&mut frame, F_TARGET, target.va);
     frame[F_TARGET_PITCH] = target.pitch / 4;
@@ -355,13 +350,12 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         }
         off += n;
     }
-    Ok(checked { screen, width, height, radius, target, damage, shapes, frame, items })
+    Ok(checked { screen, width, height, target, damage, shapes, frame, items })
 }
 
 /// compose.comp's push constants.
 pub struct compose_push {
     pub frame: u64,
-    pub planes: u64,
     pub bins: u64,
     pub clip_x: u32,
     pub clip_y: u32,
@@ -372,20 +366,13 @@ pub struct compose_push {
     pub bin_x0: u32,
     pub bin_y0: u32,
     pub nbx: u32,
-    pub bx0: u32,
-    pub by0: u32,
-    pub bsw: u32,
-    pub bsh: u32,
 }
 
 /// A compose dispatch over `area` with workgroups `width` pixels wide:
 /// its push constants and grid.
-pub fn compose(width: u32, frame: u64, planes: u64, bins: u64, area: &rect, t: &bin_table, blur: Option<grid>)
-               -> (compose_push, [u32; 3]) {
-    let (bx0, by0, bsw, bsh) = blur.unwrap_or((0, 0, 0, 0));
+pub fn compose(width: u32, frame: u64, bins: u64, area: &rect, t: &bin_table) -> (compose_push, [u32; 3]) {
     let p = compose_push {
         frame,
-        planes,
         bins,
         clip_x: area.x,
         clip_y: area.y,
@@ -396,72 +383,20 @@ pub fn compose(width: u32, frame: u64, planes: u64, bins: u64, area: &rect, t: &
         bin_x0: t.bin_x0,
         bin_y0: t.bin_y0,
         nbx: t.nbx,
-        bx0,
-        by0,
-        bsw,
-        bsh,
     };
     let cols = area.x1().div_ceil(width) - area.x / width;
     let runs = area.y1().div_ceil(ROWS) - area.y / ROWS;
     (p, [cols, runs, 1])
 }
 
-/// blur_down.comp's push constants.
-pub struct blur_down_push {
-    pub target: u64,
-    pub planes: u64,
-    pub pitch_px: u32,
-    pub width: u32,
-    pub height: u32,
-    pub bx0: u32,
-    pub by0: u32,
-    pub sw: u32,
-    pub sh: u32,
-}
-
-/// The block means of `g` in `target` (`screen_w` x `screen_h`).
-pub fn blur_down(width: u32, target: &surface, planes: u64, screen_w: u32, screen_h: u32,
-                 (bx0, by0, sw, sh): grid) -> (blur_down_push, [u32; 3]) {
-    let p = blur_down_push {
-        target: target.va,
-        planes,
-        pitch_px: target.pitch / 4,
-        width: screen_w,
-        height: screen_h,
-        bx0,
-        by0,
-        sw,
-        sh,
-    };
-    (p, [sw.div_ceil(width), sh, 1])
-}
-
-/// blur_box.comp's push constants.
-pub struct blur_box_push {
-    pub src: u64,
-    pub dst: u64,
-    pub lines: u32,
-    pub len: u32,
-    pub stride: u32,
-    pub step: u32,
-    pub radius: u32,
-}
-
-/// One box pass over `lines` lines of `len` blocks.
-pub fn blur_box(width: u32, src: u64, dst: u64, lines: u32, len: u32, stride: u32, step: u32, radius: u32)
-                -> (blur_box_push, [u32; 3]) {
-    let p = blur_box_push { src, dst, lines, len, stride, step, radius };
-    (p, [len.div_ceil(width), lines, 1])
-}
-
 /// Words of a draw's push constants (gpu_bcm2712/shaders/draw/draw.h.glsl).
-pub const DRAW_PUSH_WORDS: usize = 32;
+pub const DRAW_PUSH_WORDS: usize = 29;
 
 /// One item drawn over `r` (draw.h.glsl `Draw`): the rectangle, the item's
 /// words, the frame values and the one source its kind reads beside its
-/// own (the wallpaper, the blurred wallpaper, the glass, the glyphs, or
-/// the panel's blurred planes at `planes` over `blur`), and the viewport.
-pub fn draw_push(c: &checked, item: usize, r: &rect, planes: u64, blur: Option<grid>) -> [u32; DRAW_PUSH_WORDS] {
+/// own (the wallpaper, the blurred wallpaper, the glass or the glyphs),
+/// and the viewport.
+pub fn draw_push(c: &checked, item: usize, r: &rect) -> [u32; DRAW_PUSH_WORDS] {
     let it = &c.items[item];
     let f = &c.frame;
     let mut p = [0u32; DRAW_PUSH_WORDS];
@@ -481,22 +416,12 @@ pub fn draw_push(c: &checked, item: usize, r: &rect, planes: u64, blur: Option<g
     };
     match it[0] {
         KIND_BACKGROUND => src(&mut p, F_WALL, Some(F_WALL_PITCH)),
-        KIND_GLASS_BACKDROP => src(&mut p, F_BLUR, Some(F_BLUR_PITCH)),
+        KIND_GLASS_BACKDROP | KIND_PANEL => src(&mut p, F_BLUR, Some(F_BLUR_PITCH)),
         KIND_CHROME => src(&mut p, F_GLASS, Some(F_GLASS_PITCH)),
         KIND_CLOSE_GLYPH => src(&mut p, F_GLYPHS, None),
-        KIND_PANEL => {
-            if let Some((bx0, by0, sw, sh)) = blur {
-                p[24] = planes as u32;
-                p[25] = (planes >> 32) as u32;
-                p[26] = sw;
-                p[27] = sh;
-                p[28] = bx0;
-                p[29] = by0;
-            }
-        }
         _ => {}
     }
-    p[30] = c.width;
-    p[31] = c.height;
+    p[27] = c.width;
+    p[28] = c.height;
     p
 }

@@ -22,11 +22,6 @@ layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words {
 
 #define Blk uint[16]
 #define BC(b, k) (b)[k]
-#define PANEL_PLANES mkaddr(p.src_lo, p.src_hi)
-#define PANEL_BSW p.src_pitch
-#define PANEL_BSH p.planes_h
-#define PANEL_BX0 p.planes_x0
-#define PANEL_BY0 p.planes_y0
 
 const uint FLAG_WALL = 1u;
 const uint FLAG_BLURRED = 2u;

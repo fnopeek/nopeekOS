@@ -73,9 +73,6 @@ static BLURRED_SET: AtomicBool = AtomicBool::new(false);
 /// on a small image and scaled back up.
 const BLUR_DOWN: u32 = 4;
 const BLUR_PASSES: usize = 3;
-/// Box radius of the last wallpaper blur, in BLUR_DOWN blocks; glass over
-/// windows blurs with the same strength.
-static BLUR_RADIUS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Bumped every time the wallpaper pixels change. Mixed into the compositor's
 /// translucent-glass cache key so a same-theme wallpaper swap invalidates it
@@ -262,7 +259,6 @@ fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) 
 
     let detail = (detail_sum / (sw * sh).max(1) as u64) as u32;
     let radius = crate::shade::glass::blur_radius(detail);
-    BLUR_RADIUS.store(radius as u32, Ordering::Relaxed);
 
     // 2. Separable box blur, a few passes (none at radius 0).
     let mut tmp = alloc::vec![0u32; sw * sh];
@@ -353,29 +349,35 @@ pub fn glass_source_ptr() -> *const u8 {
     if blurred_ready() { BLURRED.load(Ordering::Acquire) } else { wallpaper_ptr() }
 }
 
+/// The blurred wallpaper glass panels sit on, screen-sized with the
+/// framebuffer pitch; None until it is ready (or with no wallpaper).
+pub fn blurred_ptr() -> Option<*const u8> {
+    blurred_ready().then(|| BLURRED.load(Ordering::Acquire) as *const u8).filter(|p| !p.is_null())
+}
+
 fn blurred_ready() -> bool {
     WALLPAPER_SET.load(Ordering::Acquire) && BLURRED_SET.load(Ordering::Acquire)
 }
 
 /// What a GPU executor of the scene list reads instead of these functions
 /// (`shade::gpu_scene`): the published sharp and blurred planes, screen-sized
-/// with the framebuffer pitch, and the box radius `blur_region` uses.
+/// with the framebuffer pitch.
 pub struct Planes {
     /// `draw_background_region` copies from it; None: the grey fill.
     pub wall: Option<*const u8>,
-    /// `draw_glass_backdrop` copies from it; None: it paints nothing.
+    /// `draw_glass_backdrop` copies from it and panels sit on it
+    /// (`blurred_ptr`); None: neither reads it.
     pub blur: Option<*const u8>,
     /// `glass_source_ptr`.
     pub glass: Option<*const u8>,
-    pub radius: u32,
 }
 
 pub fn planes() -> Planes {
     let wp = WALLPAPER.load(Ordering::Acquire);
     let wall = (has_wallpaper() && !wp.is_null()).then_some(wp as *const u8);
-    let blur = blurred_ready().then(|| BLURRED.load(Ordering::Acquire) as *const u8).filter(|p| !p.is_null());
+    let blur = blurred_ptr();
     let glass = glass_source_ptr();
-    Planes { wall, blur, glass: (!glass.is_null()).then_some(glass), radius: BLUR_RADIUS.load(Ordering::Relaxed) }
+    Planes { wall, blur, glass: (!glass.is_null()).then_some(glass) }
 }
 
 /// Put the blurred wallpaper under a glass window: inside the rounded rect
@@ -401,84 +403,6 @@ pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
         // screen-sized with the framebuffer pitch.
         unsafe { core::ptr::copy_nonoverlapping(bl.add(off), shadow.add(off), (x1 - x0) as usize * 4); }
     }
-}
-
-/// How far around a rect `blur_region` reads: the box passes reach this
-/// many pixels out, plus one block for the bilinear upscale.
-pub fn blur_margin() -> u32 {
-    (BLUR_RADIUS.load(Ordering::Relaxed) * BLUR_PASSES as u32 + 2) * BLUR_DOWN
-}
-
-/// The pixels of `rect` in `target`, blurred exactly as the wallpaper is
-/// (`compute_blur`: BLUR_DOWN blocks on the screen grid, box passes,
-/// bilinear back up), reading up to `blur_margin` around it. Row-major,
-/// `rect.w` wide. None when the wallpaper blur is off (radius 0): glass
-/// then sits on the sharp pixels.
-pub fn blur_region(target: *const u8, info: &FbInfo, rect: crate::shade::scene::Rect)
-    -> Option<alloc::vec::Vec<u32>>
-{
-    let radius = BLUR_RADIUS.load(Ordering::Relaxed) as usize;
-    if radius == 0 || rect.is_empty() { return None; }
-    let pitch = info.pitch as usize;
-    let m = blur_margin();
-    // Block grid covering rect + margin, aligned to the screen's grid.
-    let bx0 = rect.x.saturating_sub(m) / BLUR_DOWN;
-    let by0 = rect.y.saturating_sub(m) / BLUR_DOWN;
-    let bx1 = ((rect.x1() + m).min(info.width)).div_ceil(BLUR_DOWN);
-    let by1 = ((rect.y1() + m).min(info.height)).div_ceil(BLUR_DOWN);
-    let (sw, sh) = ((bx1 - bx0) as usize, (by1 - by0) as usize);
-    if sw == 0 || sh == 0 { return None; }
-    let mut planes = [alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh], alloc::vec![0u32; sw * sh]];
-    for sy in 0..sh {
-        for sx in 0..sw {
-            let x0 = (bx0 + sx as u32) * BLUR_DOWN;
-            let y0 = (by0 + sy as u32) * BLUR_DOWN;
-            let (x1, y1) = ((x0 + BLUR_DOWN).min(info.width), (y0 + BLUR_DOWN).min(info.height));
-            let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    // SAFETY: x < width, y < height of the screen-sized target.
-                    let px = unsafe { *(target.add(y as usize * pitch + x as usize * 4) as *const u32) };
-                    r += (px >> 16) & 0xFF; g += (px >> 8) & 0xFF; b += px & 0xFF; n += 1;
-                }
-            }
-            let i = sy * sw + sx;
-            let n = n.max(1);
-            planes[0][i] = r / n;
-            planes[1][i] = g / n;
-            planes[2][i] = b / n;
-        }
-    }
-    let mut tmp = alloc::vec![0u32; sw * sh];
-    for plane in planes.iter_mut() {
-        for _ in 0..BLUR_PASSES {
-            box_pass(plane, &mut tmp, sw, sh, 1, sw, radius);
-            box_pass(&tmp, plane, sh, sw, sw, 1, radius);
-        }
-    }
-    let half = (BLUR_DOWN / 2) as i32;
-    let mut out = alloc::vec![0u32; (rect.w * rect.h) as usize];
-    for y in rect.y..rect.y1() {
-        let fy = ((y as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
-        let gy = (fy >> 8).saturating_sub(by0 as usize);
-        let (y0, wy) = (gy.min(sh - 1), (fy & 0xFF) as u32);
-        let y1 = (y0 + 1).min(sh - 1);
-        for x in rect.x..rect.x1() {
-            let fx = ((x as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
-            let gx = (fx >> 8).saturating_sub(bx0 as usize);
-            let (x0, wx) = (gx.min(sw - 1), (fx & 0xFF) as u32);
-            let x1 = (x0 + 1).min(sw - 1);
-            let mut px = 0u32;
-            for (c, plane) in planes.iter().enumerate() {
-                let top = plane[y0 * sw + x0] * (256 - wx) + plane[y0 * sw + x1] * wx;
-                let bot = plane[y1 * sw + x0] * (256 - wx) + plane[y1 * sw + x1] * wx;
-                let v = (top * (256 - wy) + bot * wy) >> 16;
-                px |= v.min(255) << (16 - 8 * c as u32);
-            }
-            out[((y - rect.y) * rect.w + (x - rect.x)) as usize] = px;
-        }
-    }
-    Some(out)
 }
 
 fn isqrt(v: u32) -> u32 {

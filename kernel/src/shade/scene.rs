@@ -8,10 +8,8 @@
 //! by item, into a screen-sized target, clipped to damage rectangles. What
 //! it produces is what the GPU executor must produce.
 //!
-//! Glass (`Item::Panel` with translucent pixels) blurs what is really
-//! underneath it. That needs everything below to be painted first in a
-//! margin around the panel, so damage touching a panel grows to cover it
-//! (`expand_damage`).
+//! Glass (`Item::Panel` with translucent pixels) sits on the blurred
+//! wallpaper, computed once per wallpaper, not on what lies beneath it.
 
 use alloc::vec::Vec;
 
@@ -178,31 +176,6 @@ pub struct InPlace {
     pub key: u64,
     pub width: u32,
     pub height: u32,
-}
-
-/// Damage that touches a panel adds the panel and a margin around it: its
-/// glass blurs what is beneath, which has to be painted there first.
-///
-/// Added as a rectangle of its own, not merged into the damage it touched:
-/// the bounding box of a tile and a panel along the screen edge is nearly
-/// the whole screen.
-pub fn expand_damage(scene: &Scene, damage: &mut Vec<Rect>, screen: Rect) {
-    let margin = background::blur_margin();
-    loop {
-        let mut grew = false;
-        for item in &scene.items {
-            let Item::Panel { dst, .. } = item else { continue };
-            let need = dst.grow(margin).intersect(&screen);
-            if need.is_empty() { continue; }
-            let touched = damage.iter().any(|d| !d.intersect(dst).is_empty());
-            let covered = damage.iter().any(|d| d.union(&need) == *d);
-            if touched && !covered {
-                damage.push(need);
-                grew = true;
-            }
-        }
-        if !grew { break; }
-    }
 }
 
 /// Paint `scene` into `target` within each damage rectangle.
@@ -373,8 +346,8 @@ fn content_yuv(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rec
 
 fn panel(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area: &Rect) {
     if px.is_empty() || sw == 0 || sh == 0 || px.len() < (sw * sh) as usize { return; }
-    // What lies beneath, blurred, for the translucent pixels.
-    let blurred = background::blur_region(t, info, dst);
+    // The blurred wallpaper for the translucent pixels.
+    let blurred = background::blurred_ptr();
     let ink = crate::shade::glass::ink();
     let x1 = area.x1().min(dst.x + sw);
     let y1 = area.y1().min(dst.y + sh);
@@ -385,8 +358,10 @@ fn panel(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, are
             let a = (p >> 24) & 0xFF;
             if a == 0 { continue; }
             if a < 255 {
-                let base = match &blurred {
-                    Some(b) => b[(ly * dst.w + (x - dst.x)) as usize],
+                let base = match blurred {
+                    // SAFETY: x < width, y < height; the blurred wallpaper
+                    // is screen-sized with the framebuffer pitch.
+                    Some(b) => unsafe { *(b.add(y as usize * info.pitch as usize + x as usize * 4) as *const u32) },
                     None => render::read_pixel(t, info, x, y),
                 };
                 render::put_pixel(t, info, x, y, render::glass_blend(ink.fill(p & 0x00FF_FFFF), base, a, ink));

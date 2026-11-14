@@ -1163,7 +1163,7 @@ pub fn intent_gpu(args: &str) {
         "verify" => {
             crate::shade::gpu_scene::request_verify();
             crate::shade::force_redraw();
-            kprintln!("[npk] gpu: the next whole frame is composed on both and compared");
+            kprintln!("[npk] gpu: the next whole frame and the partial scenes after it are composed on both and compared");
             return;
         }
         "cpu" => {

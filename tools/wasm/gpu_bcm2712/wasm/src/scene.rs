@@ -1,18 +1,18 @@
 //! The gpudev scene executor on V3D: the scene checked and planned by
-//! gpu_scene (`plan_draws`), each segment drawn as one render pass the way
-//! v3dv records it (`gpu_bcm2712_core::v3d_draw`): one draw per item with
-//! draw/draw.frag for its kind, which reads the pixel the tile buffer holds
-//! and paints the item over it exactly as the CPU executor does. A panel's
-//! blur runs between the passes as blur_down.comp and blur_box.comp, one
-//! CSD job per dispatch with its cache-clean job. Everything is queued on
+//! gpu_scene (`plan_draws`), each damage rectangle drawn as one render pass
+//! the way v3dv records it (`gpu_bcm2712_core::v3d_draw`): one draw per
+//! item with draw/draw.frag for its kind, which reads the pixel the tile
+//! buffer holds and paints the item over it exactly as the CPU executor
+//! does. The self-test dispatches a compute program as one CSD job with
+//! its cache-clean job. Everything is queued on
 //! V3D's scheduler (`gpu_bcm2712_core::v3d_sched`) and finished by its
 //! interrupts. The module is also V3D's runtime PM (50 ms autosuspend, as
 //! v3d_drv.c sets it), its overflow-memory worker and its reset path. Not a
 //! Linux file.
 //!
 //! Every buffer V3D reads or writes is mapped by the kernel
-//! (`npk_v3d_map`): the module's own (programs, uniforms, the scene, blur
-//! planes, spill, the render jobs' lists and tile memory) from DMA pages,
+//! (`npk_v3d_map`): the module's own (programs, uniforms, the scene,
+//! spill, the render jobs' lists and tile memory) from DMA pages,
 //! the kernel's from their gpudev pages. The module writes only V3D
 //! addresses the kernel handed out.
 
@@ -24,7 +24,7 @@ use gpu_bcm2712_core::shaders_gen::{self as sg, Program, U};
 use gpu_bcm2712_core::v3d::{self, CsdProgram};
 use gpu_bcm2712_core::v3d_draw::{self, BoAlloc, BoKind};
 use gpu_bcm2712_core::v3d_sched::{Event, Fence, Queue, Sched};
-use gpu_scene::plan::{self, grid, rect};
+use gpu_scene::plan::{self, rect};
 
 const EINVAL: i32 = 22;
 const ENOMEM: i32 = 12;
@@ -37,9 +37,6 @@ const SCENE_PAGES: u32 = 16;
 const FREE_BOS_KEPT: usize = 24;
 /// draw.frag's item kinds, 1..=9; the pipeline of kind k is at k - 1.
 const DRAW_KINDS: usize = 9;
-/// The blur planes at start; they grow to the screen's blocks
-/// (`ensure_planes`).
-const PLANE_PAGES: u32 = 128;
 /// Programs start at this alignment in the code buffer.
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
@@ -141,8 +138,6 @@ pub struct Composer {
     draw_code: Buf,
     pipelines: [v3d_draw::Pipeline; DRAW_KINDS],
     bos: BoPool,
-    planes: Buf,
-    tmp: Buf,
     spill: Option<Buf>,
     /// Dispatches since the composer started.
     pub dispatches: u64,
@@ -311,8 +306,6 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         draw_code,
         pipelines,
         bos: BoPool { free: Vec::new(), job: Vec::new(), held: Vec::new() },
-        planes: Buf::new(PLANE_PAGES)?,
-        tmp: Buf::new(PLANE_PAGES)?,
         spill,
         dispatches: 0,
         trace: None,
@@ -333,20 +326,6 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
 }
 
 impl Composer {
-    /// The blur planes (and their scratch plane) hold `blocks` words: grown,
-    /// once nothing queued reads the old ones.
-    fn ensure_planes(&mut self, hw: &mut PiHw, blocks: u32) -> Result<(), i32> {
-        if self.planes.bytes / 4 >= blocks {
-            return Ok(());
-        }
-        let pages = (blocks * 4).div_ceil(PAGE);
-        let (Some(planes), Some(tmp)) = (Buf::new(pages), Buf::new(pages)) else { return Err(-ENOMEM) };
-        self.drain(hw);
-        core::mem::replace(&mut self.planes, planes).free();
-        core::mem::replace(&mut self.tmp, tmp).free();
-        Ok(())
-    }
-
     /// Everything the composer holds given back, V3D idle (a start that
     /// failed its self-test).
     pub fn free(mut self, hw: &mut PiHw) {
@@ -358,7 +337,7 @@ impl Composer {
         for b in self.bos.free.drain(..).chain(self.bos.job.drain(..)).chain(held) {
             b.free();
         }
-        for b in [self.code, self.draw_code, self.uniforms, self.scene, self.planes, self.tmp] {
+        for b in [self.code, self.draw_code, self.uniforms, self.scene] {
             b.free();
         }
         if let Some(b) = self.spill {
@@ -367,11 +346,10 @@ impl Composer {
     }
 }
 
-/// The compute programs the module dispatches: the panels' blur and the
-/// self-test. compose.comp is the AMD and Intel modules'; here items are
-/// drawn.
+/// The compute programs the module dispatches: the self-test's.
+/// compose.comp is the AMD and Intel modules'; here items are drawn.
 fn dispatched(p: &Program) -> bool {
-    [&sg::BLUR_DOWN, &sg::BLUR_BOX, &sg::FILL_PATTERN].iter().any(|q| core::ptr::eq(*q, p))
+    core::ptr::eq(&sg::FILL_PATTERN, p)
 }
 
 /// A push-constant block for `p` from its members by name.
@@ -855,13 +833,9 @@ impl Composer {
         let mut mem = SceneMem(&self.scene);
         let ck = gpu_scene::scene::check_scene(&JobPayload(seq), bytes, bufs, &mut mem, target)?;
         let before = self.dispatches;
-        // A panel's blur reads at most every 4x4 block of the screen.
-        let blocks = ck.width.div_ceil(plan::BLUR_DOWN) * ck.height.div_ceil(plan::BLUR_DOWN);
-        self.ensure_planes(hw, blocks)?;
-        let lim = plan::limits { bins_words: 0, plane_blocks: self.planes.bytes / 4 };
         let mut s = Sink { c: self, hw, ck: &ck };
-        if let Err(e) = plan::plan_draws(&mut s, &lim, &ck.screen, &ck.damage, &ck.shapes, ck.radius) {
-            // Segments queued before the refusal still write the target:
+        if let Err(e) = plan::plan_draws(&mut s, &ck.screen, &ck.damage, &ck.shapes) {
+            // Passes queued before the refusal still write the target:
             // the CPU redraws it only once they are done.
             self.drain(hw);
             return Err(e);
@@ -897,8 +871,7 @@ impl gpu_scene::scene::scene_buffer for SceneMem<'_> {
     }
 }
 
-/// plan.rs's steps: each segment one render pass, a panel's blur as
-/// dispatches.
+/// plan.rs's steps: each one render pass.
 struct Sink<'a> {
     c: &'a mut Composer,
     hw: &'a mut PiHw,
@@ -906,19 +879,19 @@ struct Sink<'a> {
 }
 
 impl plan::draw_sink for Sink<'_> {
-    fn draw(&mut self, area: &rect, first: usize, end: usize, blur: Option<grid>) -> Result<(), i32> {
+    fn draw(&mut self, area: &rect) -> Result<(), i32> {
         let ck = self.ck;
-        let mut draws = Vec::with_capacity(end - first);
-        for i in first..end {
+        let end = ck.items.len();
+        let mut draws = Vec::with_capacity(end);
+        for i in 0..end {
             let kind = ck.items[i][0] as usize;
             if !(1..=DRAW_KINDS).contains(&kind) {
                 return Err(-EINVAL);
             }
-            // A segment starts at its panel, the one item the blur is for.
-            let b = if i == first { blur } else { None };
-            // Only where no later item of the segment paints over it opaquely.
+            // Only where no later item paints over it opaquely.
             for r in plan::visible_parts(&ck.shapes, end, i, area) {
-                let push = gpu_scene::scene::draw_push(ck, i, &r, self.c.planes.va as u64, b);
+                let mut push = [0u32; v3d_draw::PUSH_WORDS];
+                push[..gpu_scene::scene::DRAW_PUSH_WORDS].copy_from_slice(&gpu_scene::scene::draw_push(ck, i, &r));
                 draws.push(v3d_draw::Draw { pipeline: kind - 1, push, vertex_count: 4 });
             }
         }
@@ -932,39 +905,5 @@ impl plan::draw_sink for Sink<'_> {
         let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: ck.width, height: ck.height };
         let area = v3d_draw::Rect { x: area.x, y: area.y, width: area.w, height: area.h };
         self.c.submit_draws(self.hw, image, area, &draws).map(|_| ())
-    }
-
-    fn blur_down(&mut self, g0: grid) -> Result<(), i32> {
-        let ck = self.ck;
-        let (a, grid) = gpu_scene::scene::blur_down(sg::WIDTH, &ck.target, self.c.planes.va as u64, ck.width,
-                                                    ck.height, g0);
-        let push = push_words(&sg::BLUR_DOWN, &[
-            ("target", &a.target.to_le_bytes()),
-            ("planes", &a.planes.to_le_bytes()),
-            ("pitch_px", &a.pitch_px.to_le_bytes()),
-            ("width", &a.width.to_le_bytes()),
-            ("height", &a.height.to_le_bytes()),
-            ("bx0", &a.bx0.to_le_bytes()),
-            ("by0", &a.by0.to_le_bytes()),
-            ("sw", &a.sw.to_le_bytes()),
-            ("sh", &a.sh.to_le_bytes()),
-        ])?;
-        self.c.submit_dispatch(self.hw, &sg::BLUR_DOWN, &push, grid).map(|_| ())
-    }
-
-    fn blur_box(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32> {
-        let (src, dst) = if to_tmp { (self.c.planes.va, self.c.tmp.va) } else { (self.c.tmp.va, self.c.planes.va) };
-        let (a, grid) = gpu_scene::scene::blur_box(sg::WIDTH, src as u64, dst as u64, lines, len, stride, step,
-                                                   self.ck.radius);
-        let push = push_words(&sg::BLUR_BOX, &[
-            ("src", &a.src.to_le_bytes()),
-            ("dst", &a.dst.to_le_bytes()),
-            ("lines", &a.lines.to_le_bytes()),
-            ("len", &a.len.to_le_bytes()),
-            ("stride", &a.stride.to_le_bytes()),
-            ("step", &a.step.to_le_bytes()),
-            ("radius", &a.radius.to_le_bytes()),
-        ])?;
-        self.c.submit_dispatch(self.hw, &sg::BLUR_BOX, &push, grid).map(|_| ())
     }
 }

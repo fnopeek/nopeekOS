@@ -1739,16 +1739,14 @@ impl Compositor {
         self.needs_full_redraw = false;
     }
 
-    /// Compose the frame into `target` within `damage`, grown where glass
-    /// needs what lies beneath it (`scene::expand_damage`). Returns the
+    /// Compose the frame into `target` within `damage`. Returns the
     /// damage painted. Window buffers are brought up to date while the
     /// scene is built; dirty flags are cleared by the callers that repaint
     /// those windows (`render`, `render_damaged`).
-    pub fn compose(&mut self, target: *mut u8, info: &FbInfo, mut damage: Vec<Rect>) -> Vec<Rect> {
+    pub fn compose(&mut self, target: *mut u8, info: &FbInfo, damage: Vec<Rect>) -> Vec<Rect> {
         self.refresh_chrome();
         self.tell_focus();
         let frame = self.build_scene();
-        scene::expand_damage(&frame, &mut damage, Rect::new(0, 0, info.width, info.height));
         crate::shade::gpu_scene::compose(&frame, &*self, target, info, &damage);
         #[cfg(target_arch = "x86_64")]
         crate::shade::capture::note_damage();

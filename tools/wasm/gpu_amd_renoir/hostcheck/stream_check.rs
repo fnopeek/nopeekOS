@@ -82,8 +82,6 @@ fn main() {
 
     let k = rs::KERNELS.iter().position(|k| {
         core::ptr::eq(k.code.as_ptr(), match sg::RADV_RECORDED_KERNEL {
-            "blur_box" => sg::BLUR_BOX.code.as_ptr(),
-            "blur_down" => sg::BLUR_DOWN.code.as_ptr(),
             "compose" => sg::COMPOSE.code.as_ptr(),
             _ => sg::FILL_PATTERN.code.as_ptr(),
         })

@@ -1,14 +1,10 @@
 //! How a checked scene becomes dispatches (scene.rs): per damage
-//! rectangle the item list is cut at every panel, since a panel blurs what
-//! lies beneath it (background::blur_region: 4x4 block means, three box
-//! passes per axis). Each segment is composed over the union of what its
-//! items reach, with a bin table: per 64x64 bin of the screen grid the
-//! items that reach the bin, in order, starting at the last one that covers
-//! it opaquely (the background, a window's content, a window's glass). A
-//! bin that a later segment covers opaquely is left out of the earlier
-//! ones, unless a panel in between blurs it. No GPU access here; the
-//! caller's `sink` turns each step into commands and memory writes. Not a
-//! Linux file.
+//! rectangle one compose over the union of what the items reach, with a
+//! bin table: per 64x64 bin of the screen grid the items that reach the
+//! bin, in order, starting at the last one that covers it opaquely (the
+//! background, a window's content, a window's glass). No GPU access here;
+//! the caller's `sink` turns each step into commands and memory writes.
+//! Not a Linux file.
 
 pub const EINVAL: i32 = 22;
 pub const E2BIG: i32 = 7;
@@ -25,8 +21,6 @@ pub const BIN: u32 = 64;
 pub const MAX_BINS: usize = 4096;
 /// Words after a table's lists that compose.comp's 16-word loads may touch.
 pub const BLOCK_SLACK: u32 = 16;
-pub const BLUR_DOWN: u32 = 4;
-pub const BLUR_PASSES: u32 = 3;
 /// Item indices in a bin list are 16-bit.
 pub const MAX_ITEMS: usize = 1024;
 
@@ -162,114 +156,54 @@ pub struct bin_table {
     pub listed: u32,
 }
 
-/// The block grid a panel's blur reads: `(bx0, by0, sw, sh)`.
-pub type grid = (u32, u32, u32, u32);
-
 /// What the plan asks of the GPU side.
 pub trait sink {
     /// Words of a bin table, at word `at` of the bins buffer.
     fn bins(&mut self, at: u32, words: &[u32]) -> Result<(), i32>;
-    fn compose(&mut self, area: &rect, t: &bin_table, blur: Option<grid>) -> Result<(), i32>;
-    /// Block means of the target over `g` into the planes.
-    fn blur_down(&mut self, g: grid) -> Result<(), i32>;
-    /// One box pass: planes into the scratch plane (`to_tmp`) or back.
-    fn blur_box(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32>;
+    fn compose(&mut self, area: &rect, t: &bin_table) -> Result<(), i32>;
 }
 
 pub struct limits {
     pub bins_words: u32,
-    pub plane_blocks: u32,
 }
 
-/// What the draw plan asks of the GPU side: the blur passes as for
-/// [`sink`], and the items of each segment drawn in order.
+/// What the draw plan asks of the GPU side: the items drawn in order.
 pub trait draw_sink {
-    fn blur_down(&mut self, g: grid) -> Result<(), i32>;
-    fn blur_box(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32>;
-    /// Items `first..end` over `area`, each where it reaches; `blur`: the
-    /// planes the first item's blur left (a panel), or None.
-    fn draw(&mut self, area: &rect, first: usize, end: usize, blur: Option<grid>) -> Result<(), i32>;
+    /// Every item over `area`, each where it reaches.
+    fn draw(&mut self, area: &rect) -> Result<(), i32>;
 }
 
-/// The blur passes of either plan.
-trait blurs {
-    fn down(&mut self, g: grid) -> Result<(), i32>;
-    fn pass(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32>;
-}
-
-impl blurs for dyn sink + '_ {
-    fn down(&mut self, g: grid) -> Result<(), i32> {
-        self.blur_down(g)
-    }
-    fn pass(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32> {
-        self.blur_box(to_tmp, lines, len, stride, step)
-    }
-}
-
-impl blurs for dyn draw_sink + '_ {
-    fn down(&mut self, g: grid) -> Result<(), i32> {
-        self.blur_down(g)
-    }
-    fn pass(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32> {
-        self.blur_box(to_tmp, lines, len, stride, step)
-    }
-}
-
-/// The draws of a scene, cut as [`plan`] cuts it: per damage rectangle the
-/// items in segments that end before each panel, the panel's blur between
-/// them; each segment drawn over the part of the rectangle its items reach.
-/// On a GPU that draws into a tile buffer, an item hidden by a later opaque
-/// one costs a pass over tile memory, not a read of the target, so no bin
-/// skips it.
-pub fn plan_draws(s: &mut dyn draw_sink, lim: &limits, screen: &rect, damage: &[rect], items: &[item_shape],
-                  radius: u32) -> Result<(), i32> {
+/// The draws of a scene: per damage rectangle every item, over the part
+/// of the rectangle the items reach. On a GPU that draws into a tile
+/// buffer, an item hidden by a later opaque one costs a pass over tile
+/// memory, not a read of the target, so no bin skips it.
+pub fn plan_draws(s: &mut dyn draw_sink, screen: &rect, damage: &[rect], items: &[item_shape]) -> Result<(), i32> {
     if items.len() > MAX_ITEMS {
         return Err(-E2BIG);
     }
     for d in damage {
-        let clip = d.intersect(screen);
-        if clip.is_empty() {
-            continue;
-        }
-        let mut seg = 0usize;
-        let mut seg_blur = None;
-        for i in 0..items.len() {
-            if items[i].kind != KIND_PANEL {
-                continue;
-            }
-            if i > seg {
-                draw_segment(s, items, &clip, seg, i, seg_blur)?;
-            }
-            let dst = items[i].reach;
-            seg_blur = if radius > 0 && !dst.intersect(&clip).is_empty() {
-                blur_region(s, lim, screen, &dst, radius)?
-            } else {
-                None
-            };
-            seg = i;
-        }
-        if items.len() > seg {
-            draw_segment(s, items, &clip, seg, items.len(), seg_blur)?;
+        let area = reached(items, &d.intersect(screen));
+        if !area.is_empty() {
+            s.draw(&area)?;
         }
     }
     Ok(())
 }
 
-fn draw_segment(s: &mut dyn draw_sink, items: &[item_shape], clip: &rect, first: usize, end: usize,
-                blur: Option<grid>) -> Result<(), i32> {
-    let area = items[first..end].iter().fold(EMPTY, |a, it| a.union(&it.reach)).intersect(clip);
-    if area.is_empty() {
-        return Ok(());
+/// The part of `clip` the items reach.
+fn reached(items: &[item_shape], clip: &rect) -> rect {
+    if clip.is_empty() {
+        return EMPTY;
     }
-    s.draw(&area, first, end, blur)
+    items.iter().fold(EMPTY, |a, it| a.union(&it.reach)).intersect(clip)
 }
 
 /// Pieces an item's draw is split into at most; a cover that would split
 /// it further is not cut out.
 pub const MAX_PIECES: usize = 16;
 
-/// Where item `i` of `first..end` must be drawn over `area`: its reach
-/// within the area, less every part a later item of the segment covers
+/// Where item `i` of `items[..end]` must be drawn over `area`: its reach
+/// within the area, less every part a later item covers
 /// opaquely (`cover`: there the later item's result does not depend on
 /// what lies beneath). At most `MAX_PIECES` rectangles, disjoint.
 pub fn visible_parts(items: &[item_shape], end: usize, i: usize, area: &rect) -> alloc::vec::Vec<rect> {
@@ -323,95 +257,27 @@ fn subtract(a: &rect, b: &rect, out: &mut alloc::vec::Vec<rect>) {
 }
 
 /// The dispatches of a scene: `items` in order, `damage` already checked.
-pub fn plan(s: &mut dyn sink, lim: &limits, screen: &rect, damage: &[rect], items: &[item_shape], radius: u32)
+pub fn plan(s: &mut dyn sink, lim: &limits, screen: &rect, damage: &[rect], items: &[item_shape])
             -> Result<(), i32> {
     if items.len() > MAX_ITEMS {
         return Err(-E2BIG);
     }
     let mut bins_at = 0u32;
     for d in damage {
-        let clip = d.intersect(screen);
-        if clip.is_empty() {
+        let area = reached(items, &d.intersect(screen));
+        if area.is_empty() {
             continue;
         }
-        // Where each panel's blur reads the target in this pass.
-        let mut reads = [(0usize, EMPTY); 64];
-        let mut n_reads = 0usize;
-        for (i, it) in items.iter().enumerate() {
-            if it.kind != KIND_PANEL || radius == 0 || it.reach.intersect(&clip).is_empty() {
-                continue;
-            }
-            if n_reads == reads.len() {
-                return Err(-E2BIG);
-            }
-            reads[n_reads] = (i, blur_reads(screen, &it.reach, radius));
-            n_reads += 1;
-        }
-        let pass = pass { clip, items, reads: &reads[..n_reads] };
-        let mut seg = 0usize;
-        let mut seg_blur = None;
-        for i in 0..items.len() {
-            if items[i].kind != KIND_PANEL {
-                continue;
-            }
-            if i > seg {
-                segment(s, lim, &mut bins_at, &pass, seg, i, seg_blur)?;
-            }
-            let dst = items[i].reach;
-            seg_blur = if radius > 0 && !dst.intersect(&clip).is_empty() {
-                blur_region(s, lim, screen, &dst, radius)?
-            } else {
-                None
-            };
-            seg = i;
-        }
-        if items.len() > seg {
-            segment(s, lim, &mut bins_at, &pass, seg, items.len(), seg_blur)?;
-        }
+        let t = write_bins(s, lim, bins_at, &area, items)?;
+        bins_at += t.words;
+        s.compose(&area, &t)?;
     }
     Ok(())
 }
 
-/// One damage rectangle's pass over the items.
-struct pass<'a> {
-    clip: rect,
-    items: &'a [item_shape],
-    /// Panels that blur in this pass, by item index, and the target pixels
-    /// their blur reads.
-    reads: &'a [(usize, rect)],
-}
-
-impl pass<'_> {
-    /// Whether `bin` (within the clip) is painted over opaquely by an item
-    /// from `end` on, with no panel in between reading it for its blur:
-    /// then nothing before `end` shows there.
-    fn hidden_after(&self, bin: &rect, end: usize) -> bool {
-        for (k, it) in self.items.iter().enumerate().skip(end) {
-            if it.cover.0.contains(bin) || it.cover.1.contains(bin) {
-                return !self.reads.iter().any(|&(p, r)| p >= end && p < k && !r.intersect(bin).is_empty());
-            }
-        }
-        false
-    }
-}
-
-/// Items `first..end` over the part of the clip they reach.
-fn segment(s: &mut dyn sink, lim: &limits, bins_at: &mut u32, ps: &pass, first: usize, end: usize,
-           blur: Option<grid>) -> Result<(), i32> {
-    let items = ps.items;
-    let area = items[first..end].iter().fold(EMPTY, |a, it| a.union(&it.reach)).intersect(&ps.clip);
-    if area.is_empty() {
-        return Ok(());
-    }
-    let t = write_bins(s, lim, *bins_at, &area, ps, first, end)?;
-    *bins_at += t.words;
-    s.compose(&area, &t, blur)
-}
-
-/// The bin table of items `first..end` over `area`, at word `at`.
-fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, ps: &pass, first: usize, end: usize)
+/// The bin table of `items` over `area`, at word `at`.
+fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, items: &[item_shape])
               -> Result<bin_table, i32> {
-    let items = &ps.items[..end];
     let bin_x0 = area.x / BIN;
     let bin_y0 = area.y / BIN;
     let nbx = area.x1().div_ceil(BIN) - bin_x0;
@@ -433,8 +299,8 @@ fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, ps: &pass, f
             let br = bin.intersect(area);
             let mut n = 0usize;
             let mut opaque = false;
-            if !br.is_empty() && !ps.hidden_after(&bin.intersect(&ps.clip), end) {
-                for (i, it) in items.iter().enumerate().skip(first) {
+            if !br.is_empty() {
+                for (i, it) in items.iter().enumerate() {
                     if it.reach.intersect(&br).is_empty() {
                         continue;
                     }
@@ -473,48 +339,4 @@ fn write_bins(s: &mut dyn sink, lim: &limits, at: u32, area: &rect, ps: &pass, f
     }
     s.bins(at, &hdr[..nb * 2])?;
     Ok(bin_table { at, words: nb as u32 * 2 + written + BLOCK_SLACK, bin_x0, bin_y0, nbx, listed })
-}
-
-/// The block grid `blur_region` uses for a panel at `r`: `(bx0, by0, bx1,
-/// by1)` in 4x4 blocks.
-fn blur_blocks(screen: &rect, r: &rect, radius: u32) -> (u32, u32, u32, u32) {
-    let m = (radius * BLUR_PASSES + 2) * BLUR_DOWN;
-    let bx0 = r.x.saturating_sub(m) / BLUR_DOWN;
-    let by0 = r.y.saturating_sub(m) / BLUR_DOWN;
-    let bx1 = (r.x1() + m).min(screen.w).div_ceil(BLUR_DOWN);
-    let by1 = (r.y1() + m).min(screen.h).div_ceil(BLUR_DOWN);
-    (bx0, by0, bx1, by1)
-}
-
-/// The target pixels a panel's blur reads.
-fn blur_reads(screen: &rect, r: &rect, radius: u32) -> rect {
-    let (bx0, by0, bx1, by1) = blur_blocks(screen, r, radius);
-    if bx1 <= bx0 || by1 <= by0 {
-        return EMPTY;
-    }
-    rect { x: bx0 * BLUR_DOWN, y: by0 * BLUR_DOWN, w: (bx1 - bx0) * BLUR_DOWN, h: (by1 - by0) * BLUR_DOWN }
-        .intersect(screen)
-}
-
-/// background::blur_region of `r` in the target into the planes; None
-/// where the CPU returns None (the panel then sits on the pixel beneath).
-fn blur_region<S: blurs + ?Sized>(s: &mut S, lim: &limits, screen: &rect, r: &rect, radius: u32) -> Result<Option<grid>, i32> {
-    if r.is_empty() {
-        return Ok(None);
-    }
-    let (bx0, by0, bx1, by1) = blur_blocks(screen, r, radius);
-    if bx1 <= bx0 || by1 <= by0 {
-        return Ok(None);
-    }
-    let (sw, sh) = (bx1 - bx0, by1 - by0);
-    if sw * sh > lim.plane_blocks {
-        return Err(-E2BIG);
-    }
-    s.down((bx0, by0, sw, sh))?;
-    for _ in 0..BLUR_PASSES {
-        // Columns, then rows (box_pass in compute_blur and blur_region).
-        s.pass(true, sw, sh, 1, sw)?;
-        s.pass(false, sh, sw, sw, 1)?;
-    }
-    Ok(Some((bx0, by0, sw, sh)))
 }

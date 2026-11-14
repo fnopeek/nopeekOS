@@ -30,12 +30,17 @@ const FAILURE_LIMIT: u32 = 8;
 const FAILURES_LOGGED: u64 = 16;
 /// Differing pixels the verification lists.
 const DIFFS_SHOWN: usize = 8;
+/// Scenes after a verified whole frame that are composed both ways too:
+/// the partial ones (a window, a line) take other paths on the GPU.
+const PARTIAL_CHECKS: u32 = 16;
 
 const MODE_UNTESTED: u8 = 0;
 const MODE_ON: u8 = 1;
 const MODE_OFF: u8 = 2;
 static MODE: AtomicU8 = AtomicU8::new(MODE_UNTESTED);
 static FAILURES_IN_ROW: AtomicU32 = AtomicU32::new(0);
+/// Partial scenes still to verify (`PARTIAL_CHECKS`).
+static PARTIAL_LEFT: AtomicU32 = AtomicU32::new(0);
 
 static SCENES_DONE: AtomicU64 = AtomicU64::new(0);
 static SCENES_FAILED: AtomicU64 = AtomicU64::new(0);
@@ -71,6 +76,9 @@ enum Pending {
         t0: u64,
         /// Where the CPU drew no source (a guest frame it may not copy).
         left_out: Vec<Rect>,
+        damage: Vec<Rect>,
+        /// One of the `PARTIAL_CHECKS`, not the whole frame that decides.
+        partial: bool,
     },
 }
 
@@ -90,13 +98,18 @@ pub fn compose(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbI
     finish_with(sources);
     if gpudev::scenes_offered() {
         match MODE.load(Ordering::Acquire) {
+            MODE_ON if !full && PARTIAL_LEFT.load(Ordering::Relaxed) > 0 => {
+                PARTIAL_LEFT.fetch_sub(1, Ordering::Relaxed);
+                verify(frame, sources, target, info, damage, true);
+                return;
+            }
             MODE_ON => {
                 if submit(frame, sources, target, info, damage, full, t0) {
                     return;
                 }
             }
             MODE_UNTESTED if full => {
-                verify(frame, sources, target, info, damage);
+                verify(frame, sources, target, info, damage, false);
                 return;
             }
             _ => {}
@@ -235,10 +248,10 @@ fn settle(p: Pending) -> Option<Redo> {
             failed(Ok(status));
             Some(Redo { scene, target, info, damage })
         }
-        Pending::Verify { seq, scene, target, info, copy, pages, cpu, t0, left_out } => {
+        Pending::Verify { seq, scene, target, info, copy, pages, cpu, t0, left_out, damage, partial } => {
             let ok = seq.map(|s| gpudev::wait_scene_bound(s) == 0);
             let gpu = crate::time::counter() - t0;
-            judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu, &left_out);
+            judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu, &left_out, &damage, partial);
             if gpudev::release(copy, copy, pages) {
                 crate::memory::deallocate_contiguous(copy, pages);
             }
@@ -296,11 +309,12 @@ fn source_key(s: Source) -> (u8, u32, u32) {
     }
 }
 
-/// The first whole frame both ways: the GPU into a copy of `target`, the
-/// CPU into `target` itself; `finish` compares them bit for bit. A source
-/// that changed in between leaves the question open for the next whole
-/// frame.
-fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) {
+/// A scene both ways: the GPU into a copy of `target`, the CPU into
+/// `target` itself; `finish` compares them bit for bit. The first whole
+/// frame decides whether the GPU composes, the `partial` ones after it
+/// only take it back. A source that changed in between leaves the
+/// question open for the next one.
+fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect], partial: bool) {
     let planes_before = plane_ptrs();
     let gpu_rec = Recorder { inner: sources, seen: Default::default(), blank: Default::default() };
     let cpu_rec = Recorder { inner: sources, seen: Default::default(), blank: Default::default() };
@@ -338,7 +352,8 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     let gpu_seen = gpu_rec.seen();
     let changed = cpu_rec.seen().iter().any(|s| !gpu_seen.contains(s)) || plane_ptrs() != planes_before;
     if changed {
-        crate::kdebug!("[npk] gpu: a source changed during the verification, comparing the next whole frame");
+        crate::kdebug!("[npk] gpu: a source changed during the verification, comparing the next {}",
+            if partial { "scene" } else { "whole frame" });
         // The copy stays allocated until the scene that writes it is done.
         if let Some(s) = seq {
             gpudev::wait_scene_bound(s);
@@ -350,14 +365,14 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     }
     *PENDING.lock() = Some(Pending::Verify {
         seq, scene: Scene { items: frame.items.clone() }, target: target as usize, info: *info, copy, pages, cpu, t0,
-        left_out,
+        left_out, damage: damage.to_vec(), partial,
     });
 }
 
 /// Compare the verification copy with the CPU's frame and switch.
 #[allow(clippy::too_many_arguments)]
 fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bool>, gpu: u64, cpu: u64,
-         left_out: &[Rect]) {
+         left_out: &[Rect], damage: &[Rect], partial: bool) {
     let us = |c: u64| c * 1000 / (crate::time::counter_hz() / 1000).max(1);
     match ok {
         Some(true) => {
@@ -393,9 +408,14 @@ fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bo
                     }
                 }
             }
-            if diffs == 0 {
+            if diffs == 0 && partial {
+                if PARTIAL_LEFT.load(Ordering::Relaxed) == 0 {
+                    crate::kprintln!("[npk] gpu: the {} partial scenes after it matched too", PARTIAL_CHECKS);
+                }
+            } else if diffs == 0 {
                 MODE.store(MODE_ON, Ordering::Release);
                 FAILURES_IN_ROW.store(0, Ordering::Relaxed);
+                PARTIAL_LEFT.store(PARTIAL_CHECKS, Ordering::Relaxed);
                 crate::kprintln!("[npk] gpu: scene verified ({} items), GPU {} us incl. binding vs CPU {} us — composing on the GPU",
                     frame.items.len(), us(gpu), us(cpu));
                 if skipped != 0 {
@@ -403,8 +423,13 @@ fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bo
                 }
             } else {
                 MODE.store(MODE_OFF, Ordering::Release);
-                crate::kprintln!("[npk] gpu: scene differs in {} of {} pixels, composing on the CPU (GPU {} us, CPU {} us)",
-                    diffs, info.width as u64 * info.height as u64, us(gpu), us(cpu));
+                PARTIAL_LEFT.store(0, Ordering::Relaxed);
+                crate::kprintln!("[npk] gpu: {} differs in {} of {} pixels, composing on the CPU (GPU {} us, CPU {} us)",
+                    if partial { "a partial scene" } else { "the scene" }, diffs,
+                    info.width as u64 * info.height as u64, us(gpu), us(cpu));
+                for d in damage.iter().take(6) {
+                    crate::kprintln!("[npk] gpu:   damage ({}, {}) {}x{}", d.x, d.y, d.w, d.h);
+                }
                 crate::kprintln!("[npk] gpu:   within ({}, {})..({}, {}) on {} rows", x0, y0, x1, y1, rows.len());
                 rows.sort_by(|a, b| b.1.cmp(&a.1));
                 for (y, n) in rows.iter().take(6) {
@@ -573,7 +598,7 @@ pub(crate) fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage
     let damage: Vec<Rect> = damage.iter().map(|d| d.intersect(&screen)).filter(|d| !d.is_empty()).collect();
     let mut out = Vec::with_capacity(HEADER + damage.len() * 16 + items.len() * ITEM + glyphs.len());
     put(&mut out, &[MAGIC, items.len() as u32, damage.len() as u32, glyphs.len() as u32, flags, wall, blur, glass,
-        planes.radius, ink.ceil, ink.tint, ink.tint_w, info.width, info.height, 0, 0]);
+        0, ink.ceil, ink.tint, ink.tint_w, info.width, info.height, 0, 0]);
     for d in &damage {
         put(&mut out, &[d.x, d.y, d.w, d.h]);
     }

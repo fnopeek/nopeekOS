@@ -84,6 +84,8 @@ fn fill(d: &dispatch, word: u32, hole: Hole) -> u32 {
         Hole::UserData10 => user_data(10),
         Hole::UserData11 => user_data(11),
         Hole::UserData12 => user_data(12),
+        Hole::UserData13 => user_data(13),
+        Hole::UserData14 => user_data(14),
     }
 }
 
@@ -142,19 +144,15 @@ pub fn template_for(k: usize, prev: Option<usize>) -> &'static [(u32, Hole)] {
 }
 
 /// The programs, in the order the composer uploads them.
-pub const KERNELS: [&Kernel; 5] = [&sg::FILL_PATTERN, &sg::COMPOSE, &sg::BLUR_DOWN, &sg::BLUR_BOX, &sg::IMPORT];
+pub const KERNELS: [&Kernel; 3] = [&sg::FILL_PATTERN, &sg::COMPOSE, &sg::IMPORT];
 pub const K_FILL_PATTERN: usize = 0;
 pub const K_COMPOSE: usize = 1;
-pub const K_BLUR_DOWN: usize = 2;
-pub const K_BLUR_BOX: usize = 3;
-pub const K_IMPORT: usize = 4;
+pub const K_IMPORT: usize = 2;
 
 /// Per program: first dispatch, same program again, after another one.
 type templates = (&'static [(u32, Hole)], &'static [(u32, Hole)], &'static [(u32, Hole)]);
-const TEMPLATES: [templates; 5] = [
+const TEMPLATES: [templates; 3] = [
     (sg::FILL_PATTERN_RADV_DISPATCH, sg::FILL_PATTERN_RADV_REPUSH, sg::FILL_PATTERN_RADV_SWITCH),
     (sg::COMPOSE_RADV_DISPATCH, sg::COMPOSE_RADV_REPUSH, sg::COMPOSE_RADV_SWITCH),
-    (sg::BLUR_DOWN_RADV_DISPATCH, sg::BLUR_DOWN_RADV_REPUSH, sg::BLUR_DOWN_RADV_SWITCH),
-    (sg::BLUR_BOX_RADV_DISPATCH, sg::BLUR_BOX_RADV_REPUSH, sg::BLUR_BOX_RADV_SWITCH),
     (sg::IMPORT_RADV_DISPATCH, sg::IMPORT_RADV_REPUSH, sg::IMPORT_RADV_SWITCH),
 ];

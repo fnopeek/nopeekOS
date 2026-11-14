@@ -6,10 +6,8 @@
 // comments name the function each part mirrors.
 //
 // The includer declares `Words` (a buffer reference to 32-bit words), `Blk`
-// (an item's 16 words) and `BC(b, k)` (word k of one), defines PANEL_PLANES,
-// PANEL_BSW, PANEL_BSH, PANEL_BX0 and PANEL_BY0 (the blurred planes a
-// panel's base is read from, 0 wide for none, and the screen pixel they
-// start at in quarters), and sets the g_* frame values before painting.
+// (an item's 16 words) and `BC(b, k)` (word k of one), and sets the g_*
+// frame values before painting.
 
 Words mkaddr(uint lo, uint hi) {
     return Words(uint64_t(lo) | (uint64_t(hi) << 32));
@@ -296,7 +294,7 @@ uint content(Blk it, uint x, uint y, uint c) {
     return cov >= 256u ? v : blend(v, c, cov);
 }
 
-// scene::panel at one pixel; the base is the blurred pixel beneath.
+// scene::panel at one pixel; the base is the blurred wallpaper.
 uint panel(Blk it, uint x, uint y, uint c) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
     Words src = mkaddr(BC(it, 5), BC(it, 6));
@@ -308,32 +306,7 @@ uint panel(Blk it, uint x, uint y, uint c) {
     if (a == 0u)
         return c;
     if (a < 255u) {
-        uint base = c;
-        if (PANEL_BSW != 0u) {
-            // background::blur_region's bilinear step.
-            uint fy = (y >= 2u ? y - 2u : 0u) * 256u / 4u;
-            uint gy = (fy >> 8) >= PANEL_BY0 ? (fy >> 8) - PANEL_BY0 : 0u;
-            uint y0 = min(gy, PANEL_BSH - 1u);
-            uint wy = fy & 255u;
-            uint y1 = min(y0 + 1u, PANEL_BSH - 1u);
-            uint fx = (x >= 2u ? x - 2u : 0u) * 256u / 4u;
-            uint gx = (fx >> 8) >= PANEL_BX0 ? (fx >> 8) - PANEL_BX0 : 0u;
-            uint x0 = min(gx, PANEL_BSW - 1u);
-            uint wx = fx & 255u;
-            uint x1 = min(x0 + 1u, PANEL_BSW - 1u);
-            uint q00 = PANEL_PLANES.v[y0 * PANEL_BSW + x0];
-            uint q01 = PANEL_PLANES.v[y0 * PANEL_BSW + x1];
-            uint q10 = PANEL_PLANES.v[y1 * PANEL_BSW + x0];
-            uint q11 = PANEL_PLANES.v[y1 * PANEL_BSW + x1];
-            base = 0u;
-            for (uint k = 0u; k < 3u; k++) {
-                uint sh_ = 16u - 8u * k;
-                uint top = ((q00 >> sh_) & 255u) * (256u - wx) + ((q01 >> sh_) & 255u) * wx;
-                uint bot = ((q10 >> sh_) & 255u) * (256u - wx) + ((q11 >> sh_) & 255u) * wx;
-                uint v = (top * (256u - wy) + bot * wy) >> 16;
-                base |= min(v, 255u) << sh_;
-            }
-        }
+        uint base = (g_flags & FLAG_BLURRED) != 0u ? g_blur.v[y * g_blur_pitch + x] : c;
         uint fill = ink_fill(pv & 0xFFFFFFu, g_tint, g_tint_w);
         return glass_blend(fill, base, a, g_ceil);
     }
