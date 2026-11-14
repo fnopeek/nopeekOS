@@ -22,6 +22,7 @@
 
 extern crate alloc;
 
+pub mod cle;
 pub mod clk;
 pub mod drm_mm;
 pub mod drm_scdc_helper;
@@ -32,6 +33,7 @@ pub mod linux;
 pub mod regs;
 pub mod shaders_gen;
 pub mod v3d;
+pub mod v3d_packet_gen;
 pub mod v3d_sched;
 pub mod vc4_crtc;
 pub mod vc4_drv;
@@ -45,3 +47,5 @@ pub mod vc4_plane;
 mod tests;
 #[cfg(test)]
 mod tests_v3d;
+#[cfg(test)]
+mod tests_packets;
