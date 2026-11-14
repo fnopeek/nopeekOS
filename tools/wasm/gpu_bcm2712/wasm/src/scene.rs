@@ -716,8 +716,8 @@ impl Composer {
             push[..4].copy_from_slice(&r);
             // Item::Fill: kind, x, y, w, h, color, alpha, radius.
             push[4..12].copy_from_slice(&[8, r[0], r[1], r[2] - r[0], r[3] - r[1], color, alpha, 0]);
-            push[30] = W;
-            push[31] = H;
+            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = W;
+            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = H;
             v3d_draw::Draw { pipeline: 7, push, vertex_count: 4 }
         };
         let draws = [fill([0, 0, W, H], BG, 255), fill(PART, FG, 128)];

@@ -391,6 +391,8 @@ pub fn compose(width: u32, frame: u64, bins: u64, area: &rect, t: &bin_table) ->
 
 /// Words of a draw's push constants (gpu_bcm2712/shaders/draw/draw.h.glsl).
 pub const DRAW_PUSH_WORDS: usize = 29;
+/// Word of a draw's viewport width; its height follows.
+pub const DRAW_PUSH_VIEWPORT: usize = 27;
 
 /// One item drawn over `r` (draw.h.glsl `Draw`): the rectangle, the item's
 /// words, the frame values and the one source its kind reads beside its
@@ -421,7 +423,7 @@ pub fn draw_push(c: &checked, item: usize, r: &rect) -> [u32; DRAW_PUSH_WORDS] {
         KIND_CLOSE_GLYPH => src(&mut p, F_GLYPHS, None),
         _ => {}
     }
-    p[27] = c.width;
-    p[28] = c.height;
+    p[DRAW_PUSH_VIEWPORT] = c.width;
+    p[DRAW_PUSH_VIEWPORT + 1] = c.height;
     p
 }
