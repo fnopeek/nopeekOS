@@ -1561,6 +1561,32 @@ pub fn wait_framebuffer() -> bool {
     ok
 }
 
+/// Write back and drop the CPU's cache lines of buffer `id`, of its rows
+/// `y0..y1` only with `rows`: before the module reads what the CPU wrote,
+/// and after it wrote what the CPU reads next (`dma_sync_single_for_device`
+/// and `_for_cpu`). Nothing snoops the CPU caches on arm64; x86 devices do.
+pub fn sync(id: u32, rows: Option<(u32, u32)>) {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let range = {
+            let st = STATE.lock();
+            st.bos.get(&id).filter(|b| b.addr != 0 && !st.page_lists.contains_key(&id)).map(|b| match rows {
+                Some((y0, y1)) => {
+                    let y1 = y1.min(b.height);
+                    let y0 = y0.min(y1);
+                    (b.addr + y0 as u64 * b.pitch as u64, (y1 - y0) as u64 * b.pitch as u64)
+                }
+                None => (b.addr, b.size),
+            })
+        };
+        if let Some((addr, len)) = range {
+            crate::mm::clflush_range(addr, len);
+        }
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = (id, rows);
+}
+
 /// Hand a scene to the module: `payload` per §3.3 v1 into the screen-sized
 /// buffer `target` (a shadow, or a registered copy of one), reading
 /// `sources`. Returns the job's sequence number.

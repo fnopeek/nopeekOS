@@ -57,6 +57,8 @@ enum Pending {
     Scene {
         seq: u32,
         scene: Scene,
+        /// The target's buffer.
+        tid: u32,
         target: usize,
         info: FbInfo,
         damage: Vec<Rect>,
@@ -67,6 +69,8 @@ enum Pending {
     },
     Verify {
         seq: Option<u32>,
+        /// The copy's buffer.
+        tid: Option<u32>,
         scene: Scene,
         target: usize,
         info: FbInfo,
@@ -138,14 +142,17 @@ fn submit(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     let pin = gpudev::ScenePin::new();
     let r = match encode(frame, sources, info, damage) {
         None => Err("a source cannot be handed to the module"),
-        Some((payload, srcs)) => gpudev::submit_scene(tid, payload, &srcs).ok_or("the scene was refused"),
+        Some((payload, srcs)) => {
+            to_device(tid, &srcs, info, damage);
+            gpudev::submit_scene(tid, payload, &srcs).ok_or("the scene was refused")
+        }
     };
     let binding = pin.added();
     drop(pin);
     match r {
         Ok(seq) => {
             *PENDING.lock() = Some(Pending::Scene {
-                seq, scene: Scene { items: frame.items.clone() }, target: target as usize, info: *info,
+                seq, scene: Scene { items: frame.items.clone() }, tid, target: target as usize, info: *info,
                 damage: damage.to_vec(), binding, full, t0,
             });
             true
@@ -234,8 +241,9 @@ impl Redo {
 /// Wait for `p`; what the CPU still has to compose.
 fn settle(p: Pending) -> Option<Redo> {
     match p {
-        Pending::Scene { seq, scene, target, info, damage, binding, full, t0 } => {
+        Pending::Scene { seq, scene, tid, target, info, damage, binding, full, t0 } => {
             let status = if binding { gpudev::wait_scene_bound(seq) } else { gpudev::wait_scene(seq) };
+            from_device(tid, &damage);
             if status == 0 {
                 SCENES_DONE.fetch_add(1, Ordering::Relaxed);
                 FAILURES_IN_ROW.store(0, Ordering::Relaxed);
@@ -248,8 +256,11 @@ fn settle(p: Pending) -> Option<Redo> {
             failed(Ok(status));
             Some(Redo { scene, target, info, damage })
         }
-        Pending::Verify { seq, scene, target, info, copy, pages, cpu, t0, left_out, damage, partial } => {
+        Pending::Verify { seq, tid, scene, target, info, copy, pages, cpu, t0, left_out, damage, partial } => {
             let ok = seq.map(|s| gpudev::wait_scene_bound(s) == 0);
+            if let Some(t) = tid {
+                from_device(t, &damage);
+            }
             let gpu = crate::time::counter() - t0;
             judge(&scene, target as *mut u8, &info, copy, ok, gpu, cpu, &left_out, &damage, partial);
             if gpudev::release(copy, copy, pages) {
@@ -330,11 +341,13 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
     // screen-sized buffer of `bytes`; they do not overlap.
     unsafe { core::ptr::copy_nonoverlapping(target, copy as *mut u8, bytes) };
     let t0 = crate::time::counter();
+    let tid = gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch);
     let seq = {
         let _pin = gpudev::ScenePin::new();
-        gpudev::bo_for(copy, bytes as u64, info.width, info.height, info.pitch)
-            .zip(encode(frame, &gpu_rec, info, damage))
-            .and_then(|(tid, (payload, srcs))| gpudev::submit_scene(tid, payload, &srcs))
+        tid.zip(encode(frame, &gpu_rec, info, damage)).and_then(|(tid, (payload, srcs))| {
+            to_device(tid, &srcs, info, damage);
+            gpudev::submit_scene(tid, payload, &srcs)
+        })
     };
 
     let t1 = crate::time::counter();
@@ -364,7 +377,7 @@ fn verify(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, 
         return;
     }
     *PENDING.lock() = Some(Pending::Verify {
-        seq, scene: Scene { items: frame.items.clone() }, target: target as usize, info: *info, copy, pages, cpu, t0,
+        seq, tid, scene: Scene { items: frame.items.clone() }, target: target as usize, info: *info, copy, pages, cpu, t0,
         left_out, damage: damage.to_vec(), partial,
     });
 }
@@ -449,6 +462,36 @@ fn judge(frame: &Scene, target: *mut u8, info: &FbInfo, copy: u64, ok: Option<bo
             MODE.store(MODE_OFF, Ordering::Release);
             crate::kprintln!("[npk] gpu: the verification scene could not be handed over, composing on the CPU");
         }
+    }
+}
+
+/// Rows a scene's passes read and write for each damage rectangle: whole
+/// 64-row bands, as a tiled GPU loads and stores whole tiles.
+fn damage_rows(damage: &[Rect]) -> impl Iterator<Item = (u32, u32)> + '_ {
+    damage.iter().filter(|d| !d.is_empty()).map(|d| (d.y & !63, d.y1().next_multiple_of(64)))
+}
+
+/// What the module reads goes to memory first: the sources the CPU wrote
+/// (the wallpaper planes went when they were published) and the target's
+/// rows the passes load.
+fn to_device(tid: u32, srcs: &[u32], info: &FbInfo, damage: &[Rect]) {
+    let p = crate::gui::background::planes();
+    let planes = [p.wall, p.blur, p.glass].map(|q| plane_bo(q, info));
+    for &s in srcs {
+        if !planes.contains(&Some(s)) {
+            gpudev::sync(s, None);
+        }
+    }
+    for rows in damage_rows(damage) {
+        gpudev::sync(tid, Some(rows));
+    }
+}
+
+/// The target's rows the module wrote, out of the CPU caches before the
+/// CPU reads them.
+fn from_device(tid: u32, damage: &[Rect]) {
+    for rows in damage_rows(damage) {
+        gpudev::sync(tid, Some(rows));
     }
 }
 

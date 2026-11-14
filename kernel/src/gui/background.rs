@@ -119,6 +119,7 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
         let front = WALLPAPER.load(Ordering::Acquire);
         let Some(buf) = back_plane(&mut bufs.wall, front, target_w, target_h, pages) else { return };
         scale_cover(pixels, w, h, buf, info);
+        to_device(buf, size);
         WALLPAPER.store(buf, Ordering::Release);
         WALLPAPER_SET.store(true, Ordering::Release);
         compute_blur(&mut bufs, buf, info, pages);
@@ -319,6 +320,7 @@ fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) 
         }
     }
 
+    to_device(dst, pages * 4096);
     BLURRED.store(dst, Ordering::Release);
     BLURRED_SET.store(true, Ordering::Release);
     crate::kdebug!("[npk] glass: wallpaper blurred in {} ms (detail {}, blur {})",
@@ -341,6 +343,15 @@ fn box_pass(src: &[u32], dst: &mut [u32], lines: usize, len: usize, stride: usiz
             sum = sum + at(i + r + 1) - at(i - r);
         }
     }
+}
+
+/// A plane goes to memory before it is published: the GPU modules read it
+/// past the CPU caches, which nothing snoops on arm64.
+fn to_device(p: *const u8, size: usize) {
+    #[cfg(target_arch = "aarch64")]
+    crate::mm::clflush_range(p as u64, size as u64);
+    #[cfg(not(target_arch = "aarch64"))]
+    let _ = (p, size);
 }
 
 /// What translucent glass is precomputed from: the blurred wallpaper when
