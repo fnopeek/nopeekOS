@@ -1757,6 +1757,7 @@ impl Compositor {
         self.refresh_chrome();
         self.tell_focus();
         let frame = self.build_scene();
+        let damage = crate::shade::gpu_scene::widen(damage, info);
         crate::shade::gpu_scene::compose(&frame, &*self, target, info, &damage);
         #[cfg(target_arch = "x86_64")]
         crate::shade::capture::note_damage();

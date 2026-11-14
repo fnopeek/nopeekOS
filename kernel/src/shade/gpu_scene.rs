@@ -127,6 +127,30 @@ pub fn compose(frame: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbI
     }
 }
 
+/// Damage whose bounding box is at least this share of the screen
+/// (percent) is composed as the whole screen when the GPU composes.
+const WIDEN_PERCENT: u64 = 75;
+
+/// `damage`, or the whole screen when the GPU composes and the damage
+/// spans most of it: a pass of whole tiles over the background need not
+/// load them first (gpu_bcm2712), so the whole screen costs the module
+/// less than most of it.
+pub fn widen(damage: Vec<Rect>, info: &FbInfo) -> Vec<Rect> {
+    if !gpudev::scenes_offered() || MODE.load(Ordering::Acquire) == MODE_OFF || damage.is_empty() {
+        return damage;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0u32, 0u32);
+    for d in &damage {
+        (x0, y0, x1, y1) = (x0.min(d.x), y0.min(d.y), x1.max(d.x + d.w), y1.max(d.y + d.h));
+    }
+    let boxed = x1.saturating_sub(x0) as u64 * y1.saturating_sub(y0) as u64;
+    let screen = info.width as u64 * info.height as u64;
+    if boxed * 100 >= screen * WIDEN_PERCENT {
+        return alloc::vec![Rect::new(0, 0, info.width, info.height)];
+    }
+    damage
+}
+
 fn covers_screen(damage: &[Rect], info: &FbInfo) -> bool {
     damage.iter().any(|d| d.x == 0 && d.y == 0 && d.w >= info.width && d.h >= info.height)
 }
