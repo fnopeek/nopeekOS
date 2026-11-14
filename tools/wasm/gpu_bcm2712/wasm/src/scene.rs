@@ -34,6 +34,8 @@ const PLANE_BLOCKS: u32 = PLANE_PAGES * PAGE / 4;
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
 const AUTOSUSPEND_US: u64 = 50_000;
+/// Finished jobs whose time `take_job_us` can still collect.
+const JOB_US_KEPT: usize = 64;
 /// Uniform streams: one slot per dispatch that may be in flight.
 const UNIFORM_SLOTS: u32 = 16;
 /// `v3d_overflow_mem_work`'s buffer: 256 KiB.
@@ -102,6 +104,11 @@ pub struct Composer {
     idle_since: u64,
     /// `logged_error` of v3d_hub_irq: an MMU fault is logged once.
     mmu_logged: bool,
+    /// Time spent powering V3D up since `take_power_us` (us).
+    power_us: u64,
+    /// Finished jobs and their time from start to the fence seen, until
+    /// `take_job_us` collects them; the newest `JOB_US_KEPT`.
+    job_us: Vec<(Fence, u64)>,
     scene: Buf,
     bins: Buf,
     planes: Buf,
@@ -168,6 +175,8 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         powered: true,
         idle_since: npk_sys::now_us() as u64,
         mmu_logged: false,
+        power_us: 0,
+        job_us: Vec::new(),
         scene: Buf::new(SCENE_PAGES)?,
         bins: Buf::new(BINS_PAGES)?,
         planes: Buf::new(PLANE_PAGES)?,
@@ -205,7 +214,10 @@ impl Composer {
     /// and its interrupts on (`pm_runtime_resume_and_get` before a job).
     fn power_up(&mut self, hw: &mut PiHw) -> Result<(), i32> {
         if !self.powered {
-            if npk_sys::v3d_power(1) != 0 {
+            let t0 = npk_sys::now_us() as u64;
+            let r = npk_sys::v3d_power(1);
+            self.power_us += (npk_sys::now_us() as u64).saturating_sub(t0);
+            if r != 0 {
                 Line::new().s("v3d: power-up failed").say();
                 return Err(-EIO);
             }
@@ -324,6 +336,10 @@ impl Composer {
         for e in ev {
             match e {
                 Event::Done { fence, us, unref, .. } => {
+                    if self.job_us.len() == JOB_US_KEPT {
+                        self.job_us.remove(0);
+                    }
+                    self.job_us.push((fence, us));
                     for h in unref {
                         if let Some(i) = self.overflow.iter().position(|(k, _)| *k == h) {
                             self.overflow.swap_remove(i).1.free();
@@ -413,6 +429,19 @@ impl Composer {
         if self.last != 0 {
             let _ = self.wait_fence(hw, self.last);
         }
+    }
+
+    /// The power-up time since the last call (us).
+    pub fn take_power_us(&mut self) -> u64 {
+        core::mem::take(&mut self.power_us)
+    }
+
+    /// The summed time of the finished jobs up to fence `upto` (us), which
+    /// are then forgotten.
+    pub fn take_job_us(&mut self, upto: Fence) -> u64 {
+        let sum = self.job_us.iter().filter(|(f, _)| *f <= upto).map(|(_, us)| us).sum();
+        self.job_us.retain(|(f, _)| *f > upto);
+        sum
     }
 
     /// Has fence `f` signalled, and did its job fail?

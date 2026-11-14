@@ -129,6 +129,10 @@ pub const CAP_JPEG: i32 = 64;
 pub const CAP_FLIP: i32 = 128;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
+/// A job the module took past `JOB_TIMEOUT_MS`: how much longer its buffers
+/// stay its own before the module counts as stalled. Above a GPU module's
+/// own job timeout and reset (drm_sched's 500 ms, once extended).
+const HOLD_TIMEOUT_MS: u64 = 2000;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
 const BIND_TIMEOUT_MS: u64 = 2000;
 const DRIVER_NAME: &str = "gpudev (driver module)";
@@ -1284,8 +1288,10 @@ fn halt_for(seq: u32, deadline: u64) {
     WAITING_CORES.fetch_and(!bit, Ordering::SeqCst);
 }
 
-/// Wait until job `seq` is completed, at most until `deadline` (TSC). Its
-/// status: 0, the module's error, or -ETIME (62).
+/// Wait until job `seq` is completed: one the module has not taken at most
+/// until `deadline` (TSC), one it took until it completes, or until
+/// `HOLD_TIMEOUT_MS` later when it stalls. Its status: 0, the module's
+/// error, or -ETIME (62).
 #[track_caller]
 fn wait_seq(seq: u32, deadline: u64) -> i32 {
     let cid = crate::smp::per_core::current_core_id();
@@ -1300,10 +1306,19 @@ fn wait_seq(seq: u32, deadline: u64) -> i32 {
         if stalled() {
             break -62;
         }
-        halt_for(seq, deadline);
+        if crate::time::counter() < deadline {
+            halt_for(seq, deadline);
+        } else {
+            // The module holds the job: it may share this core, so the
+            // waiter gives the core up instead of halting it.
+            park_for(seq, u64::MAX);
+        }
     };
     if let Some(s) = site {
         s.store(core::ptr::null_mut(), Ordering::Relaxed);
+    }
+    if let Some(w) = fiber::current_waker() {
+        PARKED.lock().retain(|&(_, x)| x != w);
     }
     r
 }
@@ -1339,41 +1354,60 @@ fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
             }
             return s;
         }
-        if fiber::yield_ready() {
-            continue;
-        }
-        let Some(w) = waker else {
-            core::hint::spin_loop();
-            continue;
-        };
-        // Registered before the look, so a completion after it finds us.
-        {
-            let mut p = PARKED.lock();
-            if !p.iter().any(|&(_, x)| x == w) {
-                p.push((seq, w));
-            }
-        }
-        if is_done(seq) {
-            continue;
-        }
-        let step = crate::time::counter()
-            + PARK_STEP_MS * (crate::time::counter_hz() / 1000);
-        fiber::wait(fiber::SIG_GPU_DONE, deadline.min(step));
+        // Past the deadline only a job the module holds is waited for.
+        park_for(seq, if crate::time::counter() < deadline { deadline } else { u64::MAX });
     }
 }
 
+/// One step of waiting for job `seq` without halting the core: another
+/// ready fiber runs, or the caller parks until `complete` signals it, at
+/// most `PARK_STEP_MS` and until `deadline`. Outside a fiber it spins.
+fn park_for(seq: u32, deadline: u64) {
+    if fiber::yield_ready() {
+        return;
+    }
+    let Some(w) = fiber::current_waker() else {
+        core::hint::spin_loop();
+        return;
+    };
+    // Registered before the look, so a completion after it finds us.
+    {
+        let mut p = PARKED.lock();
+        if !p.iter().any(|&(_, x)| x == w) {
+            p.push((seq, w));
+        }
+    }
+    if is_done(seq) {
+        return;
+    }
+    let step = crate::time::counter()
+        + PARK_STEP_MS * (crate::time::counter_hz() / 1000);
+    fiber::wait(fiber::SIG_GPU_DONE, deadline.min(step));
+}
+
 /// Job `seq`'s status once it is completed, or -ETIME once it cannot be any
-/// more; None while it may still be.
+/// more; None while it may still be (a job the module took, until it
+/// stalls).
 fn seq_done(seq: u32, deadline: u64) -> Option<i32> {
     if is_done(seq) {
         return Some(ERRORS.lock().remove(&seq).unwrap_or(0));
     }
-    if !READY.load(Ordering::Acquire) || crate::time::counter() >= deadline {
+    let now = crate::time::counter();
+    if !READY.load(Ordering::Acquire) || now >= deadline {
         // A job the module never took must not run after the CPU redid it.
         let mut st = STATE.lock();
         let queued = st.queue.len();
         st.queue.retain(|j| j.seq != seq);
         let taken = st.queue.len() == queued;
+        // A job the module took writes its buffers until it completes, as
+        // a fence signals only then (`dma_fence_wait`): the CPU must not
+        // write them meanwhile. The module's own job timeout ends it; past
+        // `HOLD_TIMEOUT_MS` the module is stalled.
+        if taken && READY.load(Ordering::Acquire)
+            && now < deadline.saturating_add(HOLD_TIMEOUT_MS * (crate::time::counter_hz() / 1000))
+        {
+            return None;
+        }
         st.payloads.remove(&seq);
         drop(st);
         if !taken {

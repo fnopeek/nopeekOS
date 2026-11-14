@@ -243,7 +243,7 @@ pub fn wait_event(irq: Irq, since: u64) -> bool {
 }
 
 /// The waiter runs again after the hardirq: account the time in between.
-fn note_serviced(irq: Irq) {
+pub fn note_serviced(irq: Irq) {
     let Some(d) = desc(irq) else { return };
     let at = d.fired_at.load(Ordering::Relaxed);
     let now = crate::time::counter();

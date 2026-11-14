@@ -102,18 +102,64 @@ fn named(fdt: &Fdt, node: &super::dt::Node, name: &[u8]) -> Option<(u64, u64)> {
 
 /// `raspberrypi_fw_prepare` with `maximize`: the clock on, at its highest
 /// rate. The firmware may park the caller: never under `STATE`.
-fn clock_prepare(max: u32) -> Option<()> {
+fn clock_prepare(max: u32, t: &mut Phases) -> Option<()> {
     super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_STATE,
         [V3D_CLK, pi5_core::rpi_fw::RPI_FIRMWARE_STATE_ENABLE_BIT, 0])?;
+    t.mark();
     super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_RATE, [V3D_CLK, max, 0])?;
+    t.mark();
     Some(())
 }
 
 /// `raspberrypi_fw_unprepare`: the rate to its lowest (the firmware does
 /// not stop the clock), then the clock off. Not under `STATE`.
-fn clock_unprepare(min: u32) {
+fn clock_unprepare(min: u32, t: &mut Phases) {
     let _ = super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_RATE, [V3D_CLK, min, 0]);
+    t.mark();
     let _ = super::rpi_fw::property::<3>(pi5_core::rpi_fw::RPI_FIRMWARE_SET_CLOCK_STATE, [V3D_CLK, 0, 0]);
+    t.mark();
+}
+
+/// Power transitions reported in full; after them only the slow ones.
+const POWER_REPORTED: u32 = 4;
+/// A transition this slow (us) is reported always.
+const POWER_SLOW_US: u64 = 2000;
+static POWER_REPORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// The steps of one power transition, timed.
+struct Phases {
+    t0: u64,
+    marks: [u64; 6],
+    n: usize,
+}
+
+impl Phases {
+    fn start() -> Phases {
+        Phases { t0: crate::time::counter(), marks: [0; 6], n: 0 }
+    }
+
+    fn mark(&mut self) {
+        if self.n < self.marks.len() {
+            self.marks[self.n] = crate::time::counter();
+            self.n += 1;
+        }
+    }
+
+    fn report(&self, what: &str, names: &[&str]) {
+        let us = |t: u64| t * 1_000_000 / crate::time::counter_hz().max(1);
+        let total = us(self.marks[self.n.saturating_sub(1)].saturating_sub(self.t0));
+        let n = POWER_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n >= POWER_REPORTED && total < POWER_SLOW_US {
+            return;
+        }
+        let mut line = alloc::format!("[npk] v3d: power {} in {} us:", what, total);
+        let mut prev = self.t0;
+        for (name, &m) in names.iter().zip(&self.marks[..self.n]) {
+            line.push_str(&alloc::format!(" {} {}", name, us(m.saturating_sub(prev))));
+            prev = m;
+        }
+        kprintln!("{}", line);
+    }
 }
 
 /// The GRAFX domain, then GRAFX_V3D, on (genpd before the device's
@@ -173,7 +219,7 @@ pub fn open() -> Option<Ident> {
     if !domains_on(&mut regs) {
         return None;
     }
-    clock_prepare(max_rate)?;
+    clock_prepare(max_rate, &mut Phases::start())?;
 
     let pt_pages = (PT_ENTRIES * 4) / PAGE as usize;
     let pt = crate::arch::aarch64::dma::alloc(pt_pages, 1, 1 << 40)?;
@@ -231,6 +277,7 @@ pub fn power(on: bool) -> bool {
         Some(s) => (s.min_rate, s.max_rate),
         None => return false,
     };
+    let mut t = Phases::start();
     if on {
         {
             let mut g = STATE.lock();
@@ -239,12 +286,17 @@ pub fn power(on: bool) -> bool {
                 return false;
             }
         }
-        if clock_prepare(max).is_none() {
+        t.mark();
+        if clock_prepare(max, &mut t).is_none() {
             return false;
         }
         let mut g = STATE.lock();
         let Some(s) = g.as_mut() else { return false };
-        resume_locked(s)
+        let ok = resume_locked(s);
+        drop(g);
+        t.mark();
+        t.report("on", &["domains", "clock on", "clock rate", "resume"]);
+        ok
     } else {
         {
             let mut g = STATE.lock();
@@ -252,6 +304,7 @@ pub fn power(on: bool) -> bool {
             if !v3d::idle_axi(&mut s.regs) {
                 kprintln!("[npk] v3d: Failed to wait for safe GMP shutdown");
             }
+            t.mark();
             if let Err(e) = v3d::suspend_sms(&mut s.regs) {
                 kprintln!("[npk] v3d: {:?}", e);
                 v3d::gmp_resume(&mut s.regs);
@@ -259,11 +312,15 @@ pub fn power(on: bool) -> bool {
             }
             s.powered = false;
         }
-        clock_unprepare(min);
+        t.mark();
+        clock_unprepare(min, &mut t);
         let mut g = STATE.lock();
         let Some(s) = g.as_mut() else { return false };
         v3d::v3d_domain_off(&mut s.regs);
         v3d::grafx_power_off(&mut s.regs);
+        drop(g);
+        t.mark();
+        t.report("off", &["axi", "sms", "clock rate", "clock off", "domains"]);
         true
     }
 }

@@ -256,9 +256,33 @@ struct Scenes {
     bos: alloc::vec::Vec<SceneBo>,
     /// Scenes whose cost was logged.
     logged: u32,
-    /// Queued scenes: job, last fence, start (us), dispatches, traced.
-    pending: alloc::vec::Vec<(i32, u64, u64, u32, bool)>,
+    /// Queued scenes.
+    pending: alloc::vec::Vec<Pending>,
+    /// Slow scenes logged.
+    slow_logged: u32,
 }
+
+/// A scene on V3D, not yet completed.
+#[derive(Clone, Copy)]
+struct Pending {
+    seq: i32,
+    /// Its last fence.
+    fence: u64,
+    /// When it was taken (us).
+    t0: u64,
+    dispatches: u32,
+    traced: bool,
+    /// What powering V3D up for it cost (us).
+    power_us: u64,
+}
+
+/// What woke the loop that saw a scene finished: `npk_wait`'s bits, or
+/// `WOKE_DRAIN` for a wait on the fence itself.
+const WOKE_DRAIN: i32 = -1;
+/// A scene this slow (us) says where its time went.
+const SCENE_SLOW_US: u64 = 50_000;
+/// Slow scenes that say so.
+const SLOW_LOGGED: u32 = 64;
 
 /// Scenes after the start whose cost goes to the log.
 const SCENES_LOGGED: u32 = 8;
@@ -305,7 +329,7 @@ impl Scenes {
             return None;
         }
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
-        Some(Scenes { c, bos, logged: 0, pending: alloc::vec::Vec::new() })
+        Some(Scenes { c, bos, logged: 0, pending: alloc::vec::Vec::new(), slow_logged: 0 })
     }
 
     /// `OP_BO_ADD`: mapped for V3D, its address reported.
@@ -326,7 +350,7 @@ impl Scenes {
     fn remove(&mut self, hw: &mut PiHw, id: u32) -> i32 {
         let Some(i) = self.bos.iter().position(|b| b.id == id && id > 2) else { return -22 };
         self.c.drain(hw);
-        self.reap(hw);
+        self.reap(hw, WOKE_DRAIN);
         let b = self.bos.remove(i);
         let _ = npk_sys::v3d_unmap(b.va as i64);
         0
@@ -343,7 +367,8 @@ impl Scenes {
         }
         match self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]) {
             Ok((n, f)) => {
-                self.pending.push((seq, f, t0, n, traced));
+                let power_us = self.c.take_power_us();
+                self.pending.push(Pending { seq, fence: f, t0, dispatches: n, traced, power_us });
                 if traced {
                     self.logged += 1;
                 }
@@ -359,21 +384,37 @@ impl Scenes {
 
     /// V3D's interrupts and timeouts served; every queued scene whose last
     /// fence signalled completed. The first scenes say what they cost: the
-    /// measure of the V3D path, dispatch by dispatch for the first ones.
-    fn reap(&mut self, hw: &mut PiHw) {
+    /// measure of the V3D path, dispatch by dispatch for the first ones; a
+    /// slow one says what woke the loop that saw it done (`woke`).
+    fn reap(&mut self, hw: &mut PiHw, woke: i32) {
         self.c.service(hw);
         let mut i = 0;
         while i < self.pending.len() {
-            let (seq, f, t0, n, traced) = self.pending[i];
-            let (done, failed) = self.c.fence_state(f);
+            let p = self.pending[i];
+            let (seq, traced) = (p.seq, p.traced);
+            let (done, failed) = self.c.fence_state(p.fence);
             if !done {
                 i += 1;
                 continue;
             }
             self.pending.remove(i);
-            if traced || self.logged < SCENES_LOGGED {
-                Line::new().s("scene: ").dec(n as u64).s(" dispatches in ")
-                    .dec(npk_sys::now_us() as u64 - t0).s(" us").s(if failed { ", failed" } else { "" }).say();
+            let total = (npk_sys::now_us() as u64).saturating_sub(p.t0);
+            let gpu = self.c.take_job_us(p.fence);
+            let slow = total >= SCENE_SLOW_US && self.slow_logged < SLOW_LOGGED;
+            if slow {
+                self.slow_logged += 1;
+            }
+            if traced || self.logged < SCENES_LOGGED || slow {
+                let by = match woke {
+                    WOKE_DRAIN => "a wait on it",
+                    0 => "the loop's timeout",
+                    w if w & WAIT_IRQ != 0 => "an interrupt",
+                    _ => "a command",
+                };
+                Line::new().s("scene: ").dec(p.dispatches as u64).s(" dispatches in ").dec(total).s(" us")
+                    .s(if failed { ", failed" } else { "" })
+                    .s(" (power-up ").dec(p.power_us).s(" us, jobs ").dec(gpu).s(" us, seen after ").s(by).s(")")
+                    .say();
             }
             if traced {
                 for (name, g, us) in self.c.trace.take().unwrap_or_default() {
@@ -545,7 +586,7 @@ fn show(vc4: &mut Vc4, hw: &mut PiHw, client: &drm_client_dev, kfb: &mut KernelF
 fn shutdown(vc4: &mut Vc4, hw: &mut PiHw, kfb: &KernelFb, p: &mut Present) -> i32 {
     if let Some(s) = p.scenes.as_mut() {
         s.c.drain(hw);
-        s.reap(hw);
+        s.reap(hw, WOKE_DRAIN);
         gpu_bcm2712_core::v3d::irq_disable(hw);
     }
     let off = drm_client_dev::new(vc4.crtc.len() as u32);
@@ -588,11 +629,11 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
             }
         }
 
-        npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout_ms.max(1) as i32);
+        let woke = npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout_ms.max(1) as i32);
 
         let fired = hw.fired(&mut seen);
         if let Some(s) = p.scenes.as_mut() {
-            s.reap(hw);
+            s.reap(hw, woke);
             s.c.autosuspend(hw, npk_sys::now_us() as u64);
         }
         for pv in 0..vc4.crtc.len() {

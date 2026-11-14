@@ -932,6 +932,7 @@ fn wait_ready(ctx: &mut HostState, mask: i32) -> i32 {
                 let n = crate::irq::fired_count(*irq);
                 if n != *seen {
                     *seen = n;
+                    crate::irq::note_serviced(*irq);
                     r |= WAIT_IRQ;
                 }
             }
