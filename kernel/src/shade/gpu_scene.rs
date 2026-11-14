@@ -532,7 +532,7 @@ fn damage_rows(damage: &[Rect]) -> impl Iterator<Item = (u32, u32)> + '_ {
 /// rows the passes load.
 fn to_device(tid: u32, srcs: &[u32], info: &FbInfo, damage: &[Rect]) {
     let p = crate::gui::background::planes();
-    let planes = [p.wall, p.blur, p.glass].map(|q| plane_bo(q, info));
+    let planes = [plane_bo(p.wall, info), plane_bo(p.blur, &blurred_info(info))];
     for &s in srcs {
         if !planes.contains(&Some(s)) {
             gpudev::sync(s, None);
@@ -551,9 +551,9 @@ fn from_device(tid: u32, damage: &[Rect]) {
     }
 }
 
-fn plane_ptrs() -> [Option<*const u8>; 3] {
+fn plane_ptrs() -> [Option<*const u8>; 2] {
     let p = crate::gui::background::planes();
-    [p.wall, p.blur, p.glass]
+    [p.wall, p.blur]
 }
 
 /// The kinds of the items that cover `(x, y)`, bottom to top.
@@ -586,7 +586,14 @@ fn put(out: &mut Vec<u8>, words: &[u32]) {
     }
 }
 
-/// A screen-sized plane of `background`.
+/// The blurred plane's geometry on the screen `info` (`blurred_dims`).
+fn blurred_info(info: &FbInfo) -> FbInfo {
+    let (width, height, pitch) = crate::gui::background::blurred_dims(info);
+    FbInfo { width, height, pitch, ..*info }
+}
+
+/// A plane of `background`: the wallpaper screen-sized, the blurred one
+/// as `info` gives it (`blurred_dims`).
 fn plane_bo(p: Option<*const u8>, info: &FbInfo) -> Option<u32> {
     let p = p?;
     gpudev::bo_for(p as u64, info.pitch as u64 * info.height as u64, info.width, info.height, info.pitch)
@@ -617,7 +624,7 @@ pub(crate) fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage
     let planes = crate::gui::background::planes();
     let mut srcs = Vec::new();
     let mut flags = 0;
-    let mut plane = |p: Option<*const u8>, flag: u32, srcs: &mut Vec<u32>| -> Option<u32> {
+    let mut plane = |p: Option<*const u8>, flag: u32, info: &FbInfo, srcs: &mut Vec<u32>| -> Option<u32> {
         match p {
             None => Some(NONE),
             Some(_) => {
@@ -628,9 +635,11 @@ pub(crate) fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage
             }
         }
     };
-    let wall = plane(planes.wall, FLAG_WALLPAPER, &mut srcs)?;
-    let blur = plane(planes.blur, FLAG_BLURRED, &mut srcs)?;
-    let glass = plane(planes.glass, 0, &mut srcs)?;
+    let wall = plane(planes.wall, FLAG_WALLPAPER, info, &mut srcs)?;
+    let blurred = blurred_info(info);
+    let blur = plane(planes.blur, FLAG_BLURRED, &blurred, &mut srcs)?;
+    // Glass reads the blurred plane too.
+    let glass = plane(planes.blur, 0, &blurred, &mut srcs)?;
     let ink = crate::shade::glass::ink();
 
     let mut items: Vec<[u32; 16]> = Vec::with_capacity(frame.items.len());

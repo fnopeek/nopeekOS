@@ -202,7 +202,7 @@ void main() {
             for (uint y = y_lo; y < y_hi; y++) {
                 uint c = bg;
                 if (go < 255u) {
-                    uint wpx = inside_x ? g_glass.v[y * g_glass_pitch + x] : 0u;
+                    uint wpx = inside_x ? g_glass.v[BLURRED_AT(g_glass_pitch, x, y)] : 0u;
                     c = glass_blend(glass_fill, wpx, go, g_ceil);
                 }
                 if (k1 != 0u)

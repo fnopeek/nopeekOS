@@ -60,13 +60,19 @@ fn back_plane(pair: &mut [Plane; 2], front: *mut u8, w: u32, h: u32, pages: usiz
     Some(p.ptr)
 }
 
-/// The wallpaper, heavily blurred, same size and pitch. Glass surfaces
-/// (loop, the panel) blend over this instead of the sharp image: a
-/// translucent light panel over sharp texture leaves the texture
-/// competing with the text on it, and blur is what makes glass readable.
-/// Computed once per wallpaper — the wallpaper is static, so reading it
-/// costs a frame exactly what reading the sharp one did.
+/// The wallpaper, heavily blurred, every second pixel each way: screen
+/// pixel (x, y) shows its pixel (x >> GLASS_SHIFT, y >> GLASS_SHIFT)
+/// (`Blurred::at`). Glass surfaces (loop, the panel) blend over this
+/// instead of the sharp image: a translucent light panel over sharp
+/// texture leaves the texture competing with the text on it, and blur is
+/// what makes glass readable. Computed once per wallpaper; the blur keeps
+/// no detail a pixel apart, so a quarter of the pixels is a quarter of
+/// what reading it costs a frame.
 static BLURRED: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
+/// It with its pitch in bytes, as `blurred` hands it out: one lock, so no
+/// reader pairs a plane with another plane's pitch.
+static BLURRED_PLANE: spin::Mutex<(usize, usize)> = spin::Mutex::new((0, 0));
+pub const GLASS_SHIFT: u32 = 1;
 static BLURRED_SET: AtomicBool = AtomicBool::new(false);
 
 /// Downscale factor for the blur. Blur keeps no detail, so it is computed
@@ -122,7 +128,7 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
         to_device(buf, size);
         WALLPAPER.store(buf, Ordering::Release);
         WALLPAPER_SET.store(true, Ordering::Release);
-        compute_blur(&mut bufs, buf, info, pages);
+        compute_blur(&mut bufs, buf, info);
     }
     // After the pixels are fully written: invalidate the glass cache by moving
     // the generation forward (Release pairs with the Acquire in the cache key).
@@ -138,11 +144,6 @@ pub fn set_wallpaper(pixels: &[u8], w: u32, h: u32, info: &FbInfo) {
 
 pub fn has_wallpaper() -> bool {
     WALLPAPER_SET.load(Ordering::Acquire)
-}
-
-/// Raw wallpaper buffer (framebuffer-pitch layout, BGRX u32), or null.
-fn wallpaper_ptr() -> *const u8 {
-    if WALLPAPER_SET.load(Ordering::Acquire) { WALLPAPER.load(Ordering::Acquire) } else { core::ptr::null() }
 }
 
 pub fn clear_wallpaper() {
@@ -203,9 +204,8 @@ fn draw_wallpaper_region(shadow: *mut u8, info: &FbInfo, rx: u32, ry: u32, rw: u
 pub fn reblur() {
     if !has_wallpaper() { return; }
     let info = crate::framebuffer::get_info();
-    let pages = (info.height as usize * info.pitch as usize + 4095) / 4096;
     let mut bufs = BUFFERS.lock();
-    compute_blur(&mut bufs, WALLPAPER.load(Ordering::Acquire), &info, pages);
+    compute_blur(&mut bufs, WALLPAPER.load(Ordering::Acquire), &info);
     drop(bufs);
     // Every glass cache keys on the generation.
     WALLPAPER_GEN.fetch_add(1, Ordering::Release);
@@ -213,12 +213,14 @@ pub fn reblur() {
 
 /// Blur `wp` into the blurred back buffer and publish it. The caller holds
 /// `BUFFERS`.
-fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) {
+fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo) {
     let (w, h, pitch) = (info.width, info.height, info.pitch as usize);
+    let (bw, bh, bpitch) = blurred_dims(info);
+    let pages = (bh as usize * bpitch as usize).div_ceil(4096);
     let front = BLURRED.load(Ordering::Acquire);
-    let Some(dst) = back_plane(&mut bufs.blur, front, w, h, pages) else {
+    let Some(dst) = back_plane(&mut bufs.blur, front, bw, bh, pages) else {
         BLURRED_SET.store(false, Ordering::Release);
-        crate::kprintln!("[npk] glass: no memory for the blurred wallpaper ({} pages), glass stays sharp", pages);
+        crate::kprintln!("[npk] glass: no memory for the blurred wallpaper ({} pages), glass has nothing to show through", pages);
         return;
     };
     let t0 = crate::time::ticks();
@@ -297,14 +299,17 @@ fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) 
         }));
     }
 
-    // 3. Bilinear back up to screen size (sample centres of the blocks).
+    // 3. Bilinear back up to the blurred plane, at every second screen
+    // pixel (sample centres of the blocks).
     let half = (BLUR_DOWN / 2) as i32;
-    for y in 0..h {
-        if y % 256 == 0 { crate::xhci::poll_events(); }
+    for by in 0..bh {
+        if by % 128 == 0 { crate::xhci::poll_events(); }
+        let y = by << GLASS_SHIFT;
         let fy = ((y as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
         let (y0, wy) = ((fy >> 8).min(sh - 1), (fy & 0xFF) as u32);
         let y1 = (y0 + 1).min(sh - 1);
-        for x in 0..w {
+        for bx in 0..bw {
+            let x = bx << GLASS_SHIFT;
             let fx = ((x as i32 - half).max(0) as u32 * 256 / BLUR_DOWN) as usize;
             let (x0, wx) = ((fx >> 8).min(sw - 1), (fx & 0xFF) as u32);
             let x1 = (x0 + 1).min(sw - 1);
@@ -315,12 +320,14 @@ fn compute_blur(bufs: &mut Buffers, wp: *const u8, info: &FbInfo, pages: usize) 
                 let v = (top * (256 - wy) + bot * wy) >> 16;
                 px |= v.min(255) << (16 - 8 * c as u32);
             }
-            // SAFETY: same bounds and layout as the wallpaper buffer above.
-            unsafe { *(dst.add(y as usize * pitch + x as usize * 4) as *mut u32) = px; }
+            // SAFETY: bx < bw, by < bh; the plane holds bh rows of bpitch
+            // bytes (back_plane, `pages`).
+            unsafe { *(dst.add(by as usize * bpitch as usize + bx as usize * 4) as *mut u32) = px; }
         }
     }
 
     to_device(dst, pages * 4096);
+    *BLURRED_PLANE.lock() = (dst as usize, bpitch as usize);
     BLURRED.store(dst, Ordering::Release);
     BLURRED_SET.store(true, Ordering::Release);
     crate::kdebug!("[npk] glass: wallpaper blurred in {} ms (detail {}, blur {})",
@@ -354,16 +361,34 @@ fn to_device(p: *const u8, size: usize) {
     let _ = (p, size);
 }
 
-/// What translucent glass is precomputed from: the blurred wallpaper when
-/// it is ready, else the sharp one, else null (no wallpaper).
-pub fn glass_source_ptr() -> *const u8 {
-    if blurred_ready() { BLURRED.load(Ordering::Acquire) } else { wallpaper_ptr() }
+/// The blurred plane's width, height and pitch (bytes) for a screen.
+pub fn blurred_dims(info: &FbInfo) -> (u32, u32, u32) {
+    let w = info.width.div_ceil(1 << GLASS_SHIFT);
+    (w, info.height.div_ceil(1 << GLASS_SHIFT), w * 4)
 }
 
-/// The blurred wallpaper glass panels sit on, screen-sized with the
-/// framebuffer pitch; None until it is ready (or with no wallpaper).
-pub fn blurred_ptr() -> Option<*const u8> {
-    blurred_ready().then(|| BLURRED.load(Ordering::Acquire) as *const u8).filter(|p| !p.is_null())
+/// The blurred wallpaper (`BLURRED`) as its readers take it.
+#[derive(Clone, Copy)]
+pub struct Blurred {
+    pub ptr: *const u8,
+    pub pitch: usize,
+}
+
+impl Blurred {
+    /// What screen pixel (x, y) shows of it; x and y within the screen.
+    pub fn at(&self, x: u32, y: u32) -> u32 {
+        let off = (y >> GLASS_SHIFT) as usize * self.pitch + (x >> GLASS_SHIFT) as usize * 4;
+        // SAFETY: x, y within the screen put the pixel within the plane's
+        // blurred_dims, which compute_blur allocated and filled.
+        unsafe { *(self.ptr.add(off) as *const u32) }
+    }
+}
+
+/// The blurred wallpaper glass and panels sit on; None until it is ready
+/// (or with no wallpaper), and then glass has nothing to show through.
+pub fn blurred() -> Option<Blurred> {
+    let (p, pitch) = *BLURRED_PLANE.lock();
+    (blurred_ready() && p != 0).then(|| Blurred { ptr: p as *const u8, pitch })
 }
 
 fn blurred_ready() -> bool {
@@ -371,24 +396,20 @@ fn blurred_ready() -> bool {
 }
 
 /// What a GPU executor of the scene list reads instead of these functions
-/// (`shade::gpu_scene`): the published sharp and blurred planes, screen-sized
-/// with the framebuffer pitch.
+/// (`shade::gpu_scene`): the published sharp plane, screen-sized with the
+/// framebuffer pitch, and the blurred one (`blurred_dims`).
 pub struct Planes {
     /// `draw_background_region` copies from it; None: the grey fill.
     pub wall: Option<*const u8>,
-    /// `draw_glass_backdrop` copies from it and panels sit on it
-    /// (`blurred_ptr`); None: neither reads it.
+    /// `draw_glass_backdrop` copies from it, panels and glass sit on it
+    /// (`blurred`); None: none of them reads it.
     pub blur: Option<*const u8>,
-    /// `glass_source_ptr`.
-    pub glass: Option<*const u8>,
 }
 
 pub fn planes() -> Planes {
     let wp = WALLPAPER.load(Ordering::Acquire);
     let wall = (has_wallpaper() && !wp.is_null()).then_some(wp as *const u8);
-    let blur = blurred_ptr();
-    let glass = glass_source_ptr();
-    Planes { wall, blur, glass: (!glass.is_null()).then_some(glass) }
+    Planes { wall, blur: blurred().map(|b| b.ptr) }
 }
 
 /// Put the blurred wallpaper under a glass window: inside the rounded rect
@@ -397,8 +418,7 @@ pub fn planes() -> Planes {
 pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
                            rx: u32, ry: u32, rw: u32, rh: u32, radius: u32,
                            clip: &crate::shade::scene::Rect) {
-    if !blurred_ready() { return; }
-    let bl = BLURRED.load(Ordering::Acquire);
+    let Some(bl) = blurred() else { return };
     let pitch = info.pitch as usize;
     let r = radius.min(rw / 2).min(rh / 2);
     let y1 = (ry + rh).min(info.height).min(clip.y1());
@@ -409,10 +429,12 @@ pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
         let x0 = (rx + inset).max(clip.x);
         let x1 = (rx + rw).saturating_sub(inset).min(info.width).min(clip.x1());
         if x1 <= x0 { continue; }
-        let off = y as usize * pitch + x0 as usize * 4;
-        // SAFETY: x0..x1 and y lie inside the screen; both buffers are
-        // screen-sized with the framebuffer pitch.
-        unsafe { core::ptr::copy_nonoverlapping(bl.add(off), shadow.add(off), (x1 - x0) as usize * 4); }
+        let row = y as usize * pitch;
+        for x in x0..x1 {
+            // SAFETY: x and y lie inside the screen, which `shadow` holds
+            // with the framebuffer pitch.
+            unsafe { *(shadow.add(row + x as usize * 4) as *mut u32) = bl.at(x, y); }
+        }
     }
 }
 

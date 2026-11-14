@@ -266,7 +266,7 @@ cs-4_uniform 17 0 3
 cs-4_uniform 18 0 4
 cs-4_uniform 19 0 5
 fs-4_va 41328
-fs-4_size 16216
+fs-4_size 16224
 fs-4_threads 2
 fs-4_single_seg 0
 fs-4_spill_size 0
@@ -846,7 +846,7 @@ cs-3_uniform 17 0 3
 cs-3_uniform 18 0 4
 cs-3_uniform 19 0 5
 fs-3_va 70000
-fs-3_size 1488
+fs-3_size 1496
 fs-3_threads 4
 fs-3_single_seg 0
 fs-3_spill_size 0

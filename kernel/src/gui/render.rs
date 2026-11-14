@@ -331,15 +331,14 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
     // of the blur. The generation is in the key, not just the pointer:
     // `set_wallpaper` alternates between two buffers, so a pointer key
     // would match the wallpaper before last until bg_color changed.
-    let wp = crate::gui::background::glass_source_ptr();
-    if wp.is_null() { return None; }
+    let wp = crate::gui::background::blurred()?;
     let generation = crate::gui::background::wallpaper_generation();
     let ink = crate::shade::glass::ink();
     let fill = ink.fill(bg_color);
     let pitch_px = info.pitch as usize / 4;
     let (width, height) = (info.width as usize, info.height as usize);
     let mut k = 0xcbf29ce484222325u64;
-    for v in [bg_color as u64, opacity as u64, wp as usize as u64, generation as u64, ink.key(),
+    for v in [bg_color as u64, opacity as u64, wp.ptr as usize as u64, generation as u64, ink.key(),
               info.width as u64, info.height as u64] {
         k ^= v;
         k = k.wrapping_mul(0x0000_0100_0000_01b3);
@@ -348,13 +347,9 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
     if g.as_ref().map(|(key, _, _)| *key != k).unwrap_or(true) {
         let mut buf = alloc::vec![0u32; pitch_px * height];
         for py in 0..height {
-            // SAFETY: wp is screen-sized (pitch*height); py<height, px<width.
-            let wprow = unsafe { wp.add(py * pitch_px * 4) as *const u32 };
             let base = py * pitch_px;
             for px in 0..width {
-                // SAFETY: px < width <= pitch_px, inside row py of the screen-
-                // sized plane wp.
-                let wpx = unsafe { *wprow.add(px) };
+                let wpx = wp.at(px as u32, py as u32);
                 buf[base + px] = glass_blend(fill, wpx, opacity, ink);
             }
         }

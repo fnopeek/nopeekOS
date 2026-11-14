@@ -53,6 +53,11 @@ uint g_height;
 #define FIT(x, mask) (x)
 #endif
 
+// The word of the blurred wallpaper (background.rs BLURRED, which glass
+// reads too) that screen pixel (x, y) shows: it holds every second pixel
+// each way (GLASS_SHIFT), `pitch` in words.
+#define BLURRED_AT(pitch, x, y) (((y) >> 1u) * (pitch) + ((x) >> 1u))
+
 // render::blend, alpha 0..=256.
 uint blend(uint fg, uint bg, uint a) {
     uint inv = FIT(256u - a, 0x1FFu);
@@ -277,7 +282,7 @@ ITEM_RESULT glass_backdrop(Blk it, uint x, uint y ITEM_PIXEL) {
     uint x1 = rx + rw >= inset ? rx + rw - inset : 0u;
     if (x < x0 || x >= x1)
         return KEEP;
-    return SET(g_blur.v[y * g_blur_pitch + x]);
+    return SET(g_blur.v[BLURRED_AT(g_blur_pitch, x, y)]);
 }
 
 // render::fill_rounded_chrome_aa at one pixel.
@@ -313,7 +318,7 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
         if (go >= 255u)
             return SET(bg);
         if ((g_flags & FLAG_GLASS) != 0u) {
-            uint wpx = g_glass.v[py * g_glass_pitch + px];
+            uint wpx = g_glass.v[BLURRED_AT(g_glass_pitch, px, py)];
             return SET(glass_blend(glass_fill, wpx, go, ceil_));
         }
         uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max);
@@ -344,7 +349,7 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
 ITEM_RESULT chrome_glass(uint px, uint py, uint fill, uint fill_luma, uint go) {
     // A helper pixel past the screen's edge reads its last pixel instead,
     // as in `text_inside`.
-    uint at = min(py, g_height - 1u) * g_glass_pitch + min(px, g_width - 1u);
+    uint at = BLURRED_AT(g_glass_pitch, min(px, g_width - 1u), min(py, g_height - 1u));
     return SET(glass_blend_l(fill, fill_luma, g_glass.v[at], go, g_ceil));
 }
 
@@ -417,10 +422,10 @@ ITEM_RESULT panel(Blk it, uint x, uint y ITEM_PIXEL) {
 #ifdef ITEM_OPS
         uint fill = ink_fill(pv & 0xFFFFFFu, g_tint, g_tint_w);
         if ((g_flags & FLAG_BLURRED) != 0u)
-            return SET(glass_blend(fill, g_blur.v[y * g_blur_pitch + x], a, g_ceil));
+            return SET(glass_blend(fill, g_blur.v[BLURRED_AT(g_blur_pitch, x, y)], a, g_ceil));
         return GLASS(fill, a, g_ceil);
 #else
-        uint base = (g_flags & FLAG_BLURRED) != 0u ? g_blur.v[y * g_blur_pitch + x] : c;
+        uint base = (g_flags & FLAG_BLURRED) != 0u ? g_blur.v[BLURRED_AT(g_blur_pitch, x, y)] : c;
         uint fill = ink_fill(pv & 0xFFFFFFu, g_tint, g_tint_w);
         return glass_blend(fill, base, a, g_ceil);
 #endif

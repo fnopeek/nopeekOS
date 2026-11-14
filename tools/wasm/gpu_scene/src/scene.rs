@@ -192,10 +192,23 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         }
         Ok(Some(s))
     };
+    // The blurred wallpaper, which glass reads too, holds every second
+    // pixel each way (items.glsl reads pixel (x >> 1, y >> 1)).
+    let half_src = |id: u32| -> Result<Option<surface>, i32> {
+        if id == NONE {
+            return Ok(None);
+        }
+        let (w, h) = (width.div_ceil(2), height.div_ceil(2));
+        let s = bufs.surface(id).ok_or_else(|| refused(line!()))?;
+        if s.width < w || s.height < h || !s.holds(w, h) {
+            return Err(refused(line!()));
+        }
+        Ok(Some(s))
+    };
     let hflags = rd(&hdr, 4);
     let wall = screen_src(rd(&hdr, 5))?;
-    let blur = screen_src(rd(&hdr, 6))?;
-    let glass = screen_src(rd(&hdr, 7))?;
+    let blur = half_src(rd(&hdr, 6))?;
+    let glass = half_src(rd(&hdr, 7))?;
     let mut frame = [0u32; FRAME_BYTES as usize / 4];
     set64(&mut frame, F_TARGET, target.va);
     frame[F_TARGET_PITCH] = target.pitch / 4;

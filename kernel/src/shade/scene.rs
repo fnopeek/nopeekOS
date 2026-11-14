@@ -347,7 +347,7 @@ fn content_yuv(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rec
 fn panel(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area: &Rect) {
     if px.is_empty() || sw == 0 || sh == 0 || px.len() < (sw * sh) as usize { return; }
     // The blurred wallpaper for the translucent pixels.
-    let blurred = background::blurred_ptr();
+    let blurred = background::blurred();
     let ink = crate::shade::glass::ink();
     let x1 = area.x1().min(dst.x + sw);
     let y1 = area.y1().min(dst.y + sh);
@@ -359,9 +359,7 @@ fn panel(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, are
             if a == 0 { continue; }
             if a < 255 {
                 let base = match blurred {
-                    // SAFETY: x < width, y < height; the blurred wallpaper
-                    // is screen-sized with the framebuffer pitch.
-                    Some(b) => unsafe { *(b.add(y as usize * info.pitch as usize + x as usize * 4) as *const u32) },
+                    Some(b) => b.at(x, y),
                     None => render::read_pixel(t, info, x, y),
                 };
                 render::put_pixel(t, info, x, y, render::glass_blend(ink.fill(p & 0x00FF_FFFF), base, a, ink));
