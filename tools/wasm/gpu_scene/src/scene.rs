@@ -11,6 +11,21 @@ use crate::plan::{bin_table, item_shape, rect};
 use alloc::vec::Vec;
 
 const EINVAL: i32 = 22;
+
+/// The line of this file whose check refused the last scene, for the
+/// module's log (`refused_at`).
+static REFUSED_AT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+fn refused(line: u32) -> i32 {
+    REFUSED_AT.store(line, core::sync::atomic::Ordering::Relaxed);
+    -EINVAL
+}
+
+/// The line in gpu_scene/src/scene.rs whose check refused the last scene
+/// as invalid; 0 when none did.
+pub fn refused_at() -> u32 {
+    REFUSED_AT.swap(0, core::sync::atomic::Ordering::Relaxed)
+}
 const ENOMEM: i32 = 12;
 const E2BIG: i32 = 7;
 const PAGE: u32 = 4096;
@@ -136,21 +151,21 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
                    -> Result<checked, i32> {
     let mut hdr = [0u8; HEADER_BYTES as usize];
     if bytes < HEADER_BYTES {
-        return Err(-EINVAL);
+        return Err(refused(line!()));
     }
     job.read(0, &mut hdr)?;
     if rd(&hdr, 0) != MAGIC {
-        return Err(-EINVAL);
+        return Err(refused(line!()));
     }
     let (n_items, n_damage, glyph_bytes) = (rd(&hdr, 1), rd(&hdr, 2), rd(&hdr, 3));
     if n_damage as usize > MAX_DAMAGE {
         return Err(-E2BIG);
     }
-    let glyph_padded = glyph_bytes.checked_add(3).ok_or(-EINVAL)? & !3;
+    let glyph_padded = glyph_bytes.checked_add(3).ok_or_else(|| refused(line!()))? & !3;
     let need = (HEADER_BYTES as u64) + n_damage as u64 * 16 + n_items as u64 * ITEM_BYTES as u64
         + glyph_padded as u64;
     if need > bytes as u64 {
-        return Err(-EINVAL);
+        return Err(refused(line!()));
     }
     let items_at = FRAME_BYTES;
     let glyphs_at = items_at as u64 + n_items as u64 * ITEM_BYTES as u64;
@@ -159,21 +174,21 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
     }
     let (width, height) = (rd(&hdr, 12), rd(&hdr, 13));
     if width == 0 || height == 0 || width > MAX_COORD || height > MAX_COORD {
-        return Err(-EINVAL);
+        return Err(refused(line!()));
     }
 
     // The frame block.
-    let target = bufs.surface(target_id).ok_or(-EINVAL)?;
+    let target = bufs.surface(target_id).ok_or_else(|| refused(line!()))?;
     if target.width != width || target.height != height || !target.holds(width, height) {
-        return Err(-EINVAL);
+        return Err(refused(line!()));
     }
     let screen_src = |id: u32| -> Result<Option<surface>, i32> {
         if id == NONE {
             return Ok(None);
         }
-        let s = bufs.surface(id).ok_or(-EINVAL)?;
+        let s = bufs.surface(id).ok_or_else(|| refused(line!()))?;
         if s.width < width || s.height < height || !s.holds(width, height) {
-            return Err(-EINVAL);
+            return Err(refused(line!()));
         }
         Ok(Some(s))
     };
@@ -191,7 +206,7 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         frame[F_WALL_PITCH] = s.pitch / 4;
     }
     if hflags & HDR_BLURRED != 0 {
-        let s = blur.ok_or(-EINVAL)?;
+        let s = blur.ok_or_else(|| refused(line!()))?;
         flags |= FLAG_BLURRED;
         set64(&mut frame, F_BLUR, s.va);
         frame[F_BLUR_PITCH] = s.pitch / 4;
@@ -224,7 +239,7 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         let w = |k: usize| rd(&db, i * 4 + k);
         let r = rect { x: w(0), y: w(1), w: w(2), h: w(3) };
         if r.x > MAX_COORD || r.y > MAX_COORD || r.w > MAX_COORD || r.h > MAX_COORD {
-            return Err(-EINVAL);
+            return Err(refused(line!()));
         }
         damage.push(r);
     }
@@ -248,18 +263,18 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         }
         let kind = w[0];
         if !(KIND_BACKGROUND..=KIND_CLOSE_GLYPH).contains(&kind) {
-            return Err(-EINVAL);
+            return Err(refused(line!()));
         }
         if kind != KIND_BACKGROUND && w[1..5].iter().any(|&v| v > MAX_COORD) {
-            return Err(-EINVAL);
+            return Err(refused(line!()));
         }
         let src = |id: u32| -> Result<Option<surface>, i32> {
-            let s = bufs.surface(id).ok_or(-EINVAL)?;
+            let s = bufs.surface(id).ok_or_else(|| refused(line!()))?;
             if s.width == 0 || s.height == 0 {
                 return Ok(None);
             }
             if !s.holds(s.width, s.height) {
-                return Err(-EINVAL);
+                return Err(refused(line!()));
             }
             Ok(Some(s))
         };
@@ -267,24 +282,24 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         match kind {
             KIND_GLOW => {
                 if w[5] > MAX_COORD || w[7] > 4096 || w[8] > 65536 {
-                    return Err(-EINVAL);
+                    return Err(refused(line!()));
                 }
             }
             KIND_GLASS_BACKDROP => {
                 if w[5] > MAX_COORD {
-                    return Err(-EINVAL);
+                    return Err(refused(line!()));
                 }
             }
             KIND_CHROME => {
                 if w[8] > MAX_COORD || w[9] > MAX_COORD {
-                    return Err(-EINVAL);
+                    return Err(refused(line!()));
                 }
             }
             KIND_CONTENT => {
                 // Bit 0: extend instead of scale; bits 2..1: YUYV kind
                 // (0 none, 1 limited, 2 full).
                 if w[5] > MAX_COORD || w[6] > 5 {
-                    return Err(-EINVAL);
+                    return Err(refused(line!()));
                 }
                 let Some(s) = src(w[7])? else { continue };
                 out[7] = s.va as u32;
@@ -304,13 +319,13 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
             }
             KIND_FILL => {
                 if w[7] > MAX_COORD {
-                    return Err(-EINVAL);
+                    return Err(refused(line!()));
                 }
             }
             KIND_CLOSE_GLYPH => {
                 let (asz, off) = (w[5], w[7]);
                 if asz > 256 || off as u64 + (asz as u64 * asz as u64) > glyph_bytes as u64 {
-                    return Err(-EINVAL);
+                    return Err(refused(line!()));
                 }
             }
             _ => {}

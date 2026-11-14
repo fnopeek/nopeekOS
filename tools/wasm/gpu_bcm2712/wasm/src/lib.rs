@@ -384,8 +384,13 @@ impl Scenes {
                 None
             }
             Err(e) => {
-                Line::new().s("scene into buffer ").dec(a[0] as u64).s(" refused (").dec(e.unsigned_abs() as u64)
-                    .s(")").say();
+                let at = gpu_scene::scene::refused_at();
+                let mut l = Line::new();
+                l.s("scene into buffer ").dec(a[0] as u64).s(" refused (").dec(e.unsigned_abs() as u64).s(")");
+                if at != 0 {
+                    l.s(" by gpu_scene/src/scene.rs:").dec(at as u64);
+                }
+                l.say();
                 Some(e)
             }
         }

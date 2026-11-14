@@ -948,14 +948,7 @@ impl plan::draw_sink for Sink<'_> {
     fn draw(&mut self, area: &rect) -> Result<(), i32> {
         let ck = self.ck;
         let end = ck.items.len();
-        // Over the background every pixel is written, by it or by an item
-        // that covers it opaquely: the tiles need not be loaded first
-        // (loadOp DONT_CARE), once the area is whole tiles, as v3dv loads
-        // the tiles a partial area cuts. The pixels the widening adds are
-        // composed from the same scene.
-        let whole = ck.items.first().is_some_and(|it| it[0] == gpu_scene::scene::KIND_BACKGROUND);
-        let aligned = if whole { tile_area(area, ck.width, ck.height) } else { *area };
-        let area = &aligned;
+
         let mut draws = Vec::with_capacity(end);
         for i in 0..end {
             let kind = ck.items[i][0] as usize;
@@ -978,16 +971,6 @@ impl plan::draw_sink for Sink<'_> {
         }
         let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: ck.width, height: ck.height };
         let area = v3d_draw::Rect { x: area.x, y: area.y, width: area.w, height: area.h };
-        self.c.submit_draws(self.hw, image, !whole, area, &draws).map(|_| ())
+        self.c.submit_draws(self.hw, image, true, area, &draws).map(|_| ())
     }
-}
-
-/// `a` grown to whole tiles, within the `width` x `height` image.
-fn tile_area(a: &rect, width: u32, height: u32) -> rect {
-    let (gw, gh) = v3d_draw::tile_size();
-    let x0 = a.x / gw * gw;
-    let y0 = a.y / gh * gh;
-    let x1 = (a.x + a.w).div_ceil(gw).saturating_mul(gw).min(width);
-    let y1 = (a.y + a.h).div_ceil(gh).saturating_mul(gh).min(height);
-    rect { x: x0, y: y0, w: x1.saturating_sub(x0), h: y1.saturating_sub(y0) }
 }
