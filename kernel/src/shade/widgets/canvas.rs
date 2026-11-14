@@ -292,7 +292,7 @@ fn reap_decodes() {
     });
     if done.is_empty() { return; }
     for (w, c) in done { note_frame(w, c); }
-    crate::shade::request_render();
+    crate::shade::request_damaged();
 }
 
 /// Whether a decode is still running (the shell keeps ticking for it).

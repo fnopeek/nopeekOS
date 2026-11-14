@@ -1404,7 +1404,7 @@ fn finish_job(window_id: u32, mut job: RenderJob, mode: LayoutMode) {
     }
 }
 
-/// Helper: mark the window dirty + request a render. Used by every
+/// Helper: mark the window dirty + request its repaint. Used by every
 /// state-driven re-rasterize path.
 fn mark_dirty(window_id: u32) {
     crate::shade::with_compositor(|c| {
@@ -1412,7 +1412,7 @@ fn mark_dirty(window_id: u32) {
             win.dirty = true;
         }
     });
-    crate::shade::request_render();
+    crate::shade::request_damaged();
 }
 
 /// Mouse-button-down at (x, y) on a widget window: move focus to the
@@ -1530,7 +1530,7 @@ pub fn press_at(window_id: u32, x: i32, y: i32) -> bool {
     };
     finish_job(window_id, job, LayoutMode::Reuse);
     sync_caret(window_id);
-    crate::shade::request_render();
+    mark_dirty(window_id);
     true
 }
 
@@ -1659,7 +1659,7 @@ pub fn release_at(window_id: u32) -> bool {
         RenderJob::take(s, LayoutMode::Reuse)
     };
     finish_job(window_id, job, LayoutMode::Reuse);
-    crate::shade::request_render();
+    mark_dirty(window_id);
     true
 }
 
@@ -2383,7 +2383,6 @@ fn handle_clipboard_key(window_id: u32, letter: u8, is_textarea: bool) -> bool {
     sync_caret(window_id);
     rerender_state_only(window_id);
     mark_dirty(window_id);
-    crate::shade::request_render();
     true
 }
 
@@ -2588,7 +2587,6 @@ pub fn text_select_begin(window_id: u32, x: i32, y: i32) -> bool {
         sync_caret(window_id);
         rerender_state_only(window_id);
         mark_dirty(window_id);
-        crate::shade::request_render();
     }
     began
 }
@@ -2629,7 +2627,6 @@ pub fn text_select_run(window_id: u32, x: i32, y: i32, run: u8) -> bool {
         sync_caret(window_id);
         rerender_state_only(window_id);
         mark_dirty(window_id);
-        crate::shade::request_render();
     }
     ok
 }
@@ -2656,7 +2653,6 @@ pub fn text_select_extend(window_id: u32, x: i32, y: i32) -> bool {
         sync_caret(window_id);
         rerender_state_only(window_id);
         mark_dirty(window_id);
-        crate::shade::request_render();
     }
     changed
 }
@@ -2804,7 +2800,7 @@ fn set_scene_slider(scene: &mut WidgetScene, action: abi::ActionId, value: u16) 
 /// after the queued mouse events are through.
 fn slide_repaint(window_id: u32) {
     SLIDE_DIRTY.store(window_id + 1, Ordering::Release);
-    crate::shade::request_render();
+    crate::shade::request_damaged();
 }
 
 /// Draw the slider that moved since the last frame, if any. Value changes
@@ -3328,7 +3324,6 @@ pub fn handle_input_key(
     // using the cached state slices, no recommit needed.
     finish_job(window_id, job, LayoutMode::Reuse);
     mark_dirty(window_id);
-    crate::shade::request_render();
     true
 }
 
@@ -3596,15 +3591,19 @@ pub fn scene_commit(bytes: &[u8], window_id: u32, module_name: &str) -> i32 {
     }
     sync_caret(target_id);
 
-    // Mark the window dirty so shade paints it in the next render,
-    // then request a full render on Core 0. scene_commit may run on
-    // a worker core — we never touch MMIO directly from here.
+    // Mark the window dirty so shade paints it in the next render on
+    // Core 0; scene_commit may run on a worker core. A new window is
+    // placed among the others, which takes the whole screen.
     crate::shade::with_compositor(|c| {
         if let Some(win) = c.windows.iter_mut().find(|w| w.id.0 == target_id) {
             win.dirty = true;
         }
     });
-    crate::shade::request_render();
+    if new_window.is_some() {
+        crate::shade::request_render();
+    } else {
+        crate::shade::request_damaged();
+    }
 
     match new_window {
         Some(id) => id as i32,

@@ -949,6 +949,15 @@ pub fn request_render() {
     }
 }
 
+/// Ask Core 0 to compose what changed: the windows marked dirty and the
+/// canvas frames noted since (`Compositor::render_damaged`), not the
+/// whole screen as `request_render` does.
+pub fn request_damaged() {
+    if !DAMAGE_PENDING.swap(true, Ordering::AcqRel) {
+        crate::intent::wake_shell();
+    }
+}
+
 /// Does the shell loop have to come back within one frame even without an
 /// event? True while something moves on its own — a swap animation, the
 /// screenshot flash, the focus glow — or a guest frame waits out its rate cap, a close
@@ -956,6 +965,7 @@ pub fn request_render() {
 /// shell sleeps until something wakes it.
 pub fn needs_tick() -> bool {
     DEFERRED_RENDER.load(Ordering::Relaxed)
+        || DAMAGE_PENDING.load(Ordering::Relaxed)
         || CURSOR_MOVED.load(Ordering::Relaxed)
         || SURFACE_DIRTY.load(Ordering::Relaxed)
         || terminal::is_dirty()
@@ -1464,7 +1474,11 @@ pub fn poll_render() {
     // Deferred scene redraw (drag resize/swap sets this to avoid blocking event loop)
     if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
         SURFACE_DIRTY.store(false, Ordering::Relaxed); // a full render covers the tile too
+        DAMAGE_PENDING.store(false, Ordering::Relaxed);
         render_frame();
+        CURSOR_MOVED.store(false, Ordering::Relaxed);
+    } else if DAMAGE_PENDING.swap(false, Ordering::Relaxed) {
+        render_damaged();
         CURSOR_MOVED.store(false, Ordering::Relaxed);
     } else if !terminal::is_dirty() && SURFACE_DIRTY.load(Ordering::Relaxed) {
         // Guest produced a new frame. The guest may report 100% damage every
@@ -1549,6 +1563,9 @@ static DRAG_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// Set by handle_mouse when a full scene redraw is needed but deferred.
 /// poll_render picks this up after processing all mouse events.
 static DEFERRED_RENDER: AtomicBool = AtomicBool::new(false);
+/// Windows or canvas frames changed (`request_damaged`); poll_render
+/// composes them unless a full render is pending anyway.
+static DAMAGE_PENDING: AtomicBool = AtomicBool::new(false);
 /// A pure mouse move occurred (no scene change). poll_render moves the
 /// cursor via save-under (no recomposite) for it — cheap, flicker-free.
 static CURSOR_MOVED: AtomicBool = AtomicBool::new(false);
@@ -1648,7 +1665,7 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
         if let Some(wid) = focused_widget_id() {
             let delta = (evt.hscroll as i32) * widget_scroll_step();
             if widgets::scroll_by_x(wid, delta) {
-                request_render();
+                request_damaged();
             } else {
                 widgets::push_event(wid, widgets::abi::Event::WheelX { dx: delta });
             }
@@ -1678,11 +1695,11 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
             // Shift+wheel scrolls sideways — the editor idiom, and the only
             // way to reach a long line with a mouse that has one wheel.
             if crate::input::is_shift_held() {
-                if widgets::scroll_by_x(wid, delta) { request_render(); }
+                if widgets::scroll_by_x(wid, delta) { request_damaged(); }
                 return;
             }
             if widgets::scroll_by(wid, delta) {
-                request_render();
+                request_damaged();
             } else {
                 // No Widget::Scroll consumed it → forward to the app so a
                 // Canvas/surface app (e.g. the browser) can scroll itself.

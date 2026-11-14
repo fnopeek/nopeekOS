@@ -3618,7 +3618,7 @@ pub(crate) fn npk_canvas_commit(mem: &mut [u8], ctx: &mut HostState, canvas_id: 
         return -1;
     }
     crate::shade::widgets::rerender_window_pixels(wid);
-    crate::shade::request_render();
+    crate::shade::request_damaged();
     0
 }
 
@@ -3642,7 +3642,7 @@ pub(crate) fn npk_canvas_frame(mem: &mut [u8], ctx: &mut HostState, canvas_id: i
         if n > crate::shade::widgets::canvas::window_budget() { return -1; }
         let Some(src) = guest(mem, ptr, n) else { return -1 };
         let r = crate::shade::widgets::canvas::commit_jpeg(wid, canvas_id as u32, width as u32, height as u32, src);
-        if r == 0 { crate::shade::request_render(); }
+        if r == 0 { crate::shade::request_damaged(); }
         return r;
     }
     let yuv = match format { 0 => Yuv::None, 1 => Yuv::Limited, 2 => Yuv::Full, _ => return -1 };
@@ -3656,7 +3656,7 @@ pub(crate) fn npk_canvas_frame(mem: &mut [u8], ctx: &mut HostState, canvas_id: i
     if !crate::shade::widgets::canvas::commit_frame(wid, canvas_id as u32, width as u32, height as u32, yuv, src) {
         return -1;
     }
-    crate::shade::request_render();
+    crate::shade::request_damaged();
     0
 }
 
@@ -3712,7 +3712,7 @@ pub(crate) fn npk_canvas_commit_yuv(
         return -1;
     }
     crate::shade::widgets::rerender_window_pixels(wid);
-    crate::shade::request_render();
+    crate::shade::request_damaged();
     0
 }
 
