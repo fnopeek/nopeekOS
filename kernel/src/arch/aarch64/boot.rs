@@ -342,6 +342,7 @@ const DESKTOP_DELAY_MS: u64 = 400;
 
 /// With `desktop on`, the desktop after login as on x86.
 fn desktop_fiber(_: u64) {
+    crate::smp::fiber::set_current_name(&"desktop");
     crate::smp::fiber::yield_sleep(DESKTOP_DELAY_MS);
     if crate::config::get("desktop").is_some_and(|v| v.trim() == "on") {
         start_desktop();
@@ -384,6 +385,7 @@ static SHELL_ARGS: spin::Mutex<Option<(&'static spin::Mutex<crate::capability::V
     spin::Mutex::new(None);
 
 fn shell_fiber(_: u64) {
+    crate::smp::fiber::set_current_name(&"shell");
     let args = SHELL_ARGS.lock().take();
     if let Some((vault, session)) = args {
         crate::intent::run_loop(vault, session);

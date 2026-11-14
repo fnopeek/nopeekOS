@@ -369,6 +369,7 @@ static SHELL_ARGS: spin::Mutex<Option<(&'static spin::Mutex<capability::Vault>, 
     spin::Mutex::new(None);
 
 fn shell_fiber(_: u64) {
+    crate::smp::fiber::set_current_name(&"shell");
     let args = SHELL_ARGS.lock().take();
     if let Some((vault, session)) = args {
         intent::run_loop(vault, session);

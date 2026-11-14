@@ -127,6 +127,20 @@ struct WakerSlot {
     /// Mirrors `Fiber::movable`, for a signaller deciding whether an idle
     /// core could take the woken fiber.
     movable: core::sync::atomic::AtomicBool,
+    /// The signal bits the parked fiber waits for, 0 while it runs.
+    wait_mask: core::sync::atomic::AtomicU32,
+    /// When it became runnable and still waits for its core (counter, 0 =
+    /// not runnable or running): the start of Linux's `run_delay`.
+    ready_at: AtomicU64,
+    /// Accounting as `schedstat` keeps it: time on the core, times run,
+    /// time runnable but not running (sum and longest), in counter ticks.
+    cpu: AtomicU64,
+    runs: AtomicU64,
+    delay_sum: AtomicU64,
+    delay_max: AtomicU64,
+    /// Its name (`set_current_name`), and its process (`set_current_pid`).
+    name: core::sync::atomic::AtomicPtr<&'static str>,
+    pid: core::sync::atomic::AtomicU32,
 }
 
 impl WakerSlot {
@@ -135,7 +149,27 @@ impl WakerSlot {
         core: core::sync::atomic::AtomicU32::new(0),
         used: core::sync::atomic::AtomicBool::new(false),
         movable: core::sync::atomic::AtomicBool::new(false),
+        wait_mask: core::sync::atomic::AtomicU32::new(0),
+        ready_at: AtomicU64::new(0),
+        cpu: AtomicU64::new(0),
+        runs: AtomicU64::new(0),
+        delay_sum: AtomicU64::new(0),
+        delay_max: AtomicU64::new(0),
+        name: core::sync::atomic::AtomicPtr::new(core::ptr::null_mut()),
+        pid: core::sync::atomic::AtomicU32::new(0),
     };
+
+    /// A fresh fiber's accounting.
+    fn reset_stats(&self) {
+        self.wait_mask.store(0, Ordering::Relaxed);
+        self.ready_at.store(crate::time::counter(), Ordering::Relaxed);
+        self.cpu.store(0, Ordering::Relaxed);
+        self.runs.store(0, Ordering::Relaxed);
+        self.delay_sum.store(0, Ordering::Relaxed);
+        self.delay_max.store(0, Ordering::Relaxed);
+        self.name.store(core::ptr::null_mut(), Ordering::Relaxed);
+        self.pid.store(0, Ordering::Relaxed);
+    }
 }
 
 type WakerChunk = [WakerSlot; WAKER_CHUNK];
@@ -172,6 +206,7 @@ fn alloc_waker(cid: usize, movable: bool) -> Waker {
         for (i, w) in unsafe { &*chunk }.iter().enumerate() {
             if w.used.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
                 w.signals.store(0, Ordering::Relaxed);
+                w.reset_stats();
                 w.movable.store(movable, Ordering::Relaxed);
                 w.core.store(cid as u32, Ordering::Release);
                 return (c * WAKER_CHUNK + i) as Waker;
@@ -203,6 +238,9 @@ pub fn signal(w: Waker, bits: u32) {
         return;
     }
     slot.signals.fetch_or(bits, Ordering::SeqCst);
+    if slot.wait_mask.load(Ordering::Acquire) & bits != 0 {
+        let _ = slot.ready_at.compare_exchange(0, crate::time::counter(), Ordering::AcqRel, Ordering::Relaxed);
+    }
     // SeqCst against the store in `steal_for`: a signaller that still reads
     // the old core set its bits before the move, so the new core sees them.
     let core = slot.core.load(Ordering::SeqCst) as usize;
@@ -256,6 +294,15 @@ pub fn wait(mask: u32, deadline: u64) -> Option<u32> {
     }
     // The scheduler runs with interrupts masked, as `__schedule` does.
     let irq = crate::arch::irq_save();
+    if let Some(s) = slot(w) {
+        s.ready_at.store(0, Ordering::Relaxed);
+        s.wait_mask.store(mask, Ordering::Release);
+        // A bit that arrived before the mask was published made it
+        // runnable already.
+        if s.signals.load(Ordering::Acquire) & mask != 0 {
+            let _ = s.ready_at.compare_exchange(0, crate::time::counter(), Ordering::AcqRel, Ordering::Relaxed);
+        }
+    }
     // SAFETY: as above — park, switch to the scheduler; it resumes us when a
     // bit of `mask` is set or the deadline passes.
     unsafe {
@@ -420,6 +467,22 @@ pub fn run_core_fibers(cid: usize) {
 
         let fptr: *mut Fiber = &mut *fiber;
         let waker = fiber.waker;
+        let wslot = slot(waker);
+        if let Some(s) = wslot {
+            let start = crate::time::counter();
+            let mut ready = s.ready_at.swap(0, Ordering::AcqRel);
+            if let FiberState::Waiting { deadline, .. } = fiber.state {
+                if deadline != NO_DEADLINE && deadline <= start && (ready == 0 || deadline < ready) {
+                    ready = deadline;
+                }
+            }
+            s.wait_mask.store(0, Ordering::Release);
+            if ready != 0 && ready <= start {
+                let d = start - ready;
+                s.delay_sum.fetch_add(d, Ordering::Relaxed);
+                s.delay_max.fetch_max(d, Ordering::Relaxed);
+            }
+        }
         RUN_WAKER[cid].store(waker, Ordering::Relaxed);
         RUN_PID[cid].store(fiber.pid, Ordering::Relaxed);
         RUN_START[cid].store(crate::time::counter(), Ordering::Relaxed);
@@ -433,6 +496,10 @@ pub fn run_core_fibers(cid: usize) {
             CURRENT_FIBER[cid] = core::ptr::null_mut();
         }
         let ran = crate::time::counter().saturating_sub(RUN_START[cid].swap(0, Ordering::Relaxed));
+        if let Some(s) = wslot {
+            s.cpu.fetch_add(ran, Ordering::Relaxed);
+            s.runs.fetch_add(1, Ordering::Relaxed);
+        }
         if ran > LONGEST_RUN[cid].load(Ordering::Relaxed) {
             LONGEST_RUN[cid].store(ran, Ordering::Relaxed);
             LONGEST_RUN_WAKER[cid].store(waker, Ordering::Relaxed);
@@ -474,8 +541,63 @@ pub fn set_current_pid(pid: u32) {
         if !f.is_null() {
             (*f).pid = pid;
             RUN_PID[cid].store(pid, Ordering::Relaxed);
+            if let Some(s) = slot((*f).waker) {
+                s.pid.store(pid, Ordering::Relaxed);
+            }
         }
     }
+}
+
+/// Name the running fiber for `cores` (a kernel fiber; an app is named by
+/// its process).
+pub fn set_current_name(name: &'static &'static str) {
+    if let Some(s) = current_waker().and_then(slot) {
+        s.name.store(name as *const &'static str as *mut &'static str, Ordering::Relaxed);
+    }
+}
+
+/// One fiber's accounting, as `cores` reads it.
+#[derive(Clone, Copy)]
+pub struct FiberStats {
+    pub waker: Waker,
+    pub core: u32,
+    pub pid: u32,
+    pub name: Option<&'static str>,
+    pub cpu: u64,
+    pub runs: u64,
+    pub delay_sum: u64,
+    pub delay_max: u64,
+}
+
+/// Every live fiber's accounting; `delay_max` restarts at 0 when `clear_max`.
+pub fn fiber_stats(clear_max: bool) -> alloc::vec::Vec<FiberStats> {
+    let mut out = alloc::vec::Vec::new();
+    for (c, cell) in WAKER_CHUNKS.iter().enumerate() {
+        let chunk = cell.load(Ordering::Acquire);
+        if chunk.is_null() {
+            break;
+        }
+        // SAFETY: a published chunk is a leaked Box that is never freed.
+        for (i, s) in unsafe { &*chunk }.iter().enumerate() {
+            if !s.used.load(Ordering::Acquire) {
+                continue;
+            }
+            let name = s.name.load(Ordering::Relaxed);
+            out.push(FiberStats {
+                waker: (c * WAKER_CHUNK + i) as Waker,
+                core: s.core.load(Ordering::Relaxed),
+                pid: s.pid.load(Ordering::Relaxed),
+                // SAFETY: `name` is null or a `&'static &'static str` that
+                // `set_current_name` stored.
+                name: unsafe { name.as_ref() }.copied(),
+                cpu: s.cpu.load(Ordering::Relaxed),
+                runs: s.runs.load(Ordering::Relaxed),
+                delay_sum: s.delay_sum.load(Ordering::Relaxed),
+                delay_max: if clear_max { s.delay_max.swap(0, Ordering::Relaxed) } else { s.delay_max.load(Ordering::Relaxed) },
+            });
+        }
+    }
+    out
 }
 
 /// The fiber running on `cid`, its process, and since when (TSC), if any.
@@ -678,6 +800,10 @@ pub fn yield_ready() -> bool {
         return false;
     }
     let irq = crate::arch::irq_save();
+    // SAFETY: f is the running fiber, owned by run_core_fibers' frame.
+    if let Some(s) = unsafe { slot((*f).waker) } {
+        s.ready_at.store(crate::time::counter(), Ordering::Relaxed);
+    }
     // SAFETY: f is the running fiber; mark Ready and switch back to the
     // core scheduler, which round-robins on to the next runnable fiber.
     unsafe {
@@ -927,7 +1053,8 @@ pub struct Fiber {
     /// The process it runs (`set_current_pid`), 0 for none.
     pid: u32,
     /// Switched into at least once. Until then its interrupt-state slot is a
-    /// placeholder that the scheduler replaces with its own (`run_core_fibers`).
+    /// placeholder that the scheduler sets on the first switch
+    /// (`run_core_fibers`, `start_with_interrupts`).
     started: bool,
     stack: crate::mm::stack::KernelStack,
 }

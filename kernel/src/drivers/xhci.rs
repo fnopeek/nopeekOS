@@ -682,6 +682,7 @@ pub fn attach_platform(phys: u64, len: u64, dma_bus_off: u64, quirks: Quirks, ir
 fn irq_thread(phys: u64) {
     let id = CtrlId::Mmio(phys);
     let Some(irq) = CTRLS.lock().iter().find(|s| s.ctrl == id).map(|s| s.irq) else { return };
+    crate::smp::fiber::set_current_name(&"xhci");
     loop {
         let since = crate::irq::arm(irq);
         loop {

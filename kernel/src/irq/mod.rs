@@ -78,6 +78,12 @@ struct Desc {
     /// the device, or a level line would fire again the moment the
     /// hardirq returns.
     oneshot: AtomicBool,
+    /// When the hardirq last ran (counter), and the time from there until
+    /// the waiting fiber ran again: sum, count and longest.
+    fired_at: AtomicU64,
+    lat_sum: AtomicU64,
+    lat_n: AtomicU64,
+    lat_max: AtomicU64,
 }
 
 impl Desc {
@@ -87,6 +93,10 @@ impl Desc {
             waiter: AtomicU32::new(NO_WAKER),
             hwirq: AtomicU32::new(0),
             oneshot: AtomicBool::new(false),
+            fired_at: AtomicU64::new(0),
+            lat_sum: AtomicU64::new(0),
+            lat_n: AtomicU64::new(0),
+            lat_max: AtomicU64::new(0),
         }
     }
 }
@@ -153,6 +163,7 @@ fn free_irq(irq: Irq) {
 /// sees the device data the interrupt signalled.
 #[inline]
 fn note_fired(d: &Desc) {
+    d.fired_at.store(crate::time::counter(), Ordering::Relaxed);
     d.fired.fetch_add(1, Ordering::Release);
     let w = d.waiter.load(Ordering::Acquire);
     if w != NO_WAKER {
@@ -219,10 +230,63 @@ pub fn arm(irq: Irq) -> u64 {
 /// Must be called from inside a fiber (returns false otherwise; the caller
 /// should fall back to polling).
 pub fn wait(irq: Irq, since: u64, timeout_ms: u64) -> bool {
-    crate::smp::fiber::irq_wait(irq, since, timeout_ms)
+    let fired = crate::smp::fiber::irq_wait(irq, since, timeout_ms);
+    if fired { note_serviced(irq); }
+    fired
 }
 
 /// `wait` without a timeout, as a Linux interrupt thread waits.
 pub fn wait_event(irq: Irq, since: u64) -> bool {
-    crate::smp::fiber::irq_wait_until(irq, since, crate::smp::fiber::NO_DEADLINE)
+    let fired = crate::smp::fiber::irq_wait_until(irq, since, crate::smp::fiber::NO_DEADLINE);
+    if fired { note_serviced(irq); }
+    fired
+}
+
+/// The waiter runs again after the hardirq: account the time in between.
+fn note_serviced(irq: Irq) {
+    let Some(d) = desc(irq) else { return };
+    let at = d.fired_at.load(Ordering::Relaxed);
+    let now = crate::time::counter();
+    if at != 0 && at <= now {
+        let l = now - at;
+        d.lat_sum.fetch_add(l, Ordering::Relaxed);
+        d.lat_n.fetch_add(1, Ordering::Relaxed);
+        d.lat_max.fetch_max(l, Ordering::Relaxed);
+    }
+}
+
+/// One interrupt's counters, as `cores` reads them.
+#[derive(Clone, Copy)]
+pub struct IrqStats {
+    pub irq: Irq,
+    pub hwirq: u32,
+    pub fired: u64,
+    pub waiter: crate::smp::fiber::Waker,
+    pub lat_sum: u64,
+    pub lat_n: u64,
+    pub lat_max: u64,
+}
+
+/// Every interrupt with a waiter or a count; `lat_max` restarts at 0 when
+/// `clear_max`.
+pub fn irq_stats(clear_max: bool) -> alloc::vec::Vec<IrqStats> {
+    let mut out = alloc::vec::Vec::new();
+    for irq in 1..=hw::NR_IRQS.min(Irq::MAX as usize) as Irq {
+        let Some(d) = desc(irq) else { continue };
+        let fired = d.fired.load(Ordering::Acquire);
+        let waiter = d.waiter.load(Ordering::Acquire);
+        if fired == 0 && waiter == NO_WAKER {
+            continue;
+        }
+        out.push(IrqStats {
+            irq,
+            hwirq: d.hwirq.load(Ordering::Relaxed),
+            fired,
+            waiter,
+            lat_sum: d.lat_sum.load(Ordering::Relaxed),
+            lat_n: d.lat_n.load(Ordering::Relaxed),
+            lat_max: if clear_max { d.lat_max.swap(0, Ordering::Relaxed) } else { d.lat_max.load(Ordering::Relaxed) },
+        });
+    }
+    out
 }

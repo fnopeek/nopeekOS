@@ -4,6 +4,7 @@
 //! Every intent requires a valid capability token.
 
 mod auth;
+mod cores;
 mod cert;
 pub(crate) mod fetch;
 mod forge;
@@ -2104,6 +2105,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         #[cfg(target_arch = "x86_64")]
         "cores" | "cpu" => {
             system::intent_cores();
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        "cores" | "cpu" => {
+            cores::intent_cores();
         }
         #[cfg(target_arch = "x86_64")]
         "keyvault" | "vault" => {

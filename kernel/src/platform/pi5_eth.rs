@@ -256,6 +256,7 @@ pub fn init(fdt: &Fdt) -> bool {
 fn eth_fiber(arg: u64) {
     let irq = arg as u32 as crate::irq::Irq;
     let line = (arg >> 32) as u32;
+    crate::smp::fiber::set_current_name(&"eth");
     let mut fired = false;
     let mut next_poll = crate::time::uptime_us();
     let mut lpi_due: Option<u64> = None;

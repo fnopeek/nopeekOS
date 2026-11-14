@@ -72,27 +72,6 @@ pub fn intent_status(vault: &Vault) {
 ///                             few long halts = healthy deep idle.
 ///
 /// Output goes to serial via kprintln (primary I/O).
-/// Wait until TSC `deadline` and keep the screen going. These intents run
-/// in the shell's fiber on Core 0, and the shell's loop is what composites
-/// (`shade::poll_render`): `halt_until` there froze every window, the
-/// microVM's included, for the whole wait. Now the fiber parks in frame-sized
-/// steps and composites between them. Outside a fiber, halt as before.
-#[cfg(target_arch = "x86_64")]
-fn idle_until(deadline: u64) {
-    let step = crate::time::counter_hz() / 60;
-    loop {
-        let now = crate::time::counter();
-        if now >= deadline {
-            return;
-        }
-        let d = deadline.min(now + step);
-        if crate::smp::fiber::wait(0, d).is_none() {
-            crate::interrupts::halt_until(Some(d), crate::smp::per_core::WAKE_HLT_FALLBACK);
-        }
-        crate::shade::poll_render();
-    }
-}
-
 #[cfg(target_arch = "x86_64")]
 pub fn intent_cores() {
     let cores = crate::smp::per_core::core_count().min(256);
@@ -100,14 +79,7 @@ pub fn intent_cores() {
     let tsc_per_us = (tsc_hz / 1_000_000).max(1);
 
     // Snapshot 1
-    let mut s0 = [(0u64, 0u64); 256];
-    let mut w0 = [[0u64; crate::smp::per_core::WAKE_CAUSES]; 256];
-    let mut t0 = [(0u64, 0u64); 256];
-    for c in 0..cores {
-        s0[c] = crate::smp::per_core::halt_snapshot(c);
-        w0[c] = crate::smp::per_core::wake_snapshot(c);
-        t0[c] = crate::smp::per_core::timer_snapshot(c);
-    }
+    let cs0 = super::cores::sample(true);
     let vx0 = crate::microvm::cpu::vm_exit_snapshot();
     let io0 = crate::microvm::cpu::io_port_snapshot();
     let np0 = crate::microvm::cpu::npf_snapshot();
@@ -141,22 +113,14 @@ pub fn intent_cores() {
     let window_ms: u64 = 500;
     let deadline = wall0 + window_ms * (tsc_hz / 1000);
     while crate::time::counter() < deadline {
-        idle_until(deadline);
+        super::cores::idle_until(deadline);
     }
 
     // Snapshot 2
-    let wall1 = crate::time::counter();
     let mut ap1 = [(0u64, 0u64); 256];
     crate::smp::per_core::aperf_mperf_now(&mut ap1[..cores]);
     let nominal_mhz = tsc_hz / 1_000_000;
-    let mut s1 = [(0u64, 0u64); 256];
-    let mut w1 = [[0u64; crate::smp::per_core::WAKE_CAUSES]; 256];
-    let mut t1 = [(0u64, 0u64); 256];
-    for c in 0..cores {
-        s1[c] = crate::smp::per_core::halt_snapshot(c);
-        w1[c] = crate::smp::per_core::wake_snapshot(c);
-        t1[c] = crate::smp::per_core::timer_snapshot(c);
-    }
+    let cs1 = super::cores::sample(false);
     let vx1 = crate::microvm::cpu::vm_exit_snapshot();
     let io1 = crate::microvm::cpu::io_port_snapshot();
     let np1 = crate::microvm::cpu::npf_snapshot();
@@ -179,109 +143,18 @@ pub fn intent_cores() {
     let tx1 = crate::microvm::devices::nat::tx_stats();
     let rp1 = crate::microvm::devices::net_dataplane::rx_pass_stats(); // gap_max = window peak
     let (cy1, gcy1) = crate::microvm::cpu::vm_cycle_snapshot();
-    let dwall = wall1.saturating_sub(wall0).max(1);
-
-    let vmcore = crate::smp::per_core::dedicated_vm_core();
-
-    kprintln!();
-    kprintln!("  Per-core CPU (idle-measured, {} ms window; every core wakes on deadline/IRQ/IPI)", window_ms);
-    kprintln!("  ─────────────────────────────────────────────────────");
-    kprintln!("  CORE   BUSY%    MHz   HALTS/s   AVG-RESIDENCY   QUEUE  ROLE");
-    for c in 0..cores {
-        let dhalt = s1[c].0.saturating_sub(s0[c].0);
-        let dcount = s1[c].1.saturating_sub(s0[c].1);
-
-        // True busy% = 100 − (halted cycles / wall cycles).
-        let halt_pct = ((dhalt as u128) * 100 / (dwall as u128)) as u64;
-        let busy = 100u64.saturating_sub(halt_pct.min(100));
-
-        // Halt entries per second (window is window_ms long).
-        let halts_per_s = dcount * 1000 / window_ms;
-
-        // Average residency per halt, in µs.
-        let avg_us = if dcount > 0 { (dhalt / dcount) / tsc_per_us } else { 0 };
-
-        let qlen = crate::smp::scheduler::queue_len(c);
-
+    let mhz: alloc::vec::Vec<alloc::string::String> = (0..cores).map(|c| {
         let da = ap1[c].0.wrapping_sub(ap0[c].0);
         let dm = ap1[c].1.wrapping_sub(ap0[c].1);
-        let mhz = if dm == 0 {
+        if dm == 0 {
             alloc::string::String::from("—")
         } else {
             alloc::format!("{}", (da as u128 * nominal_mhz as u128 / dm as u128) as u64)
-        };
-
-        // ROLE: classify from the measured signals, not a hardcoded guess.
-        let role: &str = if c == 0 {
-            "core0 (kernel/irq/shell)"
-        } else if Some(c) == vmcore {
-            "microvm (dedicated)"
-        } else if let Some(t) = crate::smp::per_core::native_task(c) {
-            // Leaked once per `cores` call; a handful of bytes.
-            alloc::boxed::Box::leak(alloc::format!("native task '{}'", t).into_boxed_str())
-        } else if busy >= 90 && halts_per_s < 5 {
-            "SPINNING (never halts!)"
-        } else if halts_per_s > 200 && avg_us < 50 {
-            "spin? (spurious wakes)"
-        } else if crate::smp::per_core::is_active(c) {
-            "running task"
-        } else if busy < 5 && crate::smp::fiber::fiber_count(c) > 0 {
-            alloc::boxed::Box::leak(alloc::format!("{} fiber(s), asleep",
-                crate::smp::fiber::fiber_count(c)).into_boxed_str())
-        } else if busy < 5 {
-            "idle (asleep)"
-        } else {
-            "worker"
-        };
-
-        if dcount > 0 {
-            kprintln!("  {:>4}   {:>4}%  {:>5}   {:>7}   {:>10} us   {:>5}  {}",
-                c, busy, mhz, halts_per_s, avg_us, qlen, role);
-        } else {
-            kprintln!("  {:>4}   {:>4}%  {:>5}   {:>7}   {:>13}   {:>5}  {}",
-                c, busy, mhz, halts_per_s, "—", qlen, role);
         }
-
-        // Wake-source breakdown: which cause returned each halt this
-        // window. UNATTR = HALTS − Σcauses: large here means the HLT
-        // returned with no guest ISR, i.e. KVM resuming
-        // the vCPU on a host event (host HZ tick) past the emulated HLT.
-        // That is a QEMU/KVM artifact, not a bare-metal idle bug.
-        let labels = crate::smp::per_core::WAKE_LABELS;
-        let mut attributed = 0u64;
-        // Build "cause=N/s" only for non-zero causes to keep it terse.
-        // (kprintln has no String; print inline per cause.)
-        kprint!("        wakes:");
-        let mut any = false;
-        for i in 0..labels.len() {
-            let d = w1[c][i].saturating_sub(w0[c][i]);
-            attributed = attributed.saturating_add(d);
-            if d > 0 {
-                kprint!(" {}={}/s", labels[i], d * 1000 / window_ms);
-                any = true;
-            }
-        }
-        if !any { kprint!(" (none)"); }
-        let unattr = dcount.saturating_sub(attributed);
-        kprintln!("  | UNATTR={}/s", unattr * 1000 / window_ms);
-        // Deadline timer: one-shot fires, and the worst wake past its deadline.
-        kprintln!("        timer: fires={}/s late_max={}us",
-            t1[c].0.saturating_sub(t0[c].0) * 1000 / window_ms,
-            t1[c].1 / tsc_per_us.max(1));
-        // Who lives here: WASM modules by name, the rest are kernel fibers
-        // (vCPU, NAPI, microvm workers). `driver` and `apps` decide whether
-        // a vCPU may take the core.
-        let fibers = crate::smp::fiber::fiber_count(c);
-        if c > 0 && fibers > 0 {
-            let (names, n) = crate::process::wasm_names_on_core(c);
-            kprint!("        fibers: {}", if n > 0 { names.as_str() } else { "-" });
-            let kernel = fibers.saturating_sub(n);
-            if kernel > 0 { kprint!(" (+{} kernel)", kernel); }
-            if crate::smp::per_core::driver_cores() & (1 << c) != 0 { kprint!(" [driver]"); }
-            if crate::smp::per_core::app_core() == Some(c) { kprint!(" [apps]"); }
-            kprintln!();
-        }
-    }
+    }).collect();
+    super::cores::print_cores(&cs0, &cs1, Some(&mhz));
+    super::cores::print_fibers(&cs0, &cs1);
+    super::cores::print_irqs(&cs0, &cs1);
 
     // GPU engines as the i915 PMU counts them, from the module's counters.
     {
@@ -610,7 +483,7 @@ pub fn intent_power(args: &str) {
     while crate::time::counter() < deadline {
         // Core 0 has no periodic tick: check every 20 ms.
         let d = (crate::time::counter() + tsc_hz / 50).min(deadline);
-        idle_until(d);
+        super::cores::idle_until(d);
         let e = crate::smp::per_core::rapl_pkg_raw();
         if e != last {
             jumps += 1;
@@ -1224,7 +1097,7 @@ pub fn intent_ec_watch(args: &str) {
     let mut changes = 0u32;
     while crate::time::counter() < end && changes < 60 {
         let now = crate::time::counter();
-        idle_until(now + tsc_hz / 200);
+        super::cores::idle_until(now + tsc_hz / 200);
         let ms = (crate::time::counter() - t0) / (tsc_hz / 1000).max(1);
         let ec = EC_SC.inb();
         if (ec ^ last_ec) & 0x20 != 0 {
