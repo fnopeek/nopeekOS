@@ -45,6 +45,7 @@ pub extern "C" fn fiber_on_exit() {
     unsafe {
         let f = CURRENT_FIBER[cid];
         if !f.is_null() {
+            crate::arch::irq_disable();
             (*f).state = FiberState::Done;
             switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
         }
@@ -253,12 +254,15 @@ pub fn wait(mask: u32, deadline: u64) -> Option<u32> {
     if got != 0 {
         return Some(got);
     }
+    // The scheduler runs with interrupts masked, as `__schedule` does.
+    let irq = crate::arch::irq_save();
     // SAFETY: as above — park, switch to the scheduler; it resumes us when a
     // bit of `mask` is set or the deadline passes.
     unsafe {
         (*f).state = FiberState::Waiting { mask, deadline };
         switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
     }
+    crate::arch::irq_restore(irq);
     Some(take(w))
 }
 
@@ -409,11 +413,9 @@ pub fn run_core_fibers(cid: usize) {
 
         if !fiber.started {
             fiber.started = true;
-            // A fresh fiber starts with this loop's interrupt state, as if
-            // called from here.
             // SAFETY: ctx.sp is the frame `Fiber::new` laid out; nothing
             // has run on it.
-            unsafe { crate::arch::inherit_flags(fiber.ctx.sp) };
+            unsafe { crate::arch::start_with_interrupts(fiber.ctx.sp) };
         }
 
         let fptr: *mut Fiber = &mut *fiber;
@@ -675,12 +677,14 @@ pub fn yield_ready() -> bool {
     if f.is_null() {
         return false;
     }
+    let irq = crate::arch::irq_save();
     // SAFETY: f is the running fiber; mark Ready and switch back to the
     // core scheduler, which round-robins on to the next runnable fiber.
     unsafe {
         (*f).state = FiberState::Ready;
         switch(&raw mut (*f).ctx, &raw const SCHED_CTX[cid]);
     }
+    crate::arch::irq_restore(irq);
     true
 }
 

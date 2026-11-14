@@ -66,6 +66,8 @@ const FRAME: u64 = 176;
 const DAIF_SLOT: u64 = 160;
 /// DAIF with every exception masked.
 const DAIF_MASKED: u64 = 0xf << 6;
+/// PSTATE.I in DAIF.
+const DAIF_I: u64 = 1 << 7;
 
 /// Save the current stack pointer into `*from`, resume the one in `*to`.
 ///
@@ -96,16 +98,17 @@ pub unsafe fn initial_frame(top: u64, entry: extern "C" fn(u64), arg: u64) -> u6
     sp0
 }
 
-/// A fiber that never ran starts with the interrupt mask of the loop that
-/// first switches into it: write DAIF into its frame.
+/// A fiber that never ran starts as a task leaves `schedule_tail` in
+/// Linux: in process context, interrupts enabled, the other DAIF bits as
+/// the loop that first switches into it has them.
 ///
 /// # Safety
 /// `sp` is the stack pointer `initial_frame` returned, not yet switched to.
-pub unsafe fn inherit_flags(sp: u64) {
+pub unsafe fn start_with_interrupts(sp: u64) {
     let daif: u64;
     // SAFETY: reading DAIF has no side effect; the slot is in the frame.
     unsafe {
         core::arch::asm!("mrs {}, DAIF", out(reg) daif, options(nomem, nostack, preserves_flags));
-        *((sp + DAIF_SLOT) as *mut u64) = daif;
+        *((sp + DAIF_SLOT) as *mut u64) = daif & !DAIF_I;
     }
 }

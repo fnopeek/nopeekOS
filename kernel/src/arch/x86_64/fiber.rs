@@ -89,17 +89,21 @@ pub unsafe fn initial_frame(top: u64, entry: extern "C" fn(u64), arg: u64) -> u6
     sp0
 }
 
-/// A fiber that never ran starts with the interrupt state of the loop
-/// that first switches into it: write RFLAGS into its frame.
+/// A fiber that never ran starts as a task leaves `schedule_tail` in
+/// Linux: in process context, interrupts enabled, the other RFLAGS bits as
+/// the loop that first switches into it has them.
 ///
 /// # Safety
 /// `sp` is the stack pointer `initial_frame` returned, not yet switched to.
-pub unsafe fn inherit_flags(sp: u64) {
+pub unsafe fn start_with_interrupts(sp: u64) {
     let flags: u64;
     // SAFETY: reading RFLAGS has no side effect; the slot is the frame's
     // lowest word.
     unsafe {
         core::arch::asm!("pushfq; pop {}", out(reg) flags, options(preserves_flags));
-        *(sp as *mut u64) = flags;
+        *(sp as *mut u64) = flags | RFLAGS_IF;
     }
 }
+
+/// RFLAGS.IF.
+const RFLAGS_IF: u64 = 1 << 9;
