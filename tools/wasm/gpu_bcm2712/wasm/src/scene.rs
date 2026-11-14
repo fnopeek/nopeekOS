@@ -763,7 +763,32 @@ impl Composer {
             v.extend(ring.iter().map(|r| part(3, r)));
             v
         };
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 10] = [
+        // A window's inside as a scene has it: the straight rows of a chrome
+        // with a glass source, and a text layer over it, both reading this
+        // buffer as the pass before left it (glass; text whose coverage is
+        // its top byte: none after a fill, which writes 24 bits, all after
+        // the background colour, 0xFF181820, which the covering run draws
+        // last for its second, counted run).
+        let with_src = |mut d: v3d_draw::Draw, flags: u32| {
+            d.push[20] = flags;
+            d.push[24..27].copy_from_slice(&[dst.va, 0, width]);
+            d
+        };
+        let glass_inside = with_src({
+            let mut d = chrome(1);
+            d.pipeline = KIND_CHROME_INSIDE - 1;
+            d
+        }, 4);
+        let text = {
+            let mut d = draw(7, &[]);
+            d.push[9..14].copy_from_slice(&[dst.va, 0, width, height, width]);
+            d
+        };
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 13] = [
+            ("fill + chrome inside over glass", false, alloc::vec![opaque, glass_inside]),
+            ("fill + empty text", false, alloc::vec![opaque, text]),
+            ("background colour + covering text + background colour", false,
+             alloc::vec![draw(1, &[]), text, draw(1, &[])]),
             ("fill + chrome with content, straight rows apart", false, split),
             ("fill + 8 translucent fills side by side", false, core::iter::once(opaque).chain(strips).collect()),
             ("fill, tiles loaded", true, alloc::vec![opaque]),
