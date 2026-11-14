@@ -30,5 +30,8 @@ acpi  # x86_64
 audio_hda  # x86_64
 # the Raspberry Pi 5's display (its 4K mode, hotplug)
 gpu_bcm2712  # aarch64
+# the console mirror; on the Pi it is the way to read a board whose
+# network is in doubt
+debug  # aarch64
 # file systems of external drives (USB sticks)
 extfs
