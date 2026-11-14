@@ -3,7 +3,9 @@
 // pixel (items.glsl `Op`), applied to the colour the tile buffer holds for
 // it (VK_EXT_shader_tile_image) as compose.comp paints it, written back. The attachment is R32_UINT, one
 // XRGB8888 word per pixel, so the mixing is the CPU executor's, exactly.
-// KIND selects the item kind at compile time: one small program per kind.
+// KIND selects the item kind at compile time: one small program per kind,
+// and 10 for the straight-row part of a chrome item (items.glsl
+// `chrome_inside`).
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_tile_image : require
@@ -62,6 +64,7 @@ void main() {
     case 7u: o = text(it, x, y); break;
     case 8u: o = fill(it, x, y); break;
     case 9u: o = close_glyph(it, x, y); break;
+    case 10u: o = chrome_inside(it, x, y); break;
     default: break;
     }
     color = apply(o, colorAttachmentReadEXT(dst).x);

@@ -256,6 +256,20 @@ ITEM_RESULT glass_backdrop(Blk it, uint x, uint y ITEM_PIXEL) {
     return SET(g_blur.v[y * g_blur_pitch + x]);
 }
 
+// render::fill_rounded_chrome_aa's straight-row path, shared by `chrome`
+// and `chrome_inside`.
+#define CHROME_STRAIGHT \
+        if (!paint_content) \
+            return KEEP; \
+        if (go >= 255u) \
+            return SET(bg); \
+        if ((g_flags & FLAG_GLASS) != 0u) { \
+            uint wpx = g_glass.v[py * g_glass_pitch + px]; \
+            return SET(glass_blend(glass_fill, wpx, go, ceil_)); \
+        } \
+        uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max); \
+        return BLEND_GLASS(bc, bo, glass_fill, go, ceil_);
+
 // render::fill_rounded_chrome_aa at one pixel.
 ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     uint x = BC(it, 1), y = BC(it, 2), w = BC(it, 3), h = BC(it, 4);
@@ -284,16 +298,7 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     uint skip_lo = inner_x + 2u;
     uint skip_hi = inner_x + inner_w >= 2u ? inner_x + inner_w - 2u : 0u;
     if (py >= straight_lo && py < straight_hi && px >= skip_lo && px < skip_hi) {
-        if (!paint_content)
-            return KEEP;
-        if (go >= 255u)
-            return SET(bg);
-        if ((g_flags & FLAG_GLASS) != 0u) {
-            uint wpx = g_glass.v[py * g_glass_pitch + px];
-            return SET(glass_blend(glass_fill, wpx, go, ceil_));
-        }
-        uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max);
-        return BLEND_GLASS(bc, bo, glass_fill, go, ceil_);
+        CHROME_STRAIGHT
     }
 
     uint outer = rect_coverage(px, py, x, y, w, h, r_out);
@@ -311,6 +316,22 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     if (inner == 256u)
         return GLASS(glass_fill, go, ceil_);
     return BLEND_GLASS(border_color, bo, glass_fill, min(go * inner / 256u, 255u), ceil_);
+}
+
+// `chrome` where it takes the straight-row path (plan.rs chrome_straight):
+// a draw over that part alone skips the ring's arithmetic.
+ITEM_RESULT chrome_inside(Blk it, uint px, uint py ITEM_PIXEL) {
+    uint x = BC(it, 1), y = BC(it, 2), w = BC(it, 3), h = BC(it, 4);
+    uint border_a = BC(it, 5), border_b = BC(it, 6), bg = BC(it, 7);
+    uint bo = min(BC(it, 10), 255u);
+    uint go = min(BC(it, 11), 255u);
+    bool paint_content = BC(it, 12) != 0u;
+    bool solid = border_a == border_b;
+    uint ceil_ = paint_content ? g_ceil : 255u;
+    uint tint_w = paint_content ? g_tint_w : 0u;
+    uint glass_fill = ink_fill(bg, g_tint, tint_w);
+    uint diag_max = max(w + h, 1u);
+    CHROME_STRAIGHT
 }
 
 // scene::yuv_pixel: one pixel of packed YUYV as 0xFFRRGGBB; kind 2 full

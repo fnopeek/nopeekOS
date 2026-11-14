@@ -108,7 +108,7 @@ impl item_shape {
                 (rect { x: r.x + rr, y: r.y, w: r.w - 2 * rr, h: r.h },
                  rect { x: r.x, y: r.y + rr, w: r.w, h: r.h - 2 * rr })
             }
-            KIND_CHROME => (chrome_interior(w, &r, glass), EMPTY),
+            KIND_CHROME => (chrome_interior(w, glass), EMPTY),
             _ => (EMPTY, EMPTY),
         };
         item_shape { kind, reach, cover }
@@ -121,10 +121,21 @@ impl item_shape {
 /// source. Without a glass source a translucent fill blends over what is
 /// beneath, and the ring, the corner rows and the two fringe columns do
 /// everywhere.
-fn chrome_interior(w: &[u32], r: &rect, glass: bool) -> rect {
+fn chrome_interior(w: &[u32], glass: bool) -> rect {
     let paint_content = w[12] != 0;
     let go = w[11].min(255);
-    if !paint_content || (go < 255 && !glass) || r.w < 2 || r.h < 2 {
+    if !paint_content || (go < 255 && !glass) {
+        return EMPTY;
+    }
+    chrome_straight(w)
+}
+
+/// Where render::fill_rounded_chrome_aa takes its straight-row path for
+/// the chrome item `w`: inside the border, off the corner rows and the two
+/// fringe columns (items.glsl `chrome_inside`).
+pub fn chrome_straight(w: &[u32]) -> rect {
+    let r = rect { x: w[1], y: w[2], w: w[3], h: w[4] };
+    if r.w < 2 || r.h < 2 {
         return EMPTY;
     }
     let r_out = w[8].min(r.w / 2).min(r.h / 2);
@@ -236,7 +247,7 @@ pub fn visible_parts(items: &[item_shape], end: usize, i: usize, area: &rect) ->
 
 /// `a` less `b`, as up to four disjoint rectangles: the rows above and
 /// below `b`, then the columns left and right of it in between.
-fn subtract(a: &rect, b: &rect, out: &mut alloc::vec::Vec<rect>) {
+pub fn subtract(a: &rect, b: &rect, out: &mut alloc::vec::Vec<rect>) {
     let i = a.intersect(b);
     if i.is_empty() {
         out.push(*a);

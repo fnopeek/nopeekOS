@@ -35,8 +35,11 @@ const SCENE_PAGES: u32 = 16;
 /// Render-job buffers kept for reuse once their job finished (v3dv's BO
 /// cache); more are given back.
 const FREE_BOS_KEPT: usize = 24;
-/// draw.frag's item kinds, 1..=9; the pipeline of kind k is at k - 1.
-const DRAW_KINDS: usize = 9;
+/// draw.frag's kinds: the scene's item kinds 1..=9, and 10, the straight-row
+/// part of a chrome item; the pipeline of kind k is at k - 1.
+const DRAW_KINDS: usize = 10;
+const ITEM_KINDS: usize = 9;
+const KIND_CHROME_INSIDE: usize = 10;
 /// Programs start at this alignment in the code buffer.
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
@@ -742,7 +745,26 @@ impl Composer {
             d.push[5..9].copy_from_slice(&[x0, 0, x1 - x0, height]);
             d
         }).collect();
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 9] = [
+        // The same chrome as the module draws it in a scene: its straight
+        // rows by kind 10, the ring by kind 4.
+        let split = {
+            let c = chrome(1);
+            let straight = plan::chrome_straight(&c.push[4..20]);
+            let whole = rect { x: 0, y: 0, w: width, h: height };
+            let mut ring = Vec::new();
+            plan::subtract(&whole, &straight, &mut ring);
+            let part = |pipeline: usize, r: &rect| {
+                let mut d = c;
+                d.pipeline = pipeline;
+                d.push[..4].copy_from_slice(&[r.x, r.y, r.x + r.w, r.y + r.h]);
+                d
+            };
+            let mut v = alloc::vec![opaque, part(KIND_CHROME_INSIDE - 1, &straight)];
+            v.extend(ring.iter().map(|r| part(3, r)));
+            v
+        };
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 10] = [
+            ("fill + chrome with content, straight rows apart", false, split),
             ("fill + 8 translucent fills side by side", false, core::iter::once(opaque).chain(strips).collect()),
             ("fill, tiles loaded", true, alloc::vec![opaque]),
             ("fill", false, alloc::vec![opaque]),
@@ -976,14 +998,33 @@ impl plan::draw_sink for Sink<'_> {
         let mut draws = Vec::with_capacity(end);
         for i in 0..end {
             let kind = ck.items[i][0] as usize;
-            if !(1..=DRAW_KINDS).contains(&kind) {
+            if !(1..=ITEM_KINDS).contains(&kind) {
                 return Err(-EINVAL);
             }
-            // Only where no later item paints over it opaquely.
-            for r in plan::visible_parts(&ck.shapes, end, i, area) {
+            let mut draw = |kind: usize, r: &rect| {
                 let mut push = [0u32; v3d_draw::PUSH_WORDS];
-                push[..gpu_scene::scene::DRAW_PUSH_WORDS].copy_from_slice(&gpu_scene::scene::draw_push(ck, i, &r));
+                push[..gpu_scene::scene::DRAW_PUSH_WORDS].copy_from_slice(&gpu_scene::scene::draw_push(ck, i, r));
                 draws.push(v3d_draw::Draw { pipeline: kind - 1, push, vertex_count: 4 });
+            };
+            // Only where no later item paints over it opaquely; a chrome
+            // item's straight rows by their own short program.
+            let straight = if kind == gpu_scene::scene::KIND_CHROME as usize {
+                plan::chrome_straight(&ck.items[i][..])
+            } else {
+                plan::EMPTY
+            };
+            for r in plan::visible_parts(&ck.shapes, end, i, area) {
+                let inside = r.intersect(&straight);
+                if inside.is_empty() {
+                    draw(kind, &r);
+                    continue;
+                }
+                draw(KIND_CHROME_INSIDE, &inside);
+                let mut ring = Vec::new();
+                plan::subtract(&r, &straight, &mut ring);
+                for p in &ring {
+                    draw(kind, p);
+                }
             }
         }
         if draws.is_empty() {
