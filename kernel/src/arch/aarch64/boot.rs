@@ -333,7 +333,10 @@ fn shell() -> ! {
     crate::intent::system::persist_boot_log();
     *SHELL_ARGS.lock() = Some((vault, session));
     crate::smp::fiber::admit_with_stack(0, shell_fiber, 0, 2 * 1024 * 1024);
-    crate::smp::fiber::admit_with_stack(0, desktop_fiber, 0, 256 * 1024);
+    // The desktop runs modules inline (autostart, the wallpaper decoder),
+    // which keep `forge_rt`'s host reserve free below them: 2 MiB, the boot
+    // stack x86 starts the desktop on.
+    crate::smp::fiber::admit_with_stack(0, desktop_fiber, 0, 2 * 1024 * 1024);
     crate::smp::per_core::core0_loop()
 }
 
