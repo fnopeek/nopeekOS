@@ -34,9 +34,26 @@ Words g_glass;
 uint g_glass_pitch;
 Words g_glyphs;
 
+// Division by 1000 of 0..=255000 and by 255 of 0..=65280, the ranges the
+// kinds divide, and factors known to fit `mask` (FIT). With V3D_ARITH
+// (draw.frag) the divisions are a multiply and shift that gives the
+// quotient for every value of the range, and the masks let V3D's compiler
+// use its 24-bit multiply instead of emulating 32-bit ones and the high
+// multiply a constant division takes; else as written.
+#ifdef V3D_ARITH
+#define DIV1000(x) (((((x) >> 3u) & 0x7FFFu) * 33555u) >> 22u)
+#define DIV255(x) ((((x) & 0xFFFFu) * 32897u) >> 23u)
+#define FIT(x, mask) ((x) & (mask))
+#else
+#define DIV1000(x) ((x) / 1000u)
+#define DIV255(x) ((x) / 255u)
+#define FIT(x, mask) (x)
+#endif
+
 // render::blend, alpha 0..=256.
 uint blend(uint fg, uint bg, uint a) {
-    uint inv = 256u - a;
+    uint inv = FIT(256u - a, 0x1FFu);
+    a = FIT(a, 0x1FFu);
     uint r = (((fg >> 16) & 255u) * a + ((bg >> 16) & 255u) * inv) >> 8;
     uint g = (((fg >> 8) & 255u) * a + ((bg >> 8) & 255u) * inv) >> 8;
     uint b = ((fg & 255u) * a + (bg & 255u) * inv) >> 8;
@@ -45,7 +62,7 @@ uint blend(uint fg, uint bg, uint a) {
 
 // render::luma.
 uint luma(uint c) {
-    return (((c >> 16) & 255u) * 299u + ((c >> 8) & 255u) * 587u + (c & 255u) * 114u) / 1000u;
+    return DIV1000(((c >> 16) & 255u) * 299u + ((c >> 8) & 255u) * 587u + (c & 255u) * 114u);
 }
 
 // render::glass_blend.
@@ -134,10 +151,10 @@ uint apply(Op o, uint c) {
 // theme::lerp_color.
 uint lerp_color(uint a, uint b, uint t) {
     t = min(t, 1000u);
-    uint inv = 1000u - t;
-    uint r = (((a >> 16) & 255u) * inv + ((b >> 16) & 255u) * t) / 1000u;
-    uint g = (((a >> 8) & 255u) * inv + ((b >> 8) & 255u) * t) / 1000u;
-    uint bl = ((a & 255u) * inv + (b & 255u) * t) / 1000u;
+    uint inv = FIT(1000u - t, 0x3FFu);
+    uint r = DIV1000(((a >> 16) & 255u) * inv + ((b >> 16) & 255u) * t);
+    uint g = DIV1000(((a >> 8) & 255u) * inv + ((b >> 8) & 255u) * t);
+    uint bl = DIV1000((a & 255u) * inv + (b & 255u) * t);
     return (r << 16) | (g << 8) | bl;
 }
 
@@ -439,7 +456,7 @@ ITEM_RESULT fill(Blk it, uint x, uint y ITEM_PIXEL) {
     uint cov = rect_coverage(x, y, rx, ry, rw, rh, r);
     if (cov == 0u)
         return KEEP;
-    uint a = min(min(alpha, 255u) * cov / 255u, 256u);
+    uint a = min(DIV255(min(alpha, 255u) * cov), 256u);
     if (a == 0u)
         return KEEP;
     return a >= 256u ? SET(color & 0xFFFFFFu) : BLEND(color & 0xFFFFFFu, a);

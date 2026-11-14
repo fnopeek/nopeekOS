@@ -30,6 +30,7 @@ const uint FLAG_BLURRED = 2u;
 const uint FLAG_GLASS = 4u;
 
 #define ITEM_OPS
+#define V3D_ARITH
 #include "../../../gpu_shaders/items.glsl"
 
 void main() {
