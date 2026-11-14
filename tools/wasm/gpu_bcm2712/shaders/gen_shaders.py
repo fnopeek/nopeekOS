@@ -27,8 +27,15 @@ which splits them into 32-bit operations as on other drivers without
 native 64-bit integers. Correctness is held against the CPU
 executor (shade::gpu_scene's whole-frame verification).
 
+The fragment shaders the module draws with read the tile buffer through
+VK_EXT_shader_tile_image and mix exactly as the CPU executor does, without
+fixed-function blending; mesa-v3d-tile-image.patch lowers that read to the
+V3D compiler's TLB read, as it already lowers load_output. v3dg.c records
+what v3dv builds for such a draw.
+
 The Mesa tree is the 26.2.4 source at ~/.cache/nopeekos/gpu-shaders/src/mesa
-with mesa-v3dv-int64.patch applied, built once for v3dv and the drm-shim:
+with mesa-v3dv-int64.patch and mesa-v3d-tile-image.patch applied, built
+once for v3dv and the drm-shim:
 
     meson setup build-v3d src/mesa -Dbuildtype=release -Dplatforms= \\
       -Dgallium-drivers= -Dvulkan-drivers=broadcom -Dtools=drm-shim \\
@@ -87,8 +94,8 @@ def quniform_names():
     return out
 
 
-def build_v3dc(tmp):
-    """v3dc.c built with v3dv's flags and linked against v3dv."""
+def build_v3dc(tmp, tool="v3dc"):
+    """`tool`.c (v3dc, v3dg) built with v3dv's flags and linked against v3dv."""
     cc = json.load(open(os.path.join(BUILD, "compile_commands.json")))
     cmd = next(c for c in cc if c["file"].endswith("v3dv_pipeline.c"))
     flags, skip = [], False
@@ -104,8 +111,8 @@ def build_v3dc(tmp):
             flags.append("-I" + (p if os.path.isabs(p) else os.path.join(BUILD, p)))
         elif a.startswith("-D") or a.startswith("-std"):
             flags.append(a)
-    exe = os.path.join(tmp, "v3dc")
-    subprocess.run(["cc", "-O1"] + flags + ["-c", os.path.join(HERE, "v3dc.c"), "-o", exe + ".o"], check=True)
+    exe = os.path.join(tmp, tool)
+    subprocess.run(["cc", "-O1"] + flags + ["-c", os.path.join(HERE, tool + ".c"), "-o", exe + ".o"], check=True)
     subprocess.run(["cc", "-o", exe, exe + ".o", "-L" + V3DV, "-l:libvulkan_broadcom.so",
                     "-Wl,-rpath," + V3DV], check=True)
     return exe

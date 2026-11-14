@@ -1,0 +1,79 @@
+--- a/src/broadcom/compiler/v3d_nir_lower_load_output.c
++++ b/src/broadcom/compiler/v3d_nir_lower_load_output.c
+@@ -17,24 +17,64 @@
+         return nir_vec(b, color, 4);
+ }
+ 
++/* The first `n` components of render target `rt`, sample `sample`, as
++ * v3d_nir_get_tlb_color reads them; the others zero.
++ */
++static nir_def *
++get_tlb_color(nir_builder *b, int rt, int sample, unsigned n)
++{
++        nir_def *color[4];
++        for (unsigned i = 0; i < 4; i++) {
++                color[i] = i < n ?
++                        nir_load_tlb_color_brcm(b, 1, 32, nir_imm_int(b, rt),
++                                                .base = sample, .component = i) :
++                        nir_imm_int(b, 0);
++        }
++        return nir_vec(b, color, 4);
++}
++
+ static bool
+ lower_load_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+ {
+-        if (intr->intrinsic != nir_intrinsic_load_output)
++        /* A VK_EXT_shader_tile_image color read is a read of the color the
++         * tile buffer holds for this fragment, as load_output is.
++         */
++        bool tile_image = intr->intrinsic == nir_intrinsic_load_tile_image;
++        if (intr->intrinsic != nir_intrinsic_load_output && !tile_image)
++                return false;
++
++        nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
++        if (tile_image && sem.location < FRAG_RESULT_DATA0)
+                 return false;
+ 
+         b->cursor = nir_before_instr(&intr->instr);
+ 
+         struct v3d_compile *c = data;
+ 
+-        nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+         unsigned rt = sem.location - FRAG_RESULT_DATA0;
++        if (tile_image)
++                rt += nir_src_as_uint(intr->src[0]);
+ 
+         unsigned num_samples = c->fs_key->msaa ? V3D_MAX_SAMPLES : 1;
+         assert(num_samples > 0);
+ 
++        /* A tile image is read as four components; the tile buffer holds as
++         * many as the color output writes, and each read of one more would
++         * start another read of the tile buffer. The rest read as zero.
++         */
++        unsigned n = 4;
++        if (tile_image) {
++                nir_variable *var =
++                        nir_find_variable_with_location(b->shader, nir_var_shader_out,
++                                                        FRAG_RESULT_DATA0 + rt);
++                if (var)
++                        n = glsl_get_vector_elements(var->type);
++                if (c->fs_key->swap_color_rb & (1 << rt))
++                        n = MAX2(n, 3);
++        }
++
+         nir_def *sample_id = num_samples > 1 ? nir_load_sample_id(b) : NULL;
+-        nir_def *out = v3d_nir_get_tlb_color(b, c, rt, 0);
++        nir_def *out = get_tlb_color(b, rt, 0, n);
+ 
+         /* If msaa, run through every sample and, if it matches the current sample
+          * id, use it.
+@@ -42,7 +82,7 @@
+ 
+         for (unsigned i = 1; i < num_samples; i++) {
+                 nir_def *is_cur_sample = nir_ieq_imm(b, sample_id, i);
+-                nir_def *val = v3d_nir_get_tlb_color(b, c, rt, i);
++                nir_def *val = get_tlb_color(b, rt, i, n);
+                 out = nir_bcsel(b, is_cur_sample, val, out);
+         }
+ 
