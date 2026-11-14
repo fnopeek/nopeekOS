@@ -181,6 +181,89 @@ pub struct limits {
     pub plane_blocks: u32,
 }
 
+/// What the draw plan asks of the GPU side: the blur passes as for
+/// [`sink`], and the items of each segment drawn in order.
+pub trait draw_sink {
+    fn blur_down(&mut self, g: grid) -> Result<(), i32>;
+    fn blur_box(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32>;
+    /// Items `first..end` over `area`, each where it reaches; `blur`: the
+    /// planes the first item's blur left (a panel), or None.
+    fn draw(&mut self, area: &rect, first: usize, end: usize, blur: Option<grid>) -> Result<(), i32>;
+}
+
+/// The blur passes of either plan.
+trait blurs {
+    fn down(&mut self, g: grid) -> Result<(), i32>;
+    fn pass(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32>;
+}
+
+impl blurs for dyn sink + '_ {
+    fn down(&mut self, g: grid) -> Result<(), i32> {
+        self.blur_down(g)
+    }
+    fn pass(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32> {
+        self.blur_box(to_tmp, lines, len, stride, step)
+    }
+}
+
+impl blurs for dyn draw_sink + '_ {
+    fn down(&mut self, g: grid) -> Result<(), i32> {
+        self.blur_down(g)
+    }
+    fn pass(&mut self, to_tmp: bool, lines: u32, len: u32, stride: u32, step: u32) -> Result<(), i32> {
+        self.blur_box(to_tmp, lines, len, stride, step)
+    }
+}
+
+/// The draws of a scene, cut as [`plan`] cuts it: per damage rectangle the
+/// items in segments that end before each panel, the panel's blur between
+/// them; each segment drawn over the part of the rectangle its items reach.
+/// On a GPU that draws into a tile buffer, an item hidden by a later opaque
+/// one costs a pass over tile memory, not a read of the target, so no bin
+/// skips it.
+pub fn plan_draws(s: &mut dyn draw_sink, lim: &limits, screen: &rect, damage: &[rect], items: &[item_shape],
+                  radius: u32) -> Result<(), i32> {
+    if items.len() > MAX_ITEMS {
+        return Err(-E2BIG);
+    }
+    for d in damage {
+        let clip = d.intersect(screen);
+        if clip.is_empty() {
+            continue;
+        }
+        let mut seg = 0usize;
+        let mut seg_blur = None;
+        for i in 0..items.len() {
+            if items[i].kind != KIND_PANEL {
+                continue;
+            }
+            if i > seg {
+                draw_segment(s, items, &clip, seg, i, seg_blur)?;
+            }
+            let dst = items[i].reach;
+            seg_blur = if radius > 0 && !dst.intersect(&clip).is_empty() {
+                blur_region(s, lim, screen, &dst, radius)?
+            } else {
+                None
+            };
+            seg = i;
+        }
+        if items.len() > seg {
+            draw_segment(s, items, &clip, seg, items.len(), seg_blur)?;
+        }
+    }
+    Ok(())
+}
+
+fn draw_segment(s: &mut dyn draw_sink, items: &[item_shape], clip: &rect, first: usize, end: usize,
+                blur: Option<grid>) -> Result<(), i32> {
+    let area = items[first..end].iter().fold(EMPTY, |a, it| a.union(&it.reach)).intersect(clip);
+    if area.is_empty() {
+        return Ok(());
+    }
+    s.draw(&area, first, end, blur)
+}
+
 /// The dispatches of a scene: `items` in order, `damage` already checked.
 pub fn plan(s: &mut dyn sink, lim: &limits, screen: &rect, damage: &[rect], items: &[item_shape], radius: u32)
             -> Result<(), i32> {
@@ -357,7 +440,7 @@ fn blur_reads(screen: &rect, r: &rect, radius: u32) -> rect {
 
 /// background::blur_region of `r` in the target into the planes; None
 /// where the CPU returns None (the panel then sits on the pixel beneath).
-fn blur_region(s: &mut dyn sink, lim: &limits, screen: &rect, r: &rect, radius: u32) -> Result<Option<grid>, i32> {
+fn blur_region<S: blurs + ?Sized>(s: &mut S, lim: &limits, screen: &rect, r: &rect, radius: u32) -> Result<Option<grid>, i32> {
     if r.is_empty() {
         return Ok(None);
     }
@@ -369,11 +452,11 @@ fn blur_region(s: &mut dyn sink, lim: &limits, screen: &rect, r: &rect, radius: 
     if sw * sh > lim.plane_blocks {
         return Err(-E2BIG);
     }
-    s.blur_down((bx0, by0, sw, sh))?;
+    s.down((bx0, by0, sw, sh))?;
     for _ in 0..BLUR_PASSES {
         // Columns, then rows (box_pass in compute_blur and blur_region).
-        s.blur_box(true, sw, sh, 1, sw)?;
-        s.blur_box(false, sh, sw, sw, 1)?;
+        s.pass(true, sw, sh, 1, sw)?;
+        s.pass(false, sh, sw, sw, 1)?;
     }
     Ok(Some((bx0, by0, sw, sh)))
 }

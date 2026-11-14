@@ -17,7 +17,7 @@ const PAGE: u32 = 4096;
 
 const MAGIC: u32 = 0x314E_4353;
 pub const HEADER_BYTES: u32 = 64;
-const ITEM_WORDS: usize = 16;
+pub const ITEM_WORDS: usize = 16;
 const ITEM_BYTES: u32 = 64;
 const NONE: u32 = 0xFFFF_FFFF;
 const MAX_DAMAGE: usize = 64;
@@ -116,6 +116,10 @@ pub struct checked {
     pub damage: Vec<rect>,
     /// The items kept, in order.
     pub shapes: Vec<item_shape>,
+    /// The frame block as written, and each kept item's words as written
+    /// (sources as GPU addresses): what a draw of one item reads.
+    pub frame: [u32; FRAME_BYTES as usize / 4],
+    pub items: Vec<[u32; ITEM_WORDS]>,
 }
 
 fn set64(f: &mut [u32], w: usize, v: u64) {
@@ -234,6 +238,7 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
     // source has no pixels paints nothing on the CPU and is dropped.
     let screen = rect { x: 0, y: 0, w: width, h: height };
     let mut shapes = Vec::with_capacity(n_items as usize);
+    let mut items = Vec::with_capacity(n_items as usize);
     let mut n_panels = 0usize;
     let items_off = HEADER_BYTES + n_damage * 16;
     let mut chunk = [0u8; PAGE as usize];
@@ -322,6 +327,7 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
             n_panels += 1;
         }
         shapes.push(item_shape::of(&w, &screen, glass.is_some()));
+        items.push(out);
         for (k, v) in out.iter().enumerate() {
             chunk[in_chunk + k * 4..in_chunk + k * 4 + 4].copy_from_slice(&v.to_le_bytes());
         }
@@ -349,7 +355,7 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         }
         off += n;
     }
-    Ok(checked { screen, width, height, radius, target, damage, shapes })
+    Ok(checked { screen, width, height, radius, target, damage, shapes, frame, items })
 }
 
 /// compose.comp's push constants.
@@ -446,4 +452,51 @@ pub fn blur_box(width: u32, src: u64, dst: u64, lines: u32, len: u32, stride: u3
                 -> (blur_box_push, [u32; 3]) {
     let p = blur_box_push { src, dst, lines, len, stride, step, radius };
     (p, [len.div_ceil(width), lines, 1])
+}
+
+/// Words of a draw's push constants (gpu_bcm2712/shaders/draw/draw.h.glsl).
+pub const DRAW_PUSH_WORDS: usize = 32;
+
+/// One item drawn over `r` (draw.h.glsl `Draw`): the rectangle, the item's
+/// words, the frame values and the one source its kind reads beside its
+/// own (the wallpaper, the blurred wallpaper, the glass, the glyphs, or
+/// the panel's blurred planes at `planes` over `blur`), and the viewport.
+pub fn draw_push(c: &checked, item: usize, r: &rect, planes: u64, blur: Option<grid>) -> [u32; DRAW_PUSH_WORDS] {
+    let it = &c.items[item];
+    let f = &c.frame;
+    let mut p = [0u32; DRAW_PUSH_WORDS];
+    p[0] = r.x;
+    p[1] = r.y;
+    p[2] = r.x1();
+    p[3] = r.y1();
+    p[4..20].copy_from_slice(it);
+    p[20] = f[F_FLAGS];
+    p[21] = f[F_INK_CEIL];
+    p[22] = f[F_INK_TINT];
+    p[23] = f[F_INK_TINT_W];
+    let src = |p: &mut [u32; DRAW_PUSH_WORDS], at: usize, pitch: Option<usize>| {
+        p[24] = f[at];
+        p[25] = f[at + 1];
+        p[26] = pitch.map_or(0, |k| f[k]);
+    };
+    match it[0] {
+        KIND_BACKGROUND => src(&mut p, F_WALL, Some(F_WALL_PITCH)),
+        KIND_GLASS_BACKDROP => src(&mut p, F_BLUR, Some(F_BLUR_PITCH)),
+        KIND_CHROME => src(&mut p, F_GLASS, Some(F_GLASS_PITCH)),
+        KIND_CLOSE_GLYPH => src(&mut p, F_GLYPHS, None),
+        KIND_PANEL => {
+            if let Some((bx0, by0, sw, sh)) = blur {
+                p[24] = planes as u32;
+                p[25] = (planes >> 32) as u32;
+                p[26] = sw;
+                p[27] = sh;
+                p[28] = bx0;
+                p[29] = by0;
+            }
+        }
+        _ => {}
+    }
+    p[30] = c.width;
+    p[31] = c.height;
+    p
 }

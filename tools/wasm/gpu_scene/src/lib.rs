@@ -4,10 +4,13 @@
 //! and blur_box.comp (plan.rs). One crate, so every module draws a scene
 //! by the same rules; the modules only turn the steps into their commands.
 
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![allow(non_camel_case_types)]
 
 extern crate alloc;
 
 pub mod plan;
 pub mod scene;
+
+#[cfg(test)]
+mod tests;
