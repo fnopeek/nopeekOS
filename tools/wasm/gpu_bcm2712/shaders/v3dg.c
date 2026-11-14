@@ -1,10 +1,11 @@
 /*
- * v3dg: build one graphics pipeline (vertex + fragment shader) for the
- * Raspberry Pi 5's V3D 7.1 with v3dv, the way a Vulkan application gets
- * it, record one render pass that draws one rectangle, and write what v3dv
- * built for it: the QPU programs, their uniform lists, and the render job
- * (binning and render control lists, the indirect buffer with the shader
- * records and uniform streams, the tile allocation and tile state).
+ * v3dg: build graphics pipelines (vertex + fragment shader, one per
+ * fragment shader kind) for the Raspberry Pi 5's V3D 7.1 with v3dv, the way
+ * a Vulkan application gets them, record one render pass that draws the
+ * given rectangles, and write what v3dv built for it: the QPU programs,
+ * their uniform lists, and the render job (binning and render control
+ * lists, the indirect buffer with the shader records and uniform streams,
+ * the tile allocation and tile state).
  *
  * It runs v3dv against Mesa's v3d drm-shim (LD_PRELOAD
  * libv3d_noop_drm_shim.so; V3D 7.1 is the shim's default). The job is
@@ -18,12 +19,19 @@
  * fragment shader reads the tile buffer through VK_EXT_shader_tile_image
  * and mixes exactly).
  *
- * Usage: v3dg <vs.spv> <fs.spv> <width> <height> <out dir> <draw>...
+ * Usage: v3dg [-a x,y,w,h] [-r rev] <vs.spv> <fs.spv> <width> <height>
+ *             <out dir> <draw>...
  * A draw is "kind:x0,y0,x1,y1": the fragment shader's specialization
  * constant 0 (one pipeline per kind) and the rectangle in pixels, the
  * first four push-constant words; the others are tagged 0xc0de0000 |
- * index. Writes <out dir>/meta ("key value" lines), <stage>-<kind>.bin for
- * each pipeline's programs, and bo-<offset>.bin for each buffer of the job.
+ * index. -a sets the render pass's render area (default the whole image);
+ * -r reports V3D 7.1 revision `rev` instead of the shim's (7.1.10 and
+ * later use the shader state record with draw index). Writes
+ * <out dir>/meta ("key value" lines: the device, each pipeline's programs
+ * with the prog_data fields the shader state record and the varyings
+ * state are built from, the job's buffers and submit parameters),
+ * <stage>-<kind>.bin for each pipeline's programs, and bo-<offset>.bin for
+ * each buffer of the job.
  */
 
 #include <stdio.h>
@@ -33,6 +41,7 @@
 #include "v3dv_bo.h"
 #include "v3dv_cmd_buffer.h"
 #include "v3dv_device.h"
+#include "v3dv_image.h"
 #include "v3dv_pipeline.h"
 
 PUBLIC VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char *pName);
@@ -101,6 +110,29 @@ dump_variant(FILE *m, struct v3dv_pipeline *pl, enum broadcom_shader_stage stage
    fprintf(m, "%s_threads %u\n", name, v->prog_data.base->threads);
    fprintf(m, "%s_single_seg %u\n", name, v->prog_data.base->single_seg);
    fprintf(m, "%s_spill_size %u\n", name, v->prog_data.base->spill_size);
+   fprintf(m, "%s_tmu_dirty_rcl %u\n", name, v->prog_data.base->tmu_dirty_rcl);
+   if (stage == BROADCOM_SHADER_FRAGMENT) {
+      const struct v3d_fs_prog_data *fs = v->prog_data.fs;
+      fprintf(m, "%s_writes_z %u\n", name, fs->writes_z);
+      fprintf(m, "%s_disable_ez %u\n", name, fs->disable_ez);
+      fprintf(m, "%s_uses_center_w %u\n", name, fs->uses_center_w);
+      fprintf(m, "%s_uses_implicit_point_line_varyings %u\n", name, fs->uses_implicit_point_line_varyings);
+      fprintf(m, "%s_lock_scoreboard_on_first_thrsw %u\n", name, fs->lock_scoreboard_on_first_thrsw);
+      fprintf(m, "%s_num_inputs %u\n", name, fs->num_inputs);
+      fprintf(m, "%s_uses_pid %u\n", name, fs->uses_pid);
+      for (uint32_t i = 0; i < ARRAY_SIZE(fs->flat_shade_flags); i++)
+         fprintf(m, "%s_varying_flags %u %u %u %u\n", name, i, fs->flat_shade_flags[i], fs->noperspective_flags[i],
+                 fs->centroid_flags[i]);
+   } else {
+      const struct v3d_vs_prog_data *vs = v->prog_data.vs;
+      fprintf(m, "%s_uses_vid %u\n", name, vs->uses_vid);
+      fprintf(m, "%s_uses_iid %u\n", name, vs->uses_iid);
+      fprintf(m, "%s_uses_biid %u\n", name, vs->uses_biid);
+      fprintf(m, "%s_vpm_input_size %u\n", name, vs->vpm_input_size);
+      fprintf(m, "%s_vpm_output_size %u\n", name, vs->vpm_output_size);
+      fprintf(m, "%s_vcm_cache_size %u\n", name, vs->vcm_cache_size);
+      fprintf(m, "%s_writes_psiz %u\n", name, vs->writes_psiz);
+   }
    const struct v3d_uniform_list *ul = &v->prog_data.base->uniforms;
    fprintf(m, "%s_uniforms %u\n", name, ul->count);
    for (uint32_t i = 0; i < ul->count; i++)
@@ -125,8 +157,23 @@ dump_bos(FILE *m, const char *what, struct list_head *list)
 int
 main(int argc, char **argv)
 {
+   int have_area = 0, rev = -1;
+   uint32_t area[4] = {0};
+   while (argc > 2 && argv[1][0] == '-') {
+      if (!strcmp(argv[1], "-a") &&
+          sscanf(argv[2], "%u,%u,%u,%u", &area[0], &area[1], &area[2], &area[3]) == 4) {
+         have_area = 1;
+      } else if (!strcmp(argv[1], "-r")) {
+         rev = atoi(argv[2]);
+      } else {
+         break;
+      }
+      argc -= 2;
+      argv += 2;
+   }
    if (argc < 7) {
-      fprintf(stderr, "usage: v3dg <vs.spv> <fs.spv> <width> <height> <out dir> <kind:x0,y0,x1,y1>...\n");
+      fprintf(stderr, "usage: v3dg [-a x,y,w,h] [-r rev] <vs.spv> <fs.spv> <width> <height> <out dir> "
+                      "<kind:x0,y0,x1,y1>...\n");
       return 2;
    }
    size_t vs_size, fs_size;
@@ -138,6 +185,10 @@ main(int argc, char **argv)
    }
    uint32_t width = atoi(argv[3]);
    uint32_t height = atoi(argv[4]);
+   if (!have_area) {
+      area[2] = width;
+      area[3] = height;
+   }
    const uint32_t push_bytes = PUSH_BYTES;
    out_dir = argv[5];
    uint32_t ndraws = argc - 6;
@@ -196,6 +247,8 @@ main(int argc, char **argv)
       fprintf(stderr, "v3dg: V3D %u, not 7.1 (run under the v3d drm-shim)\n", pdev->devinfo.ver);
       return 1;
    }
+   if (rev >= 0)
+      pdev->devinfo.rev = rev;
 
    uint32_t nq = 8;
    VkQueueFamilyProperties qf[8];
@@ -347,6 +400,7 @@ main(int argc, char **argv)
    fprintf(m, "rev %u\n", pdev->devinfo.rev);
    fprintf(m, "qpu_count %u\n", pdev->devinfo.qpu_count);
    fprintf(m, "size %u %u\n", width, height);
+   fprintf(m, "area %u %u %u %u\n", area[0], area[1], area[2], area[3]);
    VkPipeline pipelines[16] = {0};
    for (uint32_t i = 0; i < ndraws; i++) {
       uint32_t k = draws[i].kind;
@@ -362,6 +416,9 @@ main(int argc, char **argv)
       struct v3dv_pipeline *pl = v3dv_pipeline_from_handle(pipelines[k]);
       char name[16];
       fprintf(m, "pipeline %u\n", k);
+      fprintf(m, "pipeline_va_count %u\n", pl->va_count);
+      fprintf(m, "vpm_bin %u %u %u\n", pl->vpm_cfg_bin.As, pl->vpm_cfg_bin.Ve, pl->vpm_cfg_bin.Vc);
+      fprintf(m, "vpm %u %u %u\n", pl->vpm_cfg.As, pl->vpm_cfg.Ve, pl->vpm_cfg.Vc);
       snprintf(name, sizeof(name), "vs-%u", k);
       dump_variant(m, pl, BROADCOM_SHADER_VERTEX, name);
       snprintf(name, sizeof(name), "cs-%u", k);
@@ -400,6 +457,7 @@ main(int argc, char **argv)
    if ((r = vkBindImageMemory(dev, image, mem, 0)))
       die("vkBindImageMemory", r);
    fprintf(m, "image_va %u\n", v3dv_device_memory_from_handle(mem)->bo->offset);
+   fprintf(m, "image_stride %u\n", v3dv_image_from_handle(image)->planes[0].slices[0].stride);
    VkImageViewCreateInfo ivci = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
       .image = image,
@@ -443,7 +501,7 @@ main(int argc, char **argv)
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
       .renderPass = rp,
       .framebuffer = fb,
-      .renderArea = {{0, 0}, {width, height}},
+      .renderArea = {{area[0], area[1]}, {area[2], area[3]}},
    };
    vkCmdBeginRenderPass(cmdb, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
    for (uint32_t i = 0; i < ndraws; i++) {

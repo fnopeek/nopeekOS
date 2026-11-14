@@ -385,6 +385,84 @@ pub mod z_clip_mode {
     pub const ZERO_TO_ONE: u32 = 2;
 }
 
+/// The values listed inside packet and structure fields (Mesa's
+/// unprefixed `#define`s next to each field).
+pub mod field_values {
+    pub const ATTRIBUTE_BYTE: u32 = 4;
+    pub const ATTRIBUTE_FIXED: u32 = 3;
+    pub const ATTRIBUTE_FLOAT: u32 = 2;
+    pub const ATTRIBUTE_HALF_FLOAT: u32 = 1;
+    pub const ATTRIBUTE_INT: u32 = 6;
+    pub const ATTRIBUTE_INT2_10_10_10: u32 = 7;
+    pub const ATTRIBUTE_SHORT: u32 = 5;
+    pub const BLOCK_SIZE_128B: u32 = 1;
+    pub const BLOCK_SIZE_256B: u32 = 2;
+    pub const BLOCK_SIZE_64B: u32 = 0;
+    pub const EARLY_Z_DIRECTION_GT_GE: u32 = 1;
+    pub const EARLY_Z_DIRECTION_LT_LE: u32 = 0;
+    pub const GEOMETRY_SHADER_LINE_STRIP: u32 = 1;
+    pub const GEOMETRY_SHADER_POINTS: u32 = 0;
+    pub const GEOMETRY_SHADER_TRI_STRIP: u32 = 2;
+    pub const INDEX_TYPE_16_BIT: u32 = 1;
+    pub const INDEX_TYPE_32_BIT: u32 = 2;
+    pub const INDEX_TYPE_8_BIT: u32 = 0;
+    pub const LIST_LINES: u32 = 1;
+    pub const LIST_POINTS: u32 = 0;
+    pub const LIST_TRIANGLES: u32 = 2;
+    pub const LOAD_BUFFER_STATE: u32 = 8;
+    pub const NONE: u32 = 8;
+    pub const RENDER_TARGET_0: u32 = 0;
+    pub const RENDER_TARGET_1: u32 = 1;
+    pub const RENDER_TARGET_2: u32 = 2;
+    pub const RENDER_TARGET_3: u32 = 3;
+    pub const RENDER_TARGET_4: u32 = 4;
+    pub const RENDER_TARGET_5: u32 = 5;
+    pub const RENDER_TARGET_6: u32 = 6;
+    pub const RENDER_TARGET_7: u32 = 7;
+    pub const STENCIL: u32 = 10;
+    pub const STORE_BUFFER_STATE: u32 = 2;
+    pub const STORE_BUFFER_STATE_CL: u32 = 3;
+    pub const STORE_PRIMITIVE_COUNTS: u32 = 0;
+    pub const STORE_PRIMITIVE_COUNTS_AND_ZERO: u32 = 1;
+    pub const SWIZZLE_ALPHA: u32 = 5;
+    pub const SWIZZLE_BLUE: u32 = 4;
+    pub const SWIZZLE_GREEN: u32 = 3;
+    pub const SWIZZLE_ONE: u32 = 1;
+    pub const SWIZZLE_RED: u32 = 2;
+    pub const SWIZZLE_ZERO: u32 = 0;
+    pub const TESSELLATION_EDGE_SPACING_EVEN: u32 = 0;
+    pub const TESSELLATION_EDGE_SPACING_FRACTIONAL_EVEN: u32 = 1;
+    pub const TESSELLATION_EDGE_SPACING_FRACTIONAL_ODD: u32 = 2;
+    pub const TESSELLATION_TYPE_ISOLINES: u32 = 2;
+    pub const TESSELLATION_TYPE_QUADS: u32 = 1;
+    pub const TESSELLATION_TYPE_TRIANGLE: u32 = 0;
+    pub const TILE_ALLOCATION_BLOCK_SIZE_128B: u32 = 1;
+    pub const TILE_ALLOCATION_BLOCK_SIZE_256B: u32 = 2;
+    pub const TILE_ALLOCATION_BLOCK_SIZE_64B: u32 = 0;
+    pub const TILE_ALLOCATION_INITIAL_BLOCK_SIZE_128B: u32 = 1;
+    pub const TILE_ALLOCATION_INITIAL_BLOCK_SIZE_256B: u32 = 2;
+    pub const TILE_ALLOCATION_INITIAL_BLOCK_SIZE_64B: u32 = 0;
+    pub const TILE_HEIGHT_16_PIXELS: u32 = 1;
+    pub const TILE_HEIGHT_32_PIXELS: u32 = 2;
+    pub const TILE_HEIGHT_64_PIXELS: u32 = 3;
+    pub const TILE_HEIGHT_8_PIXELS: u32 = 0;
+    pub const TILE_WIDTH_16_PIXELS: u32 = 1;
+    pub const TILE_WIDTH_32_PIXELS: u32 = 2;
+    pub const TILE_WIDTH_64_PIXELS: u32 = 3;
+    pub const TILE_WIDTH_8_PIXELS: u32 = 0;
+    pub const TRANSFER_FUNC_HLG: u32 = 3;
+    pub const TRANSFER_FUNC_HLG_BT1886: u32 = 5;
+    pub const TRANSFER_FUNC_NONE: u32 = 0;
+    pub const TRANSFER_FUNC_PQ: u32 = 2;
+    pub const TRANSFER_FUNC_PQ_BT1886: u32 = 4;
+    pub const TRANSFER_FUNC_SRGB: u32 = 1;
+    pub const VPM_SETUP_SIZE_16_BIT: u32 = 1;
+    pub const VPM_SETUP_SIZE_32_BIT: u32 = 2;
+    pub const VPM_SETUP_SIZE_8_BIT: u32 = 0;
+    pub const Z: u32 = 9;
+    pub const ZSTENCIL: u32 = 11;
+}
+
 /// `Halt` (packet 0).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Halt {
