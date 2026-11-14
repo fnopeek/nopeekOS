@@ -700,26 +700,26 @@ impl Composer {
         (self.sched.signaled(f), self.sched.failed(f))
     }
 
-    /// What a 3840x2160 pass costs, once at start, into a buffer of the
-    /// module's: the pass with and without loading its tiles, then per item
+    /// What a pass costs, once at start, into a buffer of the module's
+    /// (3840x2160, or the largest smaller one DMA memory gives): the pass with and without loading its tiles, then per item
     /// kind (fill, background colour, chrome with and without its content,
     /// glow) one draw over the whole image on top of an opaque fill, and
     /// eight translucent fills. Logged, for where a scene's time goes.
     pub fn draw_bench(&mut self, hw: &mut PiHw) {
-        const W: u32 = 3840;
-        const H: u32 = 2160;
-        let Some(dst) = Buf::new((W * H * 4).div_ceil(PAGE)) else {
+        let sizes = [(3840u32, 2160u32), (3840, 1080), (1920, 1080), (1280, 720)];
+        let Some((dst, width, height)) = sizes.iter().find_map(|&(w, h)| Buf::new((w * h * 4).div_ceil(PAGE)).map(|b| (b, w, h)))
+        else {
             Line::new().s("v3d: bench skipped, no buffer").say();
             return;
         };
         let draw = |kind: u32, words: &[u32]| {
             let mut push = [0u32; v3d_draw::PUSH_WORDS];
-            push[..4].copy_from_slice(&[0, 0, W, H]);
+            push[..4].copy_from_slice(&[0, 0, width, height]);
             push[4] = kind;
-            push[5..9].copy_from_slice(&[0, 0, W, H]);
+            push[5..9].copy_from_slice(&[0, 0, width, height]);
             push[9..9 + words.len()].copy_from_slice(words);
-            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = W;
-            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = H;
+            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = width;
+            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = height;
             v3d_draw::Draw { pipeline: kind as usize - 1, push, vertex_count: 4 }
         };
         // Item::Fill: color, alpha, radius.
@@ -730,7 +730,7 @@ impl Composer {
         let chrome = |content: u32| draw(4, &[0x0080_80ff, 0x00ff_8080, 0x0010_1018, 24, 2, 255, 200, content]);
         // Item::Glow over a window in the middle: radius, color, band, alpha.
         let mut glow = draw(2, &[24, 0x0040_80ff, 48, 160]);
-        glow.push[5..9].copy_from_slice(&[200, 200, W - 400, H - 400]);
+        glow.push[5..9].copy_from_slice(&[200, 200, width - 400, height - 400]);
         let runs: [(&str, bool, Vec<v3d_draw::Draw>); 8] = [
             ("fill, tiles loaded", true, alloc::vec![opaque]),
             ("fill", false, alloc::vec![opaque]),
@@ -743,8 +743,8 @@ impl Composer {
             ("fill + 8 chromes with content", false, alloc::vec![opaque; 1].into_iter()
                 .chain(core::iter::repeat_n(chrome(1), 8)).collect()),
         ];
-        let image = v3d_draw::Image { va: dst.va, stride: W * 4, width: W, height: H };
-        let area = v3d_draw::Rect { x: 0, y: 0, width: W, height: H };
+        let image = v3d_draw::Image { va: dst.va, stride: width * 4, width: width, height: height };
+        let area = v3d_draw::Rect { x: 0, y: 0, width: width, height: height };
         for (name, load, draws) in runs.iter() {
             // The second run counts: the first may pay for power and caches.
             let mut us = 0;
@@ -759,7 +759,8 @@ impl Composer {
                 }
                 us = npk_sys::now_us() as u64 - t0;
             }
-            Line::new().s("v3d: bench 3840x2160 ").s(name).s(": ").dec(us).s(" us").say();
+            Line::new().s("v3d: bench ").dec(width as u64).s("x").dec(height as u64).s(" ").s(name).s(": ").dec(us).s(" us")
+                .say();
         }
         self.drain(hw);
         dst.free();
