@@ -536,6 +536,34 @@ pub fn viewport_compute_xform(vp: &Viewport) -> ([f32; 3], [f32; 3]) {
     ([half_width, half_height, (f - n) as f32], [half_width + vp.x, half_height + vp.y, n as f32])
 }
 
+/// `v3dv_write_uniforms` for the uniform contents of the drawing model's
+/// programs: a constant, a push-constant word, or the viewport's X or Y
+/// scale (in clipper units), Z offset or Z scale. False for any other
+/// contents (the generator refuses them) or a list that does not fit.
+pub fn write_uniforms(list: &[crate::shaders_gen::U], push: &[u32; PUSH_WORDS], vp: &Viewport, out: &mut [u32])
+                      -> bool {
+    use crate::shaders_gen::U;
+    if list.len() != out.len() {
+        return false;
+    }
+    let (scale, translate) = viewport_compute_xform(vp);
+    for (w, u) in out.iter_mut().zip(list) {
+        *w = match *u {
+            U::Const(v) => v,
+            U::Push(n) => match push.get(n as usize) {
+                Some(&v) => v,
+                None => return false,
+            },
+            U::ViewportXScale => (scale[0] * CLIPPER_XY_GRANULARITY).to_bits(),
+            U::ViewportYScale => (scale[1] * CLIPPER_XY_GRANULARITY).to_bits(),
+            U::ViewportZOffset => translate[2].to_bits(),
+            U::ViewportZScale => scale[2].to_bits(),
+            U::WgBase(_) | U::NumWg(_) | U::SpillOffset | U::SpillSizePerThread => return false,
+        };
+    }
+    true
+}
+
 /// The pipeline state v3dv packs once per pipeline.
 struct Packed {
     /// `pack_shader_state_record`.

@@ -6,6 +6,7 @@
 //! and the submit parameters must match.
 
 use crate::v3d_draw::*;
+use crate::shaders_gen::DRAW_PIPELINES;
 use std::collections::{BTreeMap, VecDeque};
 
 const SCENARIOS: [(&str, &str); 11] = [
@@ -181,7 +182,10 @@ fn push_words(rect: [u32; 4]) -> [u32; PUSH_WORDS] {
     p
 }
 
-fn check(name: &str, text: &str) {
+/// `generated`: the programs' prog_data and uniform lists from
+/// shaders_gen's DRAW_PIPELINES (code addresses stay v3dg's), the streams
+/// filled by `write_uniforms`.
+fn check(name: &str, text: &str, generated: bool) {
     let r = parse(text);
     let size = &r.keys["size"];
     let area = &r.keys["area"];
@@ -195,12 +199,21 @@ fn check(name: &str, text: &str) {
     let mut pipelines = Vec::new();
     let mut kinds = Vec::new();
     for (i, (kind, m, _)) in r.pipelines.iter().enumerate() {
-        let p = Pipeline {
+        let mut p = Pipeline {
             vs: vs_variant(m, "vs"),
             cs: vs_variant(m, "cs"),
             fs: fs_variant(m),
             color_write_mask: 0x1,
         };
+        if generated {
+            let g = DRAW_PIPELINES.iter().find(|g| g.kind == *kind).expect("a generated pipeline");
+            assert_eq!(g.vs.prog, p.vs.prog, "{}: vs prog_data", name);
+            assert_eq!(g.cs.prog, p.cs.prog, "{}: cs prog_data", name);
+            assert_eq!(g.fs.prog, p.fs.prog, "{}: fs prog_data", name);
+            p.vs.prog = g.vs.prog;
+            p.cs.prog = g.cs.prog;
+            p.fs.prog = g.fs.prog;
+        }
         assert_eq!(compute_vpm_config(&p.cs.prog, &p.vs.prog), r.vpm[i], "{}: vpm config", name);
         pipelines.push(p);
         kinds.push(*kind);
@@ -229,6 +242,16 @@ fn check(name: &str, text: &str) {
     // v3dv_write_uniforms for the contents these programs use.
     let (scale, translate) = viewport_compute_xform(&viewport);
     let mut fill = |d: usize, stage: Stage, words: &mut [u32]| {
+        if generated {
+            let g = DRAW_PIPELINES.iter().find(|g| g.kind == kinds[draws[d].pipeline]).expect("a pipeline");
+            let list = match stage {
+                Stage::Fragment => g.fs.uniforms,
+                Stage::Vertex => g.vs.uniforms,
+                Stage::Coordinate => g.cs.uniforms,
+            };
+            assert!(write_uniforms(list, &draws[d].push, &viewport, words), "{}: uniforms", name);
+            return;
+        }
         let s = match stage {
             Stage::Fragment => 0,
             Stage::Vertex => 1,
@@ -284,7 +307,14 @@ fn check(name: &str, text: &str) {
 #[test]
 fn every_render_pass_is_recorded_byte_for_byte_as_v3dv_records_it() {
     for (name, text) in SCENARIOS {
-        check(name, text);
+        check(name, text, false);
+    }
+}
+
+#[test]
+fn the_generated_programs_and_their_uniforms_record_what_v3dv_records() {
+    for (name, text) in SCENARIOS {
+        check(name, text, true);
     }
 }
 

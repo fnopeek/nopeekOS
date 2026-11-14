@@ -175,6 +175,14 @@ def template(meta, names):
             out.append(("SpillOffset", 0))
         elif n == "QUNIFORM_SPILL_SIZE_PER_THREAD":
             out.append(("SpillSizePerThread", 0))
+        elif n == "QUNIFORM_VIEWPORT_X_SCALE":
+            out.append(("ViewportXScale", 0))
+        elif n == "QUNIFORM_VIEWPORT_Y_SCALE":
+            out.append(("ViewportYScale", 0))
+        elif n == "QUNIFORM_VIEWPORT_Z_OFFSET":
+            out.append(("ViewportZOffset", 0))
+        elif n == "QUNIFORM_VIEWPORT_Z_SCALE":
+            out.append(("ViewportZScale", 0))
         else:
             sys.exit("gen_shaders: uniform %s is not modelled" % n)
     return out
@@ -273,7 +281,136 @@ def compile_all():
     return progs
 
 
-def emit(progs):
+DRAW_KINDS = range(1, 10)
+
+
+def compile_draws():
+    """draw/rect.vert with draw/draw.frag for each item kind, as v3dv builds
+    the pipelines (v3dg): per kind the vertex, coordinate and fragment
+    program, their uniform lists and the prog_data a shader record reads."""
+    names = quniform_names()
+    draw_dir = os.path.join(HERE, "draw")
+    with tempfile.TemporaryDirectory() as tmp:
+        v3dg = build_v3dc(tmp, "v3dg")
+        spv = {}
+        for f in ("rect.vert", "draw.frag"):
+            spv[f] = os.path.join(tmp, f + ".spv")
+            subprocess.run(["glslangValidator", "-V", "--target-env", "vulkan1.3", "-o", spv[f],
+                            os.path.join(draw_dir, f)], check=True, stdout=subprocess.DEVNULL)
+        out = os.path.join(tmp, "out")
+        os.makedirs(out)
+        env = dict(os.environ, LD_PRELOAD=SHIM, MESA_SHADER_CACHE_DISABLE="1")
+        env.pop("V3D_DEBUG", None)
+        draws = ["%d:0,0,64,64" % k for k in DRAW_KINDS]
+        r = subprocess.run([v3dg, spv["rect.vert"], spv["draw.frag"], "64", "64", out] + draws, env=env,
+                           capture_output=True, text=True)
+        if r.returncode:
+            sys.exit("gen_shaders: v3dg: %s" % r.stderr[-4000:])
+        meta = {}
+        uniforms = {}
+        for line in open(os.path.join(out, "meta")):
+            k, _, v = line.strip().partition(" ")
+            if k.endswith("_uniform"):
+                i, c, d = map(int, v.split())
+                uniforms.setdefault(k[:-len("_uniform")], []).append((c, d))
+            elif k.endswith("_varying_flags"):
+                meta.setdefault(k, []).append(list(map(int, v.split())))
+            else:
+                meta[k] = v
+        kinds = []
+        for kind in DRAW_KINDS:
+            stages = {}
+            for st in ("vs", "cs", "fs"):
+                n = "%s-%d" % (st, kind)
+                code = open(os.path.join(out, n + ".bin"), "rb").read()
+                if int(meta[n + "_spill_size"]):
+                    sys.exit("gen_shaders: %s spills; the draw model has no spill buffer" % n)
+                tpl = template({"uniform": uniforms.get(n, [])}, names)
+                if any(k in ("WgBase", "NumWg", "SpillOffset", "SpillSizePerThread") for k, _ in tpl):
+                    sys.exit("gen_shaders: %s reads a compute uniform" % n)
+                pre = n + "_"
+                m = {k[len(pre):]: v for k, v in meta.items() if k.startswith(pre)}
+                stages[st] = (code, tpl, m)
+            kinds.append((kind, stages))
+        return kinds
+
+
+def emit_draws(w, draws):
+    w("")
+    w("/// One program of a draw pipeline: its QPU code and uniform list, and")
+    w("/// the prog_data the shader state record reads.")
+    w("pub struct DrawProgram<P: 'static> {")
+    w("    pub qpu: &'static [u64],")
+    w("    pub uniforms: &'static [U],")
+    w("    pub prog: P,")
+    w("}")
+    w("")
+    w("/// The pipeline v3dv builds from draw/rect.vert and draw/draw.frag for")
+    w("/// one item kind (draw.frag's specialization constant 0).")
+    w("pub struct DrawPipeline {")
+    w("    pub kind: u32,")
+    w("    pub vs: &'static DrawProgram<crate::v3d_draw::VsProgData>,")
+    w("    /// The binning variant of the vertex shader.")
+    w("    pub cs: &'static DrawProgram<crate::v3d_draw::VsProgData>,")
+    w("    pub fs: &'static DrawProgram<crate::v3d_draw::FsProgData>,")
+    w("}")
+    w("")
+    seen = {}
+    def b(v):
+        return "true" if int(v) else "false"
+    def base(m, tpl):
+        return ("crate::v3d_draw::ProgData { threads: %s, single_seg: %s, tmu_dirty_rcl: %s, uniform_count: %d }"
+                % (m["threads"], b(m["single_seg"]), b(m["tmu_dirty_rcl"]), len(tpl)))
+    def program(st, kind, code, tpl, m):
+        if st == "fs":
+            flags = sorted(m.get("varying_flags", []))
+            words = lambda j: ", ".join(str(f[j]) for f in flags)
+            prog = ("crate::v3d_draw::FsProgData { base: %s, uses_pid: %s, flat_shade_flags: [%s], "
+                    "noperspective_flags: [%s], centroid_flags: [%s], num_inputs: %s, writes_z: %s, "
+                    "disable_ez: %s, uses_center_w: %s, uses_implicit_point_line_varyings: %s, "
+                    "lock_scoreboard_on_first_thrsw: %s }"
+                    % (base(m, tpl), b(m["uses_pid"]), words(1), words(2), words(3), m["num_inputs"],
+                       b(m["writes_z"]), b(m["disable_ez"]), b(m["uses_center_w"]),
+                       b(m["uses_implicit_point_line_varyings"]), b(m["lock_scoreboard_on_first_thrsw"])))
+        else:
+            prog = ("crate::v3d_draw::VsProgData { base: %s, uses_iid: %s, uses_biid: %s, uses_vid: %s, "
+                    "vpm_input_size: %s, vpm_output_size: %s, vcm_cache_size: %s, writes_psiz: %s }"
+                    % (base(m, tpl), b(m["uses_iid"]), b(m["uses_biid"]), b(m["uses_vid"]), m["vpm_input_size"],
+                       m["vpm_output_size"], m["vcm_cache_size"], b(m["writes_psiz"])))
+        key = (st, code, tuple(tpl), prog)
+        if key in seen:
+            return seen[key]
+        name = "DRAW_%s_%d" % (st.upper(), kind)
+        seen[key] = name
+        ty = "FsProgData" if st == "fs" else "VsProgData"
+        qpu = struct.unpack("<%dQ" % (len(code) // 8), code)
+        w("pub static %s: DrawProgram<crate::v3d_draw::%s> = DrawProgram {" % (name, ty))
+        w("    qpu: &[")
+        for i in range(0, len(qpu), 4):
+            w("        " + " ".join("0x%016x," % q for q in qpu[i:i + 4]))
+        w("    ],")
+        w("    uniforms: &[")
+        for i in range(0, len(tpl), 6):
+            parts = []
+            for k, d in tpl[i:i + 6]:
+                parts.append("U::%s(%#x)," % (k, d) if k in ("Const", "Push", "WgBase", "NumWg") else "U::%s," % k)
+            w("        " + " ".join(parts))
+        w("    ],")
+        w("    prog: %s," % prog)
+        w("};")
+        w("")
+        return name
+    pipes = []
+    for kind, stages in draws:
+        names = [program(st, kind, *stages[st]) for st in ("vs", "cs", "fs")]
+        pipes.append((kind, names))
+    w("pub static DRAW_PIPELINES: &[DrawPipeline] = &[")
+    for kind, (vs, cs, fs) in pipes:
+        w("    DrawPipeline { kind: %d, vs: &%s, cs: &%s, fs: &%s }," % (kind, vs, cs, fs))
+    w("];")
+
+
+def emit(progs, draws):
     o = []
     w = o.append
     w("// GENERATED by shaders/gen_shaders.py from tools/wasm/gpu_shaders; do not edit.")
@@ -296,6 +433,11 @@ def emit(progs):
     w("    SpillOffset,")
     w("    /// QUNIFORM_SPILL_SIZE_PER_THREAD.")
     w("    SpillSizePerThread,")
+    w("    /// QUNIFORM_VIEWPORT_X_SCALE, _Y_SCALE, _Z_OFFSET, _Z_SCALE (v3dv_uniforms.c).")
+    w("    ViewportXScale,")
+    w("    ViewportYScale,")
+    w("    ViewportZOffset,")
+    w("    ViewportZScale,")
     w("}")
     w("")
     w("pub struct Program {")
@@ -372,11 +514,12 @@ def emit(progs):
         w("        ],")
         w("    };")
     w("}")
+    emit_draws(w, draws)
     return "\n".join(o) + "\n"
 
 
 def main():
-    text = emit(compile_all())
+    text = emit(compile_all(), compile_draws())
     if "--check" in sys.argv:
         if not os.path.exists(OUT) or open(OUT).read() != text:
             sys.exit("gen_shaders: %s is stale" % OUT)

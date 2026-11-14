@@ -328,7 +328,7 @@ fn map_bo(id: u32) -> Option<SceneBo> {
 impl Scenes {
     fn new(hw: &mut PiHw) -> Option<Scenes> {
         let mut c = scene::composer_init(hw)?;
-        if !c.self_test(hw) {
+        if !c.self_test(hw) || !c.draw_self_test(hw) {
             return None;
         }
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
@@ -420,15 +420,22 @@ impl Scenes {
                     w if w & WAIT_IRQ != 0 => "an interrupt",
                     _ => "a command",
                 };
-                Line::new().s("scene: ").dec(p.dispatches as u64).s(" dispatches in ").dec(total).s(" us")
+                Line::new().s("scene: ").dec(p.dispatches as u64).s(" submissions in ").dec(total).s(" us")
                     .s(if failed { ", failed" } else { "" })
                     .s(" (power-up ").dec(p.power_us).s(" us, jobs ").dec(gpu).s(" us, seen after ").s(by).s(")")
                     .say();
             }
             if traced || slow {
                 for (name, g, us) in trace {
-                    Line::new().s("scene:   ").s(name).s(" ").dec(g[0] as u64).s("x").dec(g[1] as u64)
-                        .s(" groups, ").dec(us).s(" us").say();
+                    let mut l = Line::new();
+                    l.s("scene:   ").s(name).s(" ");
+                    if name == "bin" || name == "render" {
+                        // Draws, and the render area.
+                        l.dec(g[0] as u64).s(" draws over ").dec(g[1] as u64).s("x").dec(g[2] as u64);
+                    } else {
+                        l.dec(g[0] as u64).s("x").dec(g[1] as u64).s(" groups");
+                    }
+                    l.s(", ").dec(us).s(" us").say();
                 }
                 if let Some(v) = perf.filter(|_| self.perf_logged < PERF_LOGGED) {
                     self.perf_logged += 1;
