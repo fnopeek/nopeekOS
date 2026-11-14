@@ -170,6 +170,62 @@ const AW2W_MAX_PIPE: u32 = 8;
 const AR2R_MAX_PIPE: u32 = 8;
 const USE_AW2B_FILL: u32 = 1;
 
+/// `gem_statistics`: each counter's ethtool name and register. The
+/// registers clear on read; `GEM_OCTTXL` and `GEM_OCTRXL` have their bits
+/// 47:32 in the next word.
+pub const GEM_STATISTICS: [(&str, u64); GEM_STATS_LEN] = [
+    ("tx_octets", 0x100),
+    ("tx_frames", 0x108),
+    ("tx_broadcast_frames", 0x10c),
+    ("tx_multicast_frames", 0x110),
+    ("tx_pause_frames", 0x114),
+    ("tx_64_byte_frames", 0x118),
+    ("tx_65_127_byte_frames", 0x11c),
+    ("tx_128_255_byte_frames", 0x120),
+    ("tx_256_511_byte_frames", 0x124),
+    ("tx_512_1023_byte_frames", 0x128),
+    ("tx_1024_1518_byte_frames", 0x12c),
+    ("tx_greater_than_1518_byte_frames", 0x130),
+    ("tx_underrun", 0x134),
+    ("tx_single_collision_frames", 0x138),
+    ("tx_multiple_collision_frames", 0x13c),
+    ("tx_excessive_collisions", 0x140),
+    ("tx_late_collisions", 0x144),
+    ("tx_deferred_frames", 0x148),
+    ("tx_carrier_sense_errors", 0x14c),
+    ("rx_octets", 0x150),
+    ("rx_frames", 0x158),
+    ("rx_broadcast_frames", 0x15c),
+    ("rx_multicast_frames", 0x160),
+    ("rx_pause_frames", 0x164),
+    ("rx_64_byte_frames", 0x168),
+    ("rx_65_127_byte_frames", 0x16c),
+    ("rx_128_255_byte_frames", 0x170),
+    ("rx_256_511_byte_frames", 0x174),
+    ("rx_512_1023_byte_frames", 0x178),
+    ("rx_1024_1518_byte_frames", 0x17c),
+    ("rx_greater_than_1518_byte_frames", 0x180),
+    ("rx_undersized_frames", 0x184),
+    ("rx_oversize_frames", 0x188),
+    ("rx_jabbers", 0x18c),
+    ("rx_frame_check_sequence_errors", 0x190),
+    ("rx_length_field_frame_errors", 0x194),
+    ("rx_symbol_errors", 0x198),
+    ("rx_alignment_errors", 0x19c),
+    ("rx_resource_errors", 0x1a0),
+    ("rx_overruns", 0x1a4),
+    ("rx_ip_header_checksum_errors", 0x1a8),
+    ("rx_tcp_checksum_errors", 0x1ac),
+    ("rx_udp_checksum_errors", 0x1b0),
+    ("rx_lpi_transitions", 0x270),
+    ("rx_lpi_time", 0x274),
+    ("tx_lpi_transitions", 0x278),
+    ("tx_lpi_time", 0x27c),
+];
+pub const GEM_STATS_LEN: usize = 47;
+const GEM_OCTTXL: u64 = 0x100;
+const GEM_OCTRXL: u64 = 0x150;
+
 fn r(hw: &mut impl Hw, off: u64) -> u32 { hw.r32(Block::Rp1Bar1, GEM_BASE + off) }
 fn w(hw: &mut impl Hw, off: u64, v: u32) { hw.w32(Block::Rp1Bar1, GEM_BASE + off, v) }
 
@@ -371,6 +427,8 @@ pub struct Gem {
     eee_active: bool,
     tx_lpi_timer_us: u64,
     lpi_req: Option<LpiTimer>,
+    /// `hw_stats.gem`, in `GEM_STATISTICS` order.
+    pub stats: [u64; GEM_STATS_LEN],
 }
 
 const fn circ_cnt(head: usize, tail: usize) -> usize { head.wrapping_sub(tail) & (RING_SIZE - 1) }
@@ -455,6 +513,7 @@ impl Gem {
             tx_slot: [None; RING_SIZE], rx_buf: [None; RING_SIZE],
             txubr_pending: false, tx_pending: false, running: false, tx_stopped: false,
             eee_active: false, tx_lpi_timer_us: 0, lpi_req: None,
+            stats: [0; GEM_STATS_LEN],
         }
     }
 
@@ -846,6 +905,22 @@ impl Gem {
             if i == first { break; }
         }
         self.tx_head = head;
+    }
+
+    /// `gem_update_stats`: the hardware counters added to `stats`.
+    pub fn update_stats(&mut self, hw: &mut impl Hw) {
+        for (i, &(_, off)) in GEM_STATISTICS.iter().enumerate() {
+            let mut v = r(hw, off) as u64;
+            if off == GEM_OCTTXL || off == GEM_OCTRXL {
+                v += (r(hw, off + 4) as u64) << 32;
+            }
+            self.stats[i] += v;
+        }
+    }
+
+    /// `macb_rx_pending`, for a caller that only counts.
+    pub fn rx_waiting(&mut self, dma: &mut impl Dma) -> bool {
+        self.rx_pending(dma)
     }
 
     /// `macb_interrupt`.

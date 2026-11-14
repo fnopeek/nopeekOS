@@ -77,10 +77,32 @@ static RX: Mutex<VecDeque<(Vec<u8>, bool)>> = Mutex::new(VecDeque::new());
 static RX_FRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static RX_DROPPED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static TX_FRAMES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Wakes by the GEM's line, and timer wakes that found a frame waiting in
+/// the RX ring without an interrupt for it.
+static IRQ_WAKES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RX_UNSIGNALLED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Frames received, dropped for a full backlog, and sent, since boot.
 pub fn counters() -> (u64, u64, u64) {
     (RX_FRAMES.load(Ordering::Relaxed), RX_DROPPED.load(Ordering::Relaxed), TX_FRAMES.load(Ordering::Relaxed))
+}
+
+/// Interrupt wakes, and timer wakes that found a received frame no
+/// interrupt had announced.
+pub fn wakes() -> (u64, u64) {
+    (IRQ_WAKES.load(Ordering::Relaxed), RX_UNSIGNALLED.load(Ordering::Relaxed))
+}
+
+/// `gem_get_ethtool_stats`: the GEM's own counters since open, by name.
+pub fn hw_stats() -> Option<[(&'static str, u64); gem::GEM_STATS_LEN]> {
+    let mut g = DEV.lock();
+    let Device { eth, regs, .. } = g.as_mut()?;
+    eth.gem.update_stats(regs);
+    let mut out = [("", 0); gem::GEM_STATS_LEN];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = (gem::GEM_STATISTICS[i].0, eth.gem.stats[i]);
+    }
+    Some(out)
 }
 
 impl gem::Dma for Bufs {
@@ -240,6 +262,7 @@ fn eth_fiber(irq: u64) {
         if let Some(d) = DEV.lock().as_mut() {
             let Device { eth, bufs, regs } = d;
             if fired {
+                IRQ_WAKES.fetch_add(1, Ordering::Relaxed);
                 let i = eth.gem.interrupt(regs);
                 if i.tx_error { eth.gem.tx_error_task(regs, bufs); }
                 if i.hresp { eth.gem.hresp_error_task(regs, bufs); }
@@ -248,6 +271,8 @@ fn eth_fiber(irq: u64) {
                     while eth.gem.rx_poll(regs, bufs, NAPI_WEIGHT).1 {}
                     rx = true;
                 }
+            } else if eth.gem.rx_waiting(bufs) {
+                RX_UNSIGNALLED.fetch_add(1, Ordering::Relaxed);
             }
             if now >= next_poll {
                 next_poll = now + PHY_POLL_US;

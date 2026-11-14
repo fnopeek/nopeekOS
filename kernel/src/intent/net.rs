@@ -750,6 +750,14 @@ pub fn intent_net_info() {
         {
             let (rx, dropped, tx) = crate::platform::pi5_eth::counters();
             kprintln!("    Frames  {} in ({} dropped, backlog full), {} out", rx, dropped, tx);
+            let (irqs, unsignalled) = crate::platform::pi5_eth::wakes();
+            kprintln!("    Wakes   {} by interrupt, {} found a frame no interrupt announced", irqs, unsignalled);
+            if let Some(stats) = crate::platform::pi5_eth::hw_stats() {
+                kprintln!("    GEM counters since open (nonzero):");
+                for (name, v) in stats.iter().filter(|(_, v)| *v != 0) {
+                    kprintln!("      {:<34} {}", name, v);
+                }
+            }
         }
         kprintln!();
     }
