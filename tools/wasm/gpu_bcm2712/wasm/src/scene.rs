@@ -37,8 +37,9 @@ const SCENE_PAGES: u32 = 16;
 const FREE_BOS_KEPT: usize = 24;
 /// draw.frag's item kinds, 1..=9; the pipeline of kind k is at k - 1.
 const DRAW_KINDS: usize = 9;
+/// The blur planes at start; they grow to the screen's blocks
+/// (`ensure_planes`).
 const PLANE_PAGES: u32 = 128;
-const PLANE_BLOCKS: u32 = PLANE_PAGES * PAGE / 4;
 /// Programs start at this alignment in the code buffer.
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
@@ -332,6 +333,20 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
 }
 
 impl Composer {
+    /// The blur planes (and their scratch plane) hold `blocks` words: grown,
+    /// once nothing queued reads the old ones.
+    fn ensure_planes(&mut self, hw: &mut PiHw, blocks: u32) -> Result<(), i32> {
+        if self.planes.bytes / 4 >= blocks {
+            return Ok(());
+        }
+        let pages = (blocks * 4).div_ceil(PAGE);
+        let (Some(planes), Some(tmp)) = (Buf::new(pages), Buf::new(pages)) else { return Err(-ENOMEM) };
+        self.drain(hw);
+        core::mem::replace(&mut self.planes, planes).free();
+        core::mem::replace(&mut self.tmp, tmp).free();
+        Ok(())
+    }
+
     /// Everything the composer holds given back, V3D idle (a start that
     /// failed its self-test).
     pub fn free(mut self, hw: &mut PiHw) {
@@ -840,7 +855,10 @@ impl Composer {
         let mut mem = SceneMem(&self.scene);
         let ck = gpu_scene::scene::check_scene(&JobPayload(seq), bytes, bufs, &mut mem, target)?;
         let before = self.dispatches;
-        let lim = plan::limits { bins_words: 0, plane_blocks: PLANE_BLOCKS };
+        // A panel's blur reads at most every 4x4 block of the screen.
+        let blocks = ck.width.div_ceil(plan::BLUR_DOWN) * ck.height.div_ceil(plan::BLUR_DOWN);
+        self.ensure_planes(hw, blocks)?;
+        let lim = plan::limits { bins_words: 0, plane_blocks: self.planes.bytes / 4 };
         let mut s = Sink { c: self, hw, ck: &ck };
         if let Err(e) = plan::plan_draws(&mut s, &lim, &ck.screen, &ck.damage, &ck.shapes, ck.radius) {
             // Segments queued before the refusal still write the target:
