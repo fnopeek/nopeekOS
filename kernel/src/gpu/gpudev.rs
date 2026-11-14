@@ -1359,13 +1359,11 @@ fn wait_seq_yield(seq: u32, deadline: u64) -> i32 {
     }
 }
 
-/// One step of waiting for job `seq` without halting the core: another
-/// ready fiber runs, or the caller parks until `complete` signals it, at
-/// most `PARK_STEP_MS` and until `deadline`. Outside a fiber it spins.
+/// One step of waiting for job `seq` without halting the core: the caller
+/// parks until `complete` signals it, at most `PARK_STEP_MS` and until
+/// `deadline`, and the core runs its other fibers meanwhile. Outside a
+/// fiber it spins.
 fn park_for(seq: u32, deadline: u64) {
-    if fiber::yield_ready() {
-        return;
-    }
     let Some(w) = fiber::current_waker() else {
         core::hint::spin_loop();
         return;

@@ -258,8 +258,9 @@ struct Scenes {
     logged: u32,
     /// Queued scenes.
     pending: alloc::vec::Vec<Pending>,
-    /// Slow scenes logged.
+    /// Slow scenes logged, and those with their counters.
     slow_logged: u32,
+    perf_logged: u32,
 }
 
 /// A scene on V3D, not yet completed.
@@ -283,6 +284,8 @@ const WOKE_DRAIN: i32 = -1;
 const SCENE_SLOW_US: u64 = 50_000;
 /// Slow scenes that say so.
 const SLOW_LOGGED: u32 = 64;
+/// Scenes logged with their performance counters.
+const PERF_LOGGED: u32 = 16;
 
 /// Scenes after the start whose cost goes to the log.
 const SCENES_LOGGED: u32 = 8;
@@ -329,7 +332,7 @@ impl Scenes {
             return None;
         }
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
-        Some(Scenes { c, bos, logged: 0, pending: alloc::vec::Vec::new(), slow_logged: 0 })
+        Some(Scenes { c, bos, logged: 0, pending: alloc::vec::Vec::new(), slow_logged: 0, perf_logged: 0 })
     }
 
     /// `OP_BO_ADD`: mapped for V3D, its address reported.
@@ -359,12 +362,16 @@ impl Scenes {
     /// `OP_SCENE`: queued on V3D. None while it runs (`reap` completes
     /// it), or its status when it was refused.
     fn run(&mut self, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> Option<i32> {
+        // One scene on V3D at a time (the next waits for the last fence):
+        // the one before is completed first, so the trace and the counters
+        // are this scene's alone.
+        self.c.drain(hw);
+        self.reap(hw, WOKE_DRAIN);
         let bufs = SceneBufs(&self.bos);
         let t0 = npk_sys::now_us() as u64;
         let traced = self.logged < SCENES_TRACED;
-        if traced && self.c.trace.is_none() {
-            self.c.trace = Some(alloc::vec::Vec::new());
-        }
+        self.c.trace = Some(alloc::vec::Vec::new());
+        self.c.perf_armed = true;
         match self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]) {
             Ok((n, f)) => {
                 let power_us = self.c.take_power_us();
@@ -404,6 +411,8 @@ impl Scenes {
             if slow {
                 self.slow_logged += 1;
             }
+            let trace = self.c.trace.take().unwrap_or_default();
+            let perf = self.c.perf_take(hw);
             if traced || self.logged < SCENES_LOGGED || slow {
                 let by = match woke {
                     WOKE_DRAIN => "a wait on it",
@@ -416,10 +425,21 @@ impl Scenes {
                     .s(" (power-up ").dec(p.power_us).s(" us, jobs ").dec(gpu).s(" us, seen after ").s(by).s(")")
                     .say();
             }
-            if traced {
-                for (name, g, us) in self.c.trace.take().unwrap_or_default() {
+            if traced || slow {
+                for (name, g, us) in trace {
                     Line::new().s("scene:   ").s(name).s(" ").dec(g[0] as u64).s("x").dec(g[1] as u64)
                         .s(" groups, ").dec(us).s(" us").say();
+                }
+                if let Some(v) = perf.filter(|_| self.perf_logged < PERF_LOGGED) {
+                    self.perf_logged += 1;
+                    for (names, vals) in scene::PERF_COUNTERS.chunks(6).zip(v.chunks(6)) {
+                        let mut l = Line::new();
+                        l.s("scene:   ");
+                        for (n, v) in names.iter().zip(vals) {
+                            l.s(n).s("=").dec(*v).s(" ");
+                        }
+                        l.say();
+                    }
                 }
             }
             if !traced && self.logged < SCENES_LOGGED {

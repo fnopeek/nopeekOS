@@ -34,6 +34,18 @@ const PLANE_BLOCKS: u32 = PLANE_PAGES * PAGE / 4;
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
 const AUTOSUSPEND_US: u64 = 50_000;
+/// The performance counters a scene is measured with (`PERF_COUNTERS_71`
+/// names; at most 32, as one perfmon holds).
+pub const PERF_COUNTERS: [&str; 32] = [
+    "cycle-count", "compute-active-cycles", "QPU-active", "QPU-stalls", "QPU-wait-bubble",
+    "QPU-ic-miss-bubble", "QPU-stalls-TMU", "QPU-stalls-uniforms", "QPU-stalls-SFU", "QPU-stalls-other",
+    "QPU-total-instr-cache-hit", "QPU-total-instr-cache-miss", "QPU-total-uniform-cache-hit",
+    "QPU-total-uniform-cache-miss", "TMU-active-cycles", "TMU-stalled-cycles", "TMU-total-text-quads-access",
+    "L2T-total-cache-hit", "L2T-total-cache-miss", "L2T-TMU-read-hits", "L2T-TMU-read-miss", "L2T-stalls-mem",
+    "L2T-writeback", "core-memory-reads", "core-memory-writes", "L2T-memory-reads", "L2T-memory-writes",
+    "AXI-read-trans", "AXI-write-trans", "AXI-read-wait-cycles", "AXI-write-wait-cycles",
+    "AXI-max-outstanding-reads",
+];
 /// Finished jobs whose time `take_job_us` can still collect.
 const JOB_US_KEPT: usize = 64;
 /// Uniform streams: one slot per dispatch that may be in flight.
@@ -106,6 +118,10 @@ pub struct Composer {
     mmu_logged: bool,
     /// Time spent powering V3D up since `take_power_us` (us).
     power_us: u64,
+    /// Count `PERF_COUNTERS` over the next submission's jobs (`v3d_perfmon`
+    /// on the job), and whether they are counting.
+    pub perf_armed: bool,
+    perf_active: bool,
     /// Finished jobs and their time from start to the fence seen, until
     /// `take_job_us` collects them; the newest `JOB_US_KEPT`.
     job_us: Vec<(Fence, u64)>,
@@ -176,6 +192,8 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         idle_since: npk_sys::now_us() as u64,
         mmu_logged: false,
         power_us: 0,
+        perf_armed: false,
+        perf_active: false,
         job_us: Vec::new(),
         scene: Buf::new(SCENE_PAGES)?,
         bins: Buf::new(BINS_PAGES)?,
@@ -223,6 +241,7 @@ impl Composer {
             }
             v3d::irq_enable(hw);
             self.powered = true;
+            self.idle_since = npk_sys::now_us() as u64;
         }
         Ok(())
     }
@@ -257,6 +276,14 @@ impl Composer {
     pub fn submit_dispatch(&mut self, hw: &mut PiHw, p: &'static Program, push: &[u32; 32], grid: [u32; 3])
         -> Result<Fence, i32> {
         self.power_up(hw)?;
+        if self.perf_armed && !self.perf_active {
+            let ids: Vec<u8> = PERF_COUNTERS.iter()
+                .map(|n| v3d::PERF_COUNTERS_71.iter().position(|m| m == n).expect("a V3D 7.1 counter") as u8)
+                .collect();
+            v3d::perfmon_start(hw, &ids);
+            self.perf_active = true;
+        }
+        self.perf_armed = false;
         // A uniform slot whose dispatch finished; the oldest one waited for
         // when all are in flight.
         let slot = match self.uslots.iter().position(|&f| f == 0 || self.sched.signaled(f)) {
@@ -321,13 +348,15 @@ impl Composer {
         }
         let mut ev = Vec::new();
         let now = npk_sys::now_us() as u64;
+        let busy = !self.sched.idle();
         let core = v3d::core_irq(hw);
         let hub = v3d::hub_irq(hw);
         self.sched.irq(core, hub, now, &mut ev);
         self.sched.check_timeouts(hw, now, &mut ev);
         self.handle(hw, ev);
         self.pump(hw);
-        if self.sched.idle() {
+        // `pm_runtime_mark_last_busy` as the last job completes.
+        if busy && self.sched.idle() {
             self.idle_since = now;
         }
     }
@@ -429,6 +458,17 @@ impl Composer {
         if self.last != 0 {
             let _ = self.wait_fence(hw, self.last);
         }
+    }
+
+    /// The counters since the submission they were armed for, which stop.
+    /// None when none counted (V3D was not powered by it).
+    pub fn perf_take(&mut self, hw: &mut PiHw) -> Option<[u64; 32]> {
+        if !core::mem::take(&mut self.perf_active) || !self.powered {
+            return None;
+        }
+        let mut v = [0u64; 32];
+        v3d::perfmon_stop(hw, &mut v, true);
+        Some(v)
     }
 
     /// The power-up time since the last call (us).
