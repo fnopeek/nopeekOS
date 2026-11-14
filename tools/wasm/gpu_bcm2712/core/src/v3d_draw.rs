@@ -186,11 +186,13 @@ pub struct Draw {
 }
 
 /// The render pass: the device revision (V3D 7.1.`rev`), the attachment,
-/// the render area, the pipelines' static viewport and scissor, and the
-/// draws in order.
+/// its loadOp (LOAD, or DONT_CARE when the draws write every pixel of the
+/// render area), the render area, the pipelines' static viewport and
+/// scissor, and the draws in order.
 pub struct Pass<'a> {
     pub rev: u32,
     pub image: Image,
+    pub load: bool,
     pub render_area: Rect,
     pub viewport: Viewport,
     pub scissor: Rect,
@@ -397,6 +399,11 @@ fn tile_size_valid(pixel_count: u32, color_bpp: u32, depth_bpp: u32) -> bool {
         return true;
     }
     pixel_count * depth_bpp <= TLB_DEPTH_SIZE && pixel_count * color_bpp <= TLB_COLOR_SIZE
+}
+
+/// The tile size of a pass: one 32 bpp colour target, no MSAA.
+pub fn tile_size() -> (u32, u32) {
+    choose_tile_size(4 * internal_bpp_words(RT_INTERNAL_BPP), false)
 }
 
 /// `v3d_choose_tile_size` for V3D 7.x without double-buffer: width, height.
@@ -859,7 +866,7 @@ impl Recorder<'_, '_> {
     /// `get_granularity` (one R32_UINT target) and a framebuffer with edge
     /// padding (`v3dv_CreateFramebuffer`).
     fn area_is_tile_aligned(&self) -> bool {
-        let (gw, gh) = choose_tile_size(4 * internal_bpp_words(RT_INTERNAL_BPP), false);
+        let (gw, gh) = tile_size();
         let a = self.pass.render_area;
         let has_edge_padding = true;
         let fb = self.pass.image;
@@ -1374,8 +1381,7 @@ impl Recorder<'_, '_> {
     /// job runs the attachment's only subpass from its start, so loadOp
     /// LOAD decides (and a store outside a tile-aligned area would too).
     fn color_needs_load(&self) -> bool {
-        let load_op_load = true;
-        (!self.tile_aligned_render_area && self.color_needs_store()) || load_op_load
+        (!self.tile_aligned_render_area && self.color_needs_store()) || self.pass.load
     }
 
     /// `v3dv_cmd_buffer_check_needs_store` for the colour attachment in the

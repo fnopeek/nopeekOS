@@ -26,7 +26,7 @@ const MAX_PANELS: usize = 64;
 /// 32-bit Q24.8.
 const MAX_COORD: u32 = 1 << 16;
 
-const KIND_BACKGROUND: u32 = 1;
+pub const KIND_BACKGROUND: u32 = 1;
 const KIND_GLOW: u32 = 2;
 const KIND_GLASS_BACKDROP: u32 = 3;
 const KIND_CHROME: u32 = 4;

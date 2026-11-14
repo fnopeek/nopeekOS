@@ -223,7 +223,7 @@ fn check(name: &str, text: &str, generated: bool) {
         push: push_words(rect),
         vertex_count: 4,
     }).collect();
-    let pass = Pass { rev: key(&r.keys, "rev"), image, render_area, viewport, scissor, pipelines: &pipelines,
+    let pass = Pass { rev: key(&r.keys, "rev"), image, load: true, render_area, viewport, scissor, pipelines: &pipelines,
                       draws: &draws };
 
     let mut queues: BTreeMap<&'static str, VecDeque<(u32, u32)>> = BTreeMap::new();
