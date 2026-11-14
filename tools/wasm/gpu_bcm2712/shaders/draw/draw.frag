@@ -1,7 +1,7 @@
 #version 460
-// One scene item over the pixels of one draw: the colour the tile buffer
-// holds for the pixel (VK_EXT_shader_tile_image), painted over by the item
-// as compose.comp paints it, written back. The attachment is R32_UINT, one
+// One scene item over the pixels of one draw: what the item does to the
+// pixel (items.glsl `Op`), applied to the colour the tile buffer holds for
+// it (VK_EXT_shader_tile_image) as compose.comp paints it, written back. The attachment is R32_UINT, one
 // XRGB8888 word per pixel, so the mixing is the CPU executor's, exactly.
 // KIND selects the item kind at compile time: one small program per kind.
 #extension GL_EXT_buffer_reference : require
@@ -27,6 +27,7 @@ const uint FLAG_WALL = 1u;
 const uint FLAG_BLURRED = 2u;
 const uint FLAG_GLASS = 4u;
 
+#define ITEM_OPS
 #include "../../../gpu_shaders/items.glsl"
 
 void main() {
@@ -45,22 +46,23 @@ void main() {
     g_glass = src;
     g_glass_pitch = p.src_pitch;
     g_glyphs = src;
-    uint c;
     if (KIND == 1u) {
-        c = (g_flags & FLAG_WALL) != 0u ? g_wall.v[y * g_wall_pitch + x] : 0xFF181820u;
-    } else {
-        c = colorAttachmentReadEXT(dst).x;
-        switch (KIND) {
-        case 2u: c = glow(it, x, y, c); break;
-        case 3u: c = glass_backdrop(it, x, y, c); break;
-        case 4u: c = chrome(it, x, y, c); break;
-        case 5u: c = content(it, x, y, c); break;
-        case 6u: c = panel(it, x, y, c); break;
-        case 7u: c = text(it, x, y, c); break;
-        case 8u: c = fill(it, x, y, c); break;
-        case 9u: c = close_glyph(it, x, y, c); break;
-        default: break;
-        }
+        color = (g_flags & FLAG_WALL) != 0u ? g_wall.v[y * g_wall_pitch + x] : 0xFF181820u;
+        return;
     }
-    color = c;
+    // The item's own loads and arithmetic first, the tile buffer last: a
+    // read before them would hold the scoreboard through all of it.
+    Op o = op_keep();
+    switch (KIND) {
+    case 2u: o = glow(it, x, y); break;
+    case 3u: o = glass_backdrop(it, x, y); break;
+    case 4u: o = chrome(it, x, y); break;
+    case 5u: o = content(it, x, y); break;
+    case 6u: o = panel(it, x, y); break;
+    case 7u: o = text(it, x, y); break;
+    case 8u: o = fill(it, x, y); break;
+    case 9u: o = close_glyph(it, x, y); break;
+    default: break;
+    }
+    color = apply(o, colorAttachmentReadEXT(dst).x);
 }

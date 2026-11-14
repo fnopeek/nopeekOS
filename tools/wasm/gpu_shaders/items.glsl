@@ -8,6 +8,14 @@
 // The includer declares `Words` (a buffer reference to 32-bit words), `Blk`
 // (an item's 16 words) and `BC(b, k)` (word k of one), and sets the g_*
 // frame values before painting.
+//
+// An item kind ends in what it does to the pixel beneath: KEEP it, SET a
+// value, BLEND over it, GLASS over it or both. Painted over `c`, as
+// compose.comp does, they mix at once. With ITEM_OPS defined the kinds
+// take no pixel and return an `Op`, which `apply` mixes later: on V3D the
+// pixel is the tile buffer, and reading it before a thread switch holds
+// the scoreboard for the whole program (nir_to_vir.c,
+// lock_scoreboard_on_first_thrsw), so draw.frag reads it last.
 
 Words mkaddr(uint lo, uint hi) {
     return Words(uint64_t(lo) | (uint64_t(hi) << 32));
@@ -57,6 +65,71 @@ uint glass_blend(uint fg, uint bg, uint alpha, uint ceil_) {
 uint ink_fill(uint fg, uint tint, uint tint_w) {
     return tint_w == 0u ? fg : blend(tint, fg, tint_w);
 }
+
+#ifdef ITEM_OPS
+// What an item does to the pixel beneath: keep it, replace it by `b_col`,
+// or mix over it, by `blend` with `b_col` at `b_a`, then by `glass_blend`
+// with `g_col` at `g_a` under `g_ceil`.
+const uint OP_KEEP = 0u;
+const uint OP_BLEND = 1u;
+const uint OP_GLASS = 2u;
+const uint OP_SET = 4u;
+
+struct Op {
+    uint how;
+    uint b_col;
+    uint b_a;
+    uint g_col;
+    uint g_a;
+    uint g_ceil;
+};
+
+Op op_keep() {
+    return Op(OP_KEEP, 0u, 0u, 0u, 0u, 0u);
+}
+
+Op op_set(uint v) {
+    return Op(OP_SET, v, 0u, 0u, 0u, 0u);
+}
+
+Op op_blend(uint col, uint a) {
+    return Op(OP_BLEND, col, a, 0u, 0u, 0u);
+}
+
+Op op_glass(uint col, uint a, uint ceil_) {
+    return Op(OP_GLASS, 0u, 0u, col, a, ceil_);
+}
+
+Op op_blend_glass(uint b_col, uint b_a, uint g_col, uint g_a, uint ceil_) {
+    return Op(OP_BLEND | OP_GLASS, b_col, b_a, g_col, g_a, ceil_);
+}
+
+uint apply(Op o, uint c) {
+    if (o.how == OP_SET)
+        return o.b_col;
+    if ((o.how & OP_BLEND) != 0u)
+        c = blend(o.b_col, c, o.b_a);
+    if ((o.how & OP_GLASS) != 0u)
+        c = glass_blend(o.g_col, c, o.g_a, o.g_ceil);
+    return c;
+}
+
+#define ITEM_RESULT Op
+#define ITEM_PIXEL
+#define KEEP op_keep()
+#define SET(v) op_set(v)
+#define BLEND(col, a) op_blend(col, a)
+#define GLASS(col, a, ceil_) op_glass(col, a, ceil_)
+#define BLEND_GLASS(b_col, b_a, g_col, g_a, ceil_) op_blend_glass(b_col, b_a, g_col, g_a, ceil_)
+#else
+#define ITEM_RESULT uint
+#define ITEM_PIXEL , uint c
+#define KEEP c
+#define SET(v) (v)
+#define BLEND(col, a) blend(col, c, a)
+#define GLASS(col, a, ceil_) glass_blend(col, c, a, ceil_)
+#define BLEND_GLASS(b_col, b_a, g_col, g_a, ceil_) glass_blend(g_col, blend(b_col, c, b_a), g_a, ceil_)
+#endif
 
 // theme::lerp_color.
 uint lerp_color(uint a, uint b, uint t) {
@@ -144,47 +217,47 @@ int rrect_distance(uint px, uint py, uint rx, uint ry, uint rw, uint rh, uint r)
 }
 
 // render::draw_glow_ring at one pixel.
-uint glow(Blk it, uint x, uint y, uint c) {
+ITEM_RESULT glow(Blk it, uint x, uint y ITEM_PIXEL) {
     uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
     uint r = BC(it, 5), color = BC(it, 6), width = BC(it, 7), alpha = BC(it, 8);
     if (width == 0u || alpha == 0u || rw < 2u || rh < 2u)
-        return c;
+        return KEEP;
     r = min(r, min(rw / 2u, rh / 2u));
     uint x0 = rx >= width ? rx - width : 0u;
     uint y0 = ry >= width ? ry - width : 0u;
     if (x < x0 || y < y0 || x >= rx + rw + width || y >= ry + rh + width)
-        return c;
+        return KEEP;
     if (rect_coverage(x, y, rx, ry, rw, rh, r) > 0u)
-        return c;
+        return KEEP;
     int band_q8 = int(width) * 256;
     int d = max(rrect_distance(x, y, rx, ry, rw, rh, r), 0);
     if (d >= band_q8)
-        return c;
+        return KEEP;
     uint f = min(uint((band_q8 + 128 - d) * 256 / band_q8), 256u);
     uint a = alpha * f / 256u;
-    return a > 0u ? blend(color, c, min(a, 256u)) : c;
+    return a > 0u ? BLEND(color, min(a, 256u)) : KEEP;
 }
 
 // background::draw_glass_backdrop at one pixel.
-uint glass_backdrop(Blk it, uint x, uint y, uint c) {
+ITEM_RESULT glass_backdrop(Blk it, uint x, uint y ITEM_PIXEL) {
     if ((g_flags & FLAG_BLURRED) == 0u)
-        return c;
+        return KEEP;
     uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
     uint r = min(BC(it, 5), min(rw / 2u, rh / 2u));
     if (y < ry || y >= ry + rh)
-        return c;
+        return KEEP;
     uint ly = y - ry;
     uint from_edge = ly < r ? r - ly : (ly >= rh - r ? ly + 1u - (rh - r) : 0u);
     uint inset = from_edge == 0u ? 0u : r - isqrt(uint64_t(r * r - min(from_edge * from_edge, r * r)));
     uint x0 = rx + inset;
     uint x1 = rx + rw >= inset ? rx + rw - inset : 0u;
     if (x < x0 || x >= x1)
-        return c;
-    return g_blur.v[y * g_blur_pitch + x];
+        return KEEP;
+    return SET(g_blur.v[y * g_blur_pitch + x]);
 }
 
 // render::fill_rounded_chrome_aa at one pixel.
-uint chrome(Blk it, uint px, uint py, uint c) {
+ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     uint x = BC(it, 1), y = BC(it, 2), w = BC(it, 3), h = BC(it, 4);
     uint border_a = BC(it, 5), border_b = BC(it, 6), bg = BC(it, 7);
     uint rounding = BC(it, 8), border = BC(it, 9);
@@ -192,7 +265,7 @@ uint chrome(Blk it, uint px, uint py, uint c) {
     uint go = min(BC(it, 11), 255u);
     bool paint_content = BC(it, 12) != 0u;
     if (w < 2u || h < 2u || px < x || py < y || px >= x + w || py >= y + h)
-        return c;
+        return KEEP;
     uint r_out = min(rounding, min(w / 2u, h / 2u));
     uint border_px = min(min(border, r_out), min(w / 2u, h / 2u));
     uint inner_x = x + border_px;
@@ -212,32 +285,32 @@ uint chrome(Blk it, uint px, uint py, uint c) {
     uint skip_hi = inner_x + inner_w >= 2u ? inner_x + inner_w - 2u : 0u;
     if (py >= straight_lo && py < straight_hi && px >= skip_lo && px < skip_hi) {
         if (!paint_content)
-            return c;
+            return KEEP;
         if (go >= 255u)
-            return bg;
+            return SET(bg);
         if ((g_flags & FLAG_GLASS) != 0u) {
             uint wpx = g_glass.v[py * g_glass_pitch + px];
-            return glass_blend(glass_fill, wpx, go, ceil_);
+            return SET(glass_blend(glass_fill, wpx, go, ceil_));
         }
         uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max);
-        return glass_blend(glass_fill, blend(bc, c, bo), go, ceil_);
+        return BLEND_GLASS(bc, bo, glass_fill, go, ceil_);
     }
 
     uint outer = rect_coverage(px, py, x, y, w, h, r_out);
     if (outer == 0u)
-        return c;
+        return KEEP;
     uint border_color = solid ? border_a
         : lerp_color(border_a, border_b, min(((px - x) + (py - y)) * 1000u / diag_max, 1000u));
     if (outer < 256u)
-        return blend(border_color, c, min(outer * bo / 256u, 255u));
+        return BLEND(border_color, min(outer * bo / 256u, 255u));
     uint inner = border_px == 0u ? 256u : rect_coverage(px, py, inner_x, inner_y, inner_w, inner_h, r_in);
     if (!paint_content)
-        return inner == 256u ? c : blend(border_color, c, bo);
+        return inner == 256u ? KEEP : BLEND(border_color, bo);
     if (inner == 0u)
-        return blend(border_color, c, bo);
+        return BLEND(border_color, bo);
     if (inner == 256u)
-        return glass_blend(glass_fill, c, go, ceil_);
-    return glass_blend(glass_fill, blend(border_color, c, bo), min(go * inner / 256u, 255u), ceil_);
+        return GLASS(glass_fill, go, ceil_);
+    return BLEND_GLASS(border_color, bo, glass_fill, min(go * inner / 256u, 255u), ceil_);
 }
 
 // scene::yuv_pixel: one pixel of packed YUYV as 0xFFRRGGBB; kind 2 full
@@ -261,18 +334,18 @@ uint yuv_pixel(uint yy, uint uu, uint vv, uint kind) {
 
 // scene::content at one pixel; with a YUYV kind in fit bits 2..1,
 // scene::content_yuv (a word is two pixels).
-uint content(Blk it, uint x, uint y, uint c) {
+ITEM_RESULT content(Blk it, uint x, uint y ITEM_PIXEL) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
     uint radius = BC(it, 5), fw = BC(it, 6);
     uint fit = fw & 1u, yuv = fw >> 1;
     Words src = mkaddr(BC(it, 7), BC(it, 8));
     uint sw = BC(it, 9), sh = BC(it, 10), spitch = BC(it, 11);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh)
-        return c;
+        return KEEP;
     uint r = min(radius, min(dw / 2u, dh / 2u));
     uint cov = rect_coverage(x, y, dx, dy, dw, dh, r);
     if (cov == 0u)
-        return c;
+        return KEEP;
     uint lx = x - dx;
     uint ly = y - dy;
     uint sx = lx;
@@ -291,74 +364,81 @@ uint content(Blk it, uint x, uint y, uint c) {
     } else {
         v = src.v[min(sy, sh - 1u) * spitch + min(sx, sw - 1u)];
     }
-    return cov >= 256u ? v : blend(v, c, cov);
+    return cov >= 256u ? SET(v) : BLEND(v, cov);
 }
 
 // scene::panel at one pixel; the base is the blurred wallpaper.
-uint panel(Blk it, uint x, uint y, uint c) {
+ITEM_RESULT panel(Blk it, uint x, uint y ITEM_PIXEL) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
     Words src = mkaddr(BC(it, 5), BC(it, 6));
     uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh || x >= dx + sw || y >= dy + sh)
-        return c;
+        return KEEP;
     uint pv = src.v[(y - dy) * spitch + (x - dx)];
     uint a = pv >> 24;
     if (a == 0u)
-        return c;
+        return KEEP;
     if (a < 255u) {
+#ifdef ITEM_OPS
+        uint fill = ink_fill(pv & 0xFFFFFFu, g_tint, g_tint_w);
+        if ((g_flags & FLAG_BLURRED) != 0u)
+            return SET(glass_blend(fill, g_blur.v[y * g_blur_pitch + x], a, g_ceil));
+        return GLASS(fill, a, g_ceil);
+#else
         uint base = (g_flags & FLAG_BLURRED) != 0u ? g_blur.v[y * g_blur_pitch + x] : c;
         uint fill = ink_fill(pv & 0xFFFFFFu, g_tint, g_tint_w);
         return glass_blend(fill, base, a, g_ceil);
+#endif
     }
-    return blend(pv & 0xFFFFFFu, c, a);
+    return BLEND(pv & 0xFFFFFFu, a);
 }
 
 // scene::text at one pixel.
-uint text(Blk it, uint x, uint y, uint c) {
+ITEM_RESULT text(Blk it, uint x, uint y ITEM_PIXEL) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
     Words src = mkaddr(BC(it, 5), BC(it, 6));
     uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
     if (x < dx || y < dy || x >= dx + dw || y >= dy + dh || x >= dx + sw || y >= dy + sh)
-        return c;
+        return KEEP;
     uint pv = src.v[(y - dy) * spitch + (x - dx)];
     // The alpha byte is glyph coverage (0..255), `blend` takes 0..256.
     uint a = pv >> 24;
     if (a == 0u)
-        return c;
-    return blend(pv & 0xFFFFFFu, c, a + (a >> 7u));
+        return KEEP;
+    return BLEND(pv & 0xFFFFFFu, a + (a >> 7u));
 }
 
 // Item::Fill at one pixel.
-uint fill(Blk it, uint x, uint y, uint c) {
+ITEM_RESULT fill(Blk it, uint x, uint y ITEM_PIXEL) {
     uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
     uint color = BC(it, 5), alpha = BC(it, 6), radius = BC(it, 7);
     if (alpha == 0u || x < rx || y < ry || x >= rx + rw || y >= ry + rh)
-        return c;
+        return KEEP;
     uint r = min(radius, min(rw / 2u, rh / 2u));
     uint cov = rect_coverage(x, y, rx, ry, rw, rh, r);
     if (cov == 0u)
-        return c;
+        return KEEP;
     uint a = min(min(alpha, 255u) * cov / 255u, 256u);
     if (a == 0u)
-        return c;
-    return a >= 256u ? color & 0xFFFFFFu : blend(color & 0xFFFFFFu, c, a);
+        return KEEP;
+    return a >= 256u ? SET(color & 0xFFFFFFu) : BLEND(color & 0xFFFFFFu, a);
 }
 
 // Item::CloseGlyph at one pixel.
-uint close_glyph(Blk it, uint x, uint y, uint c) {
+ITEM_RESULT close_glyph(Blk it, uint x, uint y ITEM_PIXEL) {
     uint rx = BC(it, 1), ry = BC(it, 2), rw = BC(it, 3), rh = BC(it, 4);
     uint asz = BC(it, 5), color = BC(it, 6), off = BC(it, 7);
     if (x < rx || y < ry || x >= rx + rw || y >= ry + rh)
-        return c;
+        return KEEP;
     uint ox = rx + (rw >= asz ? rw - asz : 0u) / 2u;
     uint oy = ry + (rh >= asz ? rh - asz : 0u) / 2u;
     if (x < ox || y < oy || x >= ox + asz || y >= oy + asz)
-        return c;
+        return KEEP;
     uint b = off + (y - oy) * asz + (x - ox);
     uint a = (g_glyphs.v[b >> 2] >> ((b & 3u) * 8u)) & 255u;
     if (a == 0u)
-        return c;
+        return KEEP;
     a += a >> 7;
-    return a >= 256u ? color : blend(color, c, a);
+    return a >= 256u ? SET(color) : BLEND(color, a);
 }
 
