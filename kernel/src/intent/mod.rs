@@ -831,9 +831,7 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             return None;
         }
 
-        if crate::shade::take_deferred_render() {
-            crate::shade::render_frame();
-        }
+        crate::shade::render_requested();
 
         // Shade compositor actions (Mod+key)
         if let Some(action) = crate::shade::input::poll_action() {
@@ -1454,9 +1452,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 } else {
                     crate::microvm::vm_poll_slice(); // reaper only
                 }
-                if crate::shade::take_deferred_render() {
-                    crate::shade::render_frame();
-                }
+                crate::shade::render_requested();
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
                 }
@@ -1497,9 +1493,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_mouse(&evt);
                 }
 
-                if crate::shade::take_deferred_render() {
-                    crate::shade::render_frame();
-                }
+                crate::shade::render_requested();
 
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
@@ -1676,9 +1670,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_mouse(&evt);
                 }
 
-                if crate::shade::take_deferred_render() {
-                    crate::shade::render_frame();
-                }
+                crate::shade::render_requested();
 
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
@@ -1718,9 +1710,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                     crate::shade::handle_mouse(&evt);
                 }
 
-                if crate::shade::take_deferred_render() {
-                    crate::shade::render_frame();
-                }
+                crate::shade::render_requested();
 
                 if let Some(action) = crate::shade::input::poll_action() {
                     crate::shade::handle_action(action);
@@ -1815,9 +1805,7 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             while let Some(evt) = crate::xhci::poll_mouse() {
                 crate::shade::handle_mouse(&evt);
             }
-            if crate::shade::take_deferred_render() {
-                crate::shade::render_frame();
-            }
+            crate::shade::render_requested();
             if let Some(action) = crate::shade::input::poll_action() {
                 crate::shade::handle_action(action);
             }

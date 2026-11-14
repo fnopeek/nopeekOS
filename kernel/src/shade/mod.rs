@@ -966,9 +966,24 @@ pub fn is_active() -> bool {
     ACTIVE.load(Ordering::Acquire)
 }
 
-/// Check and clear deferred render flag (for callers with their own mouse loop).
-pub fn take_deferred_render() -> bool {
-    DEFERRED_RENDER.swap(false, Ordering::Relaxed)
+/// Compose what `request_render` or `request_damaged` asked for, for the
+/// loops with their own mouse handling. False when nothing was asked.
+pub fn render_requested() -> bool {
+    // Deferred scene redraw (drag resize/swap sets this to avoid blocking event loop)
+    if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
+        SURFACE_DIRTY.store(false, Ordering::Relaxed); // a full render covers the tile too
+        DAMAGE_PENDING.store(false, Ordering::Relaxed);
+        match RENDER_ASKED.lock().take() {
+            Some(at) => render_frame_for(at),
+            None => render_frame(),
+        }
+    } else if DAMAGE_PENDING.swap(false, Ordering::Relaxed) {
+        render_damaged();
+    } else {
+        return false;
+    }
+    CURSOR_MOVED.store(false, Ordering::Relaxed);
+    true
 }
 
 /// Request a full shade render on the next Core-0 poll cycle. Safe to
@@ -1505,19 +1520,9 @@ pub fn poll_render() {
     }
     widgets::slide_flush();
 
-    // Deferred scene redraw (drag resize/swap sets this to avoid blocking event loop)
-    if DEFERRED_RENDER.swap(false, Ordering::Relaxed) {
-        SURFACE_DIRTY.store(false, Ordering::Relaxed); // a full render covers the tile too
-        DAMAGE_PENDING.store(false, Ordering::Relaxed);
-        match RENDER_ASKED.lock().take() {
-            Some(at) => render_frame_for(at),
-            None => render_frame(),
-        }
-        CURSOR_MOVED.store(false, Ordering::Relaxed);
-    } else if DAMAGE_PENDING.swap(false, Ordering::Relaxed) {
-        render_damaged();
-        CURSOR_MOVED.store(false, Ordering::Relaxed);
-    } else if !terminal::is_dirty() && SURFACE_DIRTY.load(Ordering::Relaxed) {
+    // A requested render carries the guest frame and the cursor too.
+    let rendered = render_requested();
+    if !rendered && !terminal::is_dirty() && SURFACE_DIRTY.load(Ordering::Relaxed) {
         // Guest produced a new frame. The guest may report 100% damage every
         // frame, so this can be a full-tile blit (~16 MB of MMIO at 4K). Run
         // unthrottled at the guest's 60 Hz it saturates Core 0, which also
@@ -1541,7 +1546,7 @@ pub fn poll_render() {
         } else if CURSOR_MOVED.swap(false, Ordering::Relaxed) {
             render_frame_cursor_only();
         }
-    } else if !terminal::is_dirty() && CURSOR_MOVED.swap(false, Ordering::Relaxed) {
+    } else if !rendered && !terminal::is_dirty() && CURSOR_MOVED.swap(false, Ordering::Relaxed) {
         // Pure mouse move, nothing else changed → save-under cursor move.
         render_frame_cursor_only();
     }

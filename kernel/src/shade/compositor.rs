@@ -1377,16 +1377,17 @@ impl Compositor {
         };
         let x = ax.clamp(0, (sw - w as i32).max(0));
         let Some(win) = self.windows.iter_mut().find(|win| win.id == id) else { return };
-        // Only a popup that appears, moves or changes size uncovers what was
-        // behind it; otherwise its own damage is enough.
-        let moved = !win.visible || (win.x, win.y, win.width, win.height) != (x as u32, y as u32, w, h);
+        // A popup that moves or changes size uncovers what was behind it;
+        // otherwise its own damage is enough.
+        let old = Rect::new(win.x, win.y, win.width, win.height);
+        let moved = win.visible && (old.x, old.y, old.w, old.h) != (x as u32, y as u32, w, h);
         win.x = x as u32;
         win.y = y as u32;
         win.width = w;
         win.height = h;
         win.visible = true;
         win.dirty = true;
-        if moved { self.want_full_redraw(); }
+        if moved { self.extra_damage.push(old); }
     }
 
     /// Take a popup off the screen, telling its app when `done`. Focus is
@@ -1402,10 +1403,15 @@ impl Compositor {
         crate::shade::widgets::remove_event_queue(id.0);
         crate::shade::widgets::set_popup_parent(id.0, None);
         crate::shade::widgets::palette::set_popup_panel(id.0, false);
+        // What it covered is composed again; only an atomic is set, so this
+        // holds under the compositor lock too.
+        if let Some(w) = self.windows.iter().find(|w| w.id == id && w.visible) {
+            self.extra_damage.push(Rect::new(w.x, w.y, w.width, w.height));
+            crate::shade::request_damaged();
+        }
         self.windows.retain(|w| w.id != id);
         self.z_order.retain(|&w| w != id);
         if self.focused == Some(id) { self.focused = None; }
-        self.want_full_redraw();
     }
 
     /// Close a popup. The keyboard goes to another popup if one is left,

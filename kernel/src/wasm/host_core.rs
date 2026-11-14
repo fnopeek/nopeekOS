@@ -700,8 +700,8 @@ pub(crate) fn npk_popup(mem: &mut [u8], ctx: &mut HostState, popup: i32, anchor:
     }).flatten();
     let Some(id) = id else { return -1 };
     let module_name = ctx.module_name.clone();
+    // scene_commit asks for the popup and what it uncovered to be composed.
     let r = crate::shade::widgets::scene_commit(&payload, id.0, &module_name);
-    crate::shade::request_render();
     if r >= 0 { 0 } else { -1 }
 }
 
@@ -718,7 +718,6 @@ pub(crate) fn npk_popup_close(ctx: &mut HostState, popup: i32) -> i32 {
             c.close_popup(id, false);
         }
     });
-    crate::shade::request_render();
     0
 }
 
