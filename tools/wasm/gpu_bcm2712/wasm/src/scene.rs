@@ -704,7 +704,8 @@ impl Composer {
     /// (3840x2160, or the largest smaller one DMA memory gives): the pass with and without loading its tiles, then per item
     /// kind (fill, background colour, chrome with and without its content,
     /// glow) one draw over the whole image on top of an opaque fill, and
-    /// eight translucent fills. Logged, for where a scene's time goes.
+    /// eight translucent fills stacked and side by side. Logged with the
+    /// QPUs' counters, for where a scene's time goes.
     pub fn draw_bench(&mut self, hw: &mut PiHw) {
         let sizes = [(3840u32, 2160u32), (3840, 1080), (1920, 1080), (1280, 720)];
         let Some((dst, width, height)) = sizes.iter().find_map(|&(w, h)| Buf::new((w * h * 4).div_ceil(PAGE)).map(|b| (b, w, h)))
@@ -731,7 +732,18 @@ impl Composer {
         // Item::Glow over a window in the middle: radius, color, band, alpha.
         let mut glow = draw(2, &[24, 0x0040_80ff, 48, 160]);
         glow.push[5..9].copy_from_slice(&[200, 200, width - 400, height - 400]);
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 8] = [
+        // Eight translucent fills side by side: the pixels of one, the
+        // draws of eight. Against eight stacked ones it tells a cost per
+        // pixel a draw shades from one per draw a pixel waits for.
+        let strips: Vec<v3d_draw::Draw> = (0..8u32).map(|i| {
+            let mut d = half;
+            let (x0, x1) = (width * i / 8, width * (i + 1) / 8);
+            d.push[..4].copy_from_slice(&[x0, 0, x1, height]);
+            d.push[5..9].copy_from_slice(&[x0, 0, x1 - x0, height]);
+            d
+        }).collect();
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 9] = [
+            ("fill + 8 translucent fills side by side", false, core::iter::once(opaque).chain(strips).collect()),
             ("fill, tiles loaded", true, alloc::vec![opaque]),
             ("fill", false, alloc::vec![opaque]),
             ("background colour", false, alloc::vec![draw(1, &[])]),
@@ -748,9 +760,12 @@ impl Composer {
         for (name, load, draws) in runs.iter() {
             // The second run counts: the first may pay for power and caches.
             let mut us = 0;
+            let mut perf = None;
             for _ in 0..2 {
                 let t0 = npk_sys::now_us() as u64;
+                self.perf_armed = true;
                 let r = self.submit_draws(hw, image, *load, area, draws).and_then(|f| self.wait_fence(hw, f));
+                perf = self.perf_take(hw);
                 if let Err(e) = r {
                     Line::new().s("v3d: bench ").s(name).s(" failed (").dec(e.unsigned_abs() as u64).s(")").say();
                     self.drain(hw);
@@ -759,8 +774,16 @@ impl Composer {
                 }
                 us = npk_sys::now_us() as u64 - t0;
             }
-            Line::new().s("v3d: bench ").dec(width as u64).s("x").dec(height as u64).s(" ").s(name).s(": ").dec(us).s(" us")
-                .say();
+            let mut l = Line::new();
+            l.s("v3d: bench ").dec(width as u64).s("x").dec(height as u64).s(" ").s(name).s(": ").dec(us).s(" us");
+            // Whether the QPUs compute or wait: their active, stalled and
+            // bubble cycles against the core's.
+            if let Some(v) = perf {
+                for i in [0usize, 2, 3, 4, 15, 29] {
+                    l.s(", ").s(PERF_COUNTERS[i]).s(" ").dec(v[i]);
+                }
+            }
+            l.say();
         }
         self.drain(hw);
         dst.free();
