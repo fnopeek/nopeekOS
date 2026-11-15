@@ -617,6 +617,55 @@ fn cursor_moves_by_async_update() {
     assert_eq!(vc4.kms.crtcs[0].plane_mask & (1 << n), 0, "the cursor is off");
 }
 
+/// Run G's step "overlays" after the fbdev commit: Linux commits the
+/// primary as it is and two premultiplied ARGB8888 overlays (the first two,
+/// zpos 1 and 2) in one atomic commit; `layers_commit` does the same,
+/// access for access, the old states' release included.
+#[test]
+fn overlays_commit_is_linux() {
+    use crate::vc4_kms::PlaneLayer;
+    use drm_core::drm_fourcc::drm_format_info;
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    let client = vc4.fbdev_probe(&mut hw);
+    let mut hw = Strict::new(segment(&evs, "drm_fb_helper_set_par", 0));
+    assert_eq!(vc4.fbdev_commit(&mut hw, &client, &run_g_fb()), 0);
+    hw.done();
+
+    // The two buffers as the step logs them: size, pitch, DMA address.
+    let fb = |w: u32, h: u32, dma: u64| drm_core::drm_plane::drm_framebuffer {
+        format: drm_format_info(drm_core::regs::DRM_FORMAT_ARGB8888).expect("ARGB8888"),
+        width: w,
+        height: h,
+        pitches: [w * 4, 0, 0, 0],
+        offsets: [0; 4],
+        modifier: drm_core::regs::DRM_FORMAT_MOD_LINEAR as u64,
+        dma_addr: [dma, 0, 0, 0],
+    };
+    let whole = |fb: drm_core::drm_plane::drm_framebuffer, x: i32, y: i32| PlaneLayer {
+        fb, src_x: 0, src_y: 0, src_w: fb.width, src_h: fb.height, x, y, w: fb.width, h: fb.height,
+    };
+    let primary = vc4.kms.planes[0].base.fb.expect("the primary shows the fbdev buffer");
+    let layers = [
+        whole(primary, 0, 0),
+        whole(fb(640, 480, 0x40fd_a000), 64, 48),
+        whole(fb(1280, 720, 0x4110_6000), 1000, 600),
+    ];
+    let commits = evs.iter().filter(|e| **e == Ev::Enter("drm_atomic_commit".into())).count();
+    let destroys = evs.iter().filter(|e| **e == Ev::Enter("vc4_crtc_destroy_state".into())).count();
+    let mut expect = segment(&evs, "drm_atomic_commit", commits - 1);
+    expect.extend(segment(&evs, "vc4_crtc_destroy_state", destroys - 1));
+    let mut hw = Strict::new(expect);
+    assert_eq!(vc4.layers_commit(&mut hw, 0, &layers), 0);
+    hw.done();
+
+    let n = vc4.crtc.len();
+    let on: Vec<usize> = (0..vc4.kms.planes.len()).filter(|&p| vc4.kms.crtcs[0].plane_mask & (1 << p) != 0).collect();
+    assert_eq!(on, vec![0, 2 * n, 2 * n + 1]);
+}
+
 /// The CSD words the module computes for each program are the ones v3dv
 /// wrote for the same dispatch (`shaders_gen::recorded`).
 #[test]

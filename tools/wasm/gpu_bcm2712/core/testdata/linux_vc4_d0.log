@@ -28431,10 +28431,16 @@ PROBE-END axi:gpu ret 0
 } vc4_core_clock_atomic_check
 } vc4_atomic_check
 { drm_atomic_helper_commit
+{ drm_atomic_helper_setup_commit
 { vc4_atomic_commit_setup
 { vc4_hvs_get_new_global_state
 } vc4_hvs_get_new_global_state
 } vc4_atomic_commit_setup
+} drm_atomic_helper_setup_commit
+{ drm_atomic_helper_prepare_planes
+} drm_atomic_helper_prepare_planes
+{ drm_atomic_helper_swap_state
+} drm_atomic_helper_swap_state
 { vc4_atomic_commit_tail
 { vc4_hvs_get_old_global_state
 } vc4_hvs_get_old_global_state
@@ -28476,27 +28482,35 @@ W32 hvs+0x0010c <- 0xfff00000  ; SCALER6D_DISP0_BGND1
 R32 hvs+0x00020 = 0x802000f0  ; SCALER6D_CONTROL
 } require_hvs_enabled
 { drm_crtc_vblank_on
+{ drm_crtc_vblank_helper_get_vblank_timestamp
 { vc4_crtc_get_scanout_position
 R32 hvs+0x00118 = 0x00800000  ; SCALER6D_DISP0_STATUS  [frame count and line, guess 77]
 { vc4_crtc_get_cob_allocation
 R32 hvs+0x00114 = 0x87004b10  ; SCALER6D_DISP0_COB
 } vc4_crtc_get_cob_allocation
 } vc4_crtc_get_scanout_position
+} drm_crtc_vblank_helper_get_vblank_timestamp
 } drm_crtc_vblank_on
 { vc4_hvs_atomic_enable
 { vc4_hvs_install_dlist
 W32 hvs+0x00110 <- 0x00000036  ; SCALER6D_DISP0_LPTRS
 } vc4_hvs_install_dlist
 { vc4_hvs_update_dlist
+{ drm_crtc_vblank_get
+{ drm_vblank_get
 { vc4_enable_vblank
 W32 pv0+0x024 <- 0x00000080  ; PV_INTEN
 } vc4_enable_vblank
+{ drm_crtc_vblank_helper_get_vblank_timestamp
 { vc4_crtc_get_scanout_position
 R32 hvs+0x00118 = 0x00800000  ; SCALER6D_DISP0_STATUS  [frame count and line, guess 77]
 { vc4_crtc_get_cob_allocation
 R32 hvs+0x00114 = 0x87004b10  ; SCALER6D_DISP0_COB
 } vc4_crtc_get_cob_allocation
 } vc4_crtc_get_scanout_position
+} drm_crtc_vblank_helper_get_vblank_timestamp
+} drm_vblank_get
+} drm_crtc_vblank_get
 } vc4_hvs_update_dlist
 { vc6_hvs_init_channel
 W32 hvs+0x00100 <- 0x40000000  ; SCALER6D_DISP0_CTRL0
@@ -29130,17 +29144,21 @@ W32 pv0+0x028 <- 0x00000080  ; PV_INTSTAT
 { vc4_get_crtc_encoder
 } vc4_get_crtc_encoder
 { drm_crtc_handle_vblank
+{ drm_crtc_vblank_helper_get_vblank_timestamp
 { vc4_crtc_get_scanout_position
 R32 hvs+0x00118 = 0x00814000  ; SCALER6D_DISP0_STATUS  [frame count and line, guess 77]
 { vc4_crtc_get_cob_allocation
 R32 hvs+0x00114 = 0x87004b10  ; SCALER6D_DISP0_COB
 } vc4_crtc_get_cob_allocation
 } vc4_crtc_get_scanout_position
+} drm_crtc_vblank_helper_get_vblank_timestamp
 } drm_crtc_handle_vblank
 { vc4_crtc_handle_page_flip
 R32 hvs+0x0011c = 0x00000036  ; SCALER6D_DISP0_DL
 { drm_crtc_send_vblank_event
 } drm_crtc_send_vblank_event
+{ drm_crtc_vblank_put
+} drm_crtc_vblank_put
 } vc4_crtc_handle_page_flip
 } vc4_crtc_handle_vblank
 } vc4_crtc_irq_handler
@@ -29337,4 +29355,493 @@ GIC eoi intid 133 (SPI 101)
 # kms: modeset crtc 2 x 0 y 0 connectors 1 HDMI-A-1
 # kms: chosen "3840x2160": 594000 3840 4016 4104 4400 0 2160 2168 2178 2250 0 flags 0x5 type 0x48 aspect 0
 # kms: modeset crtc 3 x 0 y 0 connectors 0
+# step overlays: the primary as it is and two ARGB8888 overlays over it, one atomic commit
+{ vc5_dumb_create
+{ vc4_dumb_fixup_args
+} vc4_dumb_fixup_args
+# shmem file for a GEM object: drm mm object, 1228800 bytes (no backing)
+# dma alloc axi:gpu size 0x12c000 at 0x40fda000
+} vc5_dumb_create
+{ vc4_format_mod_supported
+} vc4_format_mod_supported
+# WARN (ud2) at 0x46ddf7, continuing as the kernel does
+# overlays: buffer 0 640x480 pitch 2560 dma 0x40fda000
+{ vc5_dumb_create
+{ vc4_dumb_fixup_args
+} vc4_dumb_fixup_args
+# shmem file for a GEM object: drm mm object, 3686400 bytes (no backing)
+# dma alloc axi:gpu size 0x384000 at 0x41106000
+} vc5_dumb_create
+{ vc4_format_mod_supported
+} vc4_format_mod_supported
+# WARN (ud2) at 0x46ddf7, continuing as the kernel does
+# overlays: buffer 1 1280x720 pitch 5120 dma 0x41106000
+{ vc4_plane_duplicate_state
+} vc4_plane_duplicate_state
+{ vc4_crtc_duplicate_state
+} vc4_crtc_duplicate_state
+# overlays: plane 0 (plane-4) zpos 1 blend 0 at 64,48
+{ vc4_plane_duplicate_state
+} vc4_plane_duplicate_state
+# overlays: plane 1 (plane-5) zpos 2 blend 0 at 1000,600
+{ drm_atomic_commit
+{ vc4_format_mod_supported
+} vc4_format_mod_supported
+{ vc4_format_mod_supported
+} vc4_format_mod_supported
+{ vc4_atomic_check
+{ vc4_pv_muxing_atomic_check
+{ vc4_hvs_get_global_state
+{ vc4_hvs_channels_duplicate_state
+} vc4_hvs_channels_duplicate_state
+} vc4_hvs_get_global_state
+{ cmp_vc4_crtc_hvs_output
+} cmp_vc4_crtc_hvs_output
+{ cmp_vc4_crtc_hvs_output
+} cmp_vc4_crtc_hvs_output
+{ cmp_vc4_crtc_hvs_output
+} cmp_vc4_crtc_hvs_output
+{ cmp_vc4_crtc_hvs_output
+} cmp_vc4_crtc_hvs_output
+{ cmp_vc4_crtc_hvs_output
+} cmp_vc4_crtc_hvs_output
+{ cmp_vc4_crtc_hvs_output
+} cmp_vc4_crtc_hvs_output
+} vc4_pv_muxing_atomic_check
+{ vc4_ctm_atomic_check
+} vc4_ctm_atomic_check
+{ vc4_plane_duplicate_state
+} vc4_plane_duplicate_state
+{ vc4_plane_atomic_check
+{ plane_enabled
+} plane_enabled
+{ vc6_plane_mode_set
+{ vc4_get_hvs_format
+} vc4_get_hvs_format
+{ vc4_plane_setup_clipping_and_scaling
+{ vc4_plane_margins_adj
+{ vc4_crtc_get_margins
+} vc4_crtc_get_margins
+} vc4_plane_margins_adj
+{ vc4_get_scaling_mode
+} vc4_get_scaling_mode
+{ vc4_get_scaling_mode
+} vc4_get_scaling_mode
+} vc4_plane_setup_clipping_and_scaling
+{ vc4_get_scl_field
+} vc4_get_scl_field
+{ vc4_hvs6_get_alpha_mask_mode
+} vc4_hvs6_get_alpha_mask_mode
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc6_plane_get_csc_mode
+} vc6_plane_get_csc_mode
+{ vc4_hvs5_get_alpha_blend_mode
+} vc4_hvs5_get_alpha_blend_mode
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc6_get_plane_idx
+} vc6_get_plane_idx
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_plane_calc_load
+} vc4_plane_calc_load
+} vc6_plane_mode_set
+{ vc4_plane_allocate_lbm
+{ vc4_lbm_size
+} vc4_lbm_size
+} vc4_plane_allocate_lbm
+{ vc6_plane_allocate_upm
+{ vc6_upm_size
+} vc6_upm_size
+} vc6_plane_allocate_upm
+} vc4_plane_atomic_check
+{ vc4_plane_atomic_check
+{ plane_enabled
+} plane_enabled
+{ vc6_plane_mode_set
+{ vc4_get_hvs_format
+} vc4_get_hvs_format
+{ vc4_plane_setup_clipping_and_scaling
+{ vc4_plane_margins_adj
+{ vc4_crtc_get_margins
+} vc4_crtc_get_margins
+} vc4_plane_margins_adj
+{ vc4_get_scaling_mode
+} vc4_get_scaling_mode
+{ vc4_get_scaling_mode
+} vc4_get_scaling_mode
+} vc4_plane_setup_clipping_and_scaling
+{ vc4_get_scl_field
+} vc4_get_scl_field
+{ vc4_hvs6_get_alpha_mask_mode
+} vc4_hvs6_get_alpha_mask_mode
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc6_plane_get_csc_mode
+} vc6_plane_get_csc_mode
+{ vc4_hvs5_get_alpha_blend_mode
+} vc4_hvs5_get_alpha_blend_mode
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc6_get_plane_idx
+} vc6_get_plane_idx
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_plane_calc_load
+} vc4_plane_calc_load
+} vc6_plane_mode_set
+{ vc4_plane_allocate_lbm
+{ vc4_lbm_size
+} vc4_lbm_size
+} vc4_plane_allocate_lbm
+{ vc6_plane_allocate_upm
+{ vc6_upm_size
+} vc6_upm_size
+} vc6_plane_allocate_upm
+} vc4_plane_atomic_check
+{ vc4_plane_atomic_check
+{ plane_enabled
+} plane_enabled
+{ vc6_plane_mode_set
+{ vc4_get_hvs_format
+} vc4_get_hvs_format
+{ vc4_plane_setup_clipping_and_scaling
+{ vc4_plane_margins_adj
+{ vc4_crtc_get_margins
+} vc4_crtc_get_margins
+} vc4_plane_margins_adj
+{ vc4_get_scaling_mode
+} vc4_get_scaling_mode
+{ vc4_get_scaling_mode
+} vc4_get_scaling_mode
+} vc4_plane_setup_clipping_and_scaling
+{ vc4_get_scl_field
+} vc4_get_scl_field
+{ vc4_hvs6_get_alpha_mask_mode
+} vc4_hvs6_get_alpha_mask_mode
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc6_plane_get_csc_mode
+} vc6_plane_get_csc_mode
+{ vc4_hvs5_get_alpha_blend_mode
+} vc4_hvs5_get_alpha_blend_mode
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc6_get_plane_idx
+} vc6_get_plane_idx
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_dlist_write
+{ vc4_dlist_counter_increment
+} vc4_dlist_counter_increment
+} vc4_dlist_write
+{ vc4_plane_calc_load
+} vc4_plane_calc_load
+} vc6_plane_mode_set
+{ vc4_plane_allocate_lbm
+{ vc4_lbm_size
+} vc4_lbm_size
+} vc4_plane_allocate_lbm
+{ vc6_plane_allocate_upm
+{ vc6_upm_size
+} vc6_upm_size
+} vc6_plane_allocate_upm
+} vc4_plane_atomic_check
+{ vc4_crtc_atomic_check
+{ vc4_hvs_atomic_check
+{ vc4_plane_dlist_size
+} vc4_plane_dlist_size
+{ vc4_plane_dlist_size
+} vc4_plane_dlist_size
+{ vc4_plane_dlist_size
+} vc4_plane_dlist_size
+{ vc4_hvs_alloc_dlist_entry
+} vc4_hvs_alloc_dlist_entry
+} vc4_hvs_atomic_check
+{ vc4_get_crtc_encoder
+} vc4_get_crtc_encoder
+} vc4_crtc_atomic_check
+{ vc4_load_tracker_atomic_check
+{ vc4_load_tracker_duplicate_state
+} vc4_load_tracker_duplicate_state
+} vc4_load_tracker_atomic_check
+{ vc4_core_clock_atomic_check
+{ vc4_hvs_get_global_state
+} vc4_hvs_get_global_state
+} vc4_core_clock_atomic_check
+} vc4_atomic_check
+{ drm_atomic_helper_commit
+{ drm_atomic_helper_setup_commit
+{ vc4_atomic_commit_setup
+{ vc4_hvs_get_new_global_state
+} vc4_hvs_get_new_global_state
+} vc4_atomic_commit_setup
+} drm_atomic_helper_setup_commit
+{ drm_atomic_helper_prepare_planes
+} drm_atomic_helper_prepare_planes
+{ drm_crtc_vblank_helper_get_vblank_timestamp
+{ vc4_crtc_get_scanout_position
+R32 hvs+0x00118 = 0x00814000  ; SCALER6D_DISP0_STATUS  [frame count and line, guess 77]
+{ vc4_crtc_get_cob_allocation
+R32 hvs+0x00114 = 0x87004b10  ; SCALER6D_DISP0_COB
+} vc4_crtc_get_cob_allocation
+} vc4_crtc_get_scanout_position
+} drm_crtc_vblank_helper_get_vblank_timestamp
+{ drm_atomic_helper_swap_state
+} drm_atomic_helper_swap_state
+{ drm_crtc_vblank_helper_get_vblank_timestamp
+{ vc4_crtc_get_scanout_position
+R32 hvs+0x00118 = 0x00814000  ; SCALER6D_DISP0_STATUS  [frame count and line, guess 77]
+{ vc4_crtc_get_cob_allocation
+R32 hvs+0x00114 = 0x87004b10  ; SCALER6D_DISP0_COB
+} vc4_crtc_get_cob_allocation
+} vc4_crtc_get_scanout_position
+} drm_crtc_vblank_helper_get_vblank_timestamp
+{ vc4_atomic_commit_tail
+{ vc4_hvs_get_old_global_state
+} vc4_hvs_get_old_global_state
+{ vc4_hvs_get_new_global_state
+} vc4_hvs_get_new_global_state
+{ drm_atomic_helper_commit_modeset_disables
+} drm_atomic_helper_commit_modeset_disables
+{ vc6_hvs_pv_muxing_commit
+} vc6_hvs_pv_muxing_commit
+{ drm_atomic_helper_commit_planes
+{ vc4_hvs_atomic_begin
+} vc4_hvs_atomic_begin
+{ vc4_plane_atomic_update
+} vc4_plane_atomic_update
+{ vc4_plane_atomic_update
+} vc4_plane_atomic_update
+{ vc4_plane_atomic_update
+} vc4_plane_atomic_update
+{ vc4_hvs_atomic_flush
+{ vc4_plane_write_dlist
+W32 hvs+0x04100 <- 0x490cc004  ; dlist[64]
+W32 hvs+0x04104 <- 0x00000000  ; dlist[65]
+W32 hvs+0x04108 <- 0x0000fff0  ; dlist[66]
+W32 hvs+0x0410c <- 0x086f0eff  ; dlist[67]
+W32 hvs+0x04110 <- 0xc0c0c0c0  ; dlist[68]
+W32 hvs+0x04114 <- 0x00000000  ; dlist[69]
+W32 hvs+0x04118 <- 0x40008000  ; dlist[70]
+W32 hvs+0x0411c <- 0x00001e00  ; dlist[71]
+W32 hvs+0x04120 <- 0x80000000  ; dlist[72]
+} vc4_plane_write_dlist
+{ vc4_plane_write_dlist
+W32 hvs+0x04124 <- 0x4900c007  ; dlist[73]
+W32 hvs+0x04128 <- 0x00300040  ; dlist[74]
+W32 hvs+0x0412c <- 0x2000fff0  ; dlist[75]
+W32 hvs+0x04130 <- 0x01df027f  ; dlist[76]
+W32 hvs+0x04134 <- 0xc0c0c0c0  ; dlist[77]
+W32 hvs+0x04138 <- 0x003d0400  ; dlist[78]
+W32 hvs+0x0413c <- 0x40fda000  ; dlist[79]
+W32 hvs+0x04140 <- 0x00000a00  ; dlist[80]
+W32 hvs+0x04144 <- 0x80000000  ; dlist[81]
+} vc4_plane_write_dlist
+{ vc4_plane_write_dlist
+W32 hvs+0x04148 <- 0x4900c007  ; dlist[82]
+W32 hvs+0x0414c <- 0x025803e8  ; dlist[83]
+W32 hvs+0x04150 <- 0x2000fff0  ; dlist[84]
+W32 hvs+0x04154 <- 0x02cf04ff  ; dlist[85]
+W32 hvs+0x04158 <- 0xc0c0c0c0  ; dlist[86]
+W32 hvs+0x0415c <- 0x00520800  ; dlist[87]
+W32 hvs+0x04160 <- 0x41106000  ; dlist[88]
+W32 hvs+0x04164 <- 0x00001400  ; dlist[89]
+W32 hvs+0x04168 <- 0x80000000  ; dlist[90]
+} vc4_plane_write_dlist
+W32 hvs+0x0416c <- 0x80000000  ; dlist[91]
+W32 hvs+0x00108 <- 0x00000000  ; SCALER6D_DISP0_BGND0
+W32 hvs+0x0010c <- 0xfff00000  ; SCALER6D_DISP0_BGND1
+{ vc4_hvs_install_dlist
+W32 hvs+0x00110 <- 0x00000040  ; SCALER6D_DISP0_LPTRS
+} vc4_hvs_install_dlist
+{ vc4_hvs_update_dlist
+{ drm_crtc_vblank_get
+{ drm_vblank_get
+} drm_vblank_get
+} drm_crtc_vblank_get
+} vc4_hvs_update_dlist
+} vc4_hvs_atomic_flush
+} drm_atomic_helper_commit_planes
+{ drm_atomic_helper_commit_modeset_enables
+} drm_atomic_helper_commit_modeset_enables
+{ drm_atomic_helper_wait_for_flip_done
+DELAY wait_for_completion 16666 us (until the next display event)
+# model: hvs channel 0 frame 2: dlist 0x40 active, EOF
+# model: disp_intr bit 2 set: HVS channel EOF
+# model: pv0 vertical events, INTSTAT 0x1f0 INTEN 0x80
+# gic: raise intid 133 (SPI 101): pending, taken at the next service point
+GIC ack intid 133 (SPI 101)
+# hardirq enter
+{ generic_handle_domain_irq
+{ handle_fasteoi_irq
+{ vc4_crtc_irq_handler
+R32 pv0+0x028 = 0x000001f0  ; PV_INTSTAT  [INTSTAT, guess 80]
+W32 pv0+0x028 <- 0x00000080  ; PV_INTSTAT
+{ vc4_crtc_handle_vblank
+{ vc4_get_crtc_encoder
+} vc4_get_crtc_encoder
+{ drm_crtc_handle_vblank
+{ drm_crtc_vblank_helper_get_vblank_timestamp
+{ vc4_crtc_get_scanout_position
+R32 hvs+0x00118 = 0x00824000  ; SCALER6D_DISP0_STATUS  [frame count and line, guess 77]
+{ vc4_crtc_get_cob_allocation
+R32 hvs+0x00114 = 0x87004b10  ; SCALER6D_DISP0_COB
+} vc4_crtc_get_cob_allocation
+} vc4_crtc_get_scanout_position
+} drm_crtc_vblank_helper_get_vblank_timestamp
+} drm_crtc_handle_vblank
+{ vc4_crtc_handle_page_flip
+R32 hvs+0x0011c = 0x00000040  ; SCALER6D_DISP0_DL
+{ drm_crtc_send_vblank_event
+} drm_crtc_send_vblank_event
+{ drm_crtc_vblank_put
+} drm_crtc_vblank_put
+} vc4_crtc_handle_page_flip
+} vc4_crtc_handle_vblank
+} vc4_crtc_irq_handler
+GIC eoi intid 133 (SPI 101)
+} handle_fasteoi_irq
+} generic_handle_domain_irq
+# hardirq exit (generic_handle_domain_irq 0)
+} drm_atomic_helper_wait_for_flip_done
+} vc4_atomic_commit_tail
+} drm_atomic_helper_commit
+} drm_atomic_commit
+# overlays: commit 0
+{ vc4_crtc_destroy_state
+{ vc4_hvs_mark_dlist_entry_stale
+{ vc4_hvs_get_fifo_frame_count
+R32 hvs+0x00118 = 0x00824000  ; SCALER6D_DISP0_STATUS  [frame count and line, guess 77]
+} vc4_hvs_get_fifo_frame_count
+W32 hvs+0x00004 <- 0x00000100  ; SCALER6D_CXM_SIZE  [read-only, write ignored, guess 78]
+{ vc4_hvs_irq_enable_eof
+W32 disp_intr+0x14 <- 0x00000004  ; CPU_MASK_CLEAR
+# model: disp_intr output 0 -> 1 (status 0x204 mask 0xfffffff8)
+# gic: raise intid 129 (SPI 97): pending, taken at the next service point
+} vc4_hvs_irq_enable_eof
+} vc4_hvs_mark_dlist_entry_stale
+} vc4_crtc_destroy_state
+{ vc4_plane_destroy_state
+} vc4_plane_destroy_state
+{ vc4_plane_destroy_state
+} vc4_plane_destroy_state
+{ vc4_plane_destroy_state
+} vc4_plane_destroy_state
+{ vc4_hvs_channels_destroy_state
+} vc4_hvs_channels_destroy_state
+{ vc4_load_tracker_destroy_state
+} vc4_load_tracker_destroy_state
+GIC ack intid 129 (SPI 97)
+# hardirq enter
+{ generic_handle_domain_irq
+{ brcmstb_l2_intc_irq_handle
+R32 disp_intr+0x00 = 0x00000204  ; CPU_STATUS
+R32 disp_intr+0x0c = 0xfffffff8  ; CPU_MASK_STATUS
+{ generic_handle_domain_irq
+{ handle_level_irq
+W32 disp_intr+0x10 <- 0x00000004  ; CPU_MASK_SET
+# model: disp_intr output 1 -> 0 (status 0x204 mask 0xfffffffc)
+W32 disp_intr+0x08 <- 0x00000004  ; CPU_CLEAR
+{ vc6_hvs_eof_irq_handler
+R32 hvs+0x00104 = 0x00000100  ; SCALER6D_DISP0_CTRL1
+W32 hvs+0x00104 <- 0x00000000  ; SCALER6D_DISP0_CTRL1
+{ vc4_hvs_schedule_dlist_sweep
+# work queued: 0x50d477 (not run)
+} vc4_hvs_schedule_dlist_sweep
+} vc6_hvs_eof_irq_handler
+W32 disp_intr+0x14 <- 0x00000004  ; CPU_MASK_CLEAR
+} handle_level_irq
+} generic_handle_domain_irq
+GIC eoi intid 129 (SPI 97)
+} brcmstb_l2_intc_irq_handle
+} generic_handle_domain_irq
+# hardirq exit (generic_handle_domain_irq 0)
 == run g end

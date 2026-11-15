@@ -109,6 +109,25 @@ fn drm_get_last_vbltimestamp(vblank: &drm_vblank_crtc, funcs: &mut dyn drm_vblan
     }
 }
 
+/// `drm_crtc_next_vblank_start`: when the next vblank starts, from the
+/// last vblank's time; `None` without the timing or a precise timestamp.
+/// Generic, so a driver that never calls it compiles without it.
+pub fn drm_crtc_next_vblank_start<F: drm_vblank_funcs>(vblank: &drm_vblank_crtc, funcs: &mut F) -> Option<i64> {
+    let mode = &vblank.hwmode;
+
+    if vblank.framedur_ns == 0 || vblank.linedur_ns == 0 {
+        return None;
+    }
+
+    let (precise, t) = drm_get_last_vbltimestamp(vblank, funcs, false);
+    if !precise {
+        return None;
+    }
+
+    let vblank_start = vblank.framedur_ns as u64 * mode.crtc_vblank_start as u64 / mode.crtc_vtotal as u64;
+    Some(t + vblank_start as i64)
+}
+
 /// `store_vblank`.
 fn store_vblank(vblank: &mut drm_vblank_crtc, vblank_count_inc: u32, t_vblank: i64, last: u32) {
     vblank.last = last;

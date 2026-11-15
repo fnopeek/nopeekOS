@@ -1,11 +1,11 @@
 //! `drivers/gpu/drm/vc4/vc4_kms.c` (Linux rpi-6.18) with the parts of
 //! the DRM atomic helpers (`drm_atomic_helper.c`) a vc4 commit runs
 //! through, in their order, for vc4's two pixel valves with a primary and
-//! a cursor plane each (`vc4_plane_create_additional_planes`; the
-//! overlays come with the planes of windows) and the two HDMI connectors:
+//! a cursor plane each, the overlays any of them can take
+//! (`vc4_plane_create_additional_planes`) and the two HDMI connectors:
 //! the state duplicated from the current one, `vc4_atomic_check`, then
 //! `vc4_atomic_commit_tail`. Planes 0..n are the primaries of CRTC 0..n,
-//! planes n..2n their cursors.
+//! planes n..2n their cursors, 2n..2n+16 the overlays.
 //!
 //! A commit turns outputs off (`vc4_crtc_atomic_disable`), on, or both
 //! for a new mode, and updates their planes. The CTM and the load
@@ -35,6 +35,21 @@ use drm_core::regs::{DRM_MODE_ROTATE_0, MODE_OK};
 
 /// `VC4_NUM_OVERLAY_PLANES`: the overlays below each CRTC's cursor.
 const VC4_NUM_OVERLAY_PLANES: u32 = 16;
+
+/// One plane of `layers_commit`: `src_*` in whole pixels of `fb`, the
+/// destination on the CRTC.
+#[derive(Clone, Copy, Debug)]
+pub struct PlaneLayer {
+    pub fb: drm_framebuffer,
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
 
 /// How long a commit waits for its flip (`drm_atomic_helper_wait_for_flip_done`).
 const FLIP_DONE_TIMEOUT_MS: u32 = 10_000;
@@ -78,12 +93,14 @@ impl Vc4KmsState {
             .collect();
         Vc4KmsState {
             crtcs: (0..num_crtc).map(|_| Vc4CrtcState::reset()).collect(),
-            planes: (0..2 * num_crtc)
+            planes: (0..2 * num_crtc + VC4_NUM_OVERLAY_PLANES as usize)
                 .map(|i| {
                     let mut p = Vc4PlaneState::default();
-                    // drm_plane_create_zpos_property: the primary at 0, the
-                    // cursor above the overlays.
-                    if i >= num_crtc {
+                    // drm_plane_create_zpos_property: the primary at 0,
+                    // overlay k at k + 1, the cursor above the overlays.
+                    if i >= 2 * num_crtc {
+                        p.base.zpos = (i - 2 * num_crtc) as u32 + 1;
+                    } else if i >= num_crtc {
                         p.base.zpos = VC4_NUM_OVERLAY_PLANES + 1;
                     }
                     p
@@ -241,6 +258,53 @@ impl Vc4 {
         vc4_plane_atomic_async_update(&mut self.kms.planes[cursor], &new, hw, &self.hvs);
         self.atomic_state_put(hw, s);
         0
+    }
+
+    /// What a compositor with KMS planes commits on CRTC `crtc`
+    /// (`drm_atomic_helper_update_plane` for each plane, in one atomic
+    /// commit): `layers[0]` on the primary plane, the others on overlays
+    /// in their order, bottom to top; the CRTC's other overlays off, its
+    /// cursor as it is. Blocks until the flip is done, as `page_flip`.
+    /// Overlays another CRTC shows are not taken.
+    pub fn layers_commit(&mut self, hw: &mut impl Hw, crtc: usize, layers: &[PlaneLayer]) -> i32 {
+        let n = self.crtc.len();
+        if crtc >= n || !self.kms.crtcs[crtc].active || layers.is_empty() {
+            return -EINVAL;
+        }
+        let first = 2 * n;
+        let free: Vec<usize> = (first..self.kms.planes.len())
+            .filter(|&p| self.kms.planes[p].base.crtc.is_none_or(|c| c == crtc as u32))
+            .collect();
+        if layers.len() - 1 > free.len() {
+            return -EINVAL;
+        }
+        let mut s = self.atomic_state_duplicate();
+        for &p in &free {
+            // __drm_atomic_helper_disable_plane
+            let b = &mut s.planes[p].base;
+            b.crtc = None;
+            b.fb = None;
+            (b.crtc_x, b.crtc_y, b.crtc_w, b.crtc_h) = (0, 0, 0, 0);
+            (b.src_x, b.src_y, b.src_w, b.src_h) = (0, 0, 0, 0);
+        }
+        for (k, l) in layers.iter().enumerate() {
+            let p = if k == 0 { crtc } else { free[k - 1] };
+            let b = &mut s.planes[p].base;
+            b.crtc = Some(crtc as u32);
+            b.fb = Some(l.fb);
+            (b.crtc_x, b.crtc_y, b.crtc_w, b.crtc_h) = (l.x, l.y, l.w, l.h);
+            (b.src_x, b.src_y) = (l.src_x << 16, l.src_y << 16);
+            (b.src_w, b.src_h) = (l.src_w << 16, l.src_h << 16);
+            if k > 0 {
+                b.zpos = k as u32;
+            }
+        }
+        let ret = self.atomic_check(&mut s);
+        if ret != 0 {
+            self.atomic_state_put(hw, s);
+            return ret;
+        }
+        self.atomic_commit(hw, s)
     }
 
     fn client_commit(&mut self, hw: &mut impl Hw, client: &drm_client_dev, fb: &drm_framebuffer, whole_fb: bool)
@@ -658,6 +722,11 @@ impl Vc4 {
 
         let armed: Vec<u64> = (0..self.crtc.len()).map(|i| hw.irq_arm(Spi::Pv(self.crtc[i].pv))).collect();
         let flips: Vec<bool> = s.crtcs.iter().map(|c| c.event).collect();
+        let in_state = self.crtcs_in_state(&s);
+
+        // drm_atomic_helper_wait_for_fences, interruptible, on the state
+        // still current.
+        self.set_fence_deadline(hw, &in_state, &s.crtcs);
 
         // drm_atomic_helper_swap_state
         let old_crtcs = core::mem::replace(&mut self.kms.crtcs, s.crtcs);
@@ -666,6 +735,10 @@ impl Vc4 {
         self.kms.hvs = s.hvs;
         self.kms.hvs_load = s.hvs_load;
         self.kms.membus_load = s.membus_load;
+
+        // commit_tail: drm_atomic_helper_wait_for_fences on the new state.
+        let crtcs = self.kms.crtcs.clone();
+        self.set_fence_deadline(hw, &in_state, &crtcs);
 
         // drm_atomic_helper_commit_modeset_disables: disable_outputs (the
         // HDMI encoders have no disable of their own; vc4 stops them from
@@ -762,6 +835,54 @@ impl Vc4 {
         }
 
         ret
+    }
+
+    /// `set_fence_deadline`: the start of the next vblank of each CRTC in
+    /// the commit that keeps its mode, read from the scanout position
+    /// through the CRTC's current state. No plane here carries a fence to
+    /// hand the deadline to.
+    fn set_fence_deadline(&mut self, hw: &mut impl Hw, in_state: &[bool], new: &[Vc4CrtcState]) {
+        for i in 0..self.crtc.len() {
+            if !in_state[i] || new[i].needs_modeset() || !new[i].active {
+                continue;
+            }
+            let channel = self.kms.crtcs[i].assigned_channel.unwrap_or(u32::MAX);
+            let mut f = CrtcVblank { crtc: &self.crtc[i], hvs: &self.hvs, hw, channel };
+            let _ = drm_core::drm_vblank::drm_crtc_next_vblank_start(&self.kms.vblank[i], &mut f);
+        }
+    }
+
+    /// Which CRTCs an atomic state holds (`drm_atomic_get_crtc_state`):
+    /// one whose own state changes, and the old and new CRTC of every
+    /// plane and connector that changes.
+    fn crtcs_in_state(&self, s: &Vc4AtomicState) -> Vec<bool> {
+        let mut on: Vec<bool> = (0..self.crtc.len())
+            .map(|i| {
+                let (o, n) = (&self.kms.crtcs[i], &s.crtcs[i]);
+                o.enable != n.enable || o.active != n.active || n.needs_modeset()
+            })
+            .collect();
+        let mut mark = |c: Option<u32>| {
+            if let Some(c) = c {
+                on[c as usize] = true;
+            }
+        };
+        for (o, n) in self.kms.planes.iter().zip(&s.planes) {
+            let (o, n) = (&o.base, &n.base);
+            if o.crtc != n.crtc || o.fb != n.fb || (o.crtc_x, o.crtc_y, o.crtc_w, o.crtc_h) != (n.crtc_x, n.crtc_y, n.crtc_w, n.crtc_h)
+                || (o.src_x, o.src_y, o.src_w, o.src_h) != (n.src_x, n.src_y, n.src_w, n.src_h) || o.zpos != n.zpos
+            {
+                mark(o.crtc);
+                mark(n.crtc);
+            }
+        }
+        for (o, n) in self.kms.connectors.iter().zip(&s.connectors) {
+            if o.crtc != n.crtc {
+                mark(o.crtc);
+                mark(n.crtc);
+            }
+        }
+        on
     }
 
     /// `vc4_hvs_atomic_flush`: the CRTC's planes in zpos order into its
