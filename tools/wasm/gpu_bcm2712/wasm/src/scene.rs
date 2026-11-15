@@ -911,34 +911,38 @@ impl Composer {
         dst.free();
     }
 
-    /// The last large pass again, into a buffer of the module's, once with
-    /// all its draws and once per program with that program's alone, each
-    /// timed and counted as `draw_bench` does: which items a slow scene
-    /// spends its time on. Its sources are those the scene read, which
-    /// stay until the next scene.
+    /// The last large pass again, once per program with that program's
+    /// draws alone and last with all of them, each timed and counted as
+    /// `draw_bench` does: which items a slow scene spends its time on. Into
+    /// the scene's own target, before the scene is reported done: its
+    /// first item, the background, writes every pixel of the pass, so the
+    /// last run leaves the target as the scene did. Its sources are those
+    /// the scene read, which stay until the next scene.
     pub fn profile(&mut self, hw: &mut PiHw) {
-        let Some((image, area, draws)) = self.last_pass.take() else { return };
         self.profiles_left = self.profiles_left.saturating_sub(1);
-        let Some(dst) = Buf::new((image.stride * image.height).div_ceil(PAGE)) else { return };
-        let into = v3d_draw::Image { va: dst.va, ..image };
+        let Some((image, area, draws)) = self.last_pass.take() else {
+            Line::new().s("profile: the slow scene kept no pass").say();
+            return;
+        };
         let mut pipelines: Vec<usize> = draws.iter().map(|d| d.pipeline).collect();
         pipelines.sort_unstable();
         pipelines.dedup();
-        let mut runs: Vec<(Option<usize>, Vec<v3d_draw::Draw>)> = alloc::vec![(None, draws.clone())];
+        let mut runs: Vec<(Option<usize>, Vec<v3d_draw::Draw>)> = Vec::new();
         for &p in &pipelines {
             runs.push((Some(p), draws.iter().filter(|d| d.pipeline == p).copied().collect()));
         }
+        runs.push((None, draws.clone()));
         for (p, ds) in &runs {
             let mut us = 0;
             let mut perf = None;
             for _ in 0..2 {
                 let t0 = npk_sys::now_us() as u64;
                 self.perf_armed = true;
-                let r = self.submit_draws(hw, into, false, area, ds).and_then(|f| self.wait_fence(hw, f));
+                let r = self.submit_draws(hw, image, true, area, ds).and_then(|f| self.wait_fence(hw, f));
                 perf = self.perf_take(hw);
-                if r.is_err() {
+                if let Err(e) = r {
+                    Line::new().s("profile failed (").dec(e.unsigned_abs() as u64).s(")").say();
                     self.drain(hw);
-                    dst.free();
                     return;
                 }
                 us = npk_sys::now_us() as u64 - t0;
@@ -960,7 +964,6 @@ impl Composer {
             l.say();
         }
         self.drain(hw);
-        dst.free();
     }
 
     /// The draw path proved: one render pass into a 64x48 buffer of the
