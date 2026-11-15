@@ -171,7 +171,7 @@ main(int argc, char **argv)
       argc -= 2;
       argv += 2;
    }
-   if (argc < 7) {
+   if (argc < 6) {
       fprintf(stderr, "usage: v3dg [-a x,y,w,h] [-r rev] <vs.spv> <fs.spv> <width> <height> <out dir> "
                       "<kind:x0,y0,x1,y1>...\n");
       return 2;

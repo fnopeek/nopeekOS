@@ -43,6 +43,8 @@ SCENARIOS = [
      ["%d:%d,%d,%d,%d" % (k, 4 * k, 3 * k, 4 * k + 100, 3 * k + 60) for k in range(1, 10)]),
     # The glass kinds read flat varyings from rect.vert.
     ("glass_kinds_256x128", 256, 128, [], ["1:0,0,256,128", "10:10,10,120,100", "11:130,10,250,100", "4:0,0,256,128"]),
+    # A pass that only loads and stores its tiles.
+    ("no_draws_256x128", 256, 128, [], []),
     # A glass layer built and read, alone and with text.
     ("layer_kinds_256x128", 256, 128, [], ["12:0,0,128,64", "13:10,10,120,100", "14:130,10,250,100"]),
     # The programs that keep the 64-bit paths for large radii.

@@ -1168,14 +1168,14 @@ impl plan::draw_sink for Sink<'_> {
         // by an item that covers it opaquely: an area of whole tiles needs
         // no load (loadOp DONT_CARE, as v3dv loads only the tiles a partial
         // area cuts). With a wallpaper the tiles are loaded from it instead,
-        // which is what the background draws, so it draws nothing; unless
-        // nothing else draws, as a pass has at least one draw.
+        // which is what the background draws, so it draws nothing; a pass
+        // of the bare wallpaper only loads and stores its tiles.
         let t = &ck.target;
         let f = &ck.frame;
         let fresh = ck.items.first().is_some_and(|it| it[0] == gpu_scene::scene::KIND_BACKGROUND)
             && whole_tiles(area, ck.width, ck.height);
         let wall = (f[gpu_scene::scene::F_WALL] as u64) | (f[gpu_scene::scene::F_WALL + 1] as u64) << 32;
-        let mut load_from = (fresh && f[gpu_scene::scene::F_FLAGS] & gpu_scene::scene::FLAG_WALL != 0
+        let load_from = (fresh && f[gpu_scene::scene::F_FLAGS] & gpu_scene::scene::FLAG_WALL != 0
             && wall != 0 && wall <= u32::MAX as u64)
             .then(|| (wall as u32, f[gpu_scene::scene::F_WALL_PITCH] * 4));
 
@@ -1246,11 +1246,7 @@ impl plan::draw_sink for Sink<'_> {
         if load_from.is_some() {
             // The background's draws are the first, item 0's.
             let bg = draws.iter().take_while(|d| d.push[4] == gpu_scene::scene::KIND_BACKGROUND).count();
-            if bg < draws.len() {
-                draws.drain(..bg);
-            } else {
-                load_from = None;
-            }
+            draws.drain(..bg);
         }
         if t.va > u32::MAX as u64 {
             return Err(-EINVAL);

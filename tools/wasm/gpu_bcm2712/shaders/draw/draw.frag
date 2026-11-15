@@ -93,6 +93,16 @@ void main() {
         break;
     default: break;
     }
-    uint c = apply(o, colorAttachmentReadEXT(dst).x);
+    // The tile buffer is read only where a pixel mixes over it: a pixel
+    // the item keeps is not written, one it sets is written without, and
+    // a thread whose pixels all do either skips the read (the compiler
+    // branches over it), which waits for the TLB under the scoreboard.
+    if (o.how == OP_KEEP && o2.how == OP_KEEP)
+        discard;
+    uint c;
+    if (o.how == OP_SET)
+        c = o.b_col;
+    else
+        c = apply(o, colorAttachmentReadEXT(dst).x);
     color = (KIND & 15u) == 11u || (KIND & 15u) == 14u ? apply(o2, c) : c;
 }
