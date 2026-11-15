@@ -76,6 +76,21 @@ fn blend(fg: u32, bg: u32, alpha: u32) -> u32 {
     (r << 16) | (g << 8) | b
 }
 
+/// `blend` into a pixel of a layer when `L` (`shade::layers`): its alpha
+/// byte mixed too, `fg` opaque, so over a ground of 0 the result is the
+/// premultiplied colour. items.glsl `blend` does the same.
+#[inline(always)]
+fn blend_on<const L: bool>(fg: u32, bg: u32, alpha: u32) -> u32 {
+    let c = blend(fg, bg, alpha);
+    if L { c | ((255 * alpha + (bg >> 24) * (256 - alpha)) >> 8) << 24 } else { c }
+}
+
+/// A pixel written whole (items.glsl `SET`): in a layer (`L`) it is opaque.
+#[inline(always)]
+pub fn opaque<const L: bool>(c: u32) -> u32 {
+    if L { c | 0xFF00_0000 } else { c }
+}
+
 /// Rec. 601 luma, 0..255.
 fn luma(c: u32) -> u32 {
     (((c >> 16) & 0xFF) * 299 + ((c >> 8) & 0xFF) * 587 + (c & 0xFF) * 114) / 1000
@@ -113,13 +128,19 @@ impl GlassInk {
 /// blurred backdrop this varies smoothly.
 /// `fg` must already carry the tint (`GlassInk::fill`).
 pub fn glass_blend(fg: u32, bg: u32, alpha: u32, ink: GlassInk) -> u32 {
+    glass_blend_on::<false>(fg, bg, alpha, ink)
+}
+
+/// `glass_blend` into a pixel of a layer when `L` (`blend_on`).
+#[inline(always)]
+pub fn glass_blend_on<const L: bool>(fg: u32, bg: u32, alpha: u32, ink: GlassInk) -> u32 {
     let mut a = alpha.min(256);
     let (lf, lb) = (luma(fg), luma(bg));
     if ink.ceil < 255 && lb > ink.ceil && lf < ink.ceil {
         let need = ((lb - ink.ceil) * 256).div_ceil(lb - lf);
         a = a.max(need.min(256));
     }
-    blend(fg, bg, a)
+    blend_on::<L>(fg, bg, a)
 }
 
 // ── Signed-distance-field rounded-corner AA (Hyprland-style) ──────────
@@ -227,7 +248,10 @@ pub fn rrect_distance_sdf(px: u32, py: u32,
 /// Paints strictly outside the rect (coverage 0), so window content and the
 /// chrome's own AA edge stay untouched. Lives in the tile gap — the caller
 /// keeps `width` inside it, and restores that band before repainting.
-pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
+///
+/// Into a layer when `L` (`blend_on`).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_glow_ring<const L: bool>(shadow: *mut u8, info: &FbInfo,
                       x: u32, y: u32, w: u32, h: u32, r: u32,
                       color: u32, width: u32, alpha: u32, clip: &Rect) {
     if width == 0 || alpha == 0 || w < 2 || h < 2 { return; }
@@ -253,7 +277,7 @@ pub fn draw_glow_ring(shadow: *mut u8, info: &FbInfo,
         let a = alpha * f / 256;
         if a > 0 {
             let bg = read_pixel(shadow, info, px, py);
-            put_pixel(shadow, info, px, py, blend(color, bg, a.min(256)));
+            put_pixel(shadow, info, px, py, blend_on::<L>(color, bg, a.min(256)));
         }
     };
 
@@ -381,7 +405,11 @@ fn ensure_glass_tint(bg_color: u32, opacity: u32, info: &FbInfo) -> Option<(*con
 ///
 /// `border_a == border_b` paints solid; different values give a 45°
 /// gradient (top-left → bottom-right).
-pub fn fill_rounded_chrome_aa(
+///
+/// Into a layer when `L`: what items.glsl `chrome` sets is written opaque
+/// (`opaque`), what it mixes mixes the alpha too.
+#[allow(clippy::too_many_arguments)]
+pub fn fill_rounded_chrome_aa<const L: bool>(
     shadow: *mut u8, info: &FbInfo,
     x: u32, y: u32, w: u32, h: u32,
     border_a: u32, border_b: u32, bg_color: u32,
@@ -449,7 +477,7 @@ pub fn fill_rounded_chrome_aa(
         let bg_pixel = read_pixel(shadow, info, px, py);
         if outer < 256 {
             let alpha = (outer * bo / 256).min(255);
-            put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, alpha));
+            put_pixel(shadow, info, px, py, blend_on::<L>(border_color, bg_pixel, alpha));
             return;
         }
         let inner = if border_px == 0 {
@@ -459,22 +487,22 @@ pub fn fill_rounded_chrome_aa(
         };
         if !paint_content {
             if inner == 256 { return; }
-            put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
+            put_pixel(shadow, info, px, py, blend_on::<L>(border_color, bg_pixel, bo));
             return;
         }
         if inner == 0 {
             // Border ring (outside the inner rect): solid border over wallpaper.
-            put_pixel(shadow, info, px, py, blend(border_color, bg_pixel, bo));
+            put_pixel(shadow, info, px, py, blend_on::<L>(border_color, bg_pixel, bo));
         } else if inner == 256 {
             // Deep interior: must match the straight-row glass tint exactly
             // (glass over wallpaper, no border tint), else the corner bands
             // show a border-coloured bar next to the straight middle.
-            put_pixel(shadow, info, px, py, glass_blend(glass_fill, bg_pixel, go, ink));
+            put_pixel(shadow, info, px, py, glass_blend_on::<L>(glass_fill, bg_pixel, go, ink));
         } else {
             // Inner fringe: AA transition from border to glass over ~1 px.
-            let after_border = blend(border_color, bg_pixel, bo);
+            let after_border = blend_on::<L>(border_color, bg_pixel, bo);
             let bg_alpha = (go * inner / 256).min(255);
-            put_pixel(shadow, info, px, py, glass_blend(glass_fill, after_border, bg_alpha, ink));
+            put_pixel(shadow, info, px, py, glass_blend_on::<L>(glass_fill, after_border, bg_alpha, ink));
         }
     };
 
@@ -495,17 +523,19 @@ pub fn fill_rounded_chrome_aa(
                 // SAFETY: row within fb; [lo,hi) within width.
                 unsafe {
                     let dst = shadow.add(py as usize * pitch + lo as usize * 4) as *mut u32;
-                    for i in 0..span { *dst.add(i) = bg_color; }
+                    for i in 0..span { *dst.add(i) = opaque::<L>(bg_color); }
                 }
             } else if let Some((tptr, tpitch)) = tint {
                 // SAFETY: tint is screen-sized (tpitch*height); py<height,
                 // hi<=width; Core-0-only so tptr is valid this frame.
                 unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        tptr.add(py as usize * tpitch + lo as usize),
-                        shadow.add(py as usize * pitch + lo as usize * 4) as *mut u32,
-                        span,
-                    );
+                    let from = tptr.add(py as usize * tpitch + lo as usize);
+                    let to = shadow.add(py as usize * pitch + lo as usize * 4) as *mut u32;
+                    if L {
+                        for i in 0..span { *to.add(i) = opaque::<L>(*from.add(i)); }
+                    } else {
+                        core::ptr::copy_nonoverlapping(from, to, span);
+                    }
                 }
             } else {
                 for px in lo..hi {
@@ -515,8 +545,8 @@ pub fn fill_rounded_chrome_aa(
                         let t = (((px - x) as u64 + (py - y) as u64) * 1000 / diag_max) as u32;
                         crate::theme::lerp_color(border_a, border_b, t.min(1000))
                     };
-                    let after_border = blend(bc, read_pixel(shadow, info, px, py), bo);
-                    put_pixel(shadow, info, px, py, glass_blend(glass_fill, after_border, go, ink));
+                    let after_border = blend_on::<L>(bc, read_pixel(shadow, info, px, py), bo);
+                    put_pixel(shadow, info, px, py, glass_blend_on::<L>(glass_fill, after_border, go, ink));
                 }
             }
         }
@@ -527,14 +557,17 @@ pub fn fill_rounded_chrome_aa(
 /// Blend `src` over the existing shadow-buffer pixel at (x, y) with
 /// `alpha` ∈ 0..=256. Read-modify-write helper for paths that already
 /// know the coverage analytically (e.g. SDF-aware widget blits).
-pub fn blend_pixel(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, src: u32, alpha: u32) {
+///
+/// Into a layer when `L`: whole coverage writes the pixel opaque
+/// (`opaque`), partial coverage mixes its alpha (`blend_on`).
+pub fn blend_pixel<const L: bool>(shadow: *mut u8, info: &FbInfo, x: u32, y: u32, src: u32, alpha: u32) {
     if alpha == 0 { return; }
     if alpha >= 256 {
-        put_pixel(shadow, info, x, y, src);
+        put_pixel(shadow, info, x, y, opaque::<L>(src));
         return;
     }
     let dst = read_pixel(shadow, info, x, y);
-    put_pixel(shadow, info, x, y, blend(src, dst, alpha));
+    put_pixel(shadow, info, x, y, blend_on::<L>(src, dst, alpha));
 }
 
 #[cfg(test)]

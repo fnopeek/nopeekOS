@@ -41,6 +41,16 @@ pub fn intent_gpu(args: &str) {
             crate::shade::gpu_scene::force_cpu();
             kprintln!("[npk] gpu: composing on the CPU until `gpu verify`");
         }
+        "layers on" => {
+            crate::shade::layers::allow();
+            crate::shade::force_redraw();
+            kprintln!("[npk] gpu: windows as layers on the display's planes, where the module offers them");
+        }
+        "layers off" => {
+            crate::shade::layers::forbid();
+            crate::shade::force_redraw();
+            kprintln!("[npk] gpu: the screen composed whole until `gpu layers on`");
+        }
         _ => {
             kprintln!("  gpu survey       the display hardware as the firmware set it up (read only), also stored in {}", SURVEY_PATH);
             kprintln!("  gpu iommu on     put the HVS behind its IOMMU, no pass-through, the firmware framebuffer granted");
@@ -49,6 +59,8 @@ pub fn intent_gpu(args: &str) {
             kprintln!("  gpu set          the display set a driver module binds: windows and interrupts");
             kprintln!("  gpu verify       compose the next whole frame and the partial scenes after it on both and compare");
             kprintln!("  gpu cpu          compose on the CPU until `gpu verify`");
+            kprintln!("  gpu layers on    windows as layers on the display's planes (default where offered)");
+            kprintln!("  gpu layers off   the screen composed whole, as one buffer");
         }
     }
 }

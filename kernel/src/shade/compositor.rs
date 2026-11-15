@@ -198,6 +198,8 @@ pub struct Compositor {
     /// Screen areas to repaint on the next partial render that no dirty
     /// window covers (a hint or menu of the window controls).
     pub extra_damage: Vec<Rect>,
+    /// The last scene's groups, one per window, for `shade::layers`.
+    groups: Vec<crate::shade::layers::Group>,
 }
 
 #[allow(dead_code)]
@@ -246,6 +248,7 @@ impl Compositor {
             last_bar_press: None,
             snap: None,
             extra_damage: Vec::new(),
+            groups: Vec::new(),
         }
     }
 
@@ -1757,6 +1760,19 @@ impl Compositor {
         self.refresh_chrome();
         self.tell_focus();
         let frame = self.build_scene();
+        let groups = core::mem::take(&mut self.groups);
+        // A scene still writing the target is done before layers paint in it.
+        crate::shade::gpu_scene::finish_with(&*self);
+        let shown = crate::shade::layers::compose(&frame, &groups, &*self, target, info, &damage);
+        self.groups = groups;
+        let damage = match shown {
+            crate::shade::layers::Composed::Layers(painted) => return painted,
+            crate::shade::layers::Composed::Screen { whole: true } => {
+                crate::shade::note_whole_for(format_args!("leaving layers"));
+                alloc::vec![Rect::new(0, 0, info.width, info.height)]
+            }
+            crate::shade::layers::Composed::Screen { whole: false } => damage,
+        };
         let damage = crate::shade::gpu_scene::widen(damage, info);
         crate::shade::gpu_scene::compose(&frame, &*self, target, info, &damage);
         #[cfg(target_arch = "x86_64")]
@@ -1866,11 +1882,19 @@ impl Compositor {
         let mut items = Vec::with_capacity(4 + plans.len() * 6);
         items.push(Item::Background);
         let snap_preview = self.snap_preview();
+        let mut groups = Vec::with_capacity(plans.len() + 1);
         for p in &plans {
+            let start = items.len();
             if let Some((win, item)) = snap_preview {
                 if win == p.id { items.push(item); }
             }
-            if p.kind == WindowKind::Surface && !crate::shade::surface::has_frame(p.id.0) { continue; }
+            if p.kind == WindowKind::Surface && !crate::shade::surface::has_frame(p.id.0) {
+                // Its snap preview still shows.
+                if items.len() > start {
+                    groups.push(crate::shade::layers::Group { key: p.id.0 as u64, start, end: items.len() });
+                }
+                continue;
+            }
             if p.glow.alpha > 0 {
                 items.push(Item::Glow { rect: p.win_rect, radius: rounding, color: p.glow.color,
                     band: p.glow.band, alpha: p.glow.alpha });
@@ -1961,7 +1985,11 @@ impl Compositor {
                 }
             }
             items.extend_from_slice(&p.controls);
+            if items.len() > start {
+                groups.push(crate::shade::layers::Group { key: p.id.0 as u64, start, end: items.len() });
+            }
         }
+        let top = items.len();
         self.controls_overlay(&mut items);
         self.controls.end_frame();
         // Last of all, over everything: the screenshot flash.
@@ -1970,6 +1998,10 @@ impl Compositor {
             items.push(Item::Fill { rect: Rect::new(0, 0, self.screen_w, self.screen_h), color: 0,
                 alpha: flash.min(255), radius: 0 });
         }
+        if items.len() > top {
+            groups.push(crate::shade::layers::Group { key: crate::shade::layers::TOP, start: top, end: items.len() });
+        }
+        self.groups = groups;
         Scene { items }
     }
 

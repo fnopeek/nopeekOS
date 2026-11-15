@@ -415,7 +415,10 @@ pub fn planes() -> Planes {
 /// Put the blurred wallpaper under a glass window: inside the rounded rect
 /// only, so the corners outside it keep the sharp wallpaper the gap shows.
 /// Painted within `clip`. No wallpaper → nothing to blur, no-op.
-pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
+///
+/// Into a layer when `L`: the blurred pixels opaque (`render::opaque`).
+#[allow(clippy::too_many_arguments)]
+pub fn draw_glass_backdrop<const L: bool>(shadow: *mut u8, info: &FbInfo,
                            rx: u32, ry: u32, rw: u32, rh: u32, radius: u32,
                            clip: &crate::shade::scene::Rect) {
     let Some(bl) = blurred() else { return };
@@ -433,7 +436,7 @@ pub fn draw_glass_backdrop(shadow: *mut u8, info: &FbInfo,
         for x in x0..x1 {
             // SAFETY: x and y lie inside the screen, which `shadow` holds
             // with the framebuffer pitch.
-            unsafe { *(shadow.add(row + x as usize * 4) as *mut u32) = bl.at(x, y); }
+            unsafe { *(shadow.add(row + x as usize * 4) as *mut u32) = crate::gui::render::opaque::<L>(bl.at(x, y)); }
         }
     }
 }

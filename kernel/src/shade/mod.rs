@@ -12,6 +12,7 @@ pub mod window;
 pub mod buffers;
 pub mod scene;
 pub mod gpu_scene;
+pub mod layers;
 #[cfg(target_arch = "x86_64")]
 pub mod capture;
 pub mod compositor;
@@ -1985,7 +1986,11 @@ pub fn stop() {
     terminal::set_active(false);
     framebuffer::set_gui_mode(false);
     *COMPOSITOR.lock() = None;
+    // The console's copy shows a shadow over the layers again; their
+    // buffers go after it.
+    layers::stop();
     framebuffer::clear();
+    layers::release();
 }
 
 /// Get shade config defaults.

@@ -17,6 +17,11 @@
 //!
 //! The pointer is the HVS's cursor plane (`CAP_CURSOR`): its image in a
 //! buffer of the module's own, a move an async update of the plane.
+//!
+//! The kernel may show its desktop as layers instead (`CAP_LAYERS`): the
+//! wallpaper on the primary plane, each window in a premultiplied ARGB
+//! buffer of its own on an overlay, put on screen in one atomic commit per
+//! `OP_LAYERS`, as a compositor with KMS planes does. The HVS mixes them.
 
 #![no_std]
 
@@ -30,6 +35,8 @@ use drm_core::drm_fourcc::drm_format_info;
 use drm_core::drm_plane::drm_framebuffer;
 use drm_core::linux::Line;
 use gpu_bcm2712_core::vc4_drv::Vc4;
+use gpu_bcm2712_core::vc4_kms::PlaneLayer;
+use alloc::vec::Vec;
 use hw::PiHw;
 
 // The default rights plus HARDWARE, which binding the display set
@@ -65,11 +72,22 @@ const CAP_PRESENT: i32 = 16;
 const CAP_FLIP: i32 = 128;
 const CAP_CURSOR: i32 = 8;
 const CAP_SCENE: i32 = 2;
+const CAP_LAYERS: i32 = 256;
 /// `OP_BO_ADD` / `OP_BO_REMOVE`: `a0` buffer; `OP_SCENE`: `a0` target,
 /// `a1` payload bytes.
 const OP_BO_ADD: u32 = 2;
 const OP_BO_REMOVE: u32 = 3;
 const OP_SCENE: u32 = 4;
+/// `OP_LAYERS`: `a0` count, the payload `LAYER_WORDS` words per layer,
+/// bottom to top: buffer, source x, y, w, h, destination x, y, flags.
+const OP_LAYERS: u32 = 16;
+const LAYER_WORDS: usize = 8;
+const LAYER_PREMULTIPLIED: u32 = 1;
+/// The primary and the overlays (`VC4_NUM_OVERLAY_PLANES`).
+const MAX_LAYERS: u32 = 17;
+/// `drm_fourcc.h`: what a layer's buffer holds.
+const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
+const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
 /// `OP_SHUTDOWN`: the system goes down.
 const OP_SHUTDOWN: u32 = 15;
 /// `OP_CURSOR_IMAGE`: `a0` width, `a1` height, `a2`/`a3` hotspot, the
@@ -104,6 +122,8 @@ struct KernelFb {
     width: u32,
     height: u32,
     format: u32,
+    /// Where the first pixel lies in its page.
+    first_offset: u32,
 }
 
 fn kernel_fb() -> Option<KernelFb> {
@@ -122,6 +142,7 @@ fn buffer(id: i32) -> Option<KernelFb> {
         width: u32_at(20),
         height: u32_at(24),
         format: u32_at(28),
+        first_offset: u32_at(32),
     })
 }
 
@@ -171,7 +192,7 @@ pub extern "C" fn _start() {
     // otherwise the compositor copies into the framebuffer on the CPU.
     let shadows = bind_shadows(&kfb);
     let cursor = Cursor::new();
-    let mut caps = if shadows.is_some() { CAP_COPY | CAP_PRESENT | CAP_FLIP } else { 0 };
+    let mut caps = if shadows.is_some() { CAP_COPY | CAP_PRESENT | CAP_FLIP | CAP_LAYERS } else { 0 };
     if caps != 0 && cursor.is_some() {
         caps |= CAP_CURSOR;
     }
@@ -184,7 +205,8 @@ pub extern "C" fn _start() {
         Line::new().s("the kernel did not take the presenting, the compositor copies on the CPU").say();
     }
 
-    let mut p = Present { shown: 0, shadows: shadows.unwrap_or([kfb, kfb]), cursor, scenes };
+    let mut p = Present { shown: 0, shadows: shadows.unwrap_or([kfb, kfb]), cursor, scenes,
+        layers: Vec::new(), scannable: alloc::collections::BTreeMap::new() };
     serve(&mut vc4, &mut hw, &mut kfb, &mut p);
 }
 
@@ -238,6 +260,12 @@ struct Present {
     shadows: [KernelFb; 2],
     cursor: Option<Cursor>,
     scenes: Option<Scenes>,
+    /// The layers on screen (`OP_LAYERS`), bottom to top, by buffer; empty
+    /// while a single buffer is (`shown`).
+    layers: Vec<(u32, PlaneLayer)>,
+    /// Buffers looked at for scanning out (`scannable`): one run of pages
+    /// from their first pixel, or not (None).
+    scannable: alloc::collections::BTreeMap<u32, Option<KernelFb>>,
 }
 
 /// A buffer a scene reads or writes, mapped for V3D.
@@ -580,14 +608,102 @@ impl Present {
         if (a[2], a[3], a[4], a[5]) != (0, 0, s.width, s.height) {
             return -1;
         }
-        let ret = vc4.page_flip(hw, &framebuffer(&s));
+        // Out of layers, the overlays go off in the same commit.
+        let ret = if self.layers.is_empty() {
+            vc4.page_flip(hw, &framebuffer(&s))
+        } else {
+            match (0..vc4.crtc.len()).find(|&c| vc4.kms.crtcs[c].active) {
+                Some(crtc) => vc4.layers_commit(hw, crtc, &[whole(&s)]),
+                None => -drm_core::linux::EINVAL,
+            }
+        };
         if ret != 0 {
             Line::new().s("page flip failed ").dec(ret.unsigned_abs() as u64).say();
             return -1;
         }
+        self.layers.clear();
         self.shown = src;
         0
     }
+
+    /// Buffer `id` as the HVS scans it, looked at once: its first pixel
+    /// and one run of pages from there.
+    fn scannable(&mut self, id: u32) -> Option<KernelFb> {
+        *self.scannable.entry(id).or_insert_with(|| {
+            let f = buffer(id as i32)?;
+            (f.first_offset == 0 && contiguous(id as i32, &f)).then_some(f)
+        })
+    }
+
+    /// One `OP_LAYERS`: the layers, checked, in one atomic commit on the
+    /// output that shows the desktop.
+    fn show_layers(&mut self, vc4: &mut Vc4, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> i32 {
+        let n = a[0];
+        if n == 0 || n > MAX_LAYERS {
+            return -drm_core::linux::EINVAL;
+        }
+        let mut words = alloc::vec![0u8; n as usize * LAYER_WORDS * 4];
+        if npk_sys::gpudev_job_data(seq, 0, &mut words) != words.len() as i32 {
+            return -drm_core::linux::EINVAL;
+        }
+        let w = |i: usize| u32::from_le_bytes([words[i * 4], words[i * 4 + 1], words[i * 4 + 2], words[i * 4 + 3]]);
+        let mut list = Vec::with_capacity(n as usize);
+        for l in 0..n as usize {
+            let at = |k: usize| w(l * LAYER_WORDS + k);
+            let (id, sx, sy, sw, sh, x, y, flags) = (at(0), at(1), at(2), at(3), at(4), at(5) as i32, at(6) as i32, at(7));
+            let Some(f) = self.scannable(id) else { return -drm_core::linux::EINVAL };
+            let format = if flags & LAYER_PREMULTIPLIED != 0 { DRM_FORMAT_ARGB8888 } else { DRM_FORMAT_XRGB8888 };
+            let fits = sw > 0 && sh > 0 && sx.checked_add(sw).is_some_and(|e| e <= f.width)
+                && sy.checked_add(sh).is_some_and(|e| e <= f.height);
+            // What a plane may stand off the screen (drm_atomic_plane_check:
+            // the destination's ends within an int).
+            let near = |v: i32, len: u32| v.unsigned_abs() < 1 << 16 && len < 1 << 16;
+            if !fits || !near(x, sw) || !near(y, sh) || (f.format != format && !(id == 0 && format == DRM_FORMAT_XRGB8888)) {
+                return -drm_core::linux::EINVAL;
+            }
+            let mut fb = framebuffer(&f);
+            fb.format = drm_format_info(format).expect("drm_format_info");
+            list.push((id, PlaneLayer { fb, src_x: sx, src_y: sy, src_w: sw, src_h: sh, x, y, w: sw, h: sh }));
+        }
+        let Some(crtc) = (0..vc4.crtc.len()).find(|&c| vc4.kms.crtcs[c].active) else { return -drm_core::linux::EINVAL };
+        let planes: Vec<PlaneLayer> = list.iter().map(|(_, l)| *l).collect();
+        let ret = vc4.layers_commit(hw, crtc, &planes);
+        if ret == 0 {
+            self.layers = list;
+            self.shown = 0;
+        }
+        ret
+    }
+
+    /// Before buffer `id` goes (`OP_BO_REMOVE`), what `drm_framebuffer_remove`
+    /// does for a framebuffer still on a plane: the planes that show it go
+    /// off, the bottom one shows the framebuffer instead.
+    fn forget(&mut self, vc4: &mut Vc4, hw: &mut PiHw, kfb: &KernelFb, id: u32) {
+        self.scannable.remove(&id);
+        if !self.layers.iter().any(|(b, _)| *b == id) {
+            return;
+        }
+        let bottom = self.layers[0].0 == id;
+        let mut rest: Vec<(u32, PlaneLayer)> = self.layers.iter().filter(|(b, _)| *b != id).copied().collect();
+        if bottom {
+            rest.insert(0, (0, whole(kfb)));
+        }
+        let planes: Vec<PlaneLayer> = rest.iter().map(|(_, l)| *l).collect();
+        let ret = match (0..vc4.crtc.len()).find(|&c| vc4.kms.crtcs[c].active) {
+            Some(crtc) => vc4.layers_commit(hw, crtc, &planes),
+            None => 0,
+        };
+        if ret != 0 {
+            Line::new().s("taking a removed buffer off the planes failed ").dec(ret.unsigned_abs() as u64).say();
+        }
+        self.layers = rest;
+    }
+}
+
+/// All of `f` at the screen's origin, unscaled.
+fn whole(f: &KernelFb) -> PlaneLayer {
+    PlaneLayer { fb: framebuffer(f), src_x: 0, src_y: 0, src_w: f.width, src_h: f.height, x: 0, y: 0,
+        w: f.width, h: f.height }
 }
 
 /// The fbdev client's choice on screen: the monitor's own mode (Linux's
@@ -706,8 +822,9 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
                 let client = vc4.fbdev_probe(hw);
                 show(vc4, hw, &client, kfb);
                 // The commit showed the framebuffer again, without the
-                // cursor plane.
+                // cursor plane and the layers.
                 p.shown = 0;
+                p.layers.clear();
                 if let Some(c) = &p.cursor {
                     c.apply(vc4, hw);
                 }
@@ -740,7 +857,11 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
                 (OP_CURSOR_IMAGE, Some(c)) => c.image(vc4, hw, word(0) as i32, &a),
                 (OP_CURSOR_MOVE, Some(c)) => c.moved(vc4, hw, &a),
                 (OP_BO_ADD, _) => p.scenes.as_mut().map_or(-1, |s| s.add(a[0])),
-                (OP_BO_REMOVE, _) => p.scenes.as_mut().map_or(-1, |s| s.remove(hw, a[0])),
+                (OP_BO_REMOVE, _) => {
+                    p.forget(vc4, hw, kfb, a[0]);
+                    p.scenes.as_mut().map_or(-1, |s| s.remove(hw, a[0]))
+                }
+                (OP_LAYERS, _) => p.show_layers(vc4, hw, word(0) as i32, &a),
                 (OP_SCENE, _) => match p.scenes.as_mut() {
                     Some(s) => match s.run(hw, word(0) as i32, &a) {
                         Some(st) => st,

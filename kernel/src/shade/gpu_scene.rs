@@ -249,6 +249,7 @@ fn failed(status: Result<i32, &str>) {
 /// the compositor, before reading the target. A failed scene is composed on
 /// the CPU here, which takes the compositor for its sources.
 pub fn finish() {
+    crate::shade::layers::settle();
     let Some(p) = PENDING.lock().take() else { return };
     if let Some(redo) = settle(p) {
         crate::shade::with_compositor(|comp| redo.run(&*comp));
@@ -256,7 +257,7 @@ pub fn finish() {
 }
 
 /// `finish` for a caller that holds the compositor.
-fn finish_with(sources: &dyn Sources) {
+pub(crate) fn finish_with(sources: &dyn Sources) {
     let Some(p) = PENDING.lock().take() else { return };
     if let Some(redo) = settle(p) {
         redo.run(sources);

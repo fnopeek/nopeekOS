@@ -116,6 +116,12 @@ impl FbConsole {
             return self.front_ptr();
         }
         let (front, back) = (self.front_ptr(), self.shadow_back());
+        // With layers on screen neither shadow is shown, and leaving them
+        // composes the screen whole.
+        if crate::shade::layers::on_screen() {
+            STALE.lock().clear();
+            return back;
+        }
         for r in STALE.lock().drain(..) {
             self.copy_rect(front, back, r);
         }

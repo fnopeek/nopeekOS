@@ -180,47 +180,62 @@ pub struct InPlace {
 
 /// Paint `scene` into `target` within each damage rectangle.
 pub fn execute(scene: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) {
+    execute_on::<false>(scene, sources, target, info, damage);
+}
+
+/// `execute` for one layer of the desktop (`shade::layers`), in screen
+/// coordinates into the screen-sized `target`: over a transparent ground
+/// (the background item clears to 0), every pixel premultiplied ARGB
+/// (`render::blend_on`, `render::opaque`). items.glsl paints a layer the
+/// same with `LAYER_ALPHA`.
+pub fn execute_layer(scene: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo, damage: &[Rect]) {
+    execute_on::<true>(scene, sources, target, info, damage);
+}
+
+fn execute_on<const L: bool>(scene: &Scene, sources: &dyn Sources, target: *mut u8, info: &FbInfo,
+                             damage: &[Rect]) {
     let screen = Rect::new(0, 0, info.width, info.height);
     for d in damage {
         let clip = d.intersect(&screen);
         if clip.is_empty() { continue; }
         for item in &scene.items {
-            paint(item, sources, target, info, &clip);
+            paint::<L>(item, sources, target, info, &clip);
         }
     }
 }
 
-fn paint(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &Rect) {
+fn paint<const L: bool>(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &Rect) {
     match *item {
+        Item::Background if L => render::fill_rect(t, info, clip.x, clip.y, clip.w, clip.h, 0),
         Item::Background => background::draw_background_region(t, info, clip.x, clip.y, clip.w, clip.h),
         Item::Glow { rect, radius, color, band, alpha } => {
-            render::draw_glow_ring(t, info, rect.x, rect.y, rect.w, rect.h, radius, color, band, alpha, clip);
+            render::draw_glow_ring::<L>(t, info, rect.x, rect.y, rect.w, rect.h, radius, color, band, alpha, clip);
         }
         Item::GlassBackdrop { rect, radius } => {
-            background::draw_glass_backdrop(t, info, rect.x, rect.y, rect.w, rect.h, radius, clip);
+            background::draw_glass_backdrop::<L>(t, info, rect.x, rect.y, rect.w, rect.h, radius, clip);
         }
         Item::Chrome { rect, border_a, border_b, bg, rounding, border, border_opacity, bg_opacity, paint_content } => {
-            render::fill_rounded_chrome_aa(t, info, rect.x, rect.y, rect.w, rect.h, border_a, border_b, bg,
+            render::fill_rounded_chrome_aa::<L>(t, info, rect.x, rect.y, rect.w, rect.h, border_a, border_b, bg,
                 rounding, border, border_opacity, bg_opacity, paint_content, clip);
         }
         Item::Content { src, dst, radius, fit, yuv } => {
             let area = dst.intersect(clip);
             if area.is_empty() { return; }
             if yuv != Yuv::None {
-                sources.with_source(src, &mut |px, sw, sh| content_yuv(t, info, px, sw, sh, dst, radius, fit, yuv, &area));
+                sources.with_source(src, &mut |px, sw, sh| content_yuv::<L>(t, info, px, sw, sh, dst, radius, fit, yuv, &area));
                 return;
             }
-            sources.with_source(src, &mut |px, sw, sh| content(t, info, px, sw, sh, dst, radius, fit, &area));
+            sources.with_source(src, &mut |px, sw, sh| content::<L>(t, info, px, sw, sh, dst, radius, fit, &area));
         }
         Item::Panel { src, dst } => {
             let area = dst.intersect(clip);
             if area.is_empty() { return; }
-            sources.with_source(src, &mut |px, sw, sh| panel(t, info, px, sw, sh, dst, &area));
+            sources.with_source(src, &mut |px, sw, sh| panel::<L>(t, info, px, sw, sh, dst, &area));
         }
         Item::Text { src, dst } => {
             let area = dst.intersect(clip);
             if area.is_empty() { return; }
-            sources.with_source(src, &mut |px, sw, sh| text(t, info, px, sw, sh, dst, &area));
+            sources.with_source(src, &mut |px, sw, sh| text::<L>(t, info, px, sw, sh, dst, &area));
         }
         Item::Fill { rect, color, alpha, radius } => {
             let area = rect.intersect(clip);
@@ -231,7 +246,7 @@ fn paint(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &R
                     let cov = render::rect_coverage_sdf(x, y, rect.x, rect.y, rect.w, rect.h, r);
                     if cov == 0 { continue; }
                     let a = alpha.min(255) * cov / 255;
-                    render::blend_pixel(t, info, x, y, color & 0x00FF_FFFF, a.min(256));
+                    render::blend_pixel::<L>(t, info, x, y, color & 0x00FF_FFFF, a.min(256));
                 }
             }
         }
@@ -248,7 +263,7 @@ fn paint(item: &Item, sources: &dyn Sources, t: *mut u8, info: &FbInfo, clip: &R
                     for x in g.x..g.x1() {
                         let a = glyph_alpha(glyph[((y - oy) * asz + (x - ox)) as usize], alpha) as u32;
                         if a > 0 {
-                            render::blend_pixel(t, info, x, y, color, a + (a >> 7));
+                            render::blend_pixel::<L>(t, info, x, y, color, a + (a >> 7));
                         }
                     }
                 }
@@ -273,7 +288,8 @@ fn sample(px: &[u32], sw: u32, sh: u32, dw: u32, dh: u32, fit: Fit, lx: u32, ly:
     px[(sy.min(sh - 1) * sw + sx.min(sw - 1)) as usize]
 }
 
-fn content(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, radius: u32, fit: Fit,
+#[allow(clippy::too_many_arguments)]
+fn content<const L: bool>(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, radius: u32, fit: Fit,
            area: &Rect) {
     if px.is_empty() || sw == 0 || sh == 0 || px.len() < (sw * sh) as usize { return; }
     let r = radius.min(dst.w / 2).min(dst.h / 2);
@@ -282,7 +298,7 @@ fn content(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, r
     let edge = |x: u32, y: u32| {
         let cov = render::rect_coverage_sdf(x, y, dst.x, dst.y, dst.w, dst.h, r);
         if cov > 0 {
-            render::blend_pixel(t, info, x, y, sample(px, sw, sh, dst.w, dst.h, fit, x - dst.x, y - dst.y), cov);
+            render::blend_pixel::<L>(t, info, x, y, sample(px, sw, sh, dst.w, dst.h, fit, x - dst.x, y - dst.y), cov);
         }
     };
     for y in area.y..area.y1() {
@@ -303,15 +319,19 @@ fn content(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, r
             unsafe {
                 let d = t.add(y as usize * pitch + lo as usize * 4) as *mut u32;
                 if have > lo {
-                    core::ptr::copy_nonoverlapping(px.as_ptr().add(src_row + (lo - dst.x) as usize), d,
-                        (have - lo) as usize);
+                    let from = px.as_ptr().add(src_row + (lo - dst.x) as usize);
+                    if L {
+                        for i in 0..(have - lo) as usize { *d.add(i) = render::opaque::<L>(*from.add(i)); }
+                    } else {
+                        core::ptr::copy_nonoverlapping(from, d, (have - lo) as usize);
+                    }
                 }
-                let last = px[src_row + sw as usize - 1];
+                let last = render::opaque::<L>(px[src_row + sw as usize - 1]);
                 for i in (have - lo)..(hi - lo) { *d.add(i as usize) = last; }
             }
         } else {
             for x in lo..hi {
-                render::put_pixel(t, info, x, y, sample(px, sw, sh, dst.w, dst.h, fit, x - dst.x, ly));
+                render::put_pixel(t, info, x, y, render::opaque::<L>(sample(px, sw, sh, dst.w, dst.h, fit, x - dst.x, ly)));
             }
         }
         for x in hi..area.x1() { edge(x, y); }
@@ -321,7 +341,7 @@ fn content(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, r
 /// `content` for packed YUYV: `sw` words per row are `2 * sw` pixels.
 /// Per pixel, as compose.comp's `content` does.
 #[allow(clippy::too_many_arguments)]
-fn content_yuv(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, radius: u32, fit: Fit,
+fn content_yuv<const L: bool>(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, radius: u32, fit: Fit,
                yuv: Yuv, area: &Rect) {
     if px.is_empty() || sw == 0 || sh == 0 || px.len() < (sw * sh) as usize { return; }
     let r = radius.min(dst.w / 2).min(dst.h / 2);
@@ -339,12 +359,16 @@ fn content_yuv(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rec
             let w = px[(sy * sw + sx / 2) as usize];
             let luma = if sx & 1 == 0 { w & 0xFF } else { (w >> 16) & 0xFF };
             let c = yuv_pixel(luma, (w >> 8) & 0xFF, w >> 24, yuv);
-            if cov >= 256 { render::put_pixel(t, info, x, y, c); } else { render::blend_pixel(t, info, x, y, c, cov); }
+            if cov >= 256 {
+                render::put_pixel(t, info, x, y, render::opaque::<L>(c));
+            } else {
+                render::blend_pixel::<L>(t, info, x, y, c, cov);
+            }
         }
     }
 }
 
-fn panel(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area: &Rect) {
+fn panel<const L: bool>(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area: &Rect) {
     if px.is_empty() || sw == 0 || sh == 0 || px.len() < (sw * sh) as usize { return; }
     // The blurred wallpaper for the translucent pixels.
     let blurred = background::blurred();
@@ -358,19 +382,21 @@ fn panel(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, are
             let a = (p >> 24) & 0xFF;
             if a == 0 { continue; }
             if a < 255 {
-                let base = match blurred {
-                    Some(b) => b.at(x, y),
-                    None => render::read_pixel(t, info, x, y),
+                // Over the blurred wallpaper the pixel is set (items.glsl
+                // `panel`), over what lies beneath it mixed.
+                let c = match blurred {
+                    Some(b) => render::opaque::<L>(render::glass_blend_on::<L>(ink.fill(p & 0x00FF_FFFF), b.at(x, y), a, ink)),
+                    None => render::glass_blend_on::<L>(ink.fill(p & 0x00FF_FFFF), render::read_pixel(t, info, x, y), a, ink),
                 };
-                render::put_pixel(t, info, x, y, render::glass_blend(ink.fill(p & 0x00FF_FFFF), base, a, ink));
+                render::put_pixel(t, info, x, y, c);
                 continue;
             }
-            render::blend_pixel(t, info, x, y, p & 0x00FF_FFFF, a);
+            render::blend_pixel::<L>(t, info, x, y, p & 0x00FF_FFFF, a);
         }
     }
 }
 
-fn text(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area: &Rect) {
+fn text<const L: bool>(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area: &Rect) {
     if px.is_empty() || px.len() < (sw * sh) as usize { return; }
     let x1 = area.x1().min(dst.x + sw);
     let y1 = area.y1().min(dst.y + sh);
@@ -381,8 +407,8 @@ fn text(t: *mut u8, info: &FbInfo, px: &[u32], sw: u32, sh: u32, dst: Rect, area
             // The alpha byte is glyph coverage: edges blend, cores cover.
             match p >> 24 {
                 0 => {}
-                255 => render::put_pixel(t, info, x, y, p & 0x00FF_FFFF),
-                a => render::blend_pixel(t, info, x, y, p & 0x00FF_FFFF, a + (a >> 7)),
+                255 => render::put_pixel(t, info, x, y, render::opaque::<L>(p & 0x00FF_FFFF)),
+                a => render::blend_pixel::<L>(t, info, x, y, p & 0x00FF_FFFF, a + (a >> 7)),
             }
         }
     }

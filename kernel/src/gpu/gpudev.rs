@@ -84,6 +84,19 @@ pub const OP_BACKLIGHT: u32 = 13;
 /// `a3` height; the payload is a baseline 4:2:2 JPEG the module decodes
 /// into the target (`CAP_JPEG`).
 pub const OP_JPEG: u32 = 14;
+/// `a0` count; the payload is `count` layers bottom to top, eight words
+/// each: buffer, source x, y, width, height, destination x, y (two's
+/// complement), flags (`LAYER_*`). The module shows them on the display's
+/// planes, the bottom one on the primary, in one commit; it completes once
+/// the flip is done, and from then on the buffers of the layers before are
+/// no longer read. A negative status: the commit was refused (too many
+/// layers for the planes, -28 when the display's line memory is short).
+pub const OP_LAYERS: u32 = 16;
+/// Words per layer of `OP_LAYERS`.
+pub const LAYER_WORDS: usize = 8;
+/// The layer's pixels are premultiplied ARGB8888; without it XRGB8888,
+/// opaque.
+pub const LAYER_PREMULTIPLIED: u32 = 1;
 /// The system goes down: the module turns its outputs off
 /// (`drm_atomic_helper_shutdown`), so the firmware finds the display as at
 /// power-on; an HDMI sink scrambling at 4K is told to stop.
@@ -127,6 +140,8 @@ pub const CAP_JPEG: i32 = 64;
 /// shadow on screen; every update is drawn into the other one and
 /// presented whole (`framebuffer::begin_partial`).
 pub const CAP_FLIP: i32 = 128;
+/// The module shows layers on the display's planes (`OP_LAYERS`).
+pub const CAP_LAYERS: i32 = 256;
 const FIXED_BOS: u32 = 3;
 const JOB_TIMEOUT_MS: u64 = 100;
 /// A job the module took past `JOB_TIMEOUT_MS`: how much longer its buffers
@@ -136,8 +151,10 @@ const HOLD_TIMEOUT_MS: u64 = 2000;
 /// Binding a new buffer is a page walk per 4 KB page in the module, once.
 const BIND_TIMEOUT_MS: u64 = 2000;
 const DRIVER_NAME: &str = "gpudev (driver module)";
-/// XRGB8888, the only format the compositor writes.
+/// The formats the compositor writes: XRGB8888, and premultiplied
+/// ARGB8888 for a layer (`OP_LAYERS`).
 const FORMAT_XRGB8888: u32 = 0x3432_5258;
+pub const FORMAT_ARGB8888: u32 = 0x3432_5241;
 const PAGE: u64 = 4096;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -326,6 +343,10 @@ static BACKLIGHT: AtomicBool = AtomicBool::new(false);
 static JPEG: AtomicBool = AtomicBool::new(false);
 /// It presents by flipping between the shadows (`CAP_FLIP`).
 static FLIP: AtomicBool = AtomicBool::new(false);
+static LAYERS: AtomicBool = AtomicBool::new(false);
+/// The display shows the compositor's layers (`shade::layers`): a copy to
+/// the framebuffer would flip a shadow over them.
+static LAYERS_SHOWN: AtomicBool = AtomicBool::new(false);
 static NEXT_SEQ: AtomicU32 = AtomicU32::new(1);
 /// Every job up to this sequence number is completed. Jobs that touch a
 /// buffer complete in order; a job without buffers (a guest's ccmd waiting
@@ -777,11 +798,13 @@ pub fn ready(dev: DevId, caps: i32) -> i32 {
     BACKLIGHT.store(caps & CAP_BACKLIGHT != 0, Ordering::Release);
     JPEG.store(caps & CAP_JPEG != 0, Ordering::Release);
     FLIP.store(caps & CAP_PRESENT != 0 && caps & CAP_FLIP != 0, Ordering::Release);
-    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}{}{}",
+    LAYERS.store(caps & CAP_PRESENT != 0 && caps & CAP_LAYERS != 0, Ordering::Release);
+    crate::kprintln!("[npk] gpudev: module ready, compositor copies on the GPU{}{}{}{}{}{}{}",
         if caps & CAP_SCENE != 0 { ", scenes offered" } else { "" },
         if caps & CAP_CURSOR != 0 { ", hardware cursor" } else { "" },
         if caps & CAP_FLIP != 0 && caps & CAP_PRESENT != 0 { ", the shadows flipped on screen" }
         else if caps & CAP_PRESENT != 0 { ", presented by flips" } else { "" },
+        if caps & CAP_LAYERS != 0 && caps & CAP_PRESENT != 0 { ", layers on the display's planes" } else { "" },
         if caps & CAP_BACKLIGHT != 0 { ", backlight" } else { "" },
         if caps & CAP_JPEG != 0 { ", JPEG decode" } else { "" },
         if caps & CAP_NATIVE == 0 { "" }
@@ -967,6 +990,8 @@ pub fn module_gone(dev: DevId) {
     NATIVE.store(false, Ordering::Release);
     CURSOR.store(false, Ordering::Release);
     PRESENT.store(false, Ordering::Release);
+    LAYERS.store(false, Ordering::Release);
+    LAYERS_SHOWN.store(false, Ordering::Release);
     BACKLIGHT.store(false, Ordering::Release);
     RINGS.lock().clear();
     WAKER.store(NO_WAKER, Ordering::Release);
@@ -1024,6 +1049,11 @@ fn queue_job(st: &mut State, op: u32, a: [u32; 6], payload: Option<Vec<u8>>, tou
 /// registering it with the module on first use. None when there is no
 /// module serving scenes, or the module could not bind it.
 pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Option<u32> {
+    bo_for_format(addr, size, width, height, pitch, FORMAT_XRGB8888)
+}
+
+/// `bo_for` for a buffer of pixels in `format` (`FORMAT_*`).
+pub fn bo_for_format(addr: u64, size: u64, width: u32, height: u32, pitch: u32, format: u32) -> Option<u32> {
     if !SCENES.load(Ordering::Acquire) || addr == 0 || size == 0 {
         return None;
     }
@@ -1031,13 +1061,14 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
     st.owner?;
     // A fixed buffer is named by its own handle.
     if let Some((&id, _)) = st.bos.iter().take(FIXED_BOS as usize)
-        .find(|(id, b)| **id != 0 && b.addr == addr && b.pitch == pitch && b.width == width && b.height == height)
+        .find(|(id, b)| **id != 0 && b.addr == addr && b.pitch == pitch && b.width == width && b.height == height
+            && b.format == format)
     {
         return Some(id);
     }
     if let Some(&id) = st.by_addr.get(&addr) {
         let bo = st.bos.get(&id).copied()?;
-        if bo.size == size && bo.width == width && bo.height == height && bo.pitch == pitch {
+        if bo.size == size && bo.width == width && bo.height == height && bo.pitch == pitch && bo.format == format {
             if bo.state == BoState::Failed {
                 return None;
             }
@@ -1054,7 +1085,7 @@ pub fn bo_for(addr: u64, size: u64, width: u32, height: u32, pitch: u32) -> Opti
     let id = st.next_id;
     st.next_id += 1;
     st.bos.insert(id, Bo {
-        addr, size, pitch, width, height, format: FORMAT_XRGB8888,
+        addr, size, pitch, width, height, format,
         gpu_addr: None, state: BoState::Adding, fence: 0,
     });
     st.by_addr.insert(addr, id);
@@ -1610,6 +1641,61 @@ pub fn submit_scene(target: u32, payload: Vec<u8>, sources: &[u32]) -> Option<u3
     };
     wake_module();
     Some(seq)
+}
+
+/// One layer of `submit_layers`: buffer `bo` from (`sx`, `sy`), `w` x `h`
+/// pixels, shown at (`x`, `y`) on the screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layer {
+    pub bo: u32,
+    pub sx: u32,
+    pub sy: u32,
+    pub w: u32,
+    pub h: u32,
+    pub x: i32,
+    pub y: i32,
+    pub premultiplied: bool,
+}
+
+/// Whether the module shows layers on the display's planes (`CAP_LAYERS`).
+pub fn layers_supported() -> bool {
+    READY.load(Ordering::Acquire) && LAYERS.load(Ordering::Acquire)
+}
+
+/// Queue the commit of `layers`, bottom to top (`OP_LAYERS`): it is done
+/// in order after the jobs queued before it, so the scenes that drew the
+/// layers come first. Its seq, for `wait_layers`.
+pub fn submit_layers(layers: &[Layer]) -> Option<u32> {
+    if !layers_supported() || layers.is_empty() || stalled() {
+        return None;
+    }
+    let mut payload = Vec::with_capacity(layers.len() * LAYER_WORDS * 4);
+    for l in layers {
+        let flags = if l.premultiplied { LAYER_PREMULTIPLIED } else { 0 };
+        for w in [l.bo, l.sx, l.sy, l.w, l.h, l.x as u32, l.y as u32, flags] {
+            payload.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    let bos: Vec<u32> = layers.iter().map(|l| l.bo).collect();
+    let seq = {
+        let mut st = STATE.lock();
+        st.owner?;
+        queue_job(&mut st, OP_LAYERS, [layers.len() as u32, 0, 0, 0, 0, 0], Some(payload), &bos)
+    };
+    wake_module();
+    Some(seq)
+}
+
+/// The compositor shows layers (true) or the shadows again (false).
+pub fn set_layers_shown(on: bool) {
+    LAYERS_SHOWN.store(on, Ordering::Release);
+}
+
+/// Wait for the commit `seq` of `submit_layers`: 0 once the flip is done,
+/// else why not.
+#[track_caller]
+pub fn wait_layers(seq: u32) -> i32 {
+    wait_seq(seq, deadline())
 }
 
 /// Whether the display scans the front shadow itself (`CAP_FLIP`).
@@ -2601,6 +2687,10 @@ impl GpuHal for GpudevDriver {
 
     fn blit_rect_hw(&mut self, src_gpu: u64, src_pitch: u32, dst_gpu: u64, dst_pitch: u32,
                     x: u32, y: u32, w: u32, h: u32) -> bool {
+        // Layers on screen: what a shadow holds is not shown.
+        if LAYERS_SHOWN.load(Ordering::Acquire) && dst_gpu == self.fb_gpu_addr() {
+            return true;
+        }
         submit_copy(src_gpu, src_pitch, dst_gpu, dst_pitch, x, y, w, h)
     }
 
