@@ -1,4 +1,4 @@
-issued=1794735916
+issued=1794736419
 
 [acpi]
 version=0.9.0
@@ -62,9 +62,9 @@ firmware=amdgpu/renoir_ta.bin 46080 9c85695ab3bed8cfc79d0797c93ea0d5edf9af91d94e
 firmware=amdgpu/renoir_vcn.bin 405952 3d9ad3edc096e025ff9e1261faa4bff76147874d609f5f415d97cc3f186a8f9d1f9d283d6cfffa2571c43c4f3d3be9b0
 
 [gpu_bcm2712]
-version=0.20.0
-size=436145
-sha384=a154923a04b1205a08a695ff13ec8363013655401a7f5777201a4a0d7b616061157c1929565ba10b2127d3269611e8ba
+version=0.21.0
+size=436863
+sha384=defcde5dfb4ffdad2e5c303f85936bf7cade92c66adc294a5a6f057174999dbfb21d9593c545da8a3af4d32fe70025eb
 
 [gpu_intel_tgl]
 version=0.39.0
