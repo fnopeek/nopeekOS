@@ -193,6 +193,12 @@ pub struct Pass<'a> {
     pub rev: u32,
     pub image: Image,
     pub load: bool,
+    /// The tiles loaded from another raster image of the same format
+    /// instead (its address and stride in bytes), as v3dv's TLB copies
+    /// load one image and store another (v3dvx_meta_common.c
+    /// `emit_image_load`): the pass starts from that image's pixels. Only
+    /// for a tile-aligned render area, whose tiles hold no pixel outside it.
+    pub load_from: Option<(u32, u32)>,
     pub render_area: Rect,
     pub viewport: Viewport,
     pub scissor: Rect,
@@ -1381,7 +1387,7 @@ impl Recorder<'_, '_> {
     /// job runs the attachment's only subpass from its start, so loadOp
     /// LOAD decides (and a store outside a tile-aligned area would too).
     fn color_needs_load(&self) -> bool {
-        (!self.tile_aligned_render_area && self.color_needs_store()) || self.pass.load
+        (!self.tile_aligned_render_area && self.color_needs_store()) || self.pass.load || self.pass.load_from.is_some()
     }
 
     /// `v3dv_cmd_buffer_check_needs_store` for the colour attachment in the
@@ -1518,14 +1524,15 @@ impl Recorder<'_, '_> {
         // raster image.
         let img = self.pass.image;
         if self.color_needs_load() {
+            let (va, stride) = self.pass.load_from.unwrap_or((img.va, img.stride));
             emit!(self.indirect, LoadTileBufferGeneral {
                 buffer_to_load: RENDER_TARGET_0,
-                address: img.va,
+                address: va,
                 input_image_format: RT_OUTPUT_FORMAT,
                 r_b_swap: false,
                 channel_reverse: false,
                 memory_format: memory_format::RASTER,
-                height_in_ub_or_stride: img.stride,
+                height_in_ub_or_stride: stride,
                 decimate_mode: decimate_mode::SAMPLE_0,
                 ..Default::default()
             });

@@ -56,6 +56,24 @@ uint g_height;
 // The word of the blurred wallpaper (background.rs BLURRED, which glass
 // reads too) that screen pixel (x, y) shows: it holds every second pixel
 // each way (GLASS_SHIFT), `pitch` in words.
+#ifdef V3D_ARITH
+// V3D_SMALL: the module picks this program only for items whose radius
+// and glow band fit 32 bits (scene.rs `wide`), so the 64-bit paths fall
+// away; else they stay behind a check.
+#ifndef V3D_SMALL
+#define V3D_SMALL false
+#endif
+
+// n / d for n below 2^24 and a quotient below 2^16, which V3D otherwise
+// divides in software: the float quotient (Vulkan: 2.5 ULP) is within one
+// of it, and one step each way makes it exact.
+uint udiv_small(uint n, uint d) {
+    uint q = uint(float(n) / float(d));
+    uint r = n - FIT(q, 0xFFFFFFu) * FIT(d, 0xFFFFFFu);
+    return int(r) < 0 ? q - 1u : (r >= d ? q + 1u : q);
+}
+#endif
+
 #define BLURRED_AT(pitch, x, y) (((y) >> 1u) * (pitch) + ((x) >> 1u))
 
 // render::blend, alpha 0..=256.
@@ -79,7 +97,12 @@ uint glass_blend_l(uint fg, uint lf, uint bg, uint alpha, uint ceil_) {
     uint lb = luma(bg);
     if (ceil_ < 255u && lb > ceil_ && lf < ceil_) {
         uint d = lb - lf;
+#ifdef V3D_ARITH
+        // At most 256 here, as lf < ceil_ < lb.
+        uint need = udiv_small(FIT((lb - ceil_) * 256u + d - 1u, 0x1FFFFu), d);
+#else
         uint need = ((lb - ceil_) * 256u + d - 1u) / d;
+#endif
         a = max(a, min(need, 256u));
     }
     return blend(fg, bg, a);
@@ -171,8 +194,16 @@ uint lerp_color(uint a, uint b, uint t) {
 }
 
 // Floor of the square root of a 32-bit value: a float estimate, corrected.
+// With V3D_ARITH one step each way, as the estimate is within one of it
+// (Vulkan: 3 ULP), and the squares on the 24-bit multiply.
 uint isqrt32(uint n) {
     uint x = min(uint(sqrt(float(n))), 65535u);
+#ifdef V3D_ARITH
+    if (FIT(x, 0xFFFFu) * FIT(x, 0xFFFFu) > n)
+        return x - 1u;
+    uint x1 = FIT(x + 1u, 0xFFFFu);
+    return x < 65535u && x1 * x1 <= n ? x + 1u : x;
+#endif
     for (int i = 0; i < 4 && x * x > n; i++)
         x--;
     for (int i = 0; i < 4 && x < 65535u && (x + 1u) * (x + 1u) <= n; i++)
@@ -193,15 +224,32 @@ uint isqrt(uint64_t n) {
 }
 
 // render::arc_coverage_sdf.
+// The callers pass 0 <= cdx, cdy < r_q8; with V3D_ARITH a radius up to
+// 180 pixels keeps the sum of squares within 32 bits.
 uint arc_coverage(int cdx, int cdy, int r_q8) {
-    uint64_t d2 = uint64_t(int64_t(cdx) * int64_t(cdx)) + uint64_t(int64_t(cdy) * int64_t(cdy));
-    int d = int(isqrt(d2));
+    int d;
+#ifdef V3D_ARITH
+    if (V3D_SMALL || r_q8 <= 180 * 256) {
+        uint ux = FIT(uint(cdx), 0xFFFFu), uy = FIT(uint(cdy), 0xFFFFu);
+        d = int(isqrt32(ux * ux + uy * uy));
+    } else
+#endif
+    {
+        uint64_t d2 = uint64_t(int64_t(cdx) * int64_t(cdx)) + uint64_t(int64_t(cdy) * int64_t(cdy));
+        d = int(isqrt(d2));
+    }
     int s = d - r_q8;
     if (s <= -150)
         return 256u;
     if (s >= 150)
         return 0u;
+#ifdef V3D_ARITH
+    // (s + 150) * 256 / 300 as * 64 / 75, by multiply and shift, exact
+    // for 0 < s + 150 < 300.
+    uint t = (FIT(uint(s + 150) * 64u, 0xFFFFu) * 27963u) >> 21u;
+#else
     uint t = uint((s + 150) * 256 / 300);
+#endif
     uint smoothed = t * t * (768u - 2u * t) / 65536u;
     return smoothed >= 256u ? 0u : 256u - smoothed;
 }
@@ -259,10 +307,30 @@ ITEM_RESULT glow(Blk it, uint x, uint y ITEM_PIXEL) {
     if (rect_coverage(x, y, rx, ry, rw, rh, r) > 0u)
         return KEEP;
     int band_q8 = int(width) * 256;
-    int d = max(rrect_distance(x, y, rx, ry, rw, rh, r), 0);
-    if (d >= band_q8)
-        return KEEP;
-    uint f = min(uint((band_q8 + 128 - d) * 256 / band_q8), 256u);
+    int d;
+    uint f;
+#ifdef V3D_ARITH
+    // Within the glow's rect both distances to the inner rect are below
+    // (r + width) * 256: up to 181 pixels their squares sum within 32
+    // bits, and the division takes less than 2^24.
+    if (V3D_SMALL || r + width <= 181u) {
+        int pcx = int(x) * 256 + 128, pcy = int(y) * 256 + 128;
+        uint qx = uint(max(max(int(rx + r) * 256 - pcx, pcx - int(rx + rw - r) * 256), 0));
+        uint qy = uint(max(max(int(ry + r) * 256 - pcy, pcy - int(ry + rh - r) * 256), 0));
+        qx = FIT(qx, 0xFFFFu);
+        qy = FIT(qy, 0xFFFFu);
+        d = max(int(isqrt32(qx * qx + qy * qy)) - int(r) * 256, 0);
+        if (d >= band_q8)
+            return KEEP;
+        f = min(udiv_small(FIT(uint(band_q8 + 128 - d) * 256u, 0xFFFFFFu), uint(band_q8)), 256u);
+    } else
+#endif
+    {
+        d = max(rrect_distance(x, y, rx, ry, rw, rh, r), 0);
+        if (d >= band_q8)
+            return KEEP;
+        f = min(uint((band_q8 + 128 - d) * 256 / band_q8), 256u);
+    }
     uint a = alpha * f / 256u;
     return a > 0u ? BLEND(color, min(a, 256u)) : KEEP;
 }
@@ -277,13 +345,25 @@ ITEM_RESULT glass_backdrop(Blk it, uint x, uint y ITEM_PIXEL) {
         return KEEP;
     uint ly = y - ry;
     uint from_edge = ly < r ? r - ly : (ly >= rh - r ? ly + 1u - (rh - r) : 0u);
+#ifdef V3D_ARITH
+    uint inset = from_edge == 0u ? 0u : r - isqrt32(r * r - min(from_edge * from_edge, r * r));
+#else
     uint inset = from_edge == 0u ? 0u : r - isqrt(uint64_t(r * r - min(from_edge * from_edge, r * r)));
+#endif
     uint x0 = rx + inset;
     uint x1 = rx + rw >= inset ? rx + rw - inset : 0u;
     if (x < x0 || x >= x1)
         return KEEP;
     return SET(g_blur.v[BLURRED_AT(g_blur_pitch, x, y)]);
 }
+
+// The border's position along the diagonal, d * 1000 / diag_max; small
+// chromes (V3D_SMALL, w + h below 16384) divide in float.
+#ifdef V3D_ARITH
+#define CHROME_DIAG(d, diag_max) (V3D_SMALL ? udiv_small(FIT((d) * 1000u, 0xFFFFFFu), (diag_max)) : (d) * 1000u / (diag_max))
+#else
+#define CHROME_DIAG(d, diag_max) ((d) * 1000u / (diag_max))
+#endif
 
 // render::fill_rounded_chrome_aa at one pixel.
 ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
@@ -321,7 +401,7 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
             uint wpx = g_glass.v[BLURRED_AT(g_glass_pitch, px, py)];
             return SET(glass_blend(glass_fill, wpx, go, ceil_));
         }
-        uint bc = solid ? border_a : lerp_color(border_a, border_b, ((px - x) + (py - y)) * 1000u / diag_max);
+        uint bc = solid ? border_a : lerp_color(border_a, border_b, CHROME_DIAG((px - x) + (py - y), diag_max));
         return BLEND_GLASS(bc, bo, glass_fill, go, ceil_);
     }
 
@@ -329,7 +409,7 @@ ITEM_RESULT chrome(Blk it, uint px, uint py ITEM_PIXEL) {
     if (outer == 0u)
         return KEEP;
     uint border_color = solid ? border_a
-        : lerp_color(border_a, border_b, min(((px - x) + (py - y)) * 1000u / diag_max, 1000u));
+        : lerp_color(border_a, border_b, min(CHROME_DIAG((px - x) + (py - y), diag_max), 1000u));
     if (outer < 256u)
         return BLEND(border_color, min(outer * bo / 256u, 255u));
     uint inner = border_px == 0u ? 256u : rect_coverage(px, py, inner_x, inner_y, inner_w, inner_h, r_in);
@@ -351,6 +431,21 @@ ITEM_RESULT chrome_glass(uint px, uint py, uint fill, uint fill_luma, uint go) {
     // as in `text_inside`.
     uint at = BLURRED_AT(g_glass_pitch, min(px, g_width - 1u), min(py, g_height - 1u));
     return SET(glass_blend_l(fill, fill_luma, g_glass.v[at], go, g_ceil));
+}
+
+// `chrome_glass` once per word of the glass source, for a layer the
+// module keeps per wallpaper and glass fill (scene.rs `GlassLayers`): word
+// (x, y) of the layer is what `chrome_glass` makes of word (x, y) of the
+// source. The layer is the source's size; a helper pixel past it reads its
+// last word.
+ITEM_RESULT glass_layer(uint x, uint y, uint fill, uint fill_luma, uint go) {
+    uint at = min(y, g_height - 1u) * g_glass_pitch + min(x, g_width - 1u);
+    return SET(glass_blend_l(fill, fill_luma, g_glass.v[at], go, g_ceil));
+}
+
+// `chrome_glass` read from such a layer (`g_glass`, its pitch in words).
+ITEM_RESULT chrome_glass_layer(uint px, uint py) {
+    return SET(g_glass.v[BLURRED_AT(g_glass_pitch, min(px, g_width - 1u), min(py, g_height - 1u))]);
 }
 
 // scene::yuv_pixel: one pixel of packed YUYV as 0xFFRRGGBB; kind 2 full

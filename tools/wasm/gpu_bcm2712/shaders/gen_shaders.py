@@ -281,7 +281,10 @@ def compile_all():
     return progs
 
 
-DRAW_KINDS = range(1, 12)
+# The item kinds, then the kinds whose program has a 64-bit path for large
+# radii, as KIND + 16 with that path kept (draw.frag V3D_SMALL).
+WIDE_KINDS = (2, 4, 5, 8)
+DRAW_KINDS = list(range(1, 15)) + [k + 16 for k in WIDE_KINDS]
 
 
 def compile_draws():

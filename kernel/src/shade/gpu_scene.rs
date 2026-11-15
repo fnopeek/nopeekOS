@@ -706,7 +706,7 @@ pub(crate) fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage
     let damage: Vec<Rect> = damage.iter().map(|d| d.intersect(&screen)).filter(|d| !d.is_empty()).collect();
     let mut out = Vec::with_capacity(HEADER + damage.len() * 16 + items.len() * ITEM + glyphs.len());
     put(&mut out, &[MAGIC, items.len() as u32, damage.len() as u32, glyphs.len() as u32, flags, wall, blur, glass,
-        0, ink.ceil, ink.tint, ink.tint_w, info.width, info.height, 0, 0]);
+        0, ink.ceil, ink.tint, ink.tint_w, info.width, info.height, crate::gui::background::wallpaper_generation(), 0]);
     for d in &damage {
         put(&mut out, &[d.x, d.y, d.w, d.h]);
     }

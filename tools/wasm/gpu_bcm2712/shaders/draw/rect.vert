@@ -1,7 +1,7 @@
 #version 460
 // The rectangle of one draw as a triangle strip of four vertices, from
 // pixel coordinates to the viewport's normalized ones, and what a chrome
-// item's glass (kinds 10 and 11, items.glsl `chrome_glass`) takes from it
+// item's glass (kinds 10 to 12, items.glsl `chrome_glass`) takes from it
 // once for the draw: its tinted fill and that fill's luma.
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require

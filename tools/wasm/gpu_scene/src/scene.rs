@@ -55,20 +55,24 @@ const KIND_CLOSE_GLYPH: u32 = 9;
 const F_TARGET: usize = 0;
 const F_TARGET_PITCH: usize = 2;
 pub const F_FLAGS: usize = 3;
-const F_WALL: usize = 4;
-const F_WALL_PITCH: usize = 6;
+pub const F_WALL: usize = 4;
+pub const F_WALL_PITCH: usize = 6;
 const F_BLUR: usize = 7;
 const F_BLUR_PITCH: usize = 9;
-const F_GLASS: usize = 10;
-const F_GLASS_PITCH: usize = 12;
-const F_INK_CEIL: usize = 13;
-const F_INK_TINT: usize = 14;
-const F_INK_TINT_W: usize = 15;
+pub const F_GLASS: usize = 10;
+pub const F_GLASS_PITCH: usize = 12;
+pub const F_INK_CEIL: usize = 13;
+pub const F_INK_TINT: usize = 14;
+pub const F_INK_TINT_W: usize = 15;
 const F_WIDTH: usize = 16;
 const F_HEIGHT: usize = 17;
 const F_GLYPHS: usize = 18;
+/// The generation of the blurred wallpaper the glass source holds (the
+/// kernel's `wallpaper_generation`), 0 when unknown: the same buffer holds
+/// another wallpaper after two changes.
+pub const F_GLASS_GEN: usize = 20;
 pub const FRAME_BYTES: u32 = 128;
-const FLAG_WALL: u32 = 1;
+pub const FLAG_WALL: u32 = 1;
 const FLAG_BLURRED: u32 = 2;
 pub const FLAG_GLASS: u32 = 4;
 
@@ -236,6 +240,7 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
     frame[F_WIDTH] = width;
     frame[F_HEIGHT] = height;
     set64(&mut frame, F_GLYPHS, mem.va() + glyphs_at);
+    frame[F_GLASS_GEN] = rd(&hdr, 14);
     let mut fb = [0u8; FRAME_BYTES as usize];
     for (i, v) in frame.iter().enumerate() {
         fb[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());

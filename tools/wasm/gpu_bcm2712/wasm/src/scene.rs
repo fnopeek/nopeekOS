@@ -37,7 +37,11 @@ const SCENE_PAGES: u32 = 16;
 const FREE_BOS_KEPT: usize = 24;
 /// draw.frag's kinds: the scene's item kinds 1..=9, 10, the straight-row
 /// part of a chrome item, and 11; the pipeline of kind k is at k - 1.
-const DRAW_KINDS: usize = 11;
+const DRAW_KINDS: usize = 14;
+/// The kinds with a second program for radii beyond 32-bit arithmetic
+/// (draw.frag KIND + 16, gen_shaders.py WIDE_KINDS), after the others.
+const WIDE_KINDS: [usize; 4] = [2, 4, 5, 8];
+const PIPELINES: usize = DRAW_KINDS + WIDE_KINDS.len();
 const ITEM_KINDS: usize = 9;
 const KIND_CHROME_INSIDE: usize = 10;
 /// The straight-row part of a chrome item with a text item over it
@@ -45,6 +49,25 @@ const KIND_CHROME_INSIDE: usize = 10;
 /// (draw.h.glsl `item2`).
 const KIND_WINDOW_INSIDE: usize = 11;
 const ITEM2_PUSH: usize = gpu_scene::scene::DRAW_PUSH_WORDS;
+/// A glass layer built (`GlassLayer`), and kinds 10 and 11 reading one.
+const KIND_GLASS_LAYER: usize = 12;
+const KIND_CHROME_INSIDE_LAYER: usize = 13;
+const KIND_WINDOW_INSIDE_LAYER: usize = 14;
+/// Glass layers kept: a window's glass fill differs with its focus.
+const GLASS_LAYERS: usize = 3;
+
+/// What a chrome item's straight rows make of the glass source
+/// (items.glsl `glass_layer`), once for every word of it, so kinds 13 and
+/// 14 only read it: per glass source and its wallpaper generation, and per
+/// what the glass branch takes from item and frame (fill, its tint, the
+/// opacity, the ink ceiling). The layer has the source's geometry.
+struct GlassLayer {
+    /// All zero while the slot holds none.
+    key: [u32; 9],
+    buf: Option<Buf>,
+    /// The fence of the last pass that read it.
+    used: Fence,
+}
 /// Programs start at this alignment in the code buffer.
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
@@ -144,8 +167,9 @@ pub struct Composer {
     /// The draw programs (`sg::DRAW_PIPELINES`) and a pipeline per kind
     /// with their addresses.
     draw_code: Buf,
-    pipelines: [v3d_draw::Pipeline; DRAW_KINDS],
+    pipelines: [v3d_draw::Pipeline; PIPELINES],
     bos: BoPool,
+    glass: Vec<GlassLayer>,
     spill: Option<Buf>,
     /// Dispatches since the composer started.
     pub dispatches: u64,
@@ -156,7 +180,7 @@ pub struct Composer {
 
 /// The draw programs into one buffer, each at `CODE_ALIGN`, and the
 /// pipeline of every kind pointing at its three.
-fn upload_draw_programs() -> Option<(Buf, [v3d_draw::Pipeline; DRAW_KINDS])> {
+fn upload_draw_programs() -> Option<(Buf, [v3d_draw::Pipeline; PIPELINES])> {
     let mut code: Vec<u8> = Vec::new();
     let mut placed: Vec<(*const u64, u32)> = Vec::new();
     let mut place = |qpu: &'static [u64]| -> u32 {
@@ -169,9 +193,13 @@ fn upload_draw_programs() -> Option<(Buf, [v3d_draw::Pipeline; DRAW_KINDS])> {
         placed.push((qpu.as_ptr(), at));
         at
     };
-    let mut at = [[0u32; 3]; DRAW_KINDS];
-    for (k, g) in sg::DRAW_PIPELINES.iter().enumerate().take(DRAW_KINDS) {
-        if g.kind as usize != k + 1 {
+    if sg::DRAW_PIPELINES.len() != PIPELINES {
+        return None;
+    }
+    let mut at = [[0u32; 3]; PIPELINES];
+    for (k, g) in sg::DRAW_PIPELINES.iter().enumerate() {
+        let want = if k < DRAW_KINDS { k + 1 } else { WIDE_KINDS[k - DRAW_KINDS] + 16 };
+        if g.kind as usize != want {
             return None;
         }
         at[k] = [place(g.vs.qpu), place(g.cs.qpu), place(g.fs.qpu)];
@@ -180,8 +208,8 @@ fn upload_draw_programs() -> Option<(Buf, [v3d_draw::Pipeline; DRAW_KINDS])> {
     if !buf.write(0, &code) {
         return None;
     }
-    let mut pipelines = [v3d_draw::Pipeline::default(); DRAW_KINDS];
-    for (k, g) in sg::DRAW_PIPELINES.iter().enumerate().take(DRAW_KINDS) {
+    let mut pipelines = [v3d_draw::Pipeline::default(); PIPELINES];
+    for (k, g) in sg::DRAW_PIPELINES.iter().enumerate() {
         pipelines[k] = v3d_draw::Pipeline {
             vs: v3d_draw::Variant { code: buf.va + at[k][0], prog: g.vs.prog },
             cs: v3d_draw::Variant { code: buf.va + at[k][1], prog: g.cs.prog },
@@ -314,6 +342,7 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         draw_code,
         pipelines,
         bos: BoPool { free: Vec::new(), job: Vec::new(), held: Vec::new() },
+        glass: Vec::new(),
         spill,
         dispatches: 0,
         trace: None,
@@ -343,6 +372,9 @@ impl Composer {
         }
         let held: Vec<Buf> = self.bos.held.drain(..).flat_map(|(_, b)| b).collect();
         for b in self.bos.free.drain(..).chain(self.bos.job.drain(..)).chain(held) {
+            b.free();
+        }
+        for b in self.glass.drain(..).filter_map(|g| g.buf) {
             b.free();
         }
         for b in [self.code, self.draw_code, self.uniforms, self.scene] {
@@ -491,6 +523,12 @@ impl Composer {
     /// cache clean v3dv asks for when a program wrote through the TMU).
     pub fn submit_draws(&mut self, hw: &mut PiHw, image: v3d_draw::Image, load: bool, area: v3d_draw::Rect,
                         draws: &[v3d_draw::Draw]) -> Result<Fence, i32> {
+        self.submit_pass(hw, image, load, None, area, draws)
+    }
+
+    /// `submit_draws` with the tiles loaded from `load_from` (`Pass`).
+    fn submit_pass(&mut self, hw: &mut PiHw, image: v3d_draw::Image, load: bool, load_from: Option<(u32, u32)>,
+                   area: v3d_draw::Rect, draws: &[v3d_draw::Draw]) -> Result<Fence, i32> {
         self.power_up(hw)?;
         if self.perf_armed && !self.perf_active {
             self.perf_start(hw);
@@ -503,6 +541,7 @@ impl Composer {
             rev: self.rev,
             image,
             load,
+            load_from,
             render_area: area,
             viewport,
             scissor: v3d_draw::Rect { x: 0, y: 0, width: image.width, height: image.height },
@@ -778,7 +817,21 @@ impl Composer {
             d.push[ITEM2_PUSH..ITEM2_PUSH + 16].copy_from_slice(&text.push[4..20]);
             d
         };
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 14] = [
+        // The same two read from a glass layer (kinds 13 and 14), this
+        // buffer standing in for it.
+        let layer_inside = {
+            let mut d = glass_inside;
+            d.pipeline = KIND_CHROME_INSIDE_LAYER - 1;
+            d
+        };
+        let window_inside_layer = {
+            let mut d = window_inside;
+            d.pipeline = KIND_WINDOW_INSIDE_LAYER - 1;
+            d
+        };
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 16] = [
+            ("fill + chrome inside from a glass layer", false, alloc::vec![opaque, layer_inside]),
+            ("fill + both in one pass from a glass layer", false, alloc::vec![opaque, window_inside_layer]),
             ("fill + chrome inside over glass", false, alloc::vec![opaque, glass_inside]),
             ("fill + chrome inside over glass + empty text", false, alloc::vec![opaque, glass_inside, text]),
             ("fill + both in one pass", false, alloc::vec![opaque, window_inside]),
@@ -953,6 +1006,63 @@ impl Composer {
         }
     }
 
+    /// The glass layer of chrome item `i` (`GlassLayer`), built first when
+    /// none is kept: its index in `glass`, which stays. None when the
+    /// scene gives no generation for its glass source, memory is short, or
+    /// every layer is still read by a pass or taken by this one (`taken`);
+    /// kinds 10 and 11 then work the glass out.
+    fn glass_layer(&mut self, hw: &mut PiHw, ck: &gpu_scene::scene::checked, i: usize, taken: &[Option<usize>])
+                   -> Option<usize> {
+        use gpu_scene::scene::{F_GLASS, F_GLASS_GEN, F_GLASS_PITCH, F_INK_CEIL, F_INK_TINT, F_INK_TINT_W};
+        let (f, w) = (&ck.frame, &ck.items[i]);
+        if f[F_GLASS_GEN] == 0 {
+            return None;
+        }
+        // rect.vert's fill and luma, chrome_glass's opacity, the ceiling.
+        let tint_w = if w[12] != 0 { f[F_INK_TINT_W] } else { 0 };
+        let key = [f[F_GLASS], f[F_GLASS + 1], f[F_GLASS_GEN], w[7], f[F_INK_TINT], tint_w, w[11].min(255),
+                   f[F_INK_CEIL], f[F_GLASS_PITCH]];
+        if let Some(k) = self.glass.iter().position(|g| g.key == key) {
+            return Some(k);
+        }
+        let (width, height) = (ck.width.div_ceil(2), ck.height.div_ceil(2));
+        let pitch = f[F_GLASS_PITCH];
+        let pages = (pitch as u64 * 4 * height as u64).div_ceil(PAGE as u64) as u32;
+        // A new slot, or the one read longest ago once that pass is done;
+        // a slot stays where it is, as `taken` holds indices.
+        if self.glass.len() < GLASS_LAYERS {
+            self.glass.push(GlassLayer { key: [0; 9], buf: None, used: 0 });
+        }
+        let k = (0..self.glass.len())
+            .filter(|&k| self.sched.signaled(self.glass[k].used) && !taken.contains(&Some(k)))
+            .min_by_key(|&k| (self.glass[k].buf.is_some(), self.glass[k].used))?;
+        let g = &mut self.glass[k];
+        g.key = [0; 9];
+        let buf = match g.buf.take() {
+            Some(b) if b.bytes >= pages * PAGE => b,
+            old => {
+                if let Some(b) = old {
+                    b.free();
+                }
+                Buf::new(pages)?
+            }
+        };
+        let mut push = [0u32; v3d_draw::PUSH_WORDS];
+        let all = rect { x: 0, y: 0, w: width, h: height };
+        push[..gpu_scene::scene::DRAW_PUSH_WORDS].copy_from_slice(&gpu_scene::scene::draw_push(ck, i, &all));
+        push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = width;
+        push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = height;
+        let draw = v3d_draw::Draw { pipeline: KIND_GLASS_LAYER - 1, push, vertex_count: 4 };
+        let image = v3d_draw::Image { va: buf.va, stride: pitch * 4, width, height };
+        let area = v3d_draw::Rect { x: 0, y: 0, width, height };
+        let r = self.submit_draws(hw, image, false, area, &[draw]);
+        let g = &mut self.glass[k];
+        g.buf = Some(buf);
+        let used = r.ok()?;
+        (g.key, g.used) = (key, used);
+        Some(k)
+    }
+
     /// `OP_SCENE` of job `seq`: `bytes` of scene into buffer `target`,
     /// checked, planned and queued. The dispatches and the fence of the
     /// last; the scene memory is the previous scene's until that finished,
@@ -1003,6 +1113,25 @@ impl gpu_scene::scene::scene_buffer for SceneMem<'_> {
     }
 }
 
+/// The pipeline that draws `kind` for item `w`: the kind's own, or for a
+/// radius, glow band or size beyond what its program computes in 32 bits
+/// (items.glsl V3D_SMALL) the one that keeps the 64-bit paths.
+fn pipeline(kind: usize, w: &[u32]) -> usize {
+    let wide = match kind {
+        // Item::Glow: radius + band; Item::Chrome: rounding, and w + h for
+        // the border's diagonal; Item::Content, Item::Fill: radius.
+        2 => w[5].saturating_add(w[7]) > 181,
+        4 => w[8] > 180 || w[3].saturating_add(w[4]) >= 16384,
+        5 => w[5] > 180,
+        8 => w[7] > 180,
+        _ => false,
+    };
+    match WIDE_KINDS.iter().position(|&k| k == kind) {
+        Some(i) if wide => DRAW_KINDS + i,
+        _ => kind - 1,
+    }
+}
+
 /// plan.rs's steps: each one render pass.
 struct Sink<'a> {
     c: &'a mut Composer,
@@ -1020,14 +1149,35 @@ impl plan::draw_sink for Sink<'_> {
         // them reaches.
         let mut fused: Vec<Option<(usize, rect)>> = alloc::vec![None; end];
         let mut fused_into: Vec<rect> = alloc::vec![plan::EMPTY; end];
+        // And its glass layer, which kinds 13 and 14 read instead.
+        let mut layer: Vec<Option<usize>> = alloc::vec![None; end];
         for i in 0..end {
             if ck.items[i][0] == gpu_scene::scene::KIND_CHROME && over_glass(ck, i) {
                 if let Some((j, f)) = window_text(ck, i) {
                     fused[i] = Some((j, f));
                     fused_into[j] = f;
                 }
+                if !plan::visible_parts(&ck.shapes, end, i, area).is_empty() {
+                    layer[i] = self.c.glass_layer(self.hw, ck, i, &layer);
+                }
             }
         }
+        let layers: Vec<(u32, u32)> = self.c.glass.iter().map(|g| (g.buf.as_ref().map_or(0, |b| b.va), g.key[8])).collect();
+
+        // Over the background every pixel of the area is written, by it or
+        // by an item that covers it opaquely: an area of whole tiles needs
+        // no load (loadOp DONT_CARE, as v3dv loads only the tiles a partial
+        // area cuts). With a wallpaper the tiles are loaded from it instead,
+        // which is what the background draws, so it draws nothing; unless
+        // nothing else draws, as a pass has at least one draw.
+        let t = &ck.target;
+        let f = &ck.frame;
+        let fresh = ck.items.first().is_some_and(|it| it[0] == gpu_scene::scene::KIND_BACKGROUND)
+            && whole_tiles(area, ck.width, ck.height);
+        let wall = (f[gpu_scene::scene::F_WALL] as u64) | (f[gpu_scene::scene::F_WALL + 1] as u64) << 32;
+        let mut load_from = (fresh && f[gpu_scene::scene::F_FLAGS] & gpu_scene::scene::FLAG_WALL != 0
+            && wall != 0 && wall <= u32::MAX as u64)
+            .then(|| (wall as u32, f[gpu_scene::scene::F_WALL_PITCH] * 4));
 
         let mut draws = Vec::with_capacity(end);
         for i in 0..end {
@@ -1035,13 +1185,19 @@ impl plan::draw_sink for Sink<'_> {
             if !(1..=ITEM_KINDS).contains(&kind) {
                 return Err(-EINVAL);
             }
-            let mut draw = |kind: usize, r: &rect| {
+            let mut draw = |mut kind: usize, r: &rect| {
                 let mut push = [0u32; v3d_draw::PUSH_WORDS];
                 push[..gpu_scene::scene::DRAW_PUSH_WORDS].copy_from_slice(&gpu_scene::scene::draw_push(ck, i, r));
                 if let (KIND_WINDOW_INSIDE, Some((j, _))) = (kind, fused[i]) {
                     push[ITEM2_PUSH..ITEM2_PUSH + 16].copy_from_slice(&ck.items[j]);
                 }
-                draws.push(v3d_draw::Draw { pipeline: kind - 1, push, vertex_count: 4 });
+                // The layer in place of the glass source (push words 24..27,
+                // draw.h.glsl src_lo, src_hi, src_pitch).
+                if let (KIND_CHROME_INSIDE | KIND_WINDOW_INSIDE, Some(l)) = (kind, layer[i]) {
+                    kind += KIND_CHROME_INSIDE_LAYER - KIND_CHROME_INSIDE;
+                    push[24..27].copy_from_slice(&[layers[l].0, 0, layers[l].1]);
+                }
+                draws.push(v3d_draw::Draw { pipeline: pipeline(kind, &ck.items[i]), push, vertex_count: 4 });
             };
             // Only where no later item paints over it opaquely; the straight
             // rows of a window's glass by their own short program, with its
@@ -1087,19 +1243,25 @@ impl plan::draw_sink for Sink<'_> {
         if draws.is_empty() {
             return Ok(());
         }
-        let t = &ck.target;
+        if load_from.is_some() {
+            // The background's draws are the first, item 0's.
+            let bg = draws.iter().take_while(|d| d.push[4] == gpu_scene::scene::KIND_BACKGROUND).count();
+            if bg < draws.len() {
+                draws.drain(..bg);
+            } else {
+                load_from = None;
+            }
+        }
         if t.va > u32::MAX as u64 {
             return Err(-EINVAL);
         }
         let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: ck.width, height: ck.height };
-        // Over the background every pixel of the area is written, by it or
-        // by an item that covers it opaquely: an area of whole tiles needs
-        // no load (loadOp DONT_CARE, as v3dv loads only the tiles a partial
-        // area cuts).
-        let load = !(ck.items.first().is_some_and(|it| it[0] == gpu_scene::scene::KIND_BACKGROUND)
-            && whole_tiles(area, ck.width, ck.height));
         let area = v3d_draw::Rect { x: area.x, y: area.y, width: area.w, height: area.h };
-        self.c.submit_draws(self.hw, image, load, area, &draws).map(|_| ())
+        let f = self.c.submit_pass(self.hw, image, !fresh, load_from, area, &draws)?;
+        for l in layer.into_iter().flatten() {
+            self.c.glass[l].used = f;
+        }
+        Ok(())
     }
 }
 

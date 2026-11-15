@@ -6,17 +6,24 @@
 // KIND selects the item kind at compile time: one small program per kind,
 // 10 for the straight-row part of a chrome item over glass (items.glsl
 // `chrome_glass`), and 11 for that part with a text item over it, mixed in
-// one pass (the window's inside).
+// one pass (the window's inside). 12 builds a glass layer (items.glsl
+// `glass_layer`) into an image the size of the glass source, 13 and 14
+// are 10 and 11 reading such a layer. KIND + 16 is a kind's program that
+// also takes radii beyond V3D_SMALL.
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_tile_image : require
 #extension GL_GOOGLE_include_directive : require
 
+// No depth attachment and no depth test: without this, V3D writes Z
+// per fragment anyway (nir_to_vir emit_frag_end).
+layout(early_fragment_tests) in;
+
 layout(constant_id = 0) const uint KIND = 0u;
 
 layout(location = 0) tileImageEXT highp uattachmentEXT dst;
 layout(location = 0) out uint color;
-// rect.vert: a chrome item's glass fill and its luma, for kinds 10 and 11.
+// rect.vert: a chrome item's glass fill and its luma, for kinds 10 to 12.
 layout(location = 0) flat in uint v_fill;
 layout(location = 1) flat in uint v_fill_luma;
 
@@ -35,6 +42,7 @@ const uint FLAG_GLASS = 4u;
 
 #define ITEM_OPS
 #define V3D_ARITH
+#define V3D_SMALL (KIND < 16u)
 #include "../../../gpu_shaders/items.glsl"
 
 void main() {
@@ -55,7 +63,7 @@ void main() {
     g_glass = src;
     g_glass_pitch = p.src_pitch;
     g_glyphs = src;
-    if (KIND == 1u) {
+    if ((KIND & 15u) == 1u) {
         color = (g_flags & FLAG_WALL) != 0u ? g_wall.v[y * g_wall_pitch + x] : 0xFF181820u;
         return;
     }
@@ -63,7 +71,7 @@ void main() {
     // read before them would hold the scoreboard through all of it.
     Op o = op_keep();
     Op o2 = op_keep();
-    switch (KIND) {
+    switch (KIND & 15u) {
     case 2u: o = glow(it, x, y); break;
     case 3u: o = glass_backdrop(it, x, y); break;
     case 4u: o = chrome(it, x, y); break;
@@ -77,8 +85,14 @@ void main() {
         o = chrome_glass(x, y, v_fill, v_fill_luma, min(it[11], 255u));
         o2 = text_inside(p.item2, x, y);
         break;
+    case 12u: o = glass_layer(x, y, v_fill, v_fill_luma, min(it[11], 255u)); break;
+    case 13u: o = chrome_glass_layer(x, y); break;
+    case 14u:
+        o = chrome_glass_layer(x, y);
+        o2 = text_inside(p.item2, x, y);
+        break;
     default: break;
     }
     uint c = apply(o, colorAttachmentReadEXT(dst).x);
-    color = KIND == 11u ? apply(o2, c) : c;
+    color = (KIND & 15u) == 11u || (KIND & 15u) == 14u ? apply(o2, c) : c;
 }

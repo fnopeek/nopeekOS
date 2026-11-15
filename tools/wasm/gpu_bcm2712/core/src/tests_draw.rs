@@ -9,10 +9,12 @@ use crate::v3d_draw::*;
 use crate::shaders_gen::DRAW_PIPELINES;
 use std::collections::{BTreeMap, VecDeque};
 
-const SCENARIOS: [(&str, &str); 12] = [
+const SCENARIOS: [(&str, &str); 14] = [
     ("one_64x64", include_str!("../testdata/draw/one_64x64.txt")),
     ("nine_kinds_256x128", include_str!("../testdata/draw/nine_kinds_256x128.txt")),
     ("glass_kinds_256x128", include_str!("../testdata/draw/glass_kinds_256x128.txt")),
+    ("layer_kinds_256x128", include_str!("../testdata/draw/layer_kinds_256x128.txt")),
+    ("wide_kinds_256x128", include_str!("../testdata/draw/wide_kinds_256x128.txt")),
     ("three_1920x1080", include_str!("../testdata/draw/three_1920x1080.txt")),
     ("three_3840x2160", include_str!("../testdata/draw/three_3840x2160.txt")),
     ("sub_area_256x128", include_str!("../testdata/draw/sub_area_256x128.txt")),
@@ -224,7 +226,7 @@ fn check(name: &str, text: &str, generated: bool) {
         push: push_words(rect),
         vertex_count: 4,
     }).collect();
-    let pass = Pass { rev: key(&r.keys, "rev"), image, load: true, render_area, viewport, scissor, pipelines: &pipelines,
+    let pass = Pass { rev: key(&r.keys, "rev"), image, load: true, load_from: None, render_area, viewport, scissor, pipelines: &pipelines,
                       draws: &draws };
 
     let mut queues: BTreeMap<&'static str, VecDeque<(u32, u32)>> = BTreeMap::new();
