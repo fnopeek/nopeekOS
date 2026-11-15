@@ -766,10 +766,13 @@ pub(crate) fn submit_layer(frame: &Scene, sources: &dyn Sources, info: &FbInfo, 
 
 /// Wait for the layer scene `seq` (`submit_layer`): 0 when the module
 /// painted it. Its rows of `layer` go out of the CPU caches for a reader.
-pub(crate) fn layer_done(seq: u32, binding: bool, bo: u32, layer: Rect, damage: &[Rect]) -> i32 {
+pub(crate) fn layer_done(frame: &Scene, seq: u32, binding: bool, bo: u32, layer: Rect, damage: &[Rect]) -> i32 {
     let status = if binding { gpudev::wait_scene_bound(seq) } else { gpudev::wait_scene(seq) };
     for rows in layer_rows(layer, damage) {
         gpudev::sync(bo, Some(rows));
+    }
+    if status == -22 {
+        show_refused(frame, damage);
     }
     if status == 0 {
         SCENES_DONE.fetch_add(1, Ordering::Relaxed);

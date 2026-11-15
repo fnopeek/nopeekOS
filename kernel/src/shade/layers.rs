@@ -61,9 +61,11 @@ const CHECKS: u32 = 24;
 const DIFFS_IN_ROW: u32 = 2;
 /// Wallpaper strips at most.
 const MAX_STRIPS: usize = 10;
-/// The HVS's line memory for the planes (vc4_hvs.c: 1024 words of
-/// HVS_UBM_WORD_SIZE), less what the cursor plane takes.
-const UPM_BYTES: u32 = 1024 * 256 - 4096;
+/// The HVS's line memory the planes may take (vc4_hvs.c: 1024 words of
+/// HVS_UBM_WORD_SIZE), less what the cursor plane takes; half of it, as a
+/// commit checks the new planes while the ones on screen still hold
+/// theirs (vc4_plane_duplicate_state).
+const UPM_BYTES: u32 = (1024 * 256 - 4096) / 2;
 /// Planes the display has for the desktop: the primary and its overlays.
 const MAX_PLANES: usize = MAX_GROUPS + 1;
 /// The key of the group above all windows.
@@ -172,6 +174,8 @@ static ON_SCREEN: AtomicBool = AtomicBool::new(false);
 static OFF: AtomicBool = AtomicBool::new(false);
 /// The wallpaper stays one plane: a commit with strips was refused.
 static WHOLE_WALL: AtomicBool = AtomicBool::new(false);
+/// The first commit with strips was reported.
+static STRIPS_SAID: AtomicBool = AtomicBool::new(false);
 /// The planes go with the next frame: the screen's flip that replaces
 /// them is queued by then.
 static FORGET: AtomicBool = AtomicBool::new(false);
@@ -372,7 +376,7 @@ fn settle_with(sources: Option<&dyn Sources>) {
     let mut cpu = Vec::new();
     for (i, j) in p.jobs.iter().enumerate() {
         let Some((seq, bound)) = j.gpu else { continue };
-        let status = crate::shade::gpu_scene::layer_done(seq, bound, j.bo, j.layer, &j.paint);
+        let status = crate::shade::gpu_scene::layer_done(&j.scene, seq, bound, j.bo, j.layer, &j.paint);
         match &j.reference {
             Some(r) if status == 0 => judge(j, r),
             _ if status != 0 => cpu.push(i),
@@ -402,6 +406,10 @@ fn settle_with(sources: Option<&dyn Sources>) {
             None => -1,
         };
         if status == 0 {
+            if p.strips && !STRIPS_SAID.swap(true, Ordering::Relaxed) {
+                let n = STATE.lock().strips.len();
+                crate::kprintln!("[npk] layers: the wallpaper in {} strips where it shows", n);
+            }
             STATE.lock().shown = layers;
         } else if p.strips {
             crate::kprintln!("[npk] layers: the display refused the wallpaper in strips ({}), showing it whole",
