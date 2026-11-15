@@ -20,6 +20,16 @@
 //! first layer scenes are painted both ways and compared, as whole frames
 //! of the screen are.
 //!
+//! The wallpaper is shown only where it can be seen: the display reads
+//! every plane whole each frame, and under a window that paints its
+//! layer opaquely (its content, its glass over the blurred wallpaper) the
+//! wallpaper would be read for nothing. What no layer covers opaquely
+//! goes as a few strips (`uncovered`), each a copy of its part of the
+//! wallpaper in a buffer of its own: the HVS's line memory goes by a
+//! buffer's pitch, so a narrow gap costs a narrow row. A strip is copied
+//! once per layout and wallpaper. With too many strips, or a commit the
+//! display refuses with them, the wallpaper is one plane again.
+//!
 //! A frame happens in two steps. `compose` hands the scenes over; `settle`,
 //! with the compositor released as for a scene (`gpu_scene::finish`),
 //! waits for them, paints on the CPU what the GPU did not, and only then
@@ -49,6 +59,13 @@ const CHECKS: u32 = 24;
 /// source the CPU read can change before the GPU reads it, a wrong
 /// program differs every time.
 const DIFFS_IN_ROW: u32 = 2;
+/// Wallpaper strips at most.
+const MAX_STRIPS: usize = 10;
+/// The HVS's line memory for the planes (vc4_hvs.c: 1024 words of
+/// HVS_UBM_WORD_SIZE), less what the cursor plane takes.
+const UPM_BYTES: u32 = 1024 * 256 - 4096;
+/// Planes the display has for the desktop: the primary and its overlays.
+const MAX_PLANES: usize = MAX_GROUPS + 1;
 /// The key of the group above all windows.
 pub const TOP: u64 = u64::MAX;
 
@@ -115,25 +132,46 @@ struct Pending {
     jobs: Vec<Job>,
     /// The layers to commit, None when they are on screen already.
     commit: Option<Vec<gpudev::Layer>>,
-    /// The planes the commit no longer shows.
+    /// The commit shows the wallpaper in strips.
+    strips: bool,
+    /// The planes and strips the commit no longer shows.
     gone: Vec<Plane>,
+    gone_strips: Vec<Strip>,
     /// The screen-sized buffer the CPU paints in.
     target: usize,
     info: FbInfo,
 }
 
+/// A strip of the wallpaper: where, of which wallpaper, its copy.
+struct Strip {
+    rect: Rect,
+    generation: u32,
+    buf: PixelBuffer,
+}
+
+impl Strip {
+    fn bo(&self) -> Option<u32> {
+        let b = &self.buf;
+        gpudev::bo_for(b.phys(), b.width() as u64 * b.height() as u64 * 4, b.width(), b.height(), b.width() * 4)
+    }
+}
+
 struct State {
     planes: Vec<Plane>,
+    strips: Vec<Strip>,
     pending: Option<Pending>,
     /// The layers last committed.
     shown: Vec<gpudev::Layer>,
 }
 
-static STATE: Mutex<State> = Mutex::new(State { planes: Vec::new(), pending: None, shown: Vec::new() });
+static STATE: Mutex<State> = Mutex::new(State { planes: Vec::new(), strips: Vec::new(), pending: None,
+    shown: Vec::new() });
 /// The display shows layers, not a shadow.
 static ON_SCREEN: AtomicBool = AtomicBool::new(false);
 /// Layers stay off: a commit was refused.
 static OFF: AtomicBool = AtomicBool::new(false);
+/// The wallpaper stays one plane: a commit with strips was refused.
+static WHOLE_WALL: AtomicBool = AtomicBool::new(false);
 /// The planes go with the next frame: the screen's flip that replaces
 /// them is queued by then.
 static FORGET: AtomicBool = AtomicBool::new(false);
@@ -169,6 +207,7 @@ pub fn compose(frame: &Scene, groups: &[Group], sources: &dyn Sources, target: *
     if !on_screen() && FORGET.swap(false, Ordering::AcqRel) {
         let mut st = STATE.lock();
         st.planes.clear();
+        st.strips.clear();
         st.shown.clear();
     }
     if !usable() || groups.len() > MAX_GROUPS || info.bpp != 32 {
@@ -182,9 +221,8 @@ pub fn compose(frame: &Scene, groups: &[Group], sources: &dyn Sources, target: *
 
     let mut st = STATE.lock();
     let mut old = core::mem::take(&mut st.planes);
-    let mut layers = alloc::vec![gpudev::Layer {
-        bo: wall_bo, sx: 0, sy: 0, w: info.width, h: info.height, x: 0, y: 0, premultiplied: false,
-    }];
+    let mut layers = Vec::with_capacity(groups.len());
+    let mut opaque = Vec::with_capacity(groups.len());
     let mut painted = Vec::new();
     let mut planes = Vec::with_capacity(groups.len());
     let mut jobs = Vec::new();
@@ -194,6 +232,9 @@ pub fn compose(frame: &Scene, groups: &[Group], sources: &dyn Sources, target: *
         let rect = items.iter().fold(Rect::new(0, 0, 0, 0), |r, it| r.union(&reach(it))).intersect(&screen);
         if rect.is_empty() {
             continue;
+        }
+        if let Some(o) = opaque_part(items, sources) {
+            opaque.push(o.intersect(&rect));
         }
         let same_size = |p: &Plane| p.key == g.key && (p.rect.w, p.rect.h) == (rect.w, rect.h);
         let Some(mut p) = old.iter().position(same_size).map(|i| old.swap_remove(i)).or_else(|| Plane::new(g.key, rect))
@@ -266,11 +307,54 @@ pub fn compose(frame: &Scene, groups: &[Group], sources: &dyn Sources, target: *
         return leave();
     }
     st.planes = planes;
-    let commit = (!on_screen() || layers != st.shown).then_some(layers);
+    // The wallpaper beneath: in strips where no layer covers it, or whole.
+    let mut rects = uncovered(screen, &opaque);
+    let windows_upm: u32 = layers.iter().map(|l| upm(l.w * 4)).sum();
+    let strips_upm = |rs: &[Rect]| rs.iter().map(|r| upm(r.w * 4)).sum::<u32>();
+    while rects.len() > 1 && (rects.len() > MAX_STRIPS || rects.len() + layers.len() > MAX_PLANES
+        || windows_upm + strips_upm(&rects) > UPM_BYTES)
+    {
+        join_cheapest(&mut rects);
+    }
+    let generation = crate::gui::background::wallpaper_generation();
+    let mut kept = core::mem::take(&mut st.strips);
+    let mut strips = Vec::new();
+    let mut in_strips = !WHOLE_WALL.load(Ordering::Acquire) && rects.len() + layers.len() <= MAX_PLANES
+        && windows_upm + strips_upm(&rects) <= UPM_BYTES && !(rects.is_empty() && layers.is_empty());
+    let mut all = Vec::with_capacity(layers.len() + rects.len().max(1));
+    if in_strips {
+        for r in &rects {
+            let found = kept.iter().position(|s| s.rect == *r && s.generation == generation).map(|i| kept.swap_remove(i));
+            let Some(s) = found.or_else(|| strip(wall, info, *r, generation)) else {
+                in_strips = false;
+                break;
+            };
+            let Some(bo) = s.bo() else {
+                strips.push(s);
+                in_strips = false;
+                break;
+            };
+            all.push(gpudev::Layer { bo, sx: 0, sy: 0, w: r.w, h: r.h, x: r.x as i32, y: r.y as i32,
+                premultiplied: false });
+            strips.push(s);
+        }
+    }
+    if !in_strips {
+        all.clear();
+        all.push(gpudev::Layer { bo: wall_bo, sx: 0, sy: 0, w: info.width, h: info.height, x: 0, y: 0,
+            premultiplied: false });
+        kept.append(&mut strips);
+    }
+    st.strips = strips;
+    all.append(&mut layers);
+    let commit = (!on_screen() || all != st.shown).then_some(all);
     if commit.is_none() && jobs.is_empty() {
+        // The strips not shown were not shown before either.
+        drop(kept);
         return Composed::Layers(painted);
     }
-    st.pending = Some(Pending { jobs, commit, gone: old, target: target as usize, info: *info });
+    st.pending = Some(Pending { jobs, commit, strips: in_strips, gone: old, gone_strips: kept, target: target as usize,
+        info: *info });
     ON_SCREEN.store(true, Ordering::Release);
     Composed::Layers(painted)
 }
@@ -319,6 +403,11 @@ fn settle_with(sources: Option<&dyn Sources>) {
         };
         if status == 0 {
             STATE.lock().shown = layers;
+        } else if p.strips {
+            crate::kprintln!("[npk] layers: the display refused the wallpaper in strips ({}), showing it whole",
+                status);
+            WHOLE_WALL.store(true, Ordering::Release);
+            crate::shade::request_render();
         } else {
             crate::kprintln!("[npk] layers: the display refused the commit ({}), composing the screen", status);
             OFF.store(true, Ordering::Release);
@@ -326,6 +415,7 @@ fn settle_with(sources: Option<&dyn Sources>) {
         }
     }
     drop(p.gone);
+    drop(p.gone_strips);
 }
 
 /// A layer scene the GPU painted against the CPU's `reference`. Where they
@@ -393,12 +483,14 @@ pub fn release() {
     FORGET.store(false, Ordering::Release);
     let mut st = STATE.lock();
     st.planes.clear();
+    st.strips.clear();
     st.shown.clear();
 }
 
-/// Layers again (`gpu layers on`).
+/// Layers again (`gpu layers on`), the wallpaper in strips again.
 pub fn allow() {
     OFF.store(false, Ordering::Release);
+    WHOLE_WALL.store(false, Ordering::Release);
 }
 
 /// No layers until `allow` (`gpu layers off`).
@@ -421,6 +513,150 @@ fn reach(it: &Item) -> Rect {
         | Item::Glyph { rect, .. } => rect,
         Item::Content { dst, .. } | Item::Panel { dst, .. } | Item::Text { dst, .. } => dst,
     }
+}
+
+/// The largest rectangle of a group's layer whose every pixel its items
+/// set (items.glsl `SET`, `render::opaque`): a content item with pixels
+/// to show, the glass backdrop over the blurred wallpaper, an opaque
+/// fill, without their corner rows and a pixel in from each edge, where
+/// coverage takes off; and the inside of a chrome that paints its content
+/// opaquely or as glass over the blurred wallpaper (items.glsl `chrome`'s
+/// straight rows: the rows off its inner corners, two pixels in from its
+/// border).
+fn opaque_part(items: &[Item], sources: &dyn Sources) -> Option<Rect> {
+    let blurred = crate::gui::background::blurred().is_some();
+    let inset = |r: Rect, radius: u32| {
+        let rad = radius.min(r.w / 2).min(r.h / 2) + 1;
+        (r.w > 2 && r.h > 2 * rad).then(|| Rect::new(r.x + 1, r.y + rad, r.w - 2, r.h - 2 * rad))
+    };
+    let mut best: Option<Rect> = None;
+    for it in items {
+        let o = match *it {
+            Item::Content { src, dst, radius, .. } => {
+                let mut shows = false;
+                sources.with_source(src, &mut |px, w, h| shows = !px.is_empty() && w > 0 && h > 0);
+                if shows { inset(dst, radius) } else { None }
+            }
+            Item::GlassBackdrop { rect, radius } if blurred => inset(rect, radius),
+            Item::Fill { rect, alpha, radius, .. } if alpha >= 255 => inset(rect, radius),
+            Item::Chrome { rect, rounding, border, bg_opacity, paint_content: true, .. }
+                if blurred || bg_opacity >= 255 => chrome_inside(rect, rounding, border),
+            _ => None,
+        };
+        if let Some(o) = o
+            && best.is_none_or(|b| o.w as u64 * o.h as u64 > b.w as u64 * b.h as u64)
+        {
+            best = Some(o);
+        }
+    }
+    best
+}
+
+/// Part `r` of the wallpaper at `wall` (the screen's size, `info`) copied
+/// into a strip of its own, out of the CPU caches.
+fn strip(wall: *const u8, info: &FbInfo, r: Rect, generation: u32) -> Option<Strip> {
+    let buf = PixelBuffer::new(r.w, r.h);
+    if buf.is_empty() {
+        return None;
+    }
+    let dst = buf.ptr();
+    for y in r.y..r.y1() {
+        // SAFETY: `r` lies within the screen, whose pixels the wallpaper
+        // holds at `info.pitch`; the strip holds `r.w` x `r.h` at `r.w * 4`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(wall.add(y as usize * info.pitch as usize + r.x as usize * 4),
+                dst.add((y - r.y) as usize * r.w as usize * 4), r.w as usize * 4);
+        }
+    }
+    let s = Strip { rect: r, generation, buf };
+    let bo = s.bo()?;
+    gpudev::sync(bo, None);
+    Some(s)
+}
+
+/// The line memory the HVS gives a plane whose buffer has `pitch` bytes a
+/// row (vc6_upm_size, two lines, SCALER6_PTR0_UPM_BUFF_SIZE_2_LINES).
+fn upm(pitch: u32) -> u32 {
+    (((pitch + 62) / 32) * 32 * 2).next_multiple_of(256)
+}
+
+/// The two strips whose bounding box adds the least area, as that box:
+/// the wallpaper beneath shows the same either way, read a little more.
+fn join_cheapest(rs: &mut Vec<Rect>) {
+    let area = |r: &Rect| r.w as u64 * r.h as u64;
+    let mut best = (u64::MAX, 0, 1);
+    for i in 0..rs.len() {
+        for k in i + 1..rs.len() {
+            let grown = area(&rs[i].union(&rs[k])).saturating_sub(area(&rs[i]) + area(&rs[k]));
+            if grown < best.0 {
+                best = (grown, i, k);
+            }
+        }
+    }
+    let (_, i, k) = best;
+    let joined = rs[i].union(&rs[k]);
+    rs.swap_remove(k);
+    rs[i] = joined;
+}
+
+/// The straight rows of a chrome item's inside (render::fill_rounded_chrome_aa
+/// `straight_lo..straight_hi`, `skip_lo..skip_hi`).
+fn chrome_inside(r: Rect, rounding: u32, border: u32) -> Option<Rect> {
+    if r.w < 2 || r.h < 2 {
+        return None;
+    }
+    let r_out = rounding.min(r.w / 2).min(r.h / 2);
+    let b = border.min(r_out).min(r.w / 2).min(r.h / 2);
+    let (iw, ih) = (r.w - 2 * b, r.h - 2 * b);
+    let r_in = r_out.saturating_sub(b).min(iw / 2).min(ih / 2);
+    (iw > 4 && ih > 2 * r_in).then(|| Rect::new(r.x + b + 2, r.y + b + r_in, iw - 4, ih - 2 * r_in))
+}
+
+/// What of `screen` none of `opaque` covers, as disjoint rectangles: the
+/// bands between their top and bottom edges, each band's uncovered spans,
+/// a span joined with the same span of the band above.
+fn uncovered(screen: Rect, opaque: &[Rect]) -> Vec<Rect> {
+    let opaque: Vec<Rect> = opaque.iter().map(|o| o.intersect(&screen)).filter(|o| !o.is_empty()).collect();
+    let mut ys: Vec<u32> = alloc::vec![screen.y, screen.y1()];
+    for o in &opaque {
+        ys.push(o.y);
+        ys.push(o.y1());
+    }
+    ys.sort_unstable();
+    ys.dedup();
+    let mut out = Vec::new();
+    let mut open: Vec<Rect> = Vec::new();
+    for b in ys.windows(2) {
+        let (y0, y1) = (b[0], b[1]);
+        let mut cover: Vec<(u32, u32)> = opaque.iter().filter(|o| o.y <= y0 && o.y1() >= y1).map(|o| (o.x, o.x1())).collect();
+        cover.sort_unstable();
+        let mut spans = Vec::new();
+        let mut x = screen.x;
+        for (a, e) in cover {
+            if a > x {
+                spans.push((x, a));
+            }
+            x = x.max(e);
+        }
+        if x < screen.x1() {
+            spans.push((x, screen.x1()));
+        }
+        let mut next = Vec::with_capacity(spans.len());
+        for (a, e) in spans {
+            match open.iter().position(|r| r.x == a && r.w == e - a) {
+                Some(i) => {
+                    let mut r = open.swap_remove(i);
+                    r.h += y1 - y0;
+                    next.push(r);
+                }
+                None => next.push(Rect::new(a, y0, e - a, y1 - y0)),
+            }
+        }
+        out.append(&mut open);
+        open = next;
+    }
+    out.append(&mut open);
+    out
 }
 
 /// Rectangles `rs` of the layer at `layer` from the screen-sized `target`
