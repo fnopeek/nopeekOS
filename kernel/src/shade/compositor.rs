@@ -185,6 +185,8 @@ pub struct Compositor {
     pub popup_prev_focus: Option<WindowId>,
     /// Text layer of each terminal window, by window id.
     pub term_layers: alloc::collections::BTreeMap<u32, PixelBuffer>,
+    /// What each row of a terminal's text layer shows (`render_to_window`).
+    term_rows: alloc::collections::BTreeMap<u32, Vec<u64>>,
     /// Pointer state of the window controls.
     pub controls: controls::State,
     /// A left press on a floating window's free bar: the window, and where
@@ -243,6 +245,7 @@ impl Compositor {
             bottom_strut: None,
             popup_prev_focus: None,
             term_layers: alloc::collections::BTreeMap::new(),
+            term_rows: alloc::collections::BTreeMap::new(),
             controls: controls::State::default(),
             pending_move: None,
             last_bar_press: None,
@@ -942,6 +945,32 @@ impl Compositor {
     /// kind and title, in z-order. Compared after every full frame
     /// (`render_frame_layered`); a change notifies `TOPIC_WINDOWS`. No
     /// allocation: FNV-1a over the fields.
+    /// How the screen looks beyond what windows and terminals mark dirty:
+    /// the windows, where they are and in which state, the frame's style,
+    /// the wallpaper, the theme, the glass. Equal before and after a
+    /// command, the command changed no more than what it marked.
+    pub fn look_key(&self) -> u64 {
+        let mut h = self.shell_fingerprint();
+        let mut eat = |v: u64| {
+            h ^= v;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        for w in &self.windows {
+            for v in [w.id.0, w.x, w.y, w.width, w.height, w.state as u32, w.focused as u32, w.kind as u32] {
+                eat(v as u64);
+            }
+        }
+        let g = crate::shade::glass::params();
+        for v in [self.screen_w, self.screen_h, self.border, self.rounding, crate::gui::background::wallpaper_generation(),
+                  crate::theme::generation(), crate::theme::is_active() as u32, g.loop_opacity, g.chrome_opacity,
+                  self.needs_full_redraw as u32] {
+            eat(v as u64);
+        }
+        eat(g.ink.key());
+        eat(g.blur as u64);
+        h
+    }
+
     pub fn shell_fingerprint(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
         let mut eat = |b: &[u8]| {
@@ -1796,18 +1825,39 @@ impl Compositor {
     /// Bring a terminal window's text layer up to date. While windows are
     /// in motion a layer of the wrong size is kept (and shown cropped)
     /// rather than redrawn for every intermediate size.
-    fn update_term_layer(&mut self, id: u32, terminal_idx: u8, w: u32, h: u32, dirty: bool, in_motion: bool) {
+    /// Returns the rows whose pixels it drew differently, in layer
+    /// pixels, when it drew the layer again and knows them; None when the
+    /// layer is new or all of it may differ.
+    fn update_term_layer(&mut self, id: u32, terminal_idx: u8, w: u32, h: u32, dirty: bool, in_motion: bool)
+        -> Option<Vec<(u32, u32)>>
+    {
         let stale = self.term_layers.get(&id).is_none_or(|b| b.width() != w || b.height() != h);
-        if stale && in_motion && self.term_layers.contains_key(&id) { return; }
+        if stale && in_motion && self.term_layers.contains_key(&id) { return None; }
         if stale {
             self.term_layers.insert(id, PixelBuffer::new(w, h));
         } else if !dirty && !self.needs_full_redraw {
-            return;
+            return Some(Vec::new());
         }
-        let Some(layer) = self.term_layers.get_mut(&id) else { return };
+        let layer = self.term_layers.get_mut(&id)?;
         layer.fill(0);
         let info = layer.info();
-        terminal::render_to_window(layer.ptr(), &info, 0, 0, w, h, terminal_idx);
+        let keys = terminal::render_to_window(layer.ptr(), &info, 0, 0, w, h, terminal_idx);
+        let before = self.term_rows.insert(id, keys.clone());
+        let before = before.filter(|b| !stale && b.len() == keys.len())?;
+        // A glyph may reach into the rows beside its own.
+        let row_h = terminal::cells().h;
+        let mut rows = Vec::new();
+        for (r, (a, b)) in keys.iter().zip(&before).enumerate() {
+            if a != b {
+                let y0 = (r as u32).saturating_sub(1) * row_h;
+                let y1 = ((r as u32 + 2) * row_h).min(h);
+                match rows.last_mut() {
+                    Some((_, e)) if *e >= y0 => *e = y1,
+                    _ => rows.push((y0, y1)),
+                }
+            }
+        }
+        Some(rows)
     }
 
     /// The scene of the current frame, back to front. Window buffers that
@@ -1878,6 +1928,7 @@ impl Compositor {
         }
         let live: Vec<u32> = plans.iter().filter(|p| p.kind == WindowKind::Terminal).map(|p| p.id.0).collect();
         self.term_layers.retain(|id, _| live.contains(id));
+        self.term_rows.retain(|id, _| live.contains(id));
 
         let mut items = Vec::with_capacity(4 + plans.len() * 6);
         items.push(Item::Background);
@@ -2037,6 +2088,24 @@ impl Compositor {
         }
         let screen = Rect::new(0, 0, info.width, info.height);
         let mut extra = core::mem::take(&mut self.extra_damage);
+        // Terminals whose text changed: the rows that differ, or the
+        // window when that is not known.
+        let in_motion = self.geometry_in_motion() || self.animation.is_some();
+        let texts: Vec<(WindowId, u8, Rect)> = self.windows.iter()
+            .filter(|w| w.text_dirty && !w.dirty && w.workspace == self.active_workspace && w.visible
+                && w.kind == crate::shade::window::WindowKind::Terminal)
+            .map(|w| (w.id, w.terminal_idx, self.term_text_rect(w)))
+            .collect();
+        for (id, idx, text) in texts {
+            match self.update_term_layer(id.0, idx, text.w, text.h, true, in_motion) {
+                Some(rows) if !in_motion => extra.extend(rows.iter()
+                    .map(|&(y0, y1)| Rect::new(text.x, text.y + y0, text.w, y1 - y0))),
+                _ => if let Some(w) = self.window_mut(id) { w.dirty = true; },
+            }
+        }
+        for win in &mut self.windows {
+            win.text_dirty = false;
+        }
         // Frames committed into canvas layers since the last compose.
         extra.extend(crate::shade::widgets::canvas::take_frame_damage().into_iter()
             .filter(|r| r.0 >= 0 && r.1 >= 0)

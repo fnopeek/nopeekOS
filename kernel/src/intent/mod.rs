@@ -1959,12 +1959,13 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         // Core-0 intent output goes to the loop it was typed in (not the
         // primary debug sink). Synchronous, so the redirect is safe to clear
         // right after — no idle in between where background debug would leak.
+        let look = if shade_active() { crate::shade::look_key() } else { None };
         crate::shade::terminal::set_output_redirect(term);
         dispatch_intent(input, vault, session_id);
         crate::shade::terminal::clear_output_redirect();
 
         if shade_active() {
-            crate::shade::render_frame();
+            crate::shade::render_after(look);
         }
 
         // Don't print prompt if dispatch spawned a WASM app (e.g. top)

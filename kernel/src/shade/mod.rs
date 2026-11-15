@@ -1555,9 +1555,32 @@ pub fn poll_render() {
     render_terminal_output();
 }
 
+/// How the screen looks (`Compositor::look_key`), taken before a command.
+pub fn look_key() -> Option<u64> {
+    with_compositor(|comp| comp.look_key())
+}
+
+/// After a command: what it marked dirty and the terminal rows it wrote,
+/// or the whole screen when it changed how the screen looks since
+/// `before` (`look_key`).
+#[track_caller]
+pub fn render_after(before: Option<u64>) {
+    if before.is_some() && before == look_key() {
+        render_terminal_windows();
+    } else {
+        render_frame_for(core::panic::Location::caller());
+    }
+}
+
 /// Compose the windows of the terminals with new output, not the screen.
 pub fn render_terminal_output() {
     if !terminal::is_dirty() && !terminal::any_term_dirty() { return; }
+    render_terminal_windows();
+}
+
+/// `render_terminal_output` whether or not a terminal has new output: the
+/// dirty windows and the changed rows.
+fn render_terminal_windows() {
     terminal::clear_dirty();
     CURSOR_MOVED.store(false, Ordering::Relaxed);
 
@@ -1578,7 +1601,7 @@ pub fn render_terminal_output() {
         if let Some(comp) = guard.as_mut() {
             for win in &mut comp.windows {
                 if terminal::take_term_dirty(win.terminal_idx as usize) {
-                    win.dirty = true;
+                    win.text_dirty = true;
                 }
             }
             // Output of a terminal without a window is drawn when one shows

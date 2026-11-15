@@ -66,6 +66,9 @@ pub struct Window {
     pub focused: bool,
     /// True if content changed since last render.
     pub dirty: bool,
+    /// A terminal window whose text changed: only the rows that differ are
+    /// composed again (`Compositor::render_damaged`).
+    pub text_dirty: bool,
     /// Workspace index (0-based).
     pub workspace: u8,
     /// Terminal buffer index (separate session per window).
@@ -130,6 +133,7 @@ impl Window {
             visible: true,
             focused: false,
             dirty: true,
+            text_dirty: false,
             workspace: 0,
             terminal_idx: 0,
             resize_w: 0,

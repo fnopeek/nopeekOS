@@ -487,6 +487,9 @@ impl Scenes {
             if !traced && self.logged < SCENES_LOGGED {
                 self.logged += 1;
             }
+            if slow && !failed && self.c.profiles_left > 0 {
+                self.c.profile(hw);
+            }
             npk_sys::gpudev_complete(seq, if failed { -5 } else { 0 });
         }
     }

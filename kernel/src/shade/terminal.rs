@@ -1000,17 +1000,21 @@ pub fn selection_key(idx: usize, dir: SelDir) -> bool {
 }
 
 /// Render a specific terminal's content into a window region.
+/// Draws the terminal's visible rows; returns a key per screen row (what
+/// it shows: text, colouring, selection), so a caller can tell the rows a
+/// later draw changed (`Compositor::update_term_layer`).
 pub fn render_to_window(
     shadow: *mut u8,
     info: &crate::framebuffer::FbInfo,
     x: u32, y: u32, w: u32, h: u32,
     terminal_idx: u8,
-) {
+) -> alloc::vec::Vec<u64> {
     let c = cells();
     let (char_w, char_h) = (c.w, c.h);
     let cols = w / char_w;
     let rows = h / char_h;
-    if cols == 0 || rows == 0 { return; }
+    if cols == 0 || rows == 0 { return alloc::vec::Vec::new(); }
+    let mut keys = alloc::vec![0u64; rows as usize];
 
     let visible_rows = rows as usize;
     let cols = cols as usize;
@@ -1019,7 +1023,7 @@ pub fn render_to_window(
     // so this is always enough to fill the viewport bottom-up. The lock is
     // dropped before drawing.
     let (lines, total, scroll_offset) = {
-        let term = match term(terminal_idx as usize) { Some(t) => t, None => return };
+        let term = match term(terminal_idx as usize) { Some(t) => t, None => return keys };
         let lines: alloc::vec::Vec<(alloc::vec::Vec<u8>, usize)> = term.visible_lines(visible_rows)
             .map(|(data, len)| {
                 let mut v = alloc::vec![0u8; len];
@@ -1056,6 +1060,8 @@ pub fn render_to_window(
         if py + char_h > y + h { break; }
         if e == s { continue; }
         let line_data = &lines[li].0;
+        keys[row] = row_key(&line_data[s..e], s == 0, start_line + li, s, e, sel_bounds_opt,
+            [fg, prompt_color, sel_color]);
         // Special colouring (system [npk] / `path> ` prompt) only on the
         // first wrapped row of a logical line; continuation rows are plain.
         let first = s == 0;
@@ -1105,6 +1111,35 @@ pub fn render_to_window(
             }
         }
     }
+    keys
+}
+
+/// What screen row of a terminal shows: its bytes, whether it starts its
+/// line (which colours a prompt or `[npk]`), the selected part of it, the
+/// colours. FNV-1a; 0 is an empty row.
+fn row_key(text: &[u8], first: bool, line: usize, s: usize, e: usize,
+           sel: Option<((usize, usize), (usize, usize))>, colors: [u32; 3]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |b: &[u8]| {
+        for &x in b {
+            h ^= x as u64;
+            h = h.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    eat(text);
+    eat(&[first as u8]);
+    if let Some((lo, hi)) = sel
+        && line >= lo.0 && line <= hi.0
+    {
+        let a = if line == lo.0 { lo.1 } else { 0 }.max(s);
+        let b = if line == hi.0 { hi.1 } else { usize::MAX }.min(e);
+        eat(&(a as u64).to_le_bytes());
+        eat(&(b as u64).to_le_bytes());
+    }
+    for c in colors {
+        eat(&c.to_le_bytes());
+    }
+    h | 1
 }
 
 /// Fast render: only the current input line of the active terminal.

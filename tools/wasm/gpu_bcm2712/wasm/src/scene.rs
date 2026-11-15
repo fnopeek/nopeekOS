@@ -60,6 +60,10 @@ const KIND_WINDOW_INSIDE_LAYER: usize = 14;
 /// A fill and a content item off their corner rows (`inside_rows`).
 const KIND_FILL_INSIDE: usize = 15;
 const KIND_CONTENT_INSIDE: usize = 16;
+/// Slow scenes whose largest pass is taken apart by program (`profile`).
+const PROFILES: u32 = 2;
+/// Passes at least this many pixels are kept for `profile`.
+const PROFILED_PIXELS: u32 = 1 << 21;
 /// Glass layers kept: a window's glass fill differs with its focus.
 const GLASS_LAYERS: usize = 3;
 
@@ -183,6 +187,10 @@ pub struct Composer {
     /// While set, each dispatch's program, grid and time (submit to done,
     /// caches cleaned) are kept here.
     pub trace: Option<Vec<(&'static str, [u32; 3], u64)>>,
+    /// Slow passes still to take apart by program (`profile`), and the
+    /// last large pass, to do it with.
+    pub profiles_left: u32,
+    last_pass: Option<(v3d_draw::Image, v3d_draw::Rect, Vec<v3d_draw::Draw>)>,
 }
 
 /// The draw programs into one buffer, each at `CODE_ALIGN`, and the
@@ -355,6 +363,8 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         spill,
         dispatches: 0,
         trace: None,
+        profiles_left: PROFILES,
+        last_pass: None,
     };
     Line::new().s("v3d: ").dec(qpus as u64).s(" QPUs, rev ").dec(rev as u64).s(", ")
         .dec(total as u64).s(" bytes of programs at ").hex(c.code.va).say();
@@ -901,6 +911,58 @@ impl Composer {
         dst.free();
     }
 
+    /// The last large pass again, into a buffer of the module's, once with
+    /// all its draws and once per program with that program's alone, each
+    /// timed and counted as `draw_bench` does: which items a slow scene
+    /// spends its time on. Its sources are those the scene read, which
+    /// stay until the next scene.
+    pub fn profile(&mut self, hw: &mut PiHw) {
+        let Some((image, area, draws)) = self.last_pass.take() else { return };
+        self.profiles_left = self.profiles_left.saturating_sub(1);
+        let Some(dst) = Buf::new((image.stride * image.height).div_ceil(PAGE)) else { return };
+        let into = v3d_draw::Image { va: dst.va, ..image };
+        let mut pipelines: Vec<usize> = draws.iter().map(|d| d.pipeline).collect();
+        pipelines.sort_unstable();
+        pipelines.dedup();
+        let mut runs: Vec<(Option<usize>, Vec<v3d_draw::Draw>)> = alloc::vec![(None, draws.clone())];
+        for &p in &pipelines {
+            runs.push((Some(p), draws.iter().filter(|d| d.pipeline == p).copied().collect()));
+        }
+        for (p, ds) in &runs {
+            let mut us = 0;
+            let mut perf = None;
+            for _ in 0..2 {
+                let t0 = npk_sys::now_us() as u64;
+                self.perf_armed = true;
+                let r = self.submit_draws(hw, into, false, area, ds).and_then(|f| self.wait_fence(hw, f));
+                perf = self.perf_take(hw);
+                if r.is_err() {
+                    self.drain(hw);
+                    dst.free();
+                    return;
+                }
+                us = npk_sys::now_us() as u64 - t0;
+            }
+            let px: u64 = ds.iter().map(|d| (d.push[2] - d.push[0]) as u64 * (d.push[3] - d.push[1]) as u64).sum();
+            let mut l = Line::new();
+            l.s("profile ").dec(area.width as u64).s("x").dec(area.height as u64).s(" ");
+            match p {
+                None => l.s("all ").dec(ds.len() as u64).s(" draws"),
+                Some(p) => l.s("kind ").dec(pipeline_kind(*p) as u64).s(", ").dec(ds.len() as u64).s(" draws over ")
+                    .dec(px).s(" px"),
+            };
+            l.s(": ").dec(us).s(" us");
+            if let Some(v) = perf {
+                for i in [2usize, 3, 4, 29] {
+                    l.s(", ").s(PERF_COUNTERS[i]).s(" ").dec(v[i]);
+                }
+            }
+            l.say();
+        }
+        self.drain(hw);
+        dst.free();
+    }
+
     /// The draw path proved: one render pass into a 64x48 buffer of the
     /// module's, an opaque fill over all of it and a half-transparent one
     /// over part, read back against render::blend. 48 rows end inside a
@@ -1315,6 +1377,9 @@ impl plan::draw_sink for Sink<'_> {
         }
         let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: tw, height: th };
         let area = v3d_draw::Rect { x: at.x, y: at.y, width: at.w, height: at.h };
+        if self.c.profiles_left > 0 && area.width * area.height >= PROFILED_PIXELS {
+            self.c.last_pass = Some((image, area, draws.clone()));
+        }
         let f = self.c.submit_pass(self.hw, image, !fresh, load_from, area, &draws)?;
         for l in layer.into_iter().flatten() {
             self.c.glass[l].used = f;
@@ -1353,6 +1418,12 @@ fn window_text(ck: &gpu_scene::scene::checked, i: usize) -> Option<(usize, rect)
         }
     }
     best
+}
+
+/// The draw.frag kind pipeline `p` runs (`upload_draw_programs`).
+fn pipeline_kind(p: usize) -> usize {
+    let b = p % SCREEN_PIPELINES;
+    (if b < DRAW_KINDS { b + 1 } else { WIDE_KINDS[b - DRAW_KINDS] + 32 }) + if p >= SCREEN_PIPELINES { 64 } else { 0 }
 }
 
 /// Push words `ORIGIN_PUSH..`: where the target lies on the screen, and
