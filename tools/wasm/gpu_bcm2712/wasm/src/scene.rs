@@ -37,9 +37,9 @@ const SCENE_PAGES: u32 = 16;
 const FREE_BOS_KEPT: usize = 24;
 /// draw.frag's kinds: the scene's item kinds 1..=9, 10, the straight-row
 /// part of a chrome item, and 11; the pipeline of kind k is at k - 1.
-const DRAW_KINDS: usize = 14;
+const DRAW_KINDS: usize = 16;
 /// The kinds with a second program for radii beyond 32-bit arithmetic
-/// (draw.frag KIND + 16, gen_shaders.py WIDE_KINDS), after the others.
+/// (draw.frag KIND + 32, gen_shaders.py WIDE_KINDS), after the others.
 const WIDE_KINDS: [usize; 4] = [2, 4, 5, 8];
 const PIPELINES: usize = DRAW_KINDS + WIDE_KINDS.len();
 const ITEM_KINDS: usize = 9;
@@ -53,6 +53,9 @@ const ITEM2_PUSH: usize = gpu_scene::scene::DRAW_PUSH_WORDS;
 const KIND_GLASS_LAYER: usize = 12;
 const KIND_CHROME_INSIDE_LAYER: usize = 13;
 const KIND_WINDOW_INSIDE_LAYER: usize = 14;
+/// A fill and a content item off their corner rows (`inside_rows`).
+const KIND_FILL_INSIDE: usize = 15;
+const KIND_CONTENT_INSIDE: usize = 16;
 /// Glass layers kept: a window's glass fill differs with its focus.
 const GLASS_LAYERS: usize = 3;
 
@@ -198,7 +201,7 @@ fn upload_draw_programs() -> Option<(Buf, [v3d_draw::Pipeline; PIPELINES])> {
     }
     let mut at = [[0u32; 3]; PIPELINES];
     for (k, g) in sg::DRAW_PIPELINES.iter().enumerate() {
-        let want = if k < DRAW_KINDS { k + 1 } else { WIDE_KINDS[k - DRAW_KINDS] + 16 };
+        let want = if k < DRAW_KINDS { k + 1 } else { WIDE_KINDS[k - DRAW_KINDS] + 32 };
         if g.kind as usize != want {
             return None;
         }
@@ -829,7 +832,14 @@ impl Composer {
             d.pipeline = KIND_WINDOW_INSIDE_LAYER - 1;
             d
         };
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 16] = [
+        // The opaque fill by the program of a fill's inside (kind 15).
+        let opaque_inside = {
+            let mut d = opaque;
+            d.pipeline = KIND_FILL_INSIDE - 1;
+            d
+        };
+        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 17] = [
+            ("fill by its inside's program", false, alloc::vec![opaque_inside]),
             ("fill + chrome inside from a glass layer", false, alloc::vec![opaque, layer_inside]),
             ("fill + both in one pass from a glass layer", false, alloc::vec![opaque, window_inside_layer]),
             ("fill + chrome inside over glass", false, alloc::vec![opaque, glass_inside]),
@@ -1132,6 +1142,21 @@ fn pipeline(kind: usize, w: &[u32]) -> usize {
     }
 }
 
+/// The kind that paints item `w` off its corner rows, and those rows: all
+/// of a fill's or content item's rect but the `r` rows a radius rounds at
+/// top and bottom (items.glsl `rect_coverage` is whole there). None for
+/// other kinds.
+fn inside_rows(w: &[u32]) -> Option<(usize, rect)> {
+    let (inner, radius) = match w[0] as usize {
+        8 => (KIND_FILL_INSIDE, w[7]),
+        5 => (KIND_CONTENT_INSIDE, w[5]),
+        _ => return None,
+    };
+    let (x, y, width, height) = (w[1], w[2], w[3], w[4]);
+    let r = radius.min(width / 2).min(height / 2);
+    (height > 2 * r).then(|| (inner, rect { x, y: y + r, w: width, h: height - 2 * r }))
+}
+
 /// plan.rs's steps: each one render pass.
 struct Sink<'a> {
     c: &'a mut Composer,
@@ -1208,6 +1233,9 @@ impl plan::draw_sink for Sink<'_> {
                 plan::EMPTY
             };
             let with_text = fused[i].map_or(plan::EMPTY, |(_, f)| f);
+            // A fill's and a content item's rows off its corners by their
+            // own program, which works out no coverage.
+            let rows = inside_rows(&ck.items[i]);
             for r in plan::visible_parts(&ck.shapes, end, i, area) {
                 if !fused_into[i].is_empty() {
                     let mut rest = Vec::new();
@@ -1216,6 +1244,18 @@ impl plan::draw_sink for Sink<'_> {
                         draw(kind, p);
                     }
                     continue;
+                }
+                if let Some((inner, rows)) = rows {
+                    let core = r.intersect(&rows);
+                    if !core.is_empty() {
+                        draw(inner, &core);
+                        let mut rest = Vec::new();
+                        plan::subtract(&r, &rows, &mut rest);
+                        for p in &rest {
+                            draw(kind, p);
+                        }
+                        continue;
+                    }
                 }
                 let inside = r.intersect(&straight);
                 if inside.is_empty() {

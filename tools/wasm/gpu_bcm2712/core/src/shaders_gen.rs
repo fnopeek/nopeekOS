@@ -3834,7 +3834,92 @@ pub static DRAW_FS_14: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     prog: crate::v3d_draw::FsProgData { base: crate::v3d_draw::ProgData { threads: 4, single_seg: false, tmu_dirty_rcl: false, uniform_count: 21 }, uses_pid: false, flat_shade_flags: [0, 0, 0], noperspective_flags: [0, 0, 0], centroid_flags: [0, 0, 0], num_inputs: 0, writes_z: false, disable_ez: false, uses_center_w: false, uses_implicit_point_line_varyings: false, lock_scoreboard_on_first_thrsw: false },
 };
 
-pub static DRAW_FS_18: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
+pub static DRAW_FS_15: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
+    qpu: &[
+        0x3981f186bb03f000, 0x39823186bb03f000, 0x384021897a03f1c8, 0x39e0218a7c03f248,
+        0x0c4012c6bb280000, 0x3983618c7d03f2c0, 0x3bc0d3863c00330d, 0x3bce03937a7c330d,
+        0x3bc003d7f90034c3, 0x39e07186b703f300, 0x3bccd3c63c7c330d, 0x3bc00414b60433ce,
+        0x3bce1406bb103000, 0x39e05446b7403300, 0x39857186bb03f000, 0x3bcc5446f9003503,
+        0x38401486bb443000, 0x3bce05d6b5003015, 0x39e05646b7583300, 0x3bcc0658f90035c3,
+        0x39e05146b7643440, 0x39c83186ba03f006, 0x39e07186b703f444, 0x0200015e0020d000,
+        0x38003186bb03f000, 0x38003186bb03f000, 0x38003186bb03f000, 0x39e0219ab503f481,
+        0x39e07186b703f680, 0x38203186bb03f000, 0x38003186bb03f000, 0x38003186bb03f000,
+        0x3a26f186bb03f000, 0x39871106bb6c3000, 0x0200008e0020d000, 0x38003186bb03f000,
+        0x38003186bb03f000, 0x38003186bb03f000, 0x0840075e7d35811c, 0x380021827d03f15c,
+        0x0de002c37d098148, 0x39e021867d03f108, 0x38002181b503f788, 0x3840219fb503f740,
+        0x0c000287b505f0c8, 0x0c000309b51d8188, 0x04000390b52ca148, 0x0c000351b525f108,
+        0x0de005537d418388, 0x0c00058f3845f30d, 0x040006177c5564dc, 0x38002194b503f3c0,
+        0x39e0219a7d03f608, 0x38002199b603f5d4, 0x38002184b603f65a, 0x39e0029d7d103108,
+        0x3840219b7d03f11c, 0x3800219eb503f748, 0x3800219fb503f21b, 0x39e021817c03f788,
+        0x380021827c03f7dc, 0x38002183b503f040, 0x39e02186b503f482, 0x38002188b503f204,
+        0x38002187b603f083, 0x39e07186b703f180, 0x020000080000d000, 0x38002189b603f1c8,
+        0x380e1286bb243000, 0x38001186bb283000, 0x38001186bb143000, 0x38203186bb03f000,
+        0x38203186bb03f000, 0x38003186bb03f000, 0x38203206bb183000, 0x38003186bb03f000,
+        0x38003186bb03f000,
+    ],
+    uniforms: &[
+        U::Push(0xa), U::Const(0xff), U::Const(0x8081), U::Const(0x17), U::Const(0x100), U::Const(0xffffff),
+        U::Push(0x9), U::Const(0x1c), U::Const(0xffffff3c), U::Const(0x10), U::Const(0x8), U::Const(0x1ff),
+        U::Const(0xffffff00), U::Const(0xffffff00), U::Const(0x0), U::Const(0xffffff3c),
+    ],
+    prog: crate::v3d_draw::FsProgData { base: crate::v3d_draw::ProgData { threads: 4, single_seg: false, tmu_dirty_rcl: false, uniform_count: 16 }, uses_pid: false, flat_shade_flags: [0, 0, 0], noperspective_flags: [0, 0, 0], centroid_flags: [0, 0, 0], num_inputs: 0, writes_z: false, disable_ez: false, uses_center_w: false, uses_implicit_point_line_varyings: false, lock_scoreboard_on_first_thrsw: true },
+};
+
+pub static DRAW_FS_16: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
+    qpu: &[
+        0x3982a185bb03f024, 0x39e0218b7b03f281, 0x3983618cf603f2e4, 0x39e0218e7b03f341,
+        0x3840218fbc03f320, 0x39862190f603f3a4, 0x55870452bc3c0420, 0x38002193f503f467,
+        0x54000519b54804d8, 0x28002196f52d3527, 0x0c00055d7d2d34dc, 0x28002197ba396541,
+        0x0c00069bb53965d8, 0x0c0007deba65b681, 0x0c0000867d75b7dc, 0x04000301b5086598,
+        0x38002183b503f798, 0x0c0002477d04359c, 0x0d8143c2f51c3167, 0x384021887d03f5dc,
+        0x0c0004117d64825c, 0x058445547d3d179c, 0x0c000692b5054318, 0x0d8503d7381d4412,
+        0x0c0007d97d74831c, 0x0800019bb5080558, 0x0585c05e7d69b5dc, 0x044000c4bb799020,
+        0x39e000927d503441, 0x280021887d19755c, 0x040003097d7c305c, 0x0c000650f5197127,
+        0x05e05686b7248480, 0x05e006d57c4cc501, 0x384e009d3c543400, 0x3bc0041eb5003658,
+        0x040007c37d3da65c, 0x04000101b559f6d8, 0x0c0001c97d7816dc, 0x0c005206b70c108d,
+        0x0dca0310f97897c3, 0x0dc0035bf90c9003, 0x28007186b77425ca, 0x0de003dab5742441,
+        0x3bce06d3b57c3118, 0x3bc001167d00311c, 0x3800219f7d03f1dc, 0x04000081b521f3d8,
+        0x0c0002037d0533dc, 0x0de05286b7056680, 0x0c00025eb60d341b, 0x3bcc0111b57c3098,
+        0x0c000413380d6311, 0x38002187b503f11e, 0x380021967d03f21c, 0x0400069b7d25609c,
+        0x3800219e7d03f4dc, 0x0400005fb579b698, 0x040001023834129f, 0x280021837d10b69c,
+        0x0c0002487d10b09c, 0x0800030a38649203, 0x0804e18d3830b40a, 0x380005913c30330b,
+        0x29c02190f934e003, 0x39d88590f94437c3, 0x0dc004daf934e003, 0x0800d6063c3d358b,
+        0x3bce069e3c7c360e, 0x3bc006c2f9003603, 0x3bc0d2063c00360e, 0x3bd886c2f97c3783,
+        0x09e4e199b508e401, 0x05e007c1b5119681, 0x39e002c3b51836c1, 0x3bce0204387c37c1,
+        0x3804618a381c3343, 0x39e0040cb5743201, 0x39ee02c9381035df, 0x0584c38d7a28c2c9,
+        0x280a2190f9340383, 0x39e05446b7403480, 0x020001d60020d000, 0x0c0013c6bb340000,
+        0x38003186bb03f000, 0x38003186bb03f000, 0x39e021953803f55f, 0x3980a1967a03f455,
+        0x39e021977d03f581, 0x05e0061bb53d7581, 0x39e021997c03f602, 0x05e05686b74d96c0,
+        0x39c0318c3803f01a, 0x38203186bb03f000, 0x38403186bb03f000, 0x38003186bb03f000,
+        0x38877186bb03f000, 0x3800219e7d03f75c, 0x39e0005f7d783748, 0x380c00447d743745,
+        0x04000283b51007c2, 0x05e05246b70c0482, 0x0200006d0020d000, 0x38002185b503f081,
+        0x38003186bb03f000, 0x38003186bb03f000, 0x3840218b7c03f15c, 0x3840218c3803f2c0,
+        0x28003186bb009000, 0x0c401346bb009000, 0x280021953c00a30d, 0x0c401386bb00a000,
+        0x280021963800a30e, 0x0c4004067e00a59c, 0x280021983c009550, 0x020000680000d000,
+        0x0c0004877e00961c, 0x380021973803f312, 0x380021887e03f5dc, 0x38403186bb03f000,
+        0x0c401646bb140000, 0x28003186bb009000, 0x0c401686bb009000, 0x3840219b3803f019,
+        0x280021813c00a6da, 0x0c401746bb00a000, 0x280021833800a6dd, 0x0c401786bb00a000,
+        0x280021853c00905e, 0x0de007c67e0090c8, 0x05e001077e6df148, 0x39e021887e03f108,
+        0x39e021867903f180, 0x39e0218a7903f1c0, 0x384021897803f182, 0x3800218c7803f282,
+        0x3800218b7c03f25c, 0x39e021907903f200, 0x39e0218e7c03f308, 0x3800218db603f00b,
+        0x020000480000d000, 0x380021957803f402, 0x38002192b603f34e, 0x38002189b603f495,
+        0x39e021963803f51f, 0x380021977a03f456, 0x380021983803f3d7, 0x39e021997c03f602,
+        0x3820219a3803f4d9, 0x39c0318c3803f01a, 0x38003186bb03f000, 0x3886f186bb03f000,
+        0x38001246bb6c3000, 0x38203186bb03f000, 0x38203186bb03f000, 0x38003186bb03f000,
+        0x38203206bb243000, 0x38003186bb03f000, 0x38003186bb03f000,
+    ],
+    uniforms: &[
+        U::Push(0x8), U::Push(0x7), U::Const(0x4f7ffffe), U::Const(0xffff), U::Const(0x10), U::Const(0x18),
+        U::Push(0x6), U::Push(0xa), U::Push(0xd), U::Push(0xe), U::Push(0x5), U::Push(0xf),
+        U::Push(0xb), U::Const(0x44), U::Const(0xff), U::Const(0xffffff80), U::Const(0x18), U::Const(0x8000),
+        U::Const(0x581a), U::Const(0x166e9), U::Const(0xb6d2), U::Const(0x1c5a2), U::Const(0x18), U::Const(0x12a),
+        U::Const(0x64), U::Const(0xffffede0), U::Const(0x199), U::Const(0xd0), U::Const(0x204), U::Const(0xff000000),
+        U::Const(0x0), U::Const(0xffffff3c),
+    ],
+    prog: crate::v3d_draw::FsProgData { base: crate::v3d_draw::ProgData { threads: 4, single_seg: false, tmu_dirty_rcl: false, uniform_count: 32 }, uses_pid: false, flat_shade_flags: [0, 0, 0], noperspective_flags: [0, 0, 0], centroid_flags: [0, 0, 0], num_inputs: 0, writes_z: false, disable_ez: false, uses_center_w: false, uses_implicit_point_line_varyings: false, lock_scoreboard_on_first_thrsw: false },
+};
+
+pub static DRAW_FS_34: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     qpu: &[
         0x39862186bb03f024, 0x3986619ef503f1a7, 0x09868705bb619020, 0x3bc0d0863c003699,
         0x3bc000db3c003699, 0x380ed0863c6c3619, 0x39ce00d7f9703003, 0x0804e19df5782167,
@@ -4230,7 +4315,7 @@ pub static DRAW_FS_18: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     prog: crate::v3d_draw::FsProgData { base: crate::v3d_draw::ProgData { threads: 4, single_seg: false, tmu_dirty_rcl: false, uniform_count: 162 }, uses_pid: false, flat_shade_flags: [0, 0, 0], noperspective_flags: [0, 0, 0], centroid_flags: [0, 0, 0], num_inputs: 0, writes_z: false, disable_ez: false, uses_center_w: false, uses_implicit_point_line_varyings: false, lock_scoreboard_on_first_thrsw: true },
 };
 
-pub static DRAW_FS_20: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
+pub static DRAW_FS_36: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     qpu: &[
         0x39896184bb03f020, 0x3989a1a4f503f127, 0x3989e185bb03f024, 0x398aa1a87a03f9a7,
         0x3bc0dac63c00392a, 0x3bcc0ae9f57c3167, 0x3bc00b6e38003aa6, 0x39e0db063cac3a02,
@@ -4772,7 +4857,7 @@ pub static DRAW_FS_20: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     prog: crate::v3d_draw::FsProgData { base: crate::v3d_draw::ProgData { threads: 2, single_seg: false, tmu_dirty_rcl: false, uniform_count: 278 }, uses_pid: false, flat_shade_flags: [0, 0, 0], noperspective_flags: [0, 0, 0], centroid_flags: [0, 0, 0], num_inputs: 0, writes_z: false, disable_ez: false, uses_center_w: false, uses_implicit_point_line_varyings: false, lock_scoreboard_on_first_thrsw: true },
 };
 
-pub static DRAW_FS_21: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
+pub static DRAW_FS_37: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     qpu: &[
         0x39856184bb03f020, 0x3985a193f503f127, 0x3bc00605bb003024, 0x0804e194f54d5167,
         0x398661973803f556, 0x3bcc1606bb7c3000, 0x3986b186bb03f000, 0x3bc0d6c63c00351a,
@@ -5033,7 +5118,7 @@ pub static DRAW_FS_21: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     prog: crate::v3d_draw::FsProgData { base: crate::v3d_draw::ProgData { threads: 4, single_seg: false, tmu_dirty_rcl: false, uniform_count: 121 }, uses_pid: false, flat_shade_flags: [0, 0, 0], noperspective_flags: [0, 0, 0], centroid_flags: [0, 0, 0], num_inputs: 0, writes_z: false, disable_ez: false, uses_center_w: false, uses_implicit_point_line_varyings: false, lock_scoreboard_on_first_thrsw: true },
 };
 
-pub static DRAW_FS_24: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
+pub static DRAW_FS_40: DrawProgram<crate::v3d_draw::FsProgData> = DrawProgram {
     qpu: &[
         0x3984a184bb03f020, 0x3bc004d0f5003127, 0x39e07186b703f480, 0x39852185bb03f024,
         0x3bccd4c63c7c3414, 0x3bc00551f5003167, 0x3985f186bb03f000, 0x3bcc0558387c3517,
@@ -5264,8 +5349,10 @@ pub static DRAW_PIPELINES: &[DrawPipeline] = &[
     DrawPipeline { kind: 12, vs: &DRAW_VS_10, cs: &DRAW_CS_1, fs: &DRAW_FS_12 },
     DrawPipeline { kind: 13, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_13 },
     DrawPipeline { kind: 14, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_14 },
-    DrawPipeline { kind: 18, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_18 },
-    DrawPipeline { kind: 20, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_20 },
-    DrawPipeline { kind: 21, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_21 },
-    DrawPipeline { kind: 24, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_24 },
+    DrawPipeline { kind: 15, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_15 },
+    DrawPipeline { kind: 16, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_16 },
+    DrawPipeline { kind: 34, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_34 },
+    DrawPipeline { kind: 36, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_36 },
+    DrawPipeline { kind: 37, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_37 },
+    DrawPipeline { kind: 40, vs: &DRAW_VS_1, cs: &DRAW_CS_1, fs: &DRAW_FS_40 },
 ];

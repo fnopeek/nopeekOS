@@ -8,8 +8,9 @@
 // `chrome_glass`), and 11 for that part with a text item over it, mixed in
 // one pass (the window's inside). 12 builds a glass layer (items.glsl
 // `glass_layer`) into an image the size of the glass source, 13 and 14
-// are 10 and 11 reading such a layer. KIND + 16 is a kind's program that
-// also takes radii beyond V3D_SMALL.
+// are 10 and 11 reading such a layer, 15 and 16 a fill and a content
+// item off their corner rows (`fill_inside`, `content_inside`). KIND + 32
+// is a kind's program that also takes radii beyond V3D_SMALL.
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_tile_image : require
@@ -42,7 +43,7 @@ const uint FLAG_GLASS = 4u;
 
 #define ITEM_OPS
 #define V3D_ARITH
-#define V3D_SMALL (KIND < 16u)
+#define V3D_SMALL (KIND < 32u)
 #include "../../../gpu_shaders/items.glsl"
 
 void main() {
@@ -63,7 +64,7 @@ void main() {
     g_glass = src;
     g_glass_pitch = p.src_pitch;
     g_glyphs = src;
-    if ((KIND & 15u) == 1u) {
+    if ((KIND & 31u) == 1u) {
         color = (g_flags & FLAG_WALL) != 0u ? g_wall.v[y * g_wall_pitch + x] : 0xFF181820u;
         return;
     }
@@ -71,7 +72,7 @@ void main() {
     // read before them would hold the scoreboard through all of it.
     Op o = op_keep();
     Op o2 = op_keep();
-    switch (KIND & 15u) {
+    switch (KIND & 31u) {
     case 2u: o = glow(it, x, y); break;
     case 3u: o = glass_backdrop(it, x, y); break;
     case 4u: o = chrome(it, x, y); break;
@@ -91,6 +92,8 @@ void main() {
         o = chrome_glass_layer(x, y);
         o2 = text_inside(p.item2, x, y);
         break;
+    case 15u: o = fill_inside(it, x, y); break;
+    case 16u: o = content_inside(it, x, y); break;
     default: break;
     }
     // The tile buffer is read only where a pixel mixes over it: a pixel
@@ -104,5 +107,5 @@ void main() {
         c = o.b_col;
     else
         c = apply(o, colorAttachmentReadEXT(dst).x);
-    color = (KIND & 15u) == 11u || (KIND & 15u) == 14u ? apply(o2, c) : c;
+    color = (KIND & 31u) == 11u || (KIND & 31u) == 14u ? apply(o2, c) : c;
 }

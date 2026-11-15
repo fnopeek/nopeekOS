@@ -469,6 +469,27 @@ uint yuv_pixel(uint yy, uint uu, uint vv, uint kind) {
 
 // scene::content at one pixel; with a YUYV kind in fit bits 2..1,
 // scene::content_yuv (a word is two pixels).
+// The source pixel `v` that `content` shows at (x, y) of its rect.
+#define CONTENT_SOURCE \
+    uint lx = x - dx; \
+    uint ly = y - dy; \
+    uint sx = lx; \
+    uint sy = ly; \
+    uint spx = yuv != 0u ? sw * 2u : sw; \
+    if (fit == 0u && (spx != dw || sh != dh)) { \
+        sx = lx * spx / max(dw, 1u); \
+        sy = ly * sh / max(dh, 1u); \
+    } \
+    uint v; \
+    if (yuv != 0u) { \
+        sx = min(sx, spx - 1u); \
+        uint w = src.v[min(sy, sh - 1u) * spitch + sx / 2u]; \
+        uint luma = (sx & 1u) == 0u ? (w & 255u) : ((w >> 16) & 255u); \
+        v = yuv_pixel(luma, (w >> 8) & 255u, w >> 24, yuv); \
+    } else { \
+        v = src.v[min(sy, sh - 1u) * spitch + min(sx, sw - 1u)]; \
+    }
+
 ITEM_RESULT content(Blk it, uint x, uint y ITEM_PIXEL) {
     uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
     uint radius = BC(it, 5), fw = BC(it, 6);
@@ -481,26 +502,23 @@ ITEM_RESULT content(Blk it, uint x, uint y ITEM_PIXEL) {
     uint cov = rect_coverage(x, y, dx, dy, dw, dh, r);
     if (cov == 0u)
         return KEEP;
-    uint lx = x - dx;
-    uint ly = y - dy;
-    uint sx = lx;
-    uint sy = ly;
-    uint spx = yuv != 0u ? sw * 2u : sw;
-    if (fit == 0u && (spx != dw || sh != dh)) {
-        sx = lx * spx / max(dw, 1u);
-        sy = ly * sh / max(dh, 1u);
-    }
-    uint v;
-    if (yuv != 0u) {
-        sx = min(sx, spx - 1u);
-        uint w = src.v[min(sy, sh - 1u) * spitch + sx / 2u];
-        uint luma = (sx & 1u) == 0u ? (w & 255u) : ((w >> 16) & 255u);
-        v = yuv_pixel(luma, (w >> 8) & 255u, w >> 24, yuv);
-    } else {
-        v = src.v[min(sy, sh - 1u) * spitch + min(sx, sw - 1u)];
-    }
+    CONTENT_SOURCE
     return cov >= 256u ? SET(v) : BLEND(v, cov);
 }
+
+#ifdef V3D_ARITH
+// `content` where the draw lies within the item's rect off its corner
+// rows, so coverage is whole (plan: the rows a radius does not round).
+ITEM_RESULT content_inside(Blk it, uint x, uint y ITEM_PIXEL) {
+    uint dx = BC(it, 1), dy = BC(it, 2), dw = BC(it, 3), dh = BC(it, 4);
+    uint fw = BC(it, 6);
+    uint fit = fw & 1u, yuv = fw >> 1;
+    Words src = mkaddr(BC(it, 7), BC(it, 8));
+    uint sw = BC(it, 9), sh = BC(it, 10), spitch = BC(it, 11);
+    CONTENT_SOURCE
+    return SET(v);
+}
+#endif
 
 // scene::panel at one pixel; the base is the blurred wallpaper.
 ITEM_RESULT panel(Blk it, uint x, uint y ITEM_PIXEL) {
@@ -558,6 +576,17 @@ ITEM_RESULT text_inside(Blk it, uint x, uint y ITEM_PIXEL) {
     uint sw = BC(it, 7), sh = BC(it, 8), spitch = BC(it, 9);
     TEXT_PIXEL(min(y - dy, sh - 1u) * spitch + min(x - dx, sw - 1u))
 }
+
+#ifdef V3D_ARITH
+// Item::Fill where the draw lies within its rect off its corner rows.
+ITEM_RESULT fill_inside(Blk it, uint x, uint y ITEM_PIXEL) {
+    uint color = BC(it, 5), alpha = BC(it, 6);
+    uint a = min(DIV255(min(alpha, 255u) * 256u), 256u);
+    if (a == 0u)
+        return KEEP;
+    return a >= 256u ? SET(color & 0xFFFFFFu) : BLEND(color & 0xFFFFFFu, a);
+}
+#endif
 
 // Item::Fill at one pixel.
 ITEM_RESULT fill(Blk it, uint x, uint y ITEM_PIXEL) {
