@@ -80,7 +80,7 @@ fn checked_with(items: Vec<[u32; 16]>) -> checked {
     frame[19] = 0x2;
     let target = surface { va: 0, pitch: 7680, width: 1920, height: 1080, size: 7680 * 1080 };
     checked { screen: SCREEN, width: 1920, height: 1080, target, damage: Vec::new(), shapes: Vec::new(),
-              frame, items }
+              frame, items, #[cfg(feature = "layers")] layer: None }
 }
 
 #[test]
@@ -168,4 +168,69 @@ fn visible_parts_are_the_reach_less_later_covers_pixel_for_pixel() {
             }
         }
     }
+}
+
+/// A layer's scene (`layers`): its target holds only the layer at the
+/// origin in header word 15, its damage lies within the layer, and the
+/// checked scene says where the layer is.
+#[cfg(feature = "layers")]
+#[test]
+fn a_layer_scene_paints_within_its_layer() {
+    use crate::scene::{buffers, check_scene, payload, scene_buffer, surface};
+
+    struct Bufs;
+    impl buffers for Bufs {
+        fn surface(&self, id: u32) -> Option<surface> {
+            // Buffer 7: a 200 x 100 layer.
+            (id == 7).then_some(surface { va: 0x10_0000, pitch: 800, width: 200, height: 100, size: 800 * 100 })
+        }
+    }
+    struct Mem(Vec<u8>);
+    impl scene_buffer for Mem {
+        fn va(&self) -> u64 { 0x20_0000 }
+        fn bytes(&self) -> u32 { self.0.len() as u32 }
+        fn write(&mut self, off: u32, data: &[u8]) -> bool {
+            let (o, e) = (off as usize, off as usize + data.len());
+            if e > self.0.len() { return false; }
+            self.0[o..e].copy_from_slice(data);
+            true
+        }
+    }
+    struct Job(Vec<u8>);
+    impl payload for Job {
+        fn read(&self, off: u32, out: &mut [u8]) -> Result<(), i32> {
+            let o = off as usize;
+            out.copy_from_slice(self.0.get(o..o + out.len()).ok_or(-5)?);
+            Ok(())
+        }
+    }
+    // Header (gpu_scene.rs encode): magic, items, damage, glyph bytes, flags
+    // (4: a layer), wall, blur, glass, 0, ink ceil, tint, tint weight,
+    // width, height, generation, origin; then damage, then one fill.
+    let job = |damage: [u32; 4]| {
+        let mut w = vec![0x314E_4353, 1, 1, 0, 4, u32::MAX, u32::MAX, u32::MAX, 0, 255, 0, 0, 1920, 1080, 0,
+            300 | 400 << 16];
+        w.extend_from_slice(&damage);
+        w.extend_from_slice(&[8, 300, 400, 200, 100, 0x00ff_0000, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        Job(w.iter().flat_map(|v| v.to_le_bytes()).collect())
+    };
+    let bytes = |j: &Job| j.0.len() as u32;
+
+    let inside = job([310, 410, 50, 20]);
+    let mut mem = Mem(vec![0; 64 * 1024]);
+    let ck = check_scene(&inside, bytes(&inside), &Bufs, &mut mem, 7).expect("a layer's scene");
+    assert_eq!(ck.layer, Some((300, 400)));
+    assert_eq!((ck.width, ck.height), (1920, 1080));
+    assert_eq!((ck.target.width, ck.target.height), (200, 100));
+
+    // Damage past the layer's right edge is refused.
+    let past = job([450, 410, 60, 20]);
+    let mut mem = Mem(vec![0; 64 * 1024]);
+    assert!(check_scene(&past, bytes(&past), &Bufs, &mut mem, 7).is_err());
+
+    // A layer that would reach off the screen is refused.
+    let mut off = job([310, 410, 50, 20]);
+    off.0[15 * 4..16 * 4].copy_from_slice(&(1800u32 | 400 << 16).to_le_bytes());
+    let mut mem = Mem(vec![0; 64 * 1024]);
+    assert!(check_scene(&off, bytes(&off), &Bufs, &mut mem, 7).is_err());
 }

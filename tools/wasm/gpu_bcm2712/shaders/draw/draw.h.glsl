@@ -21,4 +21,10 @@ layout(push_constant, std430) uniform Draw {
     uint height;
     // Kind 11: the text item painted over the chrome item's straight rows.
     uint item2[16];
+    // Where the target lies on the screen: a layer's origin, 0 for the
+    // screen; and the screen in pixels.
+    uint ox;
+    uint oy;
+    uint screen_w;
+    uint screen_h;
 } p;

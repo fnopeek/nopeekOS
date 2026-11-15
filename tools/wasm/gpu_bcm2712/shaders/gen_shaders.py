@@ -282,9 +282,11 @@ def compile_all():
 
 
 # The item kinds, then the kinds whose program has a 64-bit path for large
-# radii, as KIND + 32 with that path kept (draw.frag V3D_SMALL).
+# radii, as KIND + 32 with that path kept (draw.frag V3D_SMALL); then all
+# of them again as KIND + 64, painting into a layer (draw.frag LAYER).
 WIDE_KINDS = (2, 4, 5, 8)
-DRAW_KINDS = list(range(1, 17)) + [k + 32 for k in WIDE_KINDS]
+SCREEN_KINDS = list(range(1, 17)) + [k + 32 for k in WIDE_KINDS]
+DRAW_KINDS = SCREEN_KINDS + [k + 64 for k in SCREEN_KINDS]
 
 
 def compile_draws():

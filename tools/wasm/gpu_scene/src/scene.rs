@@ -6,6 +6,12 @@
 //!
 //! The kernel's CPU executor is the reference (kernel/src/shade/scene.rs):
 //! for each damage rectangle, every item in order.
+//!
+//! With the `layers` feature a scene may paint one layer of the desktop
+//! (`HDR_LAYER`, kernel/src/shade/layers.rs): the target holds only the
+//! layer, which lies at the origin in header word 15 (x | y << 16); the
+//! items and damage stay in screen coordinates, the damage within the
+//! layer.
 
 use crate::plan::{bin_table, item_shape, rect};
 use alloc::vec::Vec;
@@ -79,6 +85,8 @@ pub const FLAG_GLASS: u32 = 4;
 /// Header flags of the scene.
 const HDR_WALL: u32 = 1;
 const HDR_BLURRED: u32 = 2;
+#[cfg(feature = "layers")]
+const HDR_LAYER: u32 = 4;
 
 /// Rows a compose thread runs (compose.comp ROWS).
 pub const ROWS: u32 = 16;
@@ -138,6 +146,9 @@ pub struct checked {
     /// (sources as GPU addresses): what a draw of one item reads.
     pub frame: [u32; FRAME_BYTES as usize / 4],
     pub items: Vec<[u32; ITEM_WORDS]>,
+    /// Where the target lies on the screen, for a layer's scene.
+    #[cfg(feature = "layers")]
+    pub layer: Option<(u32, u32)>,
 }
 
 fn set64(f: &mut [u32], w: usize, v: u64) {
@@ -183,8 +194,24 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
 
     // The frame block.
     let target = bufs.surface(target_id).ok_or_else(|| refused(line!()))?;
-    if target.width != width || target.height != height || !target.holds(width, height) {
-        return Err(refused(line!()));
+    #[cfg(feature = "layers")]
+    let layer = (rd(&hdr, 4) & HDR_LAYER != 0).then(|| (rd(&hdr, 15) & 0xFFFF, rd(&hdr, 15) >> 16));
+    #[cfg(not(feature = "layers"))]
+    let layer: Option<(u32, u32)> = None;
+    match layer {
+        // A layer lies within the screen.
+        Some((ox, oy)) => {
+            if target.width == 0 || target.height == 0 || ox as u64 + target.width as u64 > width as u64
+                || oy as u64 + target.height as u64 > height as u64 || !target.holds(target.width, target.height)
+            {
+                return Err(refused(line!()));
+            }
+        }
+        None => {
+            if target.width != width || target.height != height || !target.holds(width, height) {
+                return Err(refused(line!()));
+            }
+        }
     }
     let screen_src = |id: u32| -> Result<Option<surface>, i32> {
         if id == NONE {
@@ -257,6 +284,12 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         let w = |k: usize| rd(&db, i * 4 + k);
         let r = rect { x: w(0), y: w(1), w: w(2), h: w(3) };
         if r.x > MAX_COORD || r.y > MAX_COORD || r.w > MAX_COORD || r.h > MAX_COORD {
+            return Err(refused(line!()));
+        }
+        // A layer's scene paints nothing beyond the layer.
+        if let Some((ox, oy)) = layer
+            && (r.x < ox || r.y < oy || r.x + r.w > ox + target.width || r.y + r.h > oy + target.height)
+        {
             return Err(refused(line!()));
         }
         damage.push(r);
@@ -383,7 +416,11 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
         }
         off += n;
     }
-    Ok(checked { screen, width, height, target, damage, shapes, frame, items })
+    Ok(checked {
+        screen, width, height, target, damage, shapes, frame, items,
+        #[cfg(feature = "layers")]
+        layer,
+    })
 }
 
 /// compose.comp's push constants.

@@ -22,6 +22,11 @@ const ITEM: usize = 64;
 const NONE: u32 = u32::MAX;
 const FLAG_WALLPAPER: u32 = 1;
 const FLAG_BLURRED: u32 = 2;
+/// The scene paints one layer of the desktop (`shade::layers`); header
+/// word 15 holds its origin.
+const FLAG_LAYER: u32 = 4;
+const HDR_FLAGS: usize = 4;
+const HDR_ORIGIN: usize = 15;
 /// Scenes in a row the module failed before the CPU takes over again. A
 /// scene that was late is not one: the desktop composes on the CPU while
 /// the module is stalled, and goes back to it when the late job is done.
@@ -720,6 +725,80 @@ pub(crate) fn encode(frame: &Scene, sources: &dyn Sources, info: &FbInfo, damage
     Some((out, srcs))
 }
 
+/// Hand the scene of one layer (`shade::layers`) to the module: `frame`'s
+/// items into buffer `bo`, which holds the layer at `layer` on the screen,
+/// within `damage` (screen coordinates, inside the layer). None when the
+/// GPU does not compose now or the scene cannot be handed over; the
+/// caller paints the layer on the CPU. Its seq, and whether new buffers
+/// were bound ahead of it.
+pub(crate) fn submit_layer(frame: &Scene, sources: &dyn Sources, info: &FbInfo, bo: u32, layer: Rect,
+                           damage: &[Rect]) -> Option<(u32, bool)> {
+    if !gpudev::scenes_offered() || MODE.load(Ordering::Acquire) == MODE_OFF || gpudev::stalled_now() {
+        return None;
+    }
+    let pin = gpudev::ScenePin::new();
+    let r = match encode(frame, sources, info, damage) {
+        None => Err("a source cannot be handed to the module"),
+        Some((mut payload, srcs)) => {
+            let word = |p: &mut Vec<u8>, w: usize, f: &dyn Fn(u32) -> u32| {
+                let v = u32::from_le_bytes(p[w * 4..w * 4 + 4].try_into().unwrap());
+                p[w * 4..w * 4 + 4].copy_from_slice(&f(v).to_le_bytes());
+            };
+            word(&mut payload, HDR_FLAGS, &|v| v | FLAG_LAYER);
+            word(&mut payload, HDR_ORIGIN, &|_| layer.x | layer.y << 16);
+            to_device(u32::MAX, &srcs, info, &[]);
+            for rows in layer_rows(layer, damage) {
+                gpudev::sync(bo, Some(rows));
+            }
+            gpudev::submit_scene(bo, payload, &srcs).ok_or("the scene was refused")
+        }
+    };
+    let binding = pin.added();
+    drop(pin);
+    match r {
+        Ok(seq) => Some((seq, binding)),
+        Err(why) => {
+            failed(Err(why));
+            None
+        }
+    }
+}
+
+/// Wait for the layer scene `seq` (`submit_layer`): 0 when the module
+/// painted it. Its rows of `layer` go out of the CPU caches for a reader.
+pub(crate) fn layer_done(seq: u32, binding: bool, bo: u32, layer: Rect, damage: &[Rect]) -> i32 {
+    let status = if binding { gpudev::wait_scene_bound(seq) } else { gpudev::wait_scene(seq) };
+    for rows in layer_rows(layer, damage) {
+        gpudev::sync(bo, Some(rows));
+    }
+    if status == 0 {
+        SCENES_DONE.fetch_add(1, Ordering::Relaxed);
+        FAILURES_IN_ROW.store(0, Ordering::Relaxed);
+    } else {
+        failed(Ok(status));
+    }
+    status
+}
+
+/// The rows of a layer's buffer the passes over `damage` load and store:
+/// whole tiles of 64 rows from the layer's top.
+fn layer_rows(layer: Rect, damage: &[Rect]) -> impl Iterator<Item = (u32, u32)> + '_ {
+    damage.iter().map(move |d| d.intersect(&layer)).filter(|d| !d.is_empty())
+        .map(move |d| ((d.y - layer.y) & !63, (d.y1() - layer.y).next_multiple_of(64)))
+}
+
+/// A layer the GPU painted differs from what the CPU paints: say where,
+/// and compose on the CPU until `gpu verify`.
+pub(crate) fn layer_differs(frame: &Scene, layer: Rect, diffs: usize, first: Option<(u32, u32, u32, u32)>) {
+    crate::kprintln!("[npk] gpu: layer at {:?} differs from the CPU's in {} pixels, composing on the CPU \
+        (`gpu verify` retries)", layer, diffs);
+    if let Some((x, y, c, g)) = first {
+        crate::kprintln!("[npk] gpu:   first at {},{}: CPU {:08x} GPU {:08x}, items there {}", x, y, c, g,
+            kinds_at(frame, x, y));
+    }
+    MODE.store(MODE_OFF, Ordering::Release);
+}
+
 /// Scenes may go to the GPU: verified, or not yet tried.
 pub fn may_compose_on_gpu() -> bool {
     MODE.load(Ordering::Acquire) != MODE_OFF
@@ -729,6 +808,7 @@ pub fn may_compose_on_gpu() -> bool {
 pub fn request_verify() {
     MODE.store(MODE_UNTESTED, Ordering::Release);
     FAILURES_IN_ROW.store(0, Ordering::Relaxed);
+    crate::shade::layers::verify_again();
 }
 
 /// `gpu cpu`: compose on the CPU until `gpu verify`.

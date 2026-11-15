@@ -76,15 +76,31 @@ uint udiv_small(uint n, uint d) {
 
 #define BLURRED_AT(pitch, x, y) (((y) >> 1u) * (pitch) + ((x) >> 1u))
 
-// render::blend, alpha 0..=256.
+// render::blend, alpha 0..=256. With LAYER_ALPHA, into a layer (LAYER):
+// the alpha byte mixed too, `fg` opaque (render::blend_on).
 uint blend(uint fg, uint bg, uint a) {
     uint inv = FIT(256u - a, 0x1FFu);
     a = FIT(a, 0x1FFu);
     uint r = (((fg >> 16) & 255u) * a + ((bg >> 16) & 255u) * inv) >> 8;
     uint g = (((fg >> 8) & 255u) * a + ((bg >> 8) & 255u) * inv) >> 8;
     uint b = ((fg & 255u) * a + (bg & 255u) * inv) >> 8;
+#ifdef LAYER_ALPHA
+    if (LAYER)
+        return (((255u * a + (bg >> 24) * inv) >> 8) << 24) | (r << 16) | (g << 8) | b;
+#endif
     return (r << 16) | (g << 8) | b;
 }
+
+#ifdef ITEM_OPS
+// A pixel set whole: in a layer it is opaque (render::opaque).
+uint opaque(uint c) {
+#ifdef LAYER_ALPHA
+    if (LAYER)
+        return c | 0xFF000000u;
+#endif
+    return c;
+}
+#endif
 
 // render::luma.
 uint luma(uint c) {
@@ -158,7 +174,7 @@ Op op_blend_glass(uint b_col, uint b_a, uint g_col, uint g_a, uint ceil_) {
 
 uint apply(Op o, uint c) {
     if (o.how == OP_SET)
-        return o.b_col;
+        return opaque(o.b_col);
     if ((o.how & OP_BLEND) != 0u)
         c = blend(o.b_col, c, o.b_a);
     if ((o.how & OP_GLASS) != 0u)

@@ -10,7 +10,10 @@
 // `glass_layer`) into an image the size of the glass source, 13 and 14
 // are 10 and 11 reading such a layer, 15 and 16 a fill and a content
 // item off their corner rows (`fill_inside`, `content_inside`). KIND + 32
-// is a kind's program that also takes radii beyond V3D_SMALL.
+// is a kind's program that also takes radii beyond V3D_SMALL, KIND + 64
+// one that paints into a layer of the desktop: premultiplied ARGB over a
+// transparent ground (items.glsl LAYER_ALPHA), the target at (ox, oy) on
+// the screen, which the items' coordinates are in.
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_shader_tile_image : require
@@ -43,19 +46,21 @@ const uint FLAG_GLASS = 4u;
 
 #define ITEM_OPS
 #define V3D_ARITH
-#define V3D_SMALL (KIND < 32u)
+#define V3D_SMALL ((KIND & 32u) == 0u)
+#define LAYER_ALPHA
+const bool LAYER = (KIND & 64u) != 0u;
 #include "../../../gpu_shaders/items.glsl"
 
 void main() {
-    uint x = uint(gl_FragCoord.x);
-    uint y = uint(gl_FragCoord.y);
+    uint x = uint(gl_FragCoord.x) + p.ox;
+    uint y = uint(gl_FragCoord.y) + p.oy;
     uint it[16] = p.item;
     g_flags = p.flags;
     g_ceil = p.ceil_;
     g_tint = p.tint;
     g_tint_w = p.tint_w;
-    g_width = p.width;
-    g_height = p.height;
+    g_width = p.screen_w;
+    g_height = p.screen_h;
     Words src = mkaddr(p.src_lo, p.src_hi);
     g_wall = src;
     g_wall_pitch = p.src_pitch;
@@ -65,7 +70,8 @@ void main() {
     g_glass_pitch = p.src_pitch;
     g_glyphs = src;
     if ((KIND & 31u) == 1u) {
-        color = (g_flags & FLAG_WALL) != 0u ? g_wall.v[y * g_wall_pitch + x] : 0xFF181820u;
+        // A layer's ground is transparent.
+        color = LAYER ? 0u : (g_flags & FLAG_WALL) != 0u ? g_wall.v[y * g_wall_pitch + x] : 0xFF181820u;
         return;
     }
     // The item's own loads and arithmetic first, the tile buffer last: a
@@ -104,7 +110,7 @@ void main() {
         discard;
     uint c;
     if (o.how == OP_SET)
-        c = o.b_col;
+        c = opaque(o.b_col);
     else
         c = apply(o, colorAttachmentReadEXT(dst).x);
     color = (KIND & 31u) == 11u || (KIND & 31u) == 14u ? apply(o2, c) : c;

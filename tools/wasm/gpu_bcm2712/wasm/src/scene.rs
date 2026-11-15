@@ -41,7 +41,11 @@ const DRAW_KINDS: usize = 16;
 /// The kinds with a second program for radii beyond 32-bit arithmetic
 /// (draw.frag KIND + 32, gen_shaders.py WIDE_KINDS), after the others.
 const WIDE_KINDS: [usize; 4] = [2, 4, 5, 8];
-const PIPELINES: usize = DRAW_KINDS + WIDE_KINDS.len();
+const SCREEN_PIPELINES: usize = DRAW_KINDS + WIDE_KINDS.len();
+/// Then every program again painting into a layer (draw.frag KIND + 64).
+const PIPELINES: usize = 2 * SCREEN_PIPELINES;
+/// draw.h.glsl `ox`, `oy`, `screen_w`, `screen_h`.
+const ORIGIN_PUSH: usize = 45;
 const ITEM_KINDS: usize = 9;
 const KIND_CHROME_INSIDE: usize = 10;
 /// The straight-row part of a chrome item with a text item over it
@@ -201,7 +205,9 @@ fn upload_draw_programs() -> Option<(Buf, [v3d_draw::Pipeline; PIPELINES])> {
     }
     let mut at = [[0u32; 3]; PIPELINES];
     for (k, g) in sg::DRAW_PIPELINES.iter().enumerate() {
-        let want = if k < DRAW_KINDS { k + 1 } else { WIDE_KINDS[k - DRAW_KINDS] + 32 };
+        let b = k % SCREEN_PIPELINES;
+        let want = if b < DRAW_KINDS { b + 1 } else { WIDE_KINDS[b - DRAW_KINDS] + 32 }
+            + if k >= SCREEN_PIPELINES { 64 } else { 0 };
         if g.kind as usize != want {
             return None;
         }
@@ -771,6 +777,7 @@ impl Composer {
             push[9..9 + words.len()].copy_from_slice(words);
             push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = width;
             push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = height;
+            at_origin(&mut push, (0, 0), (width, height));
             v3d_draw::Draw { pipeline: kind as usize - 1, push, vertex_count: 4 }
         };
         // Item::Fill: color, alpha, radius.
@@ -913,6 +920,7 @@ impl Composer {
             push[4..12].copy_from_slice(&[8, r[0], r[1], r[2] - r[0], r[3] - r[1], color, alpha, 0]);
             push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = W;
             push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = H;
+            at_origin(&mut push, (0, 0), (W, H));
             v3d_draw::Draw { pipeline: 7, push, vertex_count: 4 }
         };
         let draws = [fill([0, 0, W, H], BG, 255), fill(PART, FG, 128)];
@@ -1062,6 +1070,8 @@ impl Composer {
         push[..gpu_scene::scene::DRAW_PUSH_WORDS].copy_from_slice(&gpu_scene::scene::draw_push(ck, i, &all));
         push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = width;
         push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = height;
+        // The layer has the source's geometry, which is its "screen".
+        at_origin(&mut push, (0, 0), (width, height));
         let draw = v3d_draw::Draw { pipeline: KIND_GLASS_LAYER - 1, push, vertex_count: 4 };
         let image = v3d_draw::Image { va: buf.va, stride: pitch * 4, width, height };
         let area = v3d_draw::Rect { x: 0, y: 0, width, height };
@@ -1195,14 +1205,21 @@ impl plan::draw_sink for Sink<'_> {
         // area cuts). With a wallpaper the tiles are loaded from it instead,
         // which is what the background draws, so it draws nothing; a pass
         // of the bare wallpaper only loads and stores its tiles.
+        // A layer's target holds only the layer (gpu_scene `layer`): the
+        // pass is in its pixels, the draws in the screen's, over a
+        // transparent ground, never from the wallpaper.
         let t = &ck.target;
         let f = &ck.frame;
+        let origin = ck.layer.unwrap_or((0, 0));
+        let (tw, th) = if ck.layer.is_some() { (t.width, t.height) } else { (ck.width, ck.height) };
+        let at = rect { x: area.x - origin.0, y: area.y - origin.1, w: area.w, h: area.h };
         let fresh = ck.items.first().is_some_and(|it| it[0] == gpu_scene::scene::KIND_BACKGROUND)
-            && whole_tiles(area, ck.width, ck.height);
+            && whole_tiles(&at, tw, th);
         let wall = (f[gpu_scene::scene::F_WALL] as u64) | (f[gpu_scene::scene::F_WALL + 1] as u64) << 32;
-        let load_from = (fresh && f[gpu_scene::scene::F_FLAGS] & gpu_scene::scene::FLAG_WALL != 0
+        let load_from = (ck.layer.is_none() && fresh && f[gpu_scene::scene::F_FLAGS] & gpu_scene::scene::FLAG_WALL != 0
             && wall != 0 && wall <= u32::MAX as u64)
             .then(|| (wall as u32, f[gpu_scene::scene::F_WALL_PITCH] * 4));
+        let layer_pipelines = if ck.layer.is_some() { SCREEN_PIPELINES } else { 0 };
 
         let mut draws = Vec::with_capacity(end);
         for i in 0..end {
@@ -1222,7 +1239,12 @@ impl plan::draw_sink for Sink<'_> {
                     kind += KIND_CHROME_INSIDE_LAYER - KIND_CHROME_INSIDE;
                     push[24..27].copy_from_slice(&[layers[l].0, 0, layers[l].1]);
                 }
-                draws.push(v3d_draw::Draw { pipeline: pipeline(kind, &ck.items[i]), push, vertex_count: 4 });
+                push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = tw;
+                push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = th;
+                at_origin(&mut push, origin, (ck.width, ck.height));
+                draws.push(v3d_draw::Draw {
+                    pipeline: layer_pipelines + pipeline(kind, &ck.items[i]), push, vertex_count: 4,
+                });
             };
             // Only where no later item paints over it opaquely; the straight
             // rows of a window's glass by their own short program, with its
@@ -1291,8 +1313,8 @@ impl plan::draw_sink for Sink<'_> {
         if t.va > u32::MAX as u64 {
             return Err(-EINVAL);
         }
-        let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: ck.width, height: ck.height };
-        let area = v3d_draw::Rect { x: area.x, y: area.y, width: area.w, height: area.h };
+        let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: tw, height: th };
+        let area = v3d_draw::Rect { x: at.x, y: at.y, width: at.w, height: at.h };
         let f = self.c.submit_pass(self.hw, image, !fresh, load_from, area, &draws)?;
         for l in layer.into_iter().flatten() {
             self.c.glass[l].used = f;
@@ -1331,6 +1353,12 @@ fn window_text(ck: &gpu_scene::scene::checked, i: usize) -> Option<(usize, rect)
         }
     }
     best
+}
+
+/// Push words `ORIGIN_PUSH..`: where the target lies on the screen, and
+/// the screen's size (draw.h.glsl).
+fn at_origin(push: &mut [u32; v3d_draw::PUSH_WORDS], origin: (u32, u32), screen: (u32, u32)) {
+    push[ORIGIN_PUSH..ORIGIN_PUSH + 4].copy_from_slice(&[origin.0, origin.1, screen.0, screen.1]);
 }
 
 /// v3d_draw's tile-aligned render area: whole tiles, or reaching the

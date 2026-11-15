@@ -401,10 +401,10 @@ main(int argc, char **argv)
    fprintf(m, "qpu_count %u\n", pdev->devinfo.qpu_count);
    fprintf(m, "size %u %u\n", width, height);
    fprintf(m, "area %u %u %u %u\n", area[0], area[1], area[2], area[3]);
-   VkPipeline pipelines[64] = {0};
+   VkPipeline pipelines[128] = {0};
    for (uint32_t i = 0; i < ndraws; i++) {
       uint32_t k = draws[i].kind;
-      if (k >= 64) {
+      if (k >= 128) {
          fprintf(stderr, "v3dg: kind %u\n", k);
          return 2;
       }

@@ -49,6 +49,9 @@ SCENARIOS = [
     ("layer_kinds_256x128", 256, 128, [], ["12:0,0,128,64", "13:10,10,120,100", "14:130,10,250,100"]),
     # The inside of a fill and of a content item.
     ("inside_kinds_256x128", 256, 128, [], ["1:0,0,256,128", "15:10,10,120,100", "16:130,10,250,100"]),
+    # A desktop layer's programs (draw.frag KIND + 64), a wide one among them.
+    ("desktop_layer_kinds_256x128", 256, 128, [], ["65:0,0,256,128", "66:10,10,120,100", "68:130,10,250,100",
+                                                   "100:20,20,60,60"]),
     # The programs that keep the 64-bit paths for large radii.
     ("wide_kinds_256x128", 256, 128, [], ["1:0,0,256,128", "34:10,10,120,100", "36:130,10,250,100",
                                           "37:0,64,128,128", "40:128,64,256,128"]),

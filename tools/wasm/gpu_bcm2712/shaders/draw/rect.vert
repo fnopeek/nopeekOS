@@ -28,8 +28,9 @@ layout(location = 0) flat out uint v_fill;
 layout(location = 1) flat out uint v_fill_luma;
 
 void main() {
-    uint x = (gl_VertexIndex & 1) != 0 ? p.rect[2] : p.rect[0];
-    uint y = (gl_VertexIndex & 2) != 0 ? p.rect[3] : p.rect[1];
+    // The rectangle is in screen pixels, the viewport is the target's.
+    uint x = ((gl_VertexIndex & 1) != 0 ? p.rect[2] : p.rect[0]) - p.ox;
+    uint y = ((gl_VertexIndex & 2) != 0 ? p.rect[3] : p.rect[1]) - p.oy;
     gl_Position = vec4(float(x) * 2.0 / float(p.width) - 1.0, float(y) * 2.0 / float(p.height) - 1.0, 0.0, 1.0);
     // `chrome`: the glass fill of an item that paints its content.
     uint tint_w = p.item[12] != 0u ? p.tint_w : 0u;
