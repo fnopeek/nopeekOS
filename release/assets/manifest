@@ -1,4 +1,4 @@
-issued=1794770585
+issued=1794834800
 
 [font:ibm-plex-mono]
 size=173052
@@ -512,6 +512,14 @@ sha384=8e8dac710a6cf39659eaad58ce823dff936f28a31d5f2bc68b4df1a283ad275cf4de4f3a2
 size=9581568
 sha384=d0bc7a43ea61d1d3e132da2574233751ad9f4882e6c3386e03783f9cea61ef6241b72cfada6a977b1612abe7b1796442
 
+[microvm-aarch64:linux-virt]
+size=11024392
+sha384=ec4bfe3e4cb258ccc5e269fbe33c4c51d9d2bc297dc63d68a8597f16d0270935bbbe052c5b5d8bbe2923f7e9a19d039f
+
+[microvm-aarch64:initramfs]
+size=330010
+sha384=dd7e8738b4835b963b6a31c02705a0845c7598a27db0e037458d5493d4131e3a5c345f2bb73c90b721625820ee0a55a4
+
 [wallpaper:amber-ash-waves.png]
 size=9200314
 sha384=5d7a92c66f463b5d7452e79bc5c18d0c0216732d48c983ee0e9baafc40a8ceb00c66c881bd866216d559b30881e92ef7
@@ -536,5 +544,10 @@ sha384=40d6a798db10f6f83e892d2c24bd8ab72cbd917a09541cb454eb94620ad8249571b4d4200
 size=623292416
 sha384=ea161e6c2ff18d10259ea414a64e4c6e1d87cf677025278485f84be95d206d349b0c18cbd81f84d4b515040d696d5ffc
 url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-159.0-arch20261029-7/microvm-firefox.sqfs
+
+[microvm-aarch64:firefox-sqfs]
+size=604676096
+sha384=871eeb516f5cba31bec5e963531dd9fbd1c573be2649a2dc25a9fac79ca65bb2f804fc640ba484ea5bfe7a6c021e8999
+url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-160.0-alarm20261115-aarch64/microvm-firefox-aarch64.sqfs
 
 
