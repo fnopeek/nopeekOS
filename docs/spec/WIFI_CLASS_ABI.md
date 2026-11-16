@@ -131,6 +131,7 @@ byte for byte by `framecheck.py`.
 | `0x04` | `SET_KEY` | `[04][key_type u8][key_idx u8][cipher u8][key_len u8][key key_len][rsc 6]` | 11 + key_len |
 | `0x05` | `TX_EAPOL` | `[05][len u16][frame len]` | 3 + len |
 | `0x08` | `AUTHORIZED` | `[08]` | 1 |
+| `0x09` | `QUIT` | `[09]` | 1 |
 
 Codes `0x06` and `0x07` are defined in `regs.rs` and used by neither side.
 
@@ -174,6 +175,11 @@ key is installed, and requests a TX report. Handled only while a link runs.
 
 **AUTHORIZED.** The handshake is done. The driver opens its data path,
 calls `npk_netdev_set_link(1)` and sends `LINK_UP`.
+
+**QUIT.** Sent by the kernel, never by the manager (8.3). With a link
+running the driver leaves it as for `DISCONNECT`; with none it sends
+`LINK_DOWN` (0). It then powers the chip off and returns, which frees the
+card. wifid's `lib.rs` does not define the code.
 
 ---
 
@@ -418,7 +424,8 @@ The SSID is 1 to 32 bytes. Kernel checks before queueing:
 `npk_wifi_request` returns `-1` if a check fails or the queue is full. The
 `wlan` intent uses the same kernel functions (`scan`, `connect`,
 `disconnect`, `forget`, `auto <name> on|off`, `prio <name> <-128..127>`,
-`known`); `connect`, `forget`, `auto` and `prio` need WRITE, the others READ.
+`known`); `connect`, `forget`, `auto`, `prio` and `scope` need WRITE, the
+others READ.
 
 ### 8.2 State text
 
@@ -449,6 +456,25 @@ steps while connected, dimmed while connecting, struck through otherwise);
 clicking it opens `link`.
 
 ---
+
+
+### 8.3 Lending the card
+
+`wlan scope` lends the card to the module `wifiscope` (`wifi::hand_over`,
+`kernel/src/drivers/wifi.rs`). The kernel remembers which module registered
+the WiFi NIC and on which PCI function. A fiber on core 0 then:
+
+1. sends `QUIT` and waits up to 15 s for the driver to release the card;
+   if it does not, the hand-over is cancelled, and a driver that ends
+   within another 60 s is started again;
+2. starts `wifiscope` as autostart starts a module (rights from its
+   `.npk.caps`) and waits up to 20 s for it to bind the card, then up to
+   600 s for it to release it;
+3. clears both queues and starts the driver again under its own name.
+
+wifid sees `LINK_DOWN` (0) and later `DRIVER_UP`, and joins as after a boot.
+One hand-over runs at a time. No module can end another: the kernel sends
+`QUIT` on the user's `wlan scope`.
 
 ## 9. Configuration
 

@@ -4609,6 +4609,9 @@ pub(crate) fn npk_netdev_register(mem: &mut [u8], ctx: &mut HostState, mac_ptr: 
     // Re-borrow after register call
     if let Some(h) = ctx.hw.as_mut() {
         h.registered_as_netdev = true;
+        if let Some(addr) = h.pci() {
+            crate::wifi::note_nic_driver(&ctx.module_name, addr);
+        }
     }
     kprintln!("[npk] WASM driver registered as NIC: {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);

@@ -356,13 +356,17 @@ fn wlan_set_usage() {
 
 /// The verbs handled by `intent_wlan_manage`.
 #[cfg(target_arch = "x86_64")]
-pub const WLAN_VERBS: &[&str] = &["scan", "connect", "disconnect", "forget", "auto", "prio", "known"];
+pub const WLAN_VERBS: &[&str] = &["scan", "connect", "disconnect", "forget", "auto", "prio", "known", "scope"];
 
 /// Whether `verb` changes stored networks (needs WRITE).
 #[cfg(target_arch = "x86_64")]
 pub fn wlan_verb_writes(verb: &str) -> bool {
-    matches!(verb, "connect" | "forget" | "auto" | "prio")
+    matches!(verb, "connect" | "forget" | "auto" | "prio" | "scope")
 }
+
+/// The measurement module `wlan scope` lends the card to.
+#[cfg(target_arch = "x86_64")]
+const SCOPE_MODULE: &str = "wifiscope";
 
 #[cfg(target_arch = "x86_64")]
 pub fn intent_wlan_manage(args: &str) {
@@ -370,6 +374,10 @@ pub fn intent_wlan_manage(args: &str) {
     let a = args.trim();
     let (verb, rest) = a.split_once(' ').map_or((a, ""), |(v, r)| (v, r.trim()));
     match verb {
+        "scope" => match w::hand_over(SCOPE_MODULE) {
+            Ok(()) => kprintln!("[wlan] lending the card to {}: WiFi is off until it ends", SCOPE_MODULE),
+            Err(e) => kprintln!("[wlan] scope: {}", e),
+        },
         "scan" => {
             if w::request_scan() {
                 kprintln!("[wlan] scanning - `wlan` shows the list");

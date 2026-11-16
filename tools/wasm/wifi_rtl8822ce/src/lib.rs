@@ -787,14 +787,16 @@ fn driver_main(rtwdev: &mut Dev) {
         "[rtl8822ce] Stufe 5b: NEIN — nicht weiterbauen, bevor das steht\n");
 
     // From here `wifid` decides: scan, which cell, when to leave. The loop
-    // returns only if calibration fails, and with it the chip goes off.
+    // returns when calibration fails or the kernel sends `QUIT`; either way
+    // the chip goes off.
     if let (true, Some(e), Some(tp)) = (stage5b, efuse.as_ref(), _txpwr.as_ref()) {
         command_loop(h, &hal, &mut trx, mgmt_buf, h2c_buf, &mut h2c, e, tp,
                      fw_feature, rtwdev);
     }
 
-    // Reached only when a stage failed: the kernel is about to free the DMA
-    // buffers that running firmware would otherwise keep writing into.
+    // Reached when a stage failed or after `QUIT`: the kernel is about to
+    // free the DMA buffers that running firmware would otherwise keep
+    // writing into.
     mac::mac_power_off(h, hal.cut_version);
 
 
@@ -802,8 +804,8 @@ fn driver_main(rtwdev: &mut Dev) {
     // clears the report, so a dead driver's numbers do not look live; the
     // stage results are therefore printed to the terminal here and not
     // shown in `wlan`. The chip is already off, so nothing can write into
-    // the buffers being freed. Only a failed run gets here (with a link, 6b
-    // never returns), so this is loud even without `debug: 1`.
+    // the buffers being freed. Only a failed run or `QUIT` gets here, so
+    // this is loud even without `debug: 1`.
     host::say("[rtl8822ce] fertig — Chip ist aus, Geraet freigegeben\n");
 }
 
@@ -847,6 +849,10 @@ fn next_ask(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
             Some(Ask::Connect(b, c[7]))
         }
         CMD_DISCONNECT => Some(Ask::Leave),
+        CMD_QUIT => {
+            QUIT_ASKED.store(true, Ordering::Relaxed);
+            Some(Ask::Leave)
+        }
         _ => None,
     }
 }
@@ -879,6 +885,9 @@ fn command_loop(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
     host::print("[rtl8822ce] bereit — wifid waehlt das Netz\n");
 
     loop {
+        if QUIT_ASKED.load(Ordering::Relaxed) {
+            return;
+        }
         let (bssid, channel) = match next_ask(h, hal, trx, mgmt_buf, h2c, e, tp,
                                               fw_feature, d, 1000) {
             Some(Ask::Connect(b, ch)) => (b, ch),
@@ -1043,6 +1052,10 @@ fn command_loop(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
 /// `link_pump` saw `DISCONNECT` or `CONNECT` during stage 6a, whose own
 /// loop does not look at the result.
 static LEAVE_ASKED: AtomicBool = AtomicBool::new(false);
+
+/// The kernel asked the driver to end (`CMD_QUIT`): the link is left as for
+/// `DISCONNECT`, then `command_loop` returns and the chip is powered off.
+static QUIT_ASKED: AtomicBool = AtomicBool::new(false);
 
 /// main.c:2064-2081 `rtw_chip_board_info_setup`, stage 4b.
 ///
@@ -6878,7 +6891,10 @@ fn link_pump_in(h: i32, hal: &Hal, trx: &mut pci::Trx, mgmt_buf: i32,
                 }
                 // While linked the scan runs in slices beside the link.
                 Some(CMD_SCAN) => bg_scan_start(now),
-                Some(CMD_DISCONNECT) => {
+                Some(CMD_DISCONNECT) | Some(CMD_QUIT) => {
+                    if cmd[0] == CMD_QUIT {
+                        QUIT_ASKED.store(true, Ordering::Relaxed);
+                    }
                     NEXT_CONNECT.with(|c| *c = None);
                     LEAVE_ASKED.store(true, Ordering::Relaxed);
                     return PumpEnd::Leave;

@@ -1698,6 +1698,7 @@ pub fn intent_help_topic(topic: &str) {
             help_row("wlan forget <name>", "Delete a saved network");
             help_row("wlan auto <name> on|off", "Join it automatically");
             help_row("wlan prio <name> <n>", "Higher joins first");
+            help_row("wlan scope", "Lend the card to wifiscope, then reconnect");
             help_note("card keys: band (5|2.4|auto), bw, ampdu, txagg, roam, ps, btcoex, settle_ms");
             help_note("      in sys/config/wifi - `wlan set` edits it in place");
         }

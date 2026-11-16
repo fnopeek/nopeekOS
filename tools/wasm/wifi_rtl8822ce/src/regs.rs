@@ -1221,6 +1221,8 @@ pub const CMD_TX_EAPOL: u8 = 0x05;
 pub const CMD_TX_MGMT: u8 = 0x06;
 pub const CMD_ASSOCIATED: u8 = 0x07;
 pub const CMD_AUTHORIZED: u8 = 0x08;
+/// Sent by the kernel, not the manager: leave, power the chip off, return.
+pub const CMD_QUIT: u8 = 0x09;
 // Upstream (driver -> manager)
 pub const EV_SCAN_AP: u8 = 0x81;
 pub const EV_SCAN_DONE: u8 = 0x82;
