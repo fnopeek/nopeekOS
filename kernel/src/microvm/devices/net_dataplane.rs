@@ -506,8 +506,14 @@ impl TraceMark {
             kinds: crate::microvm::devices::nat::tcp_kind_stats(),
             egress: crate::microvm::devices::nat::egress_stats(),
             arp_miss: crate::microvm::devices::nat::arp_miss_count(),
+            #[cfg(target_arch = "x86_64")]
             link: crate::drivers::igc::link_stats(),
+            #[cfg(not(target_arch = "x86_64"))]
+            link: (0, 0, 0),
+            #[cfg(target_arch = "x86_64")]
             card_tx: crate::drivers::igc::tx_stats(),
+            #[cfg(not(target_arch = "x86_64"))]
+            card_tx: (0, 0, 0),
             sack: crate::microvm::devices::nat::tcp_loss_stats().1,
             card_err: crate::netdev::tx_reject_stats().1,
         }
@@ -579,6 +585,7 @@ fn arm_tx_early() {
     // card. `set microvm_txq_kb 0` lifts it.
     let kb = crate::config::get("microvm_txq_kb")
         .and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(TXQ_KB_DEFAULT);
+    #[cfg(target_arch = "x86_64")]
     crate::drivers::igc::set_tx_limit(kb.saturating_mul(1024));
     crate::kprintln!("[microvm] host card queue: {}",
         if kb == 0 { alloc::format!("ring size") } else { alloc::format!("{} KB", kb) });

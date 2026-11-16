@@ -28,8 +28,13 @@ pub fn lock() -> MutexGuard<'static, VirtioGpu> { GPU.lock() }
 /// The native-context protocol the next VM is offered, if the GPU module
 /// serves native contexts: the card's vendor picks it.
 pub fn native_protocol() -> Option<&'static str> {
-    let dev = crate::gpu::gpudev::native_device()?.pci()?;
-    Some(if crate::drivers::pci::read16(dev, 0) == 0x1002 { "amdgpu" } else { "i915" })
+    #[cfg(target_arch = "x86_64")]
+    {
+        let dev = crate::gpu::gpudev::native_device()?.pci()?;
+        Some(if crate::drivers::pci::read16(dev, 0) == 0x1002 { "amdgpu" } else { "i915" })
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    None
 }
 
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).
@@ -41,6 +46,7 @@ pub fn reset() {
     // module's i915 when it serves native contexts behind the IOMMU, else the
     // probe for `set microvm_gpu test`, else none.
     super::virtio_gpu_ctx::set_backend(None);
+    #[cfg(target_arch = "x86_64")]
     if let Some(dev) = crate::gpu::gpudev::native_device().and_then(|d| d.pci()) {
         // An AMD card's capset comes from its module.
         let backend: Option<(alloc::boxed::Box<dyn super::virtio_gpu_ctx::Backend>, &str)> =
@@ -65,6 +71,7 @@ pub fn reset() {
         if let Some(why) = crate::gpu::gpudev::native_refused() {
             crate::kprintln!("[gpu] no native contexts: {}", why);
         }
+        #[cfg(target_arch = "x86_64")]
         if mode == Some("test") {
             if let Some(b) = super::virtio_gpu_ctx::ProbeBackend::new() {
                 super::virtio_gpu_ctx::set_backend(Some(alloc::boxed::Box::new(b)));

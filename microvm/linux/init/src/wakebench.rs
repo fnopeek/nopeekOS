@@ -10,17 +10,16 @@
 //! hypervisor makes expensive, with its output on the console.
 
 use super::{syscall0, syscall1, syscall2, syscall3, syscall4, say};
+use super::sys::{SYS_CLOCK_GETTIME, SYS_PIPE, SYS_SCHED_SETAFFINITY, SYS_WAIT4};
 
-const SYS_PIPE: u64 = 22;
-const SYS_WAIT4: u64 = 61;
-const SYS_SCHED_SETAFFINITY: u64 = 203;
-const SYS_CLOCK_GETTIME: u64 = 228;
 const CLOCK_MONOTONIC: u64 = 1;
 
 const ROUNDS: u64 = 20_000;
 const WARMUP: u64 = 200;
 const SLOW_NS: u64 = 100_000;
 
+// vmbench times x86 exits (cpuid, pause); there is no aarch64 build.
+#[cfg(target_arch = "x86_64")]
 const VMBENCH: &[u8] = include_bytes!("../../vmbench/vmbench");
 
 fn cmdline_has(needle: &[u8]) -> bool {
@@ -169,6 +168,7 @@ fn wait_for_cpus() -> u32 {
 }
 
 /// Write "on" to /proc/sys/kernel/printk_devkmsg; true if the kernel took it.
+#[cfg(target_arch = "x86_64")]
 fn set_devkmsg_on() -> bool {
     let path = b"/proc/sys/kernel/printk_devkmsg\0";
     // SAFETY: NUL-terminated path, O_WRONLY.
@@ -182,7 +182,13 @@ fn set_devkmsg_on() -> bool {
     n == v.len() as i64
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+pub fn run_vm(kmsg_fd: i64) {
+    say(kmsg_fd, b"[vmbench] not built for this architecture\n");
+}
+
 /// Run `vmbench` in a child with its output on /dev/kmsg, and wait for it.
+#[cfg(target_arch = "x86_64")]
 pub fn run_vm(kmsg_fd: i64) {
     // SAFETY: fork has no preconditions.
     let pid = unsafe { syscall0(super::SYS_FORK) };

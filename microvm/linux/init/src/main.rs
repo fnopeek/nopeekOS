@@ -1,8 +1,7 @@
 //! microvm-init — nopeekOS Linux MicroVM PID-1.
 //!
 //! Statically linked, no_std, no libc. Talks to the Linux kernel
-//! exclusively via raw syscalls (x86_64 ABI: rax=nr, rdi/rsi/rdx/r10
-//! /r8/r9 = args, syscall, rax = result).
+//! exclusively via raw syscalls (`sys.rs`), on x86_64 and aarch64.
 //!
 //! Mounts the essential virtual filesystems (/proc /sys /dev /tmp), opens
 //! the console + kmsg, switches into the squashfs userspace bundle if
@@ -11,34 +10,13 @@
 #![no_std]
 #![no_main]
 
-use core::arch::asm;
-
 mod control;
+mod sys;
 mod wakebench;
 
-const SYS_READ: u64 = 0;
-const SYS_WRITE: u64 = 1;
-const SYS_OPEN: u64 = 2;
-const SYS_CLOSE: u64 = 3;
-const SYS_DUP2: u64 = 33;
-const SYS_PAUSE: u64 = 34;
-const SYS_ACCESS: u64 = 21;
-const SYS_EXECVE: u64 = 59;
-const SYS_EXIT: u64 = 60;
-#[allow(dead_code)] // part of the syscall table; a map with holes is worse
-const SYS_LSEEK: u64 = 8;
-const SYS_MKDIR: u64 = 83;
-const SYS_CHDIR: u64 = 80;
-const SYS_CHROOT: u64 = 161;
-const SYS_MOUNT: u64 = 165;
-const SYS_REBOOT: u64 = 169;
-const SYS_FORK: u64 = 57;
-const SYS_GETDENTS64: u64 = 217;
-const SYS_NANOSLEEP: u64 = 35;
-const SYS_SCHED_SETSCHEDULER: u64 = 144;
+use sys::*;
 
-// O_DIRECTORY for opendir-style reads, SCHED_RR for the RT promoter.
-const O_DIRECTORY: u64 = 0o200000;
+// SCHED_RR for the RT promoter.
 const SCHED_RR: u64 = 2;
 
 // mount(2) flags
@@ -63,19 +41,6 @@ fn on_panic(_info: &core::panic::PanicInfo) -> ! {
     let _ = sys_write(2, b"microvm-init panic\n");
     halt();
 }
-
-// _start in pure asm: Linux's process-load ABI gives RSP 16-aligned
-// pointing at argc (no return slot). Rust's function prologue assumes
-// the System V function-entry convention (RSP 8-misaligned after a
-// CALL). Without the CALL bridge, any later MOVAPS on the stack #GPs.
-core::arch::global_asm!(
-    ".global _start",
-    "_start:",
-    "    xor rbp, rbp",
-    "    and rsp, -16",
-    "    call rust_main",
-    "    ud2",
-);
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn rust_main() -> ! {
@@ -757,7 +722,10 @@ const SESSION_PATH: &[u8] = b"PATH=/usr/libexec/npk/bb:/usr/bin:/usr/sbin\0";
 const SESSION_LANG: &[u8] = b"LANG=C.UTF-8\0";
 
 /// The guest compositor, built by `microvm/linux/npkwm/build.sh`.
+#[cfg(target_arch = "x86_64")]
 const NPKWM: &[u8] = include_bytes!("../../npkwm/npkwm");
+#[cfg(target_arch = "aarch64")]
+const NPKWM: &[u8] = include_bytes!("../../npkwm/npkwm-aarch64");
 
 /// Create or truncate `path` (NUL-terminated) and write `data`; best effort.
 fn write_file(path: &[u8], data: &[u8], mode: u64) {
@@ -1088,77 +1056,4 @@ unsafe fn rt_check_thread(pid: &[u8], tid: &[u8], kmsg_fd: i64) {
     if unsafe { rt_already(tidnum) } { return; }
     let param: [i32; 1] = [2]; // sched_priority = 2
     let _ = unsafe { syscall3(SYS_SCHED_SETSCHEDULER, tidnum as u64, SCHED_RR, param.as_ptr() as u64) };
-}
-
-// ── Raw syscall wrappers ───────────────────────────────────────────
-
-unsafe fn syscall0(nr: u64) -> i64 {
-    let r: i64;
-    unsafe {
-        asm!("syscall",
-             inlateout("rax") nr as i64 => r,
-             out("rcx") _, out("r11") _,
-             options(nostack));
-    }
-    r
-}
-
-unsafe fn syscall1(nr: u64, a: u64) -> i64 {
-    let r: i64;
-    unsafe {
-        asm!("syscall",
-             inlateout("rax") nr as i64 => r,
-             in("rdi") a,
-             out("rcx") _, out("r11") _,
-             options(nostack));
-    }
-    r
-}
-
-unsafe fn syscall2(nr: u64, a: u64, b: u64) -> i64 {
-    let r: i64;
-    unsafe {
-        asm!("syscall",
-             inlateout("rax") nr as i64 => r,
-             in("rdi") a, in("rsi") b,
-             out("rcx") _, out("r11") _,
-             options(nostack));
-    }
-    r
-}
-
-unsafe fn syscall3(nr: u64, a: u64, b: u64, c: u64) -> i64 {
-    let r: i64;
-    unsafe {
-        asm!("syscall",
-             inlateout("rax") nr as i64 => r,
-             in("rdi") a, in("rsi") b, in("rdx") c,
-             out("rcx") _, out("r11") _,
-             options(nostack));
-    }
-    r
-}
-
-unsafe fn syscall4(nr: u64, a: u64, b: u64, c: u64, d: u64) -> i64 {
-    let r: i64;
-    unsafe {
-        asm!("syscall",
-             inlateout("rax") nr as i64 => r,
-             in("rdi") a, in("rsi") b, in("rdx") c, in("r10") d,
-             out("rcx") _, out("r11") _,
-             options(nostack));
-    }
-    r
-}
-
-unsafe fn syscall5(nr: u64, a: u64, b: u64, c: u64, d: u64, e: u64) -> i64 {
-    let r: i64;
-    unsafe {
-        asm!("syscall",
-             inlateout("rax") nr as i64 => r,
-             in("rdi") a, in("rsi") b, in("rdx") c, in("r10") d, in("r8") e,
-             out("rcx") _, out("r11") _,
-             options(nostack));
-    }
-    r
 }

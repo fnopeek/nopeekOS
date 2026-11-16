@@ -4,19 +4,20 @@
 # the libpipewire the userspace bundle carries.
 #
 # Output: microvm/linux/npkcam/npk-camera (committed; the userspace bundle
-# carries it).
+# carries it). `ARCH=aarch64` builds in an Arch Linux ARM root
+# (microvm/linux/guest.sh) and writes npk-camera-aarch64.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/../arch.sh"
-OUT="$SCRIPT_DIR/npk-camera"
+source "$SCRIPT_DIR/../guest.sh"
+OUT="$SCRIPT_DIR/npk-camera$GUEST_SUFFIX"
 
-arch_fetch
+guest_fetch
 STAGE="$(mktemp -d)"
-trap 'arch_rm "$STAGE"' EXIT
-arch_run "$STAGE/root" "
-    in_root pacman -Syu --noconfirm --needed base-devel pipewire libjpeg-turbo >/dev/null 2>&1
+trap 'guest_rm "$STAGE"' EXIT
+guest_run "$STAGE/root" "
+    $GUEST_PACMAN -Syu --noconfirm --needed base-devel pipewire libjpeg-turbo >/dev/null 2>&1
     mkdir -p \$R/src
     cp '$SCRIPT_DIR/npk-camera.c' \$R/src/
     in_root /bin/sh -c '
@@ -30,4 +31,4 @@ arch_run "$STAGE/root" "
 "
 cp "$STAGE/npk-camera" "$OUT"
 touch -d @0 "$OUT"
-echo "npk-camera: $(stat -c%s "$OUT") bytes"
+echo "${OUT##*/}: $(stat -c%s "$OUT") bytes"

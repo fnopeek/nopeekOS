@@ -488,6 +488,7 @@ fn write_response(sh: &ForeignPixels, rsp_mem_offset: usize, rsp_off: usize, rsp
 }
 
 /// The capset of an i915 card at `dev` (virglrenderer `i915_renderer_probe`).
+#[cfg(target_arch = "x86_64")]
 pub fn i915_capset(dev: crate::drivers::pci::PciAddr, out: &mut [u8]) {
     use crate::drivers::pci;
     let put = |out: &mut [u8], at: usize, v: u32| out[at..at + 4].copy_from_slice(&v.to_le_bytes());
@@ -531,11 +532,13 @@ pub fn i915_error_response(cmd: u32, errno: i32) -> Vec<u8> {
 /// (features, capset, contexts, the response buffer, the host-visible
 /// window) can be checked before a real backend exists. The guest's Mesa
 /// then falls back to the CPU.
+#[cfg(target_arch = "x86_64")]
 pub struct ProbeBackend {
     dev: crate::drivers::pci::PciAddr,
     next: u32,
 }
 
+#[cfg(target_arch = "x86_64")]
 impl ProbeBackend {
     /// For the display controller at 00:02.0, if there is one.
     pub fn new() -> Option<Self> {
@@ -545,6 +548,7 @@ impl ProbeBackend {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 impl Backend for ProbeBackend {
     fn capset(&self, out: &mut [u8]) {
         i915_capset(self.dev, out);

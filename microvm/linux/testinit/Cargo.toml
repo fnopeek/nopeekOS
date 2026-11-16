@@ -1,0 +1,19 @@
+# Standalone, outside the kernel workspace: a static aarch64 Linux binary.
+[workspace]
+
+[package]
+name = "microvm-testinit"
+version = "0.1.0"
+edition = "2024"
+description = "Smoke-test /init for the arm64 guest kernel: prints what it sees, then powers off"
+
+[[bin]]
+name = "testinit"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true

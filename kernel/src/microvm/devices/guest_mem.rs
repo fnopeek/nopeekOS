@@ -148,8 +148,12 @@ pub const DEMAND_ENABLED: bool = true;
 /// `GuestMem` can fault a page in without pulling in `cpu::Vendor`.
 #[derive(Clone, Copy)]
 pub enum SecondLevel {
+    #[cfg(target_arch = "x86_64")]
     Ept,
+    #[cfg(target_arch = "x86_64")]
     Npt,
+    #[cfg(target_arch = "aarch64")]
+    Stage2,
 }
 
 /// Serialises demand fault-in (see `page_host`).
@@ -256,9 +260,14 @@ impl GuestMem {
             let pins = PINS.lock();
             let pinned = |f: u64| pins.contains_key(&f);
             let taken = match self.sl {
+                #[cfg(target_arch = "x86_64")]
                 SecondLevel::Ept => crate::microvm::cpu::vmx::ept::demand_reclaim(
                     self.table_root, gpa, len, self.len, &pinned, &mut freed),
+                #[cfg(target_arch = "x86_64")]
                 SecondLevel::Npt => crate::microvm::cpu::svm::npt::demand_reclaim(
+                    self.table_root, gpa, len, self.len, &pinned, &mut freed),
+                #[cfg(target_arch = "aarch64")]
+                SecondLevel::Stage2 => crate::microvm::cpu::el2::stage2::demand_reclaim(
                     self.table_root, gpa, len, self.len, &pinned, &mut freed),
             };
             if taken != 0 {
@@ -339,16 +348,32 @@ impl GuestMem {
         // re-checks the PTE under the lock, so the second one just reads it.
         let _g = DEMAND_LOCK.lock();
         let host = match self.sl {
+            #[cfg(target_arch = "x86_64")]
             SecondLevel::Ept => {
                 crate::microvm::cpu::vmx::ept::demand_fault_in(self.table_root, page, self.len)
             }
+            #[cfg(target_arch = "x86_64")]
             SecondLevel::Npt => {
                 crate::microvm::cpu::svm::npt::demand_fault_in(self.table_root, page, self.len)
+            }
+            #[cfg(target_arch = "aarch64")]
+            SecondLevel::Stage2 => {
+                crate::microvm::cpu::el2::stage2::demand_fault_in(self.table_root, page, self.len)
             }
         }?;
         // host is page-aligned (a fresh demand frame), so host>>12<<12 == host.
         self.tlb[slot].store((pn << 32) | (host >> 12), Ordering::Relaxed);
         Some(host)
+    }
+
+    /// An instruction fetch from `gpa`, mapped not executable: make it
+    /// executable (`stage2::exec_fault`), serialized with fault-in and
+    /// reclaim. True if it was such a mapping.
+    #[cfg(target_arch = "aarch64")]
+    pub fn exec_fault(&self, gpa: u64) -> bool {
+        let _r = RECLAIM_LOCK.lock();
+        let _g = DEMAND_LOCK.lock();
+        crate::microvm::cpu::el2::stage2::exec_fault(self.table_root, gpa & !0xfff)
     }
 
     /// The second-level paging format and its root (PML4), for the

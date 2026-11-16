@@ -151,6 +151,34 @@ pub fn handle_pci_io(
     }
 }
 
+/// An access through the ECAM window (Arm guest, `pci-host-ecam-generic`)
+/// at byte offset `off`: bus, device and function in the address, the
+/// register in its low 12 bits. Extended config space reads 0.
+#[cfg(target_arch = "aarch64")]
+pub fn ecam_access(bus: &mut PciBus, off: u64, write: bool, size: u8, val: u32) -> u32 {
+    let bus_num = ((off >> 20) & 0xff) as u8;
+    let slot = ((off >> 15) & 0x1f) as u8;
+    let func = ((off >> 12) & 0x7) as u8;
+    let reg = (off & 0xfff) as u32;
+    if reg >= 0x100 {
+        return 0;
+    }
+    let dword = (reg & !3) as u8;
+    let shift = (reg & 3) * 8;
+    let mask: u32 = match size { 1 => 0xff, 2 => 0xffff, _ => 0xffff_ffff };
+    if !write {
+        return (read_pci_dword(bus, bus_num, slot, func, dword) >> shift) & mask;
+    }
+    let v = if size >= 4 {
+        val
+    } else {
+        let old = read_pci_dword(bus, bus_num, slot, func, dword);
+        (old & !(mask << shift)) | ((val & mask) << shift)
+    };
+    write_pci_dword(bus, bus_num, slot, func, dword, v);
+    0
+}
+
 fn read_pci_dword(bus: &PciBus, bus_num: u8, slot: u8, func: u8, reg: u8) -> u32 {
     if bus_num != 0 || func != 0 {
         return NO_DEVICE;

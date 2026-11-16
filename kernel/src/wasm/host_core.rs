@@ -3983,26 +3983,17 @@ pub(crate) fn npk_run_intent(mem: &mut [u8], ctx: &mut HostState, verb_ptr: i32,
     // so the caller falls back to typing the intent at the prompt.
     // Fiber mode (vCPU as a pool fiber) AND the dedicated-core path
     // both support launching from a worker, so allow those.
-    #[cfg(target_arch = "x86_64")]
+    if !crate::microvm::cpu::vm_fiber_mode()
+        && crate::smp::per_core::dedicated_vm_core().is_none()
     {
-        if !crate::microvm::cpu::vm_fiber_mode()
-            && crate::smp::per_core::dedicated_vm_core().is_none()
-        {
-            return -1;
-        }
-        match verb.as_str() {
-            "firefox" => {
-                crate::intent::launch_app(&crate::microvm::app::FIREFOX);
-                0
-            }
-            _ => -1,
-        }
+        return -1;
     }
-    // No guest to launch into.
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = verb;
-        -1
+    match verb.as_str() {
+        "firefox" => {
+            crate::intent::launch_app(&crate::microvm::app::FIREFOX);
+            0
+        }
+        _ => -1,
     }
 }
 

@@ -10,14 +10,9 @@
 use super::{say, syscall0, syscall1, syscall2, syscall3, syscall4};
 use super::{O_DIRECTORY, O_RDONLY, O_RDWR, SYS_CLOSE, SYS_FORK, SYS_GETDENTS64, SYS_NANOSLEEP,
             SYS_OPEN, SYS_READ, SYS_WRITE, SYS_EXIT};
+use super::sys::{SYS_CLOCK_GETTIME, SYS_IOCTL, SYS_KILL, SYS_POLL, SYS_PREAD64, SYS_STATFS};
 
-const SYS_KILL: u64 = 62;
 const SIGTERM: u64 = 15;
-const SYS_POLL: u64 = 7;
-const SYS_IOCTL: u64 = 16;
-const SYS_PREAD64: u64 = 17;
-const SYS_STATFS: u64 = 137;
-const SYS_CLOCK_GETTIME: u64 = 228;
 const CLOCK_MONOTONIC: u64 = 1;
 const POLLIN: u32 = 1;
 

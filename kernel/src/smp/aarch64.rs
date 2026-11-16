@@ -105,21 +105,32 @@ pub fn halt_until(deadline: Option<u64>, cause: usize) {
     crate::arch::irq_restore(irq);
 }
 
-// The WASM NIC driver and the microVM are not ported: no core holds them.
+// The WASM NIC driver is not ported: no core holds it.
 
 pub fn nic_core() -> Option<usize> {
     None
 }
 
-pub fn is_vcpu_core(_c: usize) -> bool {
-    false
+pub fn is_vcpu_core(c: usize) -> bool {
+    crate::microvm::cpu::is_vcpu_core(c)
 }
 
-pub fn in_guest(_c: usize) -> bool {
-    false
+pub fn in_guest(c: usize) -> bool {
+    crate::microvm::cpu::in_guest(c)
 }
 
+/// The vCPUs run as fibers; no core is set aside for one.
 pub fn vm_core_serve() {}
+
+/// `kvm_vcpu_kick`: wake a fiber parked in `kick_wait` on `core_id`, and if
+/// its vCPU may be in the guest, the wake SGI, which exits it.
+pub fn kick_host_core(core_id: usize) {
+    crate::smp::fiber::net_kick_bump(core_id);
+    if !crate::microvm::cpu::in_guest(core_id) {
+        return;
+    }
+    gic::send_sgi(core_id, gic::SGI_WAKE);
+}
 
 /// Arm cores have no APERF/MPERF.
 pub fn sample_aperf_mperf(_core_id: usize) {}

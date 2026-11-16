@@ -6,6 +6,7 @@
 //!
 //!   * `vmx` — Intel VT-x (VMCS, EPT)
 //!   * `svm` — AMD-V (VMCB, NPT)
+//!   * `el2` — the Arm virtualization extensions under VHE (stage 2, vGIC)
 //!
 //! Public API (`init`, `report`, `run_substrate_test`, `vm_open`,
 //! `decode_io_exit_qualification`) is re-exported one level up at
@@ -22,10 +23,16 @@
 
 pub mod rip_sample;
 pub mod steal_time;
+#[cfg(target_arch = "x86_64")]
 pub mod guest_cpuid; // guest CPUID allowlist (KVM kvm_cpu_cap_init model)
+#[cfg(target_arch = "x86_64")]
 pub mod guest_msr; // vendor-neutral guest MSR emulation
+#[cfg(target_arch = "x86_64")]
 pub mod svm;
+#[cfg(target_arch = "x86_64")]
 pub mod vmx;
+#[cfg(target_arch = "aarch64")]
+pub mod el2;
 
 use crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS;
 use spin::Mutex;
@@ -165,6 +172,7 @@ pub fn set_bench_marks(on: bool) {
 }
 
 /// One XSAVEOPT64 + XRSTOR64 of an area restored just before, in ns.
+#[cfg(target_arch = "x86_64")]
 fn xsaveopt_pair_ns() -> u64 {
     let mut area = FpuArea::boxed();
     let p = area.0.as_mut_ptr();
@@ -183,6 +191,7 @@ fn xsaveopt_pair_ns() -> u64 {
 
 /// One XSAVE64 + XRSTOR64 of every XCR0 component, in ns: the exit asm
 /// does two such pairs.
+#[cfg(target_arch = "x86_64")]
 fn xsave_pair_ns() -> u64 {
     let mut area = FpuArea::boxed();
     let p = area.0.as_mut_ptr();
@@ -200,11 +209,13 @@ fn xsave_pair_ns() -> u64 {
     cyc * 1000 / (crate::time::counter_hz() / 1_000_000).max(1) / N
 }
 
+#[cfg(target_arch = "x86_64")]
 static BENCH_XSAVE_SHOWN: AtomicBool = AtomicBool::new(false);
 
 /// A mark from vCPU `vcpu`: print each vCPU's deltas since the last one.
 pub fn bench_mark(vcpu: u8) {
     if !BENCH_MARKS.load(Ordering::Relaxed) { return; }
+    #[cfg(target_arch = "x86_64")]
     if !BENCH_XSAVE_SHOWN.swap(true, Ordering::Relaxed) {
         crate::kprintln!("[vmbench-host] host xsave64+xrstor64, all components: {} ns per pair (an exit does two)",
             xsave_pair_ns());
@@ -298,6 +309,7 @@ fn io_port_bucket(port: u16) -> usize {
 }
 /// `kvm_emulate_hypercall`: `nr` + four args, result for RAX. The set is
 /// what `guest_cpuid` announces — KVM_HC_SEND_IPI; the rest is -KVM_ENOSYS.
+#[cfg(target_arch = "x86_64")]
 pub fn kvm_hypercall(apic_id: u8, cpl: u8, nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     const KVM_HC_SEND_IPI: u64 = 10;
     const KVM_ENOSYS: i64 = 1000;
@@ -388,6 +400,7 @@ pub fn vm_cycle_snapshot() -> ([u64; VMEXIT_BUCKETS], u64) {
 #[repr(C, align(64))]
 pub(crate) struct FpuArea(pub(crate) [u8; 4096]);
 
+#[cfg(target_arch = "x86_64")]
 impl FpuArea {
     pub(crate) fn boxed() -> alloc::boxed::Box<FpuArea> {
         alloc::boxed::Box::new(FpuArea([0u8; 4096]))
@@ -402,10 +415,17 @@ impl FpuArea {
 
 /// The guest's physical address width: the host's, which CPUID leaf
 /// 0x8000_0008 passes through.
+#[cfg(target_arch = "x86_64")]
 pub fn guest_phys_bits() -> u32 {
     // Leaf 0x8000_0008 exists on every CPU with VMX or SVM.
     let eax = core::arch::x86_64::__cpuid(0x8000_0008).eax;
     (eax & 0xff).clamp(36, 52)
+}
+
+/// The guest's physical address width: the stage-2 IPA size.
+#[cfg(target_arch = "aarch64")]
+pub fn guest_phys_bits() -> u32 {
+    el2::stage2::IPA_BITS
 }
 
 /// Guest-RAM size for the next VM, chosen at `vm_open` from live host
@@ -438,6 +458,9 @@ pub fn choose_guest_ram_bytes() -> u64 {
 pub enum Vendor {
     Intel,
     Amd,
+    /// An Arm core at EL2 with VHE and a GIC with virtualization extensions.
+    #[cfg(target_arch = "aarch64")]
+    Arm,
     /// CPUID returned a string we don't recognize. MicroVM stays
     /// disabled. The variant carries a short reason for `report()`.
     Unknown(&'static str),
@@ -452,6 +475,12 @@ static VENDOR: Mutex<Vendor> = Mutex::new(Vendor::Unknown("not detected yet"));
 /// Standalone (no kernel state needed): safe to call from boot
 /// init paths that run before `microvm::cpu::init()` has set the
 /// cached `VENDOR` static, e.g. `smp::per_core::init_dedicated_vm_core`.
+#[cfg(target_arch = "aarch64")]
+pub fn detect_vendor() -> Vendor {
+    el2::detect()
+}
+
+#[cfg(target_arch = "x86_64")]
 pub fn detect_vendor() -> Vendor {
     let (_, ebx, ecx, edx) = vmx::host_cpuid(0, 0);
     // Vendor string is ebx, edx, ecx (yes, that order — Intel SDM
@@ -481,8 +510,17 @@ pub fn init() {
     let v = detect_vendor();
     *VENDOR.lock() = v;
     match v {
+        #[cfg(target_arch = "x86_64")]
         Vendor::Intel => vmx::init(),
+        #[cfg(target_arch = "x86_64")]
         Vendor::Amd => svm::init(),
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Arm => {
+            set_vm_fiber_mode(true);
+            el2::init();
+        }
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Intel | Vendor::Amd => {}
         Vendor::Unknown(reason) => {
             use crate::kprintln;
             kprintln!("[microvm] CPU vendor unknown ({}) — MicroVM disabled", reason);
@@ -493,8 +531,14 @@ pub fn init() {
 /// Print vendor-specific virt capability snapshot.
 pub fn report() {
     match current_vendor() {
+        #[cfg(target_arch = "x86_64")]
         Vendor::Intel => vmx::report(),
+        #[cfg(target_arch = "x86_64")]
         Vendor::Amd => svm::report(),
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Arm => el2::report(),
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Intel | Vendor::Amd => {}
         Vendor::Unknown(reason) => {
             use crate::kprintln;
             kprintln!("[microvm] no virt extensions: {}", reason);
@@ -505,8 +549,14 @@ pub fn report() {
 /// Run the vendor-specific substrate test (`microvm test`).
 pub fn run_substrate_test() -> Result<LaunchOutcome, &'static str> {
     match current_vendor() {
+        #[cfg(target_arch = "x86_64")]
         Vendor::Intel => vmx::run_substrate_test(),
+        #[cfg(target_arch = "x86_64")]
         Vendor::Amd => svm::run_substrate_test(),
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Arm => Err("no substrate test on Arm; `microvm` boots Linux"),
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Intel | Vendor::Amd => Err("not this architecture"),
         Vendor::Unknown(reason) => Err(reason),
     }
 }
@@ -519,11 +569,13 @@ pub fn run_substrate_test() -> Result<LaunchOutcome, &'static str> {
 // global (one VM at a time); consumers never assume the count.
 // Core-0-only access in practice; the Mutex guards against misuse.
 
+#[cfg(target_arch = "x86_64")]
 enum ActiveVm {
     Vmx(vmx::VmContext),
     Svm(svm::VmContext),
 }
 
+#[cfg(target_arch = "x86_64")]
 static ACTIVE_VM: Mutex<Option<ActiveVm>> = Mutex::new(None);
 
 /// Shade windows of the active VM, by guest output (= virtio-gpu
@@ -587,6 +639,9 @@ fn close_requested() -> bool {
 }
 
 /// A new launch: no close pending, a fresh control channel.
+#[cfg(target_arch = "x86_64")]
+mod x86_exit {
+use super::*;
 /// Read by the exit path of `run_guest_once` (both vendors): issue an IBPB
 /// right after every VM exit, on CPUs where enhanced IBRS does not already
 /// keep guest-trained predictions out of the host (`spec_mitigations`; the
@@ -631,7 +686,7 @@ fn cpu_has_ibpb() -> bool {
 
 /// Decide once per launch: where `spec_mitigations` says this CPU needs it,
 /// unless `set microvm_ibpb on|off` forces it (to measure what it costs).
-fn arm_exit_mitigations() {
+pub(super) fn arm_exit_mitigations() {
     let forced = crate::config::get("microvm_ibpb").map(|v| v.trim() == "on");
     let on = cpu_has_ibpb() && forced.unwrap_or_else(crate::spec_mitigations::ibpb_on_exit);
     IBPB_ON_EXIT.store(on, Ordering::Release);
@@ -649,6 +704,17 @@ fn arm_exit_mitigations() {
     crate::kprintln!("[microvm] IBPB on VM exit: {}{}{}", if on { "on" } else { "off" },
         if forced.is_some() { " (config)" } else { "" },
         if bhb { ", branch history cleared" } else { "" });
+}
+}
+#[cfg(target_arch = "x86_64")]
+pub use x86_exit::*;
+
+/// Decide once per launch what the guest exit path does on this core type.
+#[cfg(target_arch = "aarch64")]
+fn arm_exit_mitigations() {
+    DEVPOLL_ALWAYS.store(crate::config::get("microvm_devpoll").is_some_and(|v| v.trim() == "always"),
+        Ordering::Release);
+    el2::arm_exit_mitigations();
 }
 
 fn reset_close_state() {
@@ -869,7 +935,10 @@ pub const GUEST_SMP_AP: bool = true;
 /// + SIPI/LAPIC routing, so this gates the guest's `maxcpus` (and the AP spawn)
 /// on AMD and Intel alike. Unknown vendor stays single-vCPU.
 pub fn smp_ap_active() -> bool {
-    GUEST_SMP_AP && matches!(current_vendor(), Vendor::Amd | Vendor::Intel)
+    #[cfg(target_arch = "aarch64")]
+    return GUEST_SMP_AP && matches!(current_vendor(), Vendor::Arm);
+    #[cfg(target_arch = "x86_64")]
+    return GUEST_SMP_AP && matches!(current_vendor(), Vendor::Amd | Vendor::Intel);
 }
 
 /// An I/O APIC in the MP table, and the guest booted without `noapic`: device
@@ -893,6 +962,8 @@ pub fn guest_lapic_active() -> bool {
         && match current_vendor() {
             Vendor::Amd => true,
             Vendor::Intel => VMX_GUEST_LAPIC,
+            #[cfg(target_arch = "aarch64")]
+            Vendor::Arm => false,
             Vendor::Unknown(_) => false,
         }
 }
@@ -1091,8 +1162,13 @@ pub fn request_ap_spawn(apic_id: u8, sipi_vector: u8) {
 fn ap_orch_reset() {
     AP_SPAWNED.store(0, Ordering::Release);
     AP_SPAWN_REQUESTED.store(0, Ordering::Release);
-    svm::clear_ap_shared();
-    vmx::clear_ap_shared();
+    #[cfg(target_arch = "x86_64")]
+    {
+        svm::clear_ap_shared();
+        vmx::clear_ap_shared();
+    }
+    #[cfg(target_arch = "aarch64")]
+    el2::clear_ap_shared();
     VM_CORE_MASK.store(1, Ordering::Release); // only Core 0 reserved
     VCPU_CORES.store(0, Ordering::Release);
     WORKER_CORES.store(0, Ordering::Release);
@@ -1319,10 +1395,18 @@ pub fn bsp_host_core() -> Option<usize> {
 /// is back on, loop again.
 #[inline]
 pub fn entry_irqs_off(kick_gen: u64, host_core: usize, deadline: u64) -> bool {
-    // SAFETY: the vCPU loop runs with IF=1; `entry_irqs_on` or the VMX
-    // exit asm sets it again.
-    unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
-    crate::interrupts::arm_vcpu_timer(deadline);
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: the vCPU loop runs with IF=1; `entry_irqs_on` or the VMX
+        // exit asm sets it again.
+        unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
+        crate::interrupts::arm_vcpu_timer(deadline);
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::arch::irq_disable();
+        crate::arch::aarch64::timer::arm_at(deadline);
+    }
     // `vcpu->mode = IN_GUEST_MODE` then the last look (KVM
     // vcpu_enter_guest): a kicker bumps the generation or sets the peer
     // wake, then reads this flag. Either we see its change here, or it sees
@@ -1380,8 +1464,12 @@ pub fn slice_deadline_with_peers(host_core: usize, slice_deadline: u64) -> u64 {
 /// Host interrupts back on after the guest exit; a pending one is taken now.
 #[inline]
 pub fn entry_irqs_on() {
+    #[cfg(target_arch = "x86_64")]
     // SAFETY: counterpart of `entry_irqs_off`.
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: counterpart of `entry_irqs_off`; a pending interrupt is taken now.
+    unsafe { core::arch::asm!("msr DAIFClr, #2", "isb", options(nomem, nostack)) };
 }
 
 /// The wake half of irqfd (`virt/kvm/eventfd.c`): an RX-ready signal both
@@ -1480,7 +1568,10 @@ pub fn vm_active() -> bool {
     if vm_fiber_mode() || crate::smp::per_core::dedicated_vm_core().is_some() {
         return false;
     }
-    ACTIVE_VM.lock().is_some()
+    #[cfg(target_arch = "x86_64")]
+    return ACTIVE_VM.lock().is_some();
+    #[cfg(not(target_arch = "x86_64"))]
+    false
 }
 
 /// Open a microvm and register it as the active VM. Non-blocking:
@@ -1543,6 +1634,10 @@ pub fn vm_open(
         return Ok(());
     }
 
+    #[cfg(target_arch = "aarch64")]
+    return Err("the guest runs as a vCPU fiber only");
+    #[cfg(target_arch = "x86_64")]
+    {
     let mut slot = ACTIVE_VM.lock();
     if slot.is_some() {
         return Err("a microvm is already running");
@@ -1555,6 +1650,7 @@ pub fn vm_open(
     *slot = Some(vm);
     reset_close_state();
     Ok(())
+    }
 }
 
 /// Run one bounded slice of the active VM, if any. Called from the
@@ -1566,6 +1662,7 @@ pub fn vm_poll_slice() {
     // loft. Spawn it here on Core 0 (compositor op). Runs on both the
     // cooperative and dedicated paths since it's before the early return.
     sync_vm_windows();
+    #[cfg(target_arch = "x86_64")]
     crate::shade::capture::sync();
     if OPEN_LOFT_REQUESTED.swap(false, Ordering::AcqRel) {
         // `launch_app` dedups by open window, but loading runs on a worker:
@@ -1654,7 +1751,13 @@ pub fn vm_poll_slice() {
         }
         return;
     }
+    #[cfg(target_arch = "x86_64")]
+    cooperative_slice();
+}
 
+/// The cooperative Core-0 path: one slice of `ACTIVE_VM`.
+#[cfg(target_arch = "x86_64")]
+fn cooperative_slice() {
     let mut slot = ACTIVE_VM.lock();
     if slot.is_none() {
         return;
@@ -1720,6 +1823,7 @@ pub fn vm_poll_slice() {
 
 /// Host-idle the dedicated core while the guest is halted: until its next
 /// timer deadline or an interrupt / kick IPI (`kvm_vcpu_block`).
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn idle_host_sleep(next_timer_tsc: Option<u64>) {
     crate::interrupts::halt_until(
@@ -1737,6 +1841,7 @@ fn idle_host_sleep(next_timer_tsc: Option<u64>) {
 /// dedicated core for the guest's whole lifetime — that is the point:
 /// the guest no longer fights Shade + the shell for Core 0. Never
 /// touches `ACTIVE_VM` (cooperative-path only).
+#[cfg(target_arch = "x86_64")]
 pub fn vm_core_serve() {
     if VM_RUN_STATE.load(Ordering::Acquire) != VM_REQUESTED {
         return;
@@ -1862,8 +1967,11 @@ const PARK_SAFETY_MS: u64 = 8;
 /// another vCPU's IPI) or, on the BSP, the net backend's INTx. The re-check
 /// before a vCPU blocks (`kick_wait_until_unless`).
 fn vcpu_wake_pending(apic_id: u8) -> bool {
-    svm::lapic::posted_pending(apic_id)
-        || (apic_id == 0 && crate::microvm::devices::net_backend::irq_pending())
+    #[cfg(target_arch = "x86_64")]
+    let posted = svm::lapic::posted_pending(apic_id);
+    #[cfg(target_arch = "aarch64")]
+    let posted = el2::wake_pending(apic_id);
+    posted || (apic_id == 0 && crate::microvm::devices::net_backend::irq_pending())
 }
 
 /// Wake-up bound for a blocked vCPU: the guest's next timer tick, clamped to
@@ -1980,6 +2088,53 @@ fn vcpu_fiber_task(_arg: u64) {
     }
 
     match current_vendor() {
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Arm => {
+            match el2::vm_open(
+                &pending.bzimage,
+                &pending.cmdline,
+                pending.initramfs.as_deref(),
+                &pending.inject,
+            ) {
+                Ok(mut ctx) => {
+                    VCPU_COUNT.store(1, Ordering::Release);
+                    if GUEST_SMP_AP {
+                        ctx.publish_for_aps();
+                    }
+                    loop {
+                        if close_requested() {
+                            crate::kprintln!("[microvm] window closed — stopping guest");
+                            break;
+                        }
+                        let outcome = ctx.run_slice(SLICE_BUDGET);
+                        match outcome {
+                            Ok(el2::SliceOutcome::StillRunning) => ctx.yield_runnable(),
+                            Ok(el2::SliceOutcome::Idle) => park_vcpu_idle(ctx.next_timer_deadline_tsc()),
+                            Ok(el2::SliceOutcome::Exited(o)) => {
+                                crate::kprintln!("[microvm] guest exited — reason {:#x} qual {:#x}",
+                                    o.exit_reason, o.exit_qualification);
+                                break;
+                            }
+                            Err(e) => {
+                                crate::kprintln!("[microvm] run FAILED: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    VM_CLOSE_REQUESTED.store(true, Ordering::Release);
+                    crate::intent::wake_shell();
+                    if wait_aps_down() {
+                        ap_orch_reset();
+                        ctx.close();
+                        VCPU_COUNT.store(0, Ordering::Release);
+                    }
+                }
+                Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
+            }
+        }
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Intel | Vendor::Amd => {}
+        #[cfg(target_arch = "x86_64")]
         Vendor::Amd => {
             match svm::vm_open(
                 &pending.bzimage,
@@ -2049,6 +2204,7 @@ fn vcpu_fiber_task(_arg: u64) {
                 Err(e) => crate::kprintln!("[microvm] open FAILED: {}", e),
             }
         }
+        #[cfg(target_arch = "x86_64")]
         Vendor::Intel => {
             // VMX guest as a fiber + guest-SMP BSP. `vmx::vm_open` installs
             // this worker's per-core TSS so VMX host state is valid off Core 0.
@@ -2151,6 +2307,34 @@ fn ap_vcpu_fiber_task(arg: u64) {
     );
 
     match detect_vendor() {
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Arm => match el2::vm_open_ap(apic_id) {
+            Ok(mut ctx) => loop {
+                if close_requested() {
+                    break;
+                }
+                match ctx.run_slice(SLICE_BUDGET) {
+                    Ok(el2::SliceOutcome::StillRunning) => ctx.yield_runnable(),
+                    Ok(el2::SliceOutcome::Idle) => {
+                        crate::smp::fiber::kick_wait_until_unless(
+                            vcpu_block_deadline(ctx.next_timer_deadline_tsc()),
+                            || vcpu_wake_pending(apic_id));
+                    }
+                    Ok(el2::SliceOutcome::Exited(o)) => {
+                        crate::kprintln!("[microvm] AP vCPU exited — reason {:#x}", o.exit_reason);
+                        break;
+                    }
+                    Err(e) => {
+                        crate::kprintln!("[microvm] AP run FAILED: {}", e);
+                        break;
+                    }
+                }
+            },
+            Err(e) => crate::kprintln!("[microvm] AP open FAILED: {}", e),
+        },
+        #[cfg(target_arch = "aarch64")]
+        Vendor::Intel | Vendor::Amd => {}
+        #[cfg(target_arch = "x86_64")]
         Vendor::Intel => match vmx::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => {
                 crate::microvm::boottime::mark("host: AP opened, first entry next");
@@ -2190,6 +2374,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
             }
             Err(e) => crate::kprintln!("[microvm] AP open FAILED: {}", e),
         },
+        #[cfg(target_arch = "x86_64")]
         Vendor::Amd => match svm::vm_open_ap(vector, apic_id) {
             Ok(mut ctx) => loop {
                 if close_requested() {
@@ -2237,6 +2422,7 @@ fn ap_vcpu_fiber_task(arg: u64) {
 
 /// Decode the I/O VM-exit qualification field from a substrate-test
 /// `LaunchOutcome.exit_qualification`. Only Intel populates I/O exits.
+#[cfg(target_arch = "x86_64")]
 pub fn decode_io_exit_qualification(qual: u64) -> (u16, bool, u8) {
     match current_vendor() {
         Vendor::Intel => vmx::decode_io_exit_qualification(qual),
@@ -2257,4 +2443,7 @@ pub fn decode_io_exit_qualification(qual: u64) -> (u16, bool, u8) {
 ///
 /// Callers that decode reason values must dispatch on
 /// `current_vendor()`.
+#[cfg(target_arch = "x86_64")]
 pub use vmx::LaunchOutcome;
+#[cfg(target_arch = "aarch64")]
+pub use el2::LaunchOutcome;

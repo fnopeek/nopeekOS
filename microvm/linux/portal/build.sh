@@ -6,18 +6,19 @@
 #
 # Output: microvm/linux/portal/portal-npk and npk-capture-probe (committed;
 # the userspace bundle carries them with npk.portal, portals.conf and the
-# D-Bus service file).
+# D-Bus service file). `ARCH=aarch64` builds in an Arch Linux ARM root
+# (microvm/linux/guest.sh) and writes them with an -aarch64 suffix.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-source "$SCRIPT_DIR/../arch.sh"
+source "$SCRIPT_DIR/../guest.sh"
 
-arch_fetch
+guest_fetch
 STAGE="$(mktemp -d)"
-trap 'arch_rm "$STAGE"' EXIT
-arch_run "$STAGE/root" "
-    in_root pacman -Syu --noconfirm --needed base-devel glib2 pipewire mesa libdrm >/dev/null 2>&1
+trap 'guest_rm "$STAGE"' EXIT
+guest_run "$STAGE/root" "
+    $GUEST_PACMAN -Syu --noconfirm --needed base-devel glib2 pipewire mesa libdrm >/dev/null 2>&1
     mkdir -p \$R/src
     cp '$SCRIPT_DIR/portal-npk.c' '$SCRIPT_DIR/npk-capture-probe.c' '$SCRIPT_DIR/npkcap.h' \$R/src/
     in_root /bin/sh -c '
@@ -32,7 +33,7 @@ arch_run "$STAGE/root" "
     cp \$R/src/portal-npk \$R/src/npk-capture-probe '$STAGE/'
 "
 for f in portal-npk npk-capture-probe; do
-    cp "$STAGE/$f" "$SCRIPT_DIR/$f"
-    touch -d @0 "$SCRIPT_DIR/$f"
-    echo "$f: $(stat -c%s "$SCRIPT_DIR/$f") bytes"
+    cp "$STAGE/$f" "$SCRIPT_DIR/$f$GUEST_SUFFIX"
+    touch -d @0 "$SCRIPT_DIR/$f$GUEST_SUFFIX"
+    echo "$f$GUEST_SUFFIX: $(stat -c%s "$SCRIPT_DIR/$f$GUEST_SUFFIX") bytes"
 done

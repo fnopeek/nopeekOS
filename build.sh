@@ -1606,7 +1606,29 @@ sha384=${BZIMG_SHA}
             fi
         fi
 
-        # The wallpapers a new install brings (assets/wallpapers/): a board
+        # The Arm guest: kernel Image and PID-1 initramfs for the microVM
+        # on EL2 (`ARCH=arm64 microvm-linux/build.sh`,
+        # `ARCH=aarch64 microvm/linux/init/initramfs.sh`). Own sections, so
+        # each architecture's `update` takes only its own guest.
+        for ARM_ASSET in "linux-virt-arm64.Image:microvm-aarch64:linux-virt" \
+                         "microvm-initramfs-arm64.cpio.gz:microvm-aarch64:initramfs"; do
+            ARM_FILE="$RELEASE_DIR/assets/${ARM_ASSET%%:*}"
+            ARM_SECTION="${ARM_ASSET#*:}"
+            [ -f "$ARM_FILE" ] || continue
+            ARM_SIZE=$(stat -c%s "$ARM_FILE")
+            ARM_SHA=$(openssl dgst -sha384 -hex "$ARM_FILE" 2>/dev/null | awk '{print $NF}')
+            ASSET_MANIFEST="${ASSET_MANIFEST}[${ARM_SECTION}]
+size=${ARM_SIZE}
+sha384=${ARM_SHA}
+
+"
+            if [ -f "$KEY_FILE" ]; then
+                openssl dgst -sha384 -sign "$KEY_FILE" -out "${ARM_FILE}.sig" "$ARM_FILE"
+                ok "Signed $(basename "$ARM_FILE") ($ARM_SIZE bytes)"
+            fi
+        done
+
+
         # set up without the installer gets them with `update`. Downloaded
         # from release/blobs like every asset; the blob is the same git
         # object as the file, so it costs no repo space.
@@ -1798,6 +1820,7 @@ ${MOD_FW:+$MOD_FW
             # microvm-firefox.sqfs -> [microvm:firefox-sqfs]
             case "$NAME" in
                 microvm-firefox.sqfs)      SECTION="microvm:firefox-sqfs" ;;
+                microvm-firefox-aarch64.sqfs) SECTION="microvm-aarch64:firefox-sqfs" ;;
                 *)
                     err "unknown large asset filename: $NAME"
                     err "add an AssetSpec entry in kernel/src/intent/update.rs and a case here"

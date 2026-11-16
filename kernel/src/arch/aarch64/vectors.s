@@ -11,12 +11,23 @@
  * registers through aarch64_exception, which never returns, on the core's
  * fault stack (`fault_stacks`, 16 KiB each, by TPIDR_EL1): the
  * interrupted stack may be the one that just ran into its guard page.
+ * The lower-EL entries are guest exits.
  */
 
 .macro entry kind
     .balign 0x80
     mov     x0, #\kind
     b       report
+.endm
+
+/* An exception from a lower EL is a guest's (microvm/cpu/el2/switch.rs):
+ * the ESB defers its SError into DISR_EL1 (Linux `valid_vect`). */
+.macro guest_vect kind
+    .balign 0x80
+    hint    #16
+    stp     x0, x1, [sp, #-16]!
+    mov     x0, #\kind
+    b       npk_guest_exit
 .endm
 
 .section .text
@@ -34,14 +45,14 @@ exception_vectors:
     b       irq_entry
     entry 6
     entry 7
-    entry 8
-    entry 9
-    entry 10
-    entry 11
-    entry 12
-    entry 13
-    entry 14
-    entry 15
+    guest_vect 0
+    guest_vect 1
+    guest_vect 2
+    guest_vect 3
+    guest_vect 0
+    guest_vect 1
+    guest_vect 2
+    guest_vect 3
 
 /* A synchronous exception at the current EL that is not a forge
  * guard-page fault (forge.rs) reports as entry 0 or 4 does. */
@@ -52,6 +63,11 @@ sync_sp0_report:
 .global sync_spx_report
 sync_spx_report:
     mov     x0, #4
+    b       report
+/* A lower-EL exception with no guest running. */
+.global lower_el_report
+lower_el_report:
+    mov     x0, #8
     b       report
 
 report:

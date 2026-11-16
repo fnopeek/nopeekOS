@@ -1586,6 +1586,7 @@ impl VirtioGpu {
         if !crate::shade::surface::detach_blob(serial) {
             kprintln!("[gpu] a reader kept a guest frame that is being given back");
         }
+        #[cfg(target_arch = "x86_64")]
         crate::shade::capture::forget_blob(serial);
         crate::gpu::gpudev::forget_pages(serial);
         self.retired.push(blob);

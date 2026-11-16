@@ -16,6 +16,10 @@ pub const CAP_ID: u32 = 0x11;
 
 /// Whether devices offer MSI-X this run: on unless `set microvm_msix off`.
 pub fn wanted() -> bool {
+    // The Arm guest has no MSI frame yet: legacy INTx only.
+    #[cfg(target_arch = "aarch64")]
+    return false;
+    #[cfg(target_arch = "x86_64")]
     !crate::config::get("microvm_msix").is_some_and(|v| v.trim().eq_ignore_ascii_case("off"))
 }
 
@@ -106,6 +110,9 @@ impl<const N: usize> Msix<N> {
         // (logical) in bit 2. Data: vector in 7:0, delivery mode in 10:8.
         let addr = self.addr[v].load(Ordering::Acquire);
         let data = self.data[v].load(Ordering::Acquire);
+        #[cfg(target_arch = "aarch64")]
+        let _ = (addr, data);
+        #[cfg(target_arch = "x86_64")]
         crate::microvm::cpu::svm::lapic::deliver_msg(
             (addr >> 12) as u8,
             addr & (1 << 2) != 0,

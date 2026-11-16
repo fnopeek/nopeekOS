@@ -65,7 +65,6 @@ mod input;
 mod net;
 mod audio;
 mod capture;
-#[cfg(target_arch = "x86_64")]
 mod camfeed;
 mod devices;
 mod intent;
@@ -95,7 +94,6 @@ mod spec_mitigations;
 mod process;
 #[cfg(target_arch = "x86_64")]
 mod tss;
-#[cfg(target_arch = "x86_64")]
 mod microvm;
 #[cfg(target_arch = "x86_64")]
 #[allow(dead_code, unused_imports)]

@@ -782,7 +782,6 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             // A running microvm is the foreground task: give it a real time
             // budget per outer iteration (8 slices, ~24 ms guest), then
             // input/render/spin. One slice per iteration starves the guest.
-            #[cfg(target_arch = "x86_64")]
             if crate::microvm::vm_active() {
                 for _ in 0..8 { crate::microvm::vm_poll_slice(); }
             } else {
@@ -1423,8 +1422,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             // surface keeps compositing), let shade keybinds through
             // (Mod+Q closes it and tears the VM down), and forward
             // other keys to the guest.
-            // A microVM surface: x86 runs the guests.
-            #[cfg(target_arch = "x86_64")]
             if crate::shade::focused_surface_id().is_some() {
                 // Drain the mouse ring here, before poll_render():
                 // poll_mouse is a consuming SPSC ring and poll_render
@@ -1486,7 +1483,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
             if let Some(widget_wid) = crate::shade::focused_widget_id() {
                 crate::shade::poll_render();
                 crate::net::poll();
-                #[cfg(target_arch = "x86_64")]
                 crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
@@ -1663,7 +1659,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 from_intent = true;
                 crate::shade::poll_render();
                 crate::net::poll();
-                #[cfg(target_arch = "x86_64")]
                 crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
@@ -1703,7 +1698,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
                 wasm_term = focused_term;
                 crate::shade::poll_render();
                 crate::net::poll();
-                #[cfg(target_arch = "x86_64")]
                 crate::microvm::vm_poll_slice();
 
                 while let Some(evt) = crate::xhci::poll_mouse() {
@@ -1802,7 +1796,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
         if shade_active() && !crate::shade::focused_is_terminal() {
             crate::shade::poll_render();
             crate::net::poll();
-            #[cfg(target_arch = "x86_64")]
             crate::microvm::vm_poll_slice();
             while let Some(evt) = crate::xhci::poll_mouse() {
                 crate::shade::handle_mouse(&evt);
@@ -2247,7 +2240,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 crate::microvm::report();
             }
         }
-        #[cfg(target_arch = "x86_64")]
         "microvm" => {
             let sub = args.trim();
             if sub.is_empty() {
@@ -2256,6 +2248,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 kprintln!("[microvm]   linux-info — parse bundled bzImage, print stats");
             } else if sub == "test" {
                 if require_cap(vault, &session, Rights::EXECUTE, "microvm test") {
+                    #[cfg(target_arch = "x86_64")]
                     match crate::microvm::run_substrate_test() {
                         Ok(outcome) => {
                             let basic = (outcome.exit_reason & 0xFFFF) as u16;
@@ -2290,6 +2283,10 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                             }
                         }
                         Err(e) => kprintln!("[microvm] substrate-test FAILED: {}", e),
+                    }
+                    #[cfg(target_arch = "aarch64")]
+                    if let Err(e) = crate::microvm::run_substrate_test() {
+                        kprintln!("[microvm] {}", e);
                     }
                 }
             } else if sub == "linux-info" {
@@ -2332,7 +2329,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                 kprintln!("[microvm] available: test, linux-info, linux, shell");
             }
         }
-        #[cfg(target_arch = "x86_64")]
         "firefox" => {
             // The browsers are microvm apps, each with its own image and
             // home image; what the user types or what the launcher spawns.
@@ -2910,6 +2906,26 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
     }
 }
 
+/// `microvm linux-info` on Arm: check the arm64 `Image` header the loader
+/// would boot, without starting a guest.
+#[cfg(target_arch = "aarch64")]
+fn microvm_linux_info() {
+    const IMAGE_PATH: &str = "sys/microvm/linux-virt.Image";
+    let bytes = match crate::npkfs::fetch(IMAGE_PATH) {
+        Ok((b, _hash)) => b,
+        Err(e) => {
+            kprintln!("[microvm] cannot read {}: {:?}", IMAGE_PATH, e);
+            kprintln!("[microvm] `update` fetches it");
+            return;
+        }
+    };
+    kprintln!("[microvm] arm64 Image at {}: {} KB", IMAGE_PATH, bytes.len() / 1024);
+    match crate::microvm::linux::arm64::place(&bytes, 0, u64::MAX) {
+        Ok(p) => kprintln!("[microvm]   loads at {:#x}..{:#x}", p.image, p.image_end),
+        Err(e) => kprintln!("[microvm]   not bootable: {}", e),
+    }
+}
+
 /// `microvm linux-info` handler: fetch the bundled bzImage from npkFS,
 /// parse the Linux Boot Protocol setup header, print stats. Read-only, no
 /// VM activity. The asset lands at `sys/microvm/linux-virt.bzImage` on a
@@ -2983,7 +2999,6 @@ fn microvm_linux_info() {
 /// via `vm_core_serve`. On the cooperative path (≤ 2 cores) `vm_open`
 /// needs BSP state and fails from a worker; the host function then
 /// returns -1 and the user types the intent at a Core-0 prompt.
-#[cfg(target_arch = "x86_64")]
 pub fn launch_app(app: &'static crate::microvm::app::App) {
     if !crate::npkfs::exists(app.sqfs) {
         kprintln!("[microvm] {}: no image at {} — `update` fetches it", app.name, app.sqfs);
@@ -2999,9 +3014,13 @@ pub fn launch_app(app: &'static crate::microvm::app::App) {
 /// `[guest] <line>`. `inject` is empty for plain `linux`; for `shell <line>`
 /// it is the line + '\n' preloaded into the UART RX FIFO so PID-1 can echo
 /// it back.
-#[cfg(target_arch = "x86_64")]
 fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
-    const BZIMAGE_PATH: &str = "sys/microvm/linux-virt.bzImage";
+    // The kernel image for this machine's guest; the initramfs and the app
+    // images keep one name, their content matches the machine's architecture.
+    #[cfg(target_arch = "x86_64")]
+    const KERNEL_PATH: &str = "sys/microvm/linux-virt.bzImage";
+    #[cfg(target_arch = "aarch64")]
+    const KERNEL_PATH: &str = "sys/microvm/linux-virt.Image";
     const INITRAMFS_PATH: &str = "sys/microvm/initramfs.cpio.gz";
     // Linux boot protocol cmdline.
     //
@@ -3032,7 +3051,6 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     let ripsample =
         crate::config::get("microvm_ripsample").is_some_and(|v| v.trim().eq_ignore_ascii_case("on"));
     crate::microvm::cpu::rip_sample::set_enabled(ripsample);
-    let tsc_khz = crate::time::counter_hz() / 1000;
     let mut s = String::new();
     // `loglevel=5` keeps warnings, errors and panics on the host console and
     // drops the informational boot log: every console byte is a VM exit, and
@@ -3050,18 +3068,29 @@ fn microvm_linux(inject: &[u8], bench_mb: Option<u32>) {
     // its own, and any `idle=` would keep `cpuidle_haltpoll` from loading.
     // Without `KVM_HINTS_REALTIME` (steal time on) it loads only when forced.
     let cpus = if crate::microvm::cpu::smp_ap_active() { "maxcpus=1" } else { "nr_cpus=1" };
+    #[cfg(target_arch = "x86_64")]
     let _ = write!(
         s,
         "earlycon=uart8250,io,0x3f8,115200n8 console=ttyS0,115200 \
 panic=1 acpi=off tsc=reliable \
 tsc_early_khz={} devtmpfs.mount=1 {}",
-        tsc_khz, cpus,
+        crate::time::counter_hz() / 1000, cpus,
+    );
+    // Arm: the guest's 16550 is memory-mapped at the address its device tree
+    // names (`el2::platform`), its clock is the architected timer, and the
+    // device tree replaces ACPI.
+    #[cfg(target_arch = "aarch64")]
+    let _ = write!(
+        s,
+        "earlycon=uart8250,mmio,{:#x} console=ttyS0 panic=1 devtmpfs.mount=1 {}",
+        crate::microvm::cpu::el2::platform::UART_BASE, cpus,
     );
     // The guest kernel randomizes its own placement; the RIP sampler's
     // addresses are only resolvable against System.map without that.
     if ripsample {
         let _ = write!(s, " nokaslr");
     }
+    #[cfg(target_arch = "x86_64")]
     if crate::microvm::cpu::steal_time::configured() {
         let _ = write!(s, " cpuidle_haltpoll.force=1");
     }
@@ -3080,11 +3109,13 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     {
         let _ = write!(s, " loglevel=5");
     }
+    #[cfg(target_arch = "x86_64")]
     if !crate::microvm::cpu::guest_lapic_active() {
         let _ = write!(s, " nolapic");
     }
     // The I/O APIC is in the MP table only when it is emulated; otherwise the
     // guest stays on the 8259.
+    #[cfg(target_arch = "x86_64")]
     if !crate::microvm::cpu::guest_ioapic_active() {
         let _ = write!(s, " noapic");
     }
@@ -3147,11 +3178,11 @@ tsc_early_khz={} devtmpfs.mount=1 {}",
     let cmdline: alloc::vec::Vec<u8> = s.into_bytes();
     let cmdline: &[u8] = &cmdline;
 
-    kprintln!("[microvm] loading bzImage from {}...", BZIMAGE_PATH);
-    let bytes = match crate::npkfs::fetch(BZIMAGE_PATH) {
+    kprintln!("[microvm] loading the kernel image from {}...", KERNEL_PATH);
+    let bytes = match crate::npkfs::fetch(KERNEL_PATH) {
         Ok((b, _hash)) => b,
         Err(e) => {
-            kprintln!("[microvm] cannot read {}: {:?}", BZIMAGE_PATH, e);
+            kprintln!("[microvm] cannot read {}: {:?}", KERNEL_PATH, e);
             kprintln!("[microvm] reinstall from USB to seed bundled assets");
             return;
         }

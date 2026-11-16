@@ -35,6 +35,9 @@ fn holes(fdt: &Fdt, out: &mut [(u64, u64); MAX_HOLES]) -> usize {
     add(lo, hi - lo);
     add(fdt.addr() as u64, fdt.size() as u64);
     fdt.reservations(|a, s| add(a, s));
+    if let Some((s, e)) = crate::microvm::selftest::initrd(fdt) {
+        add(s, e - s);
+    }
     // Whole 2 MiB blocks: `screen` maps them uncached, and no other data
     // may share them (exclusive loads and stores need cacheable memory).
     if let Some(Ok(fb)) = crate::platform::simplefb::find(fdt) {
@@ -290,7 +293,11 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     crate::platform::pi5::init(&fdt);
     crate::platform::pi5_eth::init(&fdt);
     crate::platform::pi5_fan::init(&fdt);
+    crate::microvm::init();
     let Some(id) = crate::platform::pi5_sd::init(&fdt) else {
+        if let Some((s, e)) = crate::microvm::selftest::initrd(&fdt) {
+            crate::microvm::selftest::run(s, e);
+        }
         kprintln!("[npk] No SD card: no system disk. System halted.");
         crate::arch::halt_forever()
     };

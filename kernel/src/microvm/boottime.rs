@@ -49,18 +49,39 @@ const IO_COUNTERS: usize = 6;
 fn io_counters() -> [u64; IO_COUNTERS] {
     use core::sync::atomic::Ordering::Relaxed;
     use crate::microvm::devices::virtqueue as vq;
-    use crate::microvm::cpu::{svm::npt, vmx::ept};
+    let (d2m, d4k) = demand_blocks();
     [
         vq::BLK_KICKS.load(Relaxed), vq::BLK_REQS.load(Relaxed),
         vq::BLK_BYTES.load(Relaxed), vq::BLK_CYCLES.load(Relaxed),
-        npt::DEMAND_2M.load(Relaxed) + ept::DEMAND_2M.load(Relaxed),
-        npt::DEMAND_4K_BLOCKS.load(Relaxed) + ept::DEMAND_4K_BLOCKS.load(Relaxed),
+        d2m, d4k,
     ]
+}
+
+/// Demand blocks mapped as one 2 MB leaf, and as 4 KB pages.
+#[cfg(target_arch = "x86_64")]
+fn demand_blocks() -> (u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    use crate::microvm::cpu::{svm::npt, vmx::ept};
+    (npt::DEMAND_2M.load(Relaxed) + ept::DEMAND_2M.load(Relaxed),
+        npt::DEMAND_4K_BLOCKS.load(Relaxed) + ept::DEMAND_4K_BLOCKS.load(Relaxed))
+}
+
+#[cfg(target_arch = "aarch64")]
+fn demand_blocks() -> (u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    use crate::microvm::cpu::el2::stage2;
+    (stage2::DEMAND_2M.load(Relaxed), stage2::DEMAND_4K_BLOCKS.load(Relaxed))
 }
 /// vCPUs whose host cores' clock is sampled for the app phase.
 const MAX_FREQ_VCPUS: usize = 8;
 
 /// APERF/MPERF of each vCPU's host core as of its last halt.
+#[cfg(not(target_arch = "x86_64"))]
+fn vcpu_core_clocks() -> [(u64, u64); MAX_FREQ_VCPUS] {
+    [(0, 0); MAX_FREQ_VCPUS]
+}
+
+#[cfg(target_arch = "x86_64")]
 fn vcpu_core_clocks() -> [(u64, u64); MAX_FREQ_VCPUS] {
     core::array::from_fn(|i| {
         match crate::microvm::cpu::svm::lapic::phase_snapshot(i) {

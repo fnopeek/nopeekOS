@@ -74,6 +74,14 @@ const ASSETS: &[AssetSpec] = &[
     // redirect chain to objects.githubusercontent.com.
     #[cfg(target_arch = "x86_64")]
     AssetSpec { section: "microvm:firefox-sqfs", npkfs_path: "sys/microvm/firefox.sqfs" },
+    // The same three for the guest on Arm's EL2: own sections, the same
+    // npkFS names; each machine keeps only its own architecture's guest.
+    #[cfg(target_arch = "aarch64")]
+    AssetSpec { section: "microvm-aarch64:initramfs", npkfs_path: "sys/microvm/initramfs.cpio.gz" },
+    #[cfg(target_arch = "aarch64")]
+    AssetSpec { section: "microvm-aarch64:linux-virt", npkfs_path: "sys/microvm/linux-virt.Image" },
+    #[cfg(target_arch = "aarch64")]
+    AssetSpec { section: "microvm-aarch64:firefox-sqfs", npkfs_path: "sys/microvm/firefox.sqfs" },
     // CPython's standard library, as one zip. Stored uncompressed on
     // purpose: this interpreter has no zlib, so a deflated zip raises
     // ZipImportError at the first import. It also saves decompressing on
@@ -528,10 +536,14 @@ struct AssetJob {
 /// Diff release/assets/manifest against npkFS-resident assets. Reads only:
 /// returns the jobs to run, how many were already current, and the shipped
 /// root CAs the manifest no longer lists.
-/// An asset only another architecture uses: the microVM's guest images
-/// are x86-64 guests that run on SVM or VMX.
+/// An asset only another architecture uses: `microvm:` is the x86-64
+/// guest (SVM, VMX), `microvm-aarch64:` the guest on EL2.
 fn other_arch_asset(section: &str) -> bool {
-    !cfg!(target_arch = "x86_64") && section.starts_with("microvm:")
+    if cfg!(target_arch = "x86_64") {
+        section.starts_with("microvm-aarch64:")
+    } else {
+        section.starts_with("microvm:")
+    }
 }
 
 fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {

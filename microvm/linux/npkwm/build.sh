@@ -19,12 +19,14 @@
 #
 # Output: microvm/linux/npkwm/npkwm (committed; PID 1 embeds it), or
 # microvm/linux/npkwm/npkwm-gles2 (committed; the userspace bundle carries it).
+# `ARCH=aarch64` builds in an Arch Linux ARM root (microvm/linux/guest.sh)
+# and writes npkwm-aarch64.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-source "$SCRIPT_DIR/../arch.sh"
+source "$SCRIPT_DIR/../guest.sh"
 
 CACHE="${HOME}/.cache/nopeekos/wlroots"
 VARIANT="${1:-}"
@@ -33,6 +35,7 @@ case "$VARIANT" in
     gles2) NAME=npkwm-gles2; WLR_RENDER="-Drenderers=gles2 -Dallocators=gbm"; EXTRA_PACKAGES="mesa" ;;
     *) echo "usage: $0 [gles2]" >&2; exit 1 ;;
 esac
+NAME="$NAME$GUEST_SUFFIX"
 OUT="$SCRIPT_DIR/$NAME"
 
 # wlroots from its release tarball, pinned by sha512.
@@ -50,15 +53,15 @@ fetch() {
 }
 
 mkdir -p "$CACHE"
-arch_fetch
+guest_fetch
 fetch "$WLR_URL" "$WLR_TARBALL"
 echo "${WLR_SHA512}  $CACHE/$WLR_TARBALL" | sha512sum -c - >/dev/null \
     || { echo "sha512 mismatch on $WLR_TARBALL" >&2; exit 1; }
 
 STAGE="$(mktemp -d)"
-trap 'arch_rm "$STAGE"' EXIT
-arch_run "$STAGE/root" "
-    in_root pacman -Syu --noconfirm --needed $BUILD_PACKAGES >/dev/null
+trap 'guest_rm "$STAGE"' EXIT
+guest_run "$STAGE/root" "
+    $GUEST_PACMAN -Syu --noconfirm --needed $BUILD_PACKAGES >/dev/null
     mkdir -p \$R/src
     tar -xzf '$CACHE/$WLR_TARBALL' -C \$R/src
     cp '$SCRIPT_DIR/npkwm.c' \$R/src/

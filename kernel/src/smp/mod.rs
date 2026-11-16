@@ -14,5 +14,6 @@ pub mod scheduler;
 mod hw;
 
 pub use hw::init;
+pub use hw::kick_host_core;
 #[cfg(target_arch = "x86_64")]
-pub use hw::{kick_host_core, kick_host_core_posted};
+pub use hw::kick_host_core_posted;

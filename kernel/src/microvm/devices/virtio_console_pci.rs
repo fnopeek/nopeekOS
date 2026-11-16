@@ -344,6 +344,7 @@ pub fn reset() {
     *FS_REQ.lock() = [None; MAX_OUTPUTS];
     cam_stop();
     CAPTURE_OPEN.store(false, Ordering::Release);
+    #[cfg(target_arch = "x86_64")]
     crate::shade::capture::guest_gone();
 }
 
@@ -351,6 +352,7 @@ pub fn reset() {
 impl Drop for VirtioConsole {
     fn drop(&mut self) {
         cam_stop();
+        #[cfg(target_arch = "x86_64")]
         crate::shade::capture::guest_gone();
     }
 }
@@ -880,6 +882,7 @@ impl VirtioConsole {
                 if self.device_status == 0 {
                     cam_stop();
                     CAPTURE_OPEN.store(false, Ordering::Release);
+                    #[cfg(target_arch = "x86_64")]
                     crate::shade::capture::guest_gone();
                     self.queues = [VirtQueue::fresh(); NUM_QUEUES as usize];
                     self.driver_features = [0; 2];
@@ -931,6 +934,10 @@ impl VirtioConsole {
 
 /// One capture-port frame. A known type with a short payload is dropped and
 /// logged; the session state decides whether the request is allowed.
+#[cfg(not(target_arch = "x86_64"))]
+fn parse_capture(_msg_type: u8, _p: &[u8]) {}
+
+#[cfg(target_arch = "x86_64")]
 fn parse_capture(msg_type: u8, p: &[u8]) {
     use crate::shade::capture;
     let u16_at = |i: usize| u16::from_le_bytes([p[i], p[i + 1]]);

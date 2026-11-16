@@ -11,3 +11,16 @@ rustflags = [
     "-C", "link-arg=--no-dynamic-linker",
     "-C", "relocation-model=static",
 ]
+
+# The arm64 guest: `cargo build --release --target aarch64-unknown-linux-musl`.
+# musl only names the target; nothing of libc or its crt is linked.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = [
+    "-C", "link-self-contained=no",
+    "-C", "link-arg=-nostdlib",
+    "-C", "link-arg=-static",
+    "-C", "link-arg=--no-dynamic-linker",
+    "-C", "relocation-model=static",
+    "-C", "target-feature=+crt-static",
+]

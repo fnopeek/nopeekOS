@@ -110,6 +110,16 @@ pub fn map(gpa_off: u64, host_phys: &[u64], cache: Cache) -> Result<(), &'static
     for (i, &host) in host_phys.iter().enumerate() {
         let gpa = self::gpa() + gpa_off + i as u64 * PAGE;
         match sl {
+            #[cfg(target_arch = "aarch64")]
+            SecondLevel::Stage2 => {
+                use crate::microvm::cpu::el2::stage2;
+                let c = match cache {
+                    Cache::WriteBack => stage2::MEM_NORMAL_WB,
+                    Cache::WriteCombining | Cache::Uncached => stage2::MEM_NORMAL_NC,
+                };
+                stage2::window_map(pml4, gpa, host, c)?;
+            }
+            #[cfg(target_arch = "x86_64")]
             SecondLevel::Ept => {
                 use crate::microvm::cpu::vmx::ept;
                 let t = match cache {
@@ -119,6 +129,7 @@ pub fn map(gpa_off: u64, host_phys: &[u64], cache: Cache) -> Result<(), &'static
                 };
                 ept::window_map(pml4, gpa, host, t)?;
             }
+            #[cfg(target_arch = "x86_64")]
             SecondLevel::Npt => {
                 use crate::microvm::cpu::svm::npt;
                 let c = match cache {
@@ -146,8 +157,12 @@ pub fn unmap(gpa_off: u64, pages: usize) {
         }
         let gpa = self::gpa() + off;
         removed |= match sl {
+            #[cfg(target_arch = "x86_64")]
             SecondLevel::Ept => crate::microvm::cpu::vmx::ept::window_unmap(pml4, gpa),
+            #[cfg(target_arch = "x86_64")]
             SecondLevel::Npt => crate::microvm::cpu::svm::npt::window_unmap(pml4, gpa),
+            #[cfg(target_arch = "aarch64")]
+            SecondLevel::Stage2 => crate::microvm::cpu::el2::stage2::window_unmap(pml4, gpa),
         };
     }
     if removed {
@@ -161,8 +176,12 @@ pub fn is_mapped(gpa: u64) -> bool {
     let _g = LOCK.lock();
     let page = gpa & !(PAGE - 1);
     match sl {
+        #[cfg(target_arch = "x86_64")]
         SecondLevel::Ept => crate::microvm::cpu::vmx::ept::window_mapped(pml4, page),
+        #[cfg(target_arch = "x86_64")]
         SecondLevel::Npt => crate::microvm::cpu::svm::npt::window_mapped(pml4, page),
+        #[cfg(target_arch = "aarch64")]
+        SecondLevel::Stage2 => crate::microvm::cpu::el2::stage2::window_mapped(pml4, page),
     }
 }
 

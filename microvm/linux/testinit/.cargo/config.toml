@@ -1,0 +1,8 @@
+[build]
+target = "aarch64-unknown-linux-musl"
+
+# No aarch64 cross gcc on the build host: Rust's own lld with its
+# self-contained musl crt objects links the static binary.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-C", "link-self-contained=yes", "-C", "target-feature=+crt-static"]
