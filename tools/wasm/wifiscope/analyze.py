@@ -72,30 +72,38 @@ def gate0(d):
         return
     print('== Gate 0: the sample port')
     groups = {}
+    order = []
     for r in rows(p):
         key = (r.get('src', 'B'), int(r['rx_gain']))
+        if key not in groups:
+            order.append(key)
         groups.setdefault(key, []).append(Block(r))
     rate = None
     sd_of = {}
-    for (src, g), bs in groups.items():
+    for key in order:
+        src, g = key
+        bs = groups[key]
         m = sum(b.mean for b in bs) / len(bs)
         sd = math.sqrt(sum(b.var for b in bs) / len(bs))
-        sd_of[(src, g)] = sd
-        spread = max(abs(b.mean - m) for b in bs)
+        sd_of[key] = sd
         rate = sum(b.n for b in bs) / (sum(b.dt_us for b in bs) / 1e6)
-        label = f'{src} gain {g}' if g >= 0 else f'{src} (BB normal)'
+        label = f'{src} gain {g}' if g >= 0 else src
         print(f'  {label:18s}: mean {m.real:7.2f}{m.imag:+7.2f}j  '
-              f'noise sd {sd:6.2f}  mean spread {spread:5.2f}  peak {max(b.peak for b in bs)}')
+              f'noise sd {sd:6.2f}  peak {max(b.peak for b in bs)}')
     print(f'  read rate {rate / 1e3:.0f} k samples/s')
+    steps = [k for k in order if k[1] < 0 and not k[0].startswith('live')]
+    if steps:
+        base = sd_of[steps[0]]
+        print(f'  B receives in the normal state (noise sd > 5): {verdict(base > 5)}')
+        dead = next((k[0] for k in steps if sd_of[k] < 0.2 * base), None)
+        if dead:
+            print(f'  -> B goes silent at step "{dead}"')
+        else:
+            print('  B keeps receiving through every step')
     b_sds = [v for (src, g), v in sd_of.items() if src == 'B']
-    alive = bool(b_sds) and max(b_sds) > 1.5 * min(b_sds) + 0.5
-    print(f'  B follows its RX gain: {verdict(alive)}')
-    live = sd_of.get(('live_B', -1))
-    if live is not None and b_sds:
-        print(f'  B in normal receive vs. B forced: noise {live:.2f} vs {min(b_sds):.2f}..{max(b_sds):.2f}')
-    if not alive:
-        print('  -> path B does not react to the forced RX gain; check diag.csv '
-              'for whether RF 0x00 took the value')
+    if b_sds:
+        alive = max(b_sds) > 1.5 * min(b_sds) + 0.5
+        print(f'  B follows its RX gain: {verdict(alive)}')
 
 
 def diag(d):
@@ -135,7 +143,8 @@ def gate1(d):
     p = os.path.join(d, 'gate1.csv')
     if not os.path.exists(p):
         return
-    print(f'== Gate 1: carrier on A, measured on B (rx_gain {meta(p, "rx_gain")})')
+    g = meta(p, 'rx_gain')
+    print(f'== Gate 1: carrier on A, measured on B ({"rx_gain " + g if g else "B on its AGC"})')
     ps = pairs(rows(p), 'phase')
     names = ['quiet', 'hand', 'quiet again', 'quiet, higher TX']
     series = {}
@@ -167,6 +176,16 @@ def gate1(d):
         print(f'  hand: change {abs(delta):.2f} ({rel * 100:.1f} %), phase {dph:+.1f} deg, '
               f'quiet jitter {jitter:.2f}')
         print(f'  hand visible (change > 3x quiet jitter): {verdict(abs(delta) > 3 * jitter)}')
+    rs = rows(p)
+    if rs and 'rf0_b' in rs[0]:
+        for on in ('0', '1'):
+            vals = {}
+            for r in rs:
+                if r['tx_on'] == on:
+                    vals[int(r['rf0_b'])] = vals.get(int(r['rf0_b']), 0) + 1
+            top = sorted(vals.items(), key=lambda x: -x[1])[:4]
+            print(f'  B RF0 with carrier {"on " if on == "1" else "off"}: '
+                  + ', '.join(f'0x{v:05x} x{n}' for v, n in top))
     plot1(d, series, names)
 
 

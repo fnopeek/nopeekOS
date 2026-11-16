@@ -9,9 +9,10 @@
 //!
 //! Three measurements, each written to npkFS as CSV for host-side analysis:
 //!
-//! - gate 0: both ports with the BB in its normal receive state, then B
-//!   alone at five RX gains, plus one raw block.
-//! - gate 1: A's carrier off and on in turn, with the hand prompts.
+//! - gate 0: path A's port once, then path B's after each cumulative step
+//!   of the setup, plus one raw block of B in normal receive.
+//! - gate 1: A's carrier off and on in turn, with the hand prompts; B
+//!   stays in the BB's normal receive state.
 //! - gate 2: the same off/on pair across channel switches, for the phase
 //!   after a retune.
 //!
@@ -46,16 +47,12 @@ const DIAG_MAX: usize = 400;
 /// RF 0x00 `[19:16]`.
 const RF_MODE_STANDBY: u32 = 0x10000;
 const RF_MODE_TX: u32 = 0x20000;
-const RF_MODE_RX: u32 = 0x30000;
 
 /// Samples per block.
 const BLOCK: usize = 2048;
 /// Samples in the raw dump.
 const RAW: usize = 4096;
-/// A sample magnitude at or above this counts as near clipping.
-const CLIP: i32 = 400;
 
-const RX_GAINS: [u32; 5] = [0x00, 0x08, 0x10, 0x18, 0x1f];
 /// TX gain index of the carrier: the lowest.
 const TX_LOW: u32 = 0x00;
 const TX_HIGHER: u32 = 0x08;
@@ -152,13 +149,6 @@ struct Stat {
     min_q: i32,
     max_q: i32,
     dt_us: u64,
-}
-
-impl Stat {
-    fn peak(&self) -> i32 {
-        self.min_i.abs().max(self.max_i.abs())
-            .max(self.min_q.abs()).max(self.max_q.abs())
-    }
 }
 
 fn s10(v: u32) -> i32 {
@@ -270,49 +260,72 @@ fn save_state(h: i32) -> Saved {
 
 fn restore_state(h: i32, s: &Saved) {
     carrier(h, None);
-    for (k, &r) in RF_SAVE.iter().enumerate() {
-        phy::write_rf_reg(h, phy::RF_PATH_A, r, phy::RFREG_MASK, s.rf[k][0]);
-        phy::write_rf_reg(h, phy::RF_PATH_B, r, phy::RFREG_MASK, s.rf[k][1]);
-    }
     host::w8(h, 0x1bcc, s.bcc);
     for (k, &r) in BB_SAVE.iter().enumerate() {
         host::w32(h, r, s.bb[k]);
+    }
+    // 3-wire is back on: RF 0x00 takes the serial path again.
+    for (k, &r) in RF_SAVE.iter().enumerate() {
+        phy::write_rf_reg_mix(h, phy::RF_PATH_A, r, phy::RFREG_MASK, s.rf[k][0]);
+        phy::write_rf_reg_mix(h, phy::RF_PATH_B, r, phy::RFREG_MASK, s.rf[k][1]);
     }
     coex::write_indirect_reg(h, 0x38, MASKDWORD, s.gnt_val);
     host::w32(h, 0x70, s.gnt_ctl);
 }
 
-/// The antenna to WLAN (`rtw8822c_dpk_set_gnt_wl`), MAC queues paused, the
-/// BB as for the DAC calibration (`rtw8822c_dac_bb_setting`: 3-wire off on
-/// both paths, so RF 0x00 stays as written), A's TX clock forced on.
-fn setup_bb(h: i32) {
-    host::w32_mask(h, 0x70, 1 << 26, 0x1);
-    coex::write_indirect_reg(h, 0x38, MASKBYTE1, 0x77);
-    host::w8(h, 0x522, 0xff);
+/// The setup, one cumulative step at a time. Gate 0 measures B after each;
+/// the first `MINIMAL` steps are what gates 1 and 2 run with, leaving B's
+/// receive path to the BB. The rest is the DAC calibration's BB setting
+/// (`rtw8822c_dac_bb_setting`), under which B has been seen to go silent.
+const STEPS: [&str; 14] = [
+    "normal", "gnt_wl", "tx_pause", "sharerx_txgat_off", "txen_gck_a",
+    "3wire_a_off",
+    "r1d58", "r1a00", "r1a14", "igi_7e", "3wire_b_off", "nctl_1b00_1bcc",
+    "r1e24", "r1e28",
+];
+const MINIMAL: usize = 6;
 
-    host::w32_mask(h, 0x1d58, 0xff8, 0x1ff);
-    host::w32_mask(h, 0x1a00, 0x3, 0x2);
-    host::w32_mask(h, 0x1a14, 0x300, 0x3);
-    host::w32(h, 0x1d70, 0x7e7e7e7e);
-    host::w32_mask(h, 0x180c, 0x3, 0x0);
-    host::w32_mask(h, 0x410c, 0x3, 0x0);
-    host::w32(h, 0x1b00, 0x0000_0008);
-    host::w8(h, 0x1bcc, 0x3f);
-    host::w32(h, 0x1b00, 0x0000_000a);
-    host::w8(h, 0x1bcc, 0x3f);
-    host::w32_mask(h, 0x1e24, 1 << 31, 0x0);
-    host::w32_mask(h, 0x1e28, 0xf, 0x3);
-
-    host::w32_mask(h, REG_RFTXEN_GCK_A, BIT_RFTXEN_GCK_FORCE_ON, 0x1);
-    host::w32_mask(h, REG_3WIRE, BIT_DIS_SHARERX_TXGAT, 0x1);
-
-    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_B);
-    host::w32(h, 0x1c24, 0x0001_0002);
+fn step(h: i32, k: usize) {
+    match k {
+        1 => {
+            host::w32_mask(h, 0x70, 1 << 26, 0x1);
+            coex::write_indirect_reg(h, 0x38, MASKBYTE1, 0x77);
+        }
+        2 => host::w8(h, 0x522, 0xff),
+        3 => {
+            host::w32_mask(h, REG_3WIRE, BIT_DIS_SHARERX_TXGAT, 0x1);
+            host::w32_mask(h, REG_3WIRE2, BIT_DIS_SHARERX_TXGAT, 0x1);
+        }
+        4 => host::w32_mask(h, REG_RFTXEN_GCK_A, BIT_RFTXEN_GCK_FORCE_ON, 0x1),
+        5 => host::w32_mask(h, REG_3WIRE, BIT_3WIRE_EN, 0x0),
+        6 => host::w32_mask(h, 0x1d58, 0xff8, 0x1ff),
+        7 => host::w32_mask(h, 0x1a00, 0x3, 0x2),
+        8 => host::w32_mask(h, 0x1a14, 0x300, 0x3),
+        9 => host::w32(h, 0x1d70, 0x7e7e7e7e),
+        10 => host::w32_mask(h, REG_3WIRE2, BIT_3WIRE_EN, 0x0),
+        11 => {
+            host::w32(h, 0x1b00, 0x0000_0008);
+            host::w8(h, 0x1bcc, 0x3f);
+            host::w32(h, 0x1b00, 0x0000_000a);
+            host::w8(h, 0x1bcc, 0x3f);
+        }
+        12 => host::w32_mask(h, 0x1e24, 1 << 31, 0x0),
+        13 => host::w32_mask(h, 0x1e28, 0xf, 0x3),
+        _ => {}
+    }
 }
 
-fn rx_gain(h: i32, gain: u32) {
-    rf0(h, phy::RF_PATH_B, RF_MODE_RX | (gain << 5), "rx_gain");
-    host::delay_us(100);
+fn sample_b(h: i32) {
+    host::w32(h, 0x1c24, 0x0001_0002);
+    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_B);
+}
+
+/// The setup gates 1 and 2 run with.
+fn setup_minimal(h: i32) {
+    for k in 1..MINIMAL {
+        step(h, k);
+    }
+    sample_b(h);
 }
 
 /// A's carrier at TX gain index `gain`, or standby.
@@ -325,65 +338,29 @@ fn carrier(h: i32, gain: Option<u32>) {
     host::delay_us(100);
 }
 
-fn tune(h: i32, ch: u8, gain: u32) {
+fn tune(h: i32, ch: u8) {
     chip::set_channel(h, ch, 0, RTW_SC_DONT_CARE);
-    setup_bb(h);
+    setup_minimal(h);
     carrier(h, None);
-    rx_gain(h, gain);
     host::delay_us(2000);
 }
 
 // ── Gates ────────────────────────────────────────────────────────
 
-fn gate0_rows(h: i32, out: &mut Vec<u8>, src: &str, gain: i64) {
-    for rep in 0..10 {
+fn gate0_rows(h: i32, out: &mut Vec<u8>, src: &str, reps: i64) {
+    for rep in 0..reps {
         let s = block(h);
         put(out, src);
-        out.push(b',');
-        put_i(out, gain);
-        out.push(b',');
+        put(out, ",-1,");
         put_i(out, rep);
         out.push(b',');
         put_stat(out, &s);
     }
 }
 
-fn gate0(h: i32) {
-    host::say("[wifiscope] gate 0: both ports live, then path B at five RX gains\n");
-    let mut out = Vec::new();
-    head(&mut out, "gate0");
-    put(&mut out, "src,rx_gain,");
-    put(&mut out, "rep,");
-    put(&mut out, STAT_HEAD);
-
-    // The BB's own receive state: 3-wire on, gains from the AGC.
-    diag("live", phy::RF_PATH_A, 0, rf0_read(h, phy::RF_PATH_A), "read");
-    diag("live", phy::RF_PATH_B, 0, rf0_read(h, phy::RF_PATH_B), "read");
-    host::w32(h, 0x1c24, 0x0001_0002);
-    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_B);
-    gate0_rows(h, &mut out, "live_B", -1);
-    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_A);
-    gate0_rows(h, &mut out, "live_A", -1);
-
-    setup_bb(h);
-    carrier(h, None);
-    for &g in RX_GAINS.iter() {
-        rx_gain(h, g);
-        for rep in 0..10 {
-            let s = block(h);
-            put(&mut out, "B,");
-            put_i(&mut out, g as i64);
-            out.push(b',');
-            put_i(&mut out, rep);
-            out.push(b',');
-            put_stat(&mut out, &s);
-        }
-    }
-    save("gate0.csv", &out);
-
-    rx_gain(h, 0x10);
+fn raw_dump(h: i32) {
     let mut raw = Vec::with_capacity(RAW * 16);
-    head(&mut raw, "gate0 raw, rx_gain 16");
+    head(&mut raw, "gate0 raw, path B, BB normal");
     put(&mut raw, "t_us,i,q\n");
     let t0 = host::now_us();
     for _ in 0..RAW {
@@ -398,21 +375,32 @@ fn gate0(h: i32) {
     save("gate0_raw.csv", &raw);
 }
 
-/// The highest RX gain at which A's carrier stays clear of clipping.
-fn pick_gain(h: i32) -> u32 {
-    for &g in RX_GAINS.iter().rev() {
-        rx_gain(h, g);
-        carrier(h, Some(TX_LOW));
-        let s = block(h);
-        carrier(h, None);
-        if s.peak() < CLIP {
-            return g;
-        }
+fn gate0(h: i32, saved: &Saved) {
+    host::say("[wifiscope] gate 0: path B after each setup step\n");
+    let mut out = Vec::new();
+    head(&mut out, "gate0");
+    put(&mut out, "src,rx_gain,rep,");
+    put(&mut out, STAT_HEAD);
+
+    diag("live", phy::RF_PATH_A, 0, rf0_read(h, phy::RF_PATH_A), "read");
+    diag("live", phy::RF_PATH_B, 0, rf0_read(h, phy::RF_PATH_B), "read");
+    host::w32(h, 0x1c24, 0x0001_0002);
+    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_A);
+    gate0_rows(h, &mut out, "live_A", 5);
+    sample_b(h);
+    raw_dump(h);
+
+    for (k, name) in STEPS.iter().enumerate() {
+        step(h, k);
+        host::delay_us(500);
+        diag(name, phy::RF_PATH_B, 0, rf0_read(h, phy::RF_PATH_B), "read");
+        gate0_rows(h, &mut out, name, 5);
     }
-    RX_GAINS[0]
+    save("gate0.csv", &out);
+    restore_state(h, saved);
 }
 
-fn gate1(h: i32, gain: u32) {
+fn gate1(h: i32) {
     // (prompt, seconds, TX gain index)
     const PHASES: [(&str, u64, u32); 4] = [
         ("keep hands away from the screen edge", 8, TX_LOW),
@@ -423,11 +411,8 @@ fn gate1(h: i32, gain: u32) {
     host::say("[wifiscope] gate 1: carrier on A, measured on B\n");
     let mut out = Vec::new();
     head(&mut out, "gate1");
-    put(&mut out, "# rx_gain ");
-    put_i(&mut out, gain as i64);
-    put(&mut out, "\nphase,tx_gain,tx_on,t_ms,");
+    put(&mut out, "# B in normal receive, AGC running\nphase,tx_gain,tx_on,t_ms,rf0_b,");
     put(&mut out, STAT_HEAD);
-    rx_gain(h, gain);
     let t_start = host::now_ms();
     for (p, &(prompt, secs, txg)) in PHASES.iter().enumerate() {
         host::say("[wifiscope] now: ");
@@ -447,6 +432,8 @@ fn gate1(h: i32, gain: u32) {
                 out.push(b',');
                 put_i(&mut out, (host::now_ms() - t_start) as i64);
                 out.push(b',');
+                put_i(&mut out, rf0_read(h, phy::RF_PATH_B) as i64);
+                out.push(b',');
                 put_stat(&mut out, &s);
             }
             carrier(h, None);
@@ -458,17 +445,15 @@ fn gate1(h: i32, gain: u32) {
     save("gate1.csv", &out);
 }
 
-fn gate2(h: i32, gain: u32) {
+fn gate2(h: i32) {
     host::say("[wifiscope] gate 2: channel switches, hands away\n");
     let mut out = Vec::new();
     head(&mut out, "gate2");
-    put(&mut out, "# rx_gain ");
-    put_i(&mut out, gain as i64);
-    put(&mut out, "\nround,channel,tx_on,");
+    put(&mut out, "# B in normal receive, AGC running\nround,channel,tx_on,rf0_b,");
     put(&mut out, STAT_HEAD);
     for round in 0..SWEEP_ROUNDS {
         for &ch in CH_SWEEP.iter() {
-            tune(h, ch, gain);
+            tune(h, ch);
             for on in [false, true] {
                 carrier(h, if on { Some(TX_LOW) } else { None });
                 let s = block(h);
@@ -477,6 +462,8 @@ fn gate2(h: i32, gain: u32) {
                 put_i(&mut out, ch as i64);
                 out.push(b',');
                 put_i(&mut out, on as i64);
+                out.push(b',');
+                put_i(&mut out, rf0_read(h, phy::RF_PATH_B) as i64);
                 out.push(b',');
                 put_stat(&mut out, &s);
             }
@@ -493,15 +480,11 @@ pub fn run(h: i32) {
     host::sleep_ms(50);
     let saved = save_state(h);
 
-    gate0(h);
-    let gain = pick_gain(h);
-    let mut line = Vec::new();
-    put(&mut line, "[wifiscope] RX gain for gate 1 and 2: ");
-    put_i(&mut line, gain as i64);
-    put(&mut line, "\n");
-    host::say(core::str::from_utf8(&line).unwrap_or(""));
-    gate1(h, gain);
-    gate2(h, gain);
+    gate0(h, &saved);
+    setup_minimal(h);
+    carrier(h, None);
+    gate1(h);
+    gate2(h);
 
     restore_state(h, &saved);
     DIAG.with(|(d, _)| {
