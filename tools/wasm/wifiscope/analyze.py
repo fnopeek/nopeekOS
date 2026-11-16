@@ -151,6 +151,25 @@ def matrix(d):
                 print('  ' + l[2:].strip())
 
 
+CARRIER_MIN = 10
+
+
+def timeline(series, names):
+    """The carrier per second: level, angle, and how much it moves within
+    the second. Motion shows as movement within the second."""
+    print('  per second: phase, t, |z|, angle, movement within the second')
+    for ph in sorted(series):
+        bins = {}
+        for x in series[ph]:
+            bins.setdefault(x[0] // 1000, []).append(x[1])
+        for t in sorted(bins):
+            zs = bins[t]
+            m = sum(zs) / len(zs)
+            mv = sum(abs(z - m) for z in zs) / len(zs)
+            bar = '#' * min(40, int(mv / 2))
+            print(f'    {names[ph]:13s} {t:3d}s  {abs(m):6.1f}  {math.degrees(cmath.phase(m)):7.1f}  {mv:6.1f} {bar}')
+
+
 def port_of(p):
     with open(p) as f:
         for l in f:
@@ -197,18 +216,26 @@ def gate1(d):
         return
     print(f'== Gate 1: carrier on A ({port_of(p)})')
     ps = pairs(rows(p), 'phase')
-    names = ['quiet', 'hand', 'quiet again', 'quiet, higher TX', 'walking 1-3 m', 'still, away']
+    five = any(l.startswith('phase,tx_gain,tx_on,t_ms,rf0_a,rf0_b,tries') for l in open(p))
+    names = (['quiet', 'hand', 'quiet again', 'walking 1-3 m', 'still, away'] if five else
+             ['quiet', 'hand', 'quiet again', 'quiet, higher TX', 'walking 1-3 m', 'still, away'])
     series = {}
     dead = 0
+    weak = 0
     for off, on in ps:
         bo, bn = Block(off), Block(on)
         if bo.var < 25 or bn.var < 25:
             dead += 1
             continue
+        if abs(bn.mean - bo.mean) < CARRIER_MIN:
+            weak += 1
+            continue
         series.setdefault(int(on['phase']), []).append(
             (int(on['t_ms']), bn.mean - bo.mean, math.hypot(bn.sem, bo.sem), bn.peak))
     if dead:
-        print(f'  {dead} pairs skipped: B silent (noise sd < 5) in one half')
+        print(f'  {dead} pairs skipped: the port silent (noise sd < 5) in one half')
+    if weak:
+        print(f'  {weak} pairs skipped: the carrier did not come on')
     flips = unflip(series)
     if flips:
         print(f'  {flips} pairs turned by 180 deg (the LO divider locks to either half)')
@@ -223,6 +250,7 @@ def gate1(d):
         print(f'  {names[ph]:17s}: carrier {abs(mean):7.2f} @ {math.degrees(cmath.phase(mean)):7.1f} deg'
               f'  SNR {snr:6.1f}  phase sd {circ_std_deg(ds):5.2f} deg'
               f'  spread {spread:5.2f} (noise {noise:4.2f})  n {len(s)}')
+    timeline(series, names)
     if 0 in summary:
         q = series[0]
         snr = abs(summary[0]) / (sum(x[2] for x in q) / len(q))
@@ -276,40 +304,38 @@ def gate2(d):
     p = os.path.join(d, 'gate2.csv')
     if not os.path.exists(p):
         return
-    print('== Gate 2: phase after channel switches')
+    print('== Gate 2: phase after channel switches (modulo 180 deg)')
     per_ch = {}
-    dead = 0
+    dead = weak = 0
     for off, on in pairs(rows(p), 'channel'):
         bo, bn = Block(off), Block(on)
         if bo.var < 25 or bn.var < 25:
             dead += 1
             continue
-        per_ch.setdefault(int(on['channel']), []).append(bn.mean - bo.mean)
-    flips = 0
-    for ch, zs in per_ch.items():
-        ref = zs[0]
-        for k, z in enumerate(zs):
-            if (z * ref.conjugate()).real < 0:
-                zs[k] = -z
-                flips += 1
-    if flips:
-        print(f'  {flips} pairs turned by 180 deg to their channel\'s first')
+        z = bn.mean - bo.mean
+        if abs(z) < CARRIER_MIN:
+            weak += 1
+            continue
+        per_ch.setdefault(int(on['channel']), []).append(z)
     if dead:
-        print(f'  {dead} pairs skipped: B silent (noise sd < 5) in one half')
+        print(f'  {dead} pairs skipped: the port silent in one half')
+    if weak:
+        print(f'  {weak} pairs skipped: the carrier did not come on')
+    if not per_ch:
+        print('  no pair with the carrier on: no verdict')
+        return
     worst = 0.0
     for ch, zs in sorted(per_ch.items()):
-        sd = circ_std_deg(zs)
-        worst = max(worst, sd)
-        m = sum(zs) / len(zs)
-        print(f'  ch {ch:3d}: carrier {abs(m):7.2f} @ {math.degrees(cmath.phase(m)):7.1f} deg'
-              f'  phase sd over {len(zs)} retunes {sd:6.2f} deg')
-    if not per_ch:
-        print('  no pair with B receiving in both halves: no verdict')
-        return
+        sq = [(z / abs(z)) ** 2 for z in zs]
+        r = abs(sum(sq)) / len(sq)
+        sd = 0.0 if r >= 1 else math.degrees(math.sqrt(-2 * math.log(max(r, 1e-12)))) / 2
+        if len(zs) > 1:
+            worst = max(worst, sd)
+        ang = math.degrees(cmath.phase(sum(sq))) / 2
+        print(f'  ch {ch:3d}: carrier {sum(abs(z) for z in zs) / len(zs):7.1f} @ {ang:7.1f} deg (mod 180)'
+              f'  sd over {len(zs)} {sd:5.2f} deg')
     print(f'  phase reproducible after retune (sd < 5 deg): {verdict(worst < 5)}')
     slope(per_ch)
-    if worst >= 5:
-        print('  -> the phase does not survive a retune (after turning 180 deg flips)')
     try:
         import matplotlib
         matplotlib.use('Agg')
@@ -318,45 +344,39 @@ def gate2(d):
         return
     fig, ax = plt.subplots(figsize=(8, 4))
     for ch, zs in sorted(per_ch.items()):
-        ax.plot(range(len(zs)), [math.degrees(cmath.phase(z)) for z in zs], 'o-', label=f'ch {ch}')
-    ax.set_xlabel('round')
-    ax.set_ylabel('carrier phase (deg)')
-    if per_ch:
-        ax.legend()
+        ax.plot([5000 + 5 * ch] * len(zs), [math.degrees(cmath.phase(z * z)) / 2 for z in zs], 'o')
+    ax.set_xlabel('frequency (MHz)')
+    ax.set_ylabel('carrier phase mod 180 (deg)')
     fig.tight_layout()
     fig.savefig(os.path.join(d, 'gate2.png'), dpi=120)
     print(f'  plot: {os.path.join(d, "gate2.png")}')
 
 
 def slope(per_ch):
-    """Phase against frequency within each band: a straight line is a
-    path delay, and its slope the extra path length."""
+    """Phase against frequency within each band, on the doubled angle so a
+    180 deg flip does not matter: a straight line is a path delay."""
     c = 299792458.0
     bands = {'low (36-48)': lambda ch: ch <= 48, 'high (149-165)': lambda ch: ch >= 149}
     for name, inband in bands.items():
         pts = []
         for ch, zs in sorted(per_ch.items()):
-            if not inband(ch) or not zs:
-                continue
-            m = sum(zs) / len(zs)
-            if abs(m) < 5:
-                continue
-            pts.append((5000 + 5 * ch, cmath.phase(m)))
+            if inband(ch) and zs:
+                pts.append((5000 + 5 * ch, cmath.phase(sum((z / abs(z)) ** 2 for z in zs))))
         if len(pts) < 3:
             print(f'  band {name}: carrier on fewer than 3 channels, no slope')
             continue
         ph = [pts[0][1]]
-        for _, p in pts[1:]:
-            d = p - ph[-1]
-            d -= 2 * math.pi * round(d / (2 * math.pi))
-            ph.append(ph[-1] + d)
+        for _, q in pts[1:]:
+            dd = q - ph[-1]
+            dd -= 2 * math.pi * round(dd / (2 * math.pi))
+            ph.append(ph[-1] + dd)
         f = [x[0] * 1e6 for x in pts]
         fm, pm = sum(f) / len(f), sum(ph) / len(ph)
         k = sum((a - fm) * (b - pm) for a, b in zip(f, ph)) / sum((a - fm) ** 2 for a in f)
         res = math.sqrt(sum((b - pm - k * (a - fm)) ** 2 for a, b in zip(f, ph)) / len(f))
-        tau = -k / (2 * math.pi)
-        print(f'  band {name}: phase slope {math.degrees(k) * 1e6:+.3f} deg/MHz, '
-              f'delay {tau * 1e9:+.2f} ns = path {tau * c:+.2f} m, fit residual {math.degrees(res):.1f} deg')
+        tau = -k / 2 / (2 * math.pi)
+        print(f'  band {name}: delay {tau * 1e9:+.2f} ns = path {tau * c:+.2f} m, '
+              f'fit residual {math.degrees(res) / 2:.1f} deg, {len(pts)} channels')
 
 
 def main():

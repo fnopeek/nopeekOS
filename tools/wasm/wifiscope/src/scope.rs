@@ -69,7 +69,6 @@ const RAW: usize = 4096;
 
 /// TX gain index of the carrier: the lowest.
 const TX_LOW: u32 = 0x00;
-const TX_HIGHER: u32 = 0x08;
 
 /// Band 4: the only band where a carrier showed on B.
 const CH_START: u8 = 149;
@@ -174,6 +173,48 @@ fn s10(v: u32) -> i32 {
 fn sample(h: i32) -> (i32, i32) {
     let w = host::r32_mask(h, SAMPLE_PORT, 0x3fffff);
     (s10(w >> 12), s10(w))
+}
+
+/// Sums of `n` samples: (I, Q).
+fn probe(h: i32, n: usize) -> (i64, i64) {
+    let (mut si, mut sq) = (0i64, 0i64);
+    for _ in 0..n {
+        let (i, q) = sample(h);
+        si += i as i64;
+        sq += q as i64;
+    }
+    (si, sq)
+}
+
+/// Samples in the check that the carrier came on.
+const PROBE: usize = 256;
+/// The carrier counts as on when the mean moves by this much.
+const CARRIER_MIN: i64 = 10;
+/// Switch-ons before a pair is taken as it is.
+const TRIES: u32 = 4;
+
+/// One off/on pair. The carrier does not come on at every switch-on; a
+/// short probe checks it and switches again, up to `TRIES` times.
+fn pair(h: i32, txg: u32) -> (Stat, Stat, u32) {
+    carrier(h, None);
+    let off = block(h);
+    let n = off.n as i64;
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        carrier(h, Some(txg));
+        let (pi, pq) = probe(h, PROBE);
+        let di = pi * n - off.si * PROBE as i64;
+        let dq = pq * n - off.sq * PROBE as i64;
+        let lim = CARRIER_MIN * PROBE as i64 * n;
+        if di * di + dq * dq >= lim * lim || tries >= TRIES {
+            break;
+        }
+        carrier(h, None);
+        host::delay_us(500);
+    }
+    let on = block(h);
+    (off, on, tries)
 }
 
 fn block(h: i32) -> Stat {
@@ -482,18 +523,17 @@ fn gate0(h: i32, saved: &Saved) {
 
 fn gate1(h: i32) {
     // (prompt, seconds, TX gain index)
-    const PHASES: [(&str, u64, u32); 6] = [
+    const PHASES: [(&str, u64, u32); 5] = [
         ("keep hands away from the screen edge", 8, TX_LOW),
         ("hold a hand flat in front of the top screen edge, about 10 cm", 8, TX_LOW),
         ("hands away again", 8, TX_LOW),
-        ("hands away, slightly stronger carrier", 5, TX_HIGHER),
-        ("walk slowly past the laptop at 1 to 3 m, back and forth", 15, TX_HIGHER),
-        ("step away and stand still, out of the room if you can", 8, TX_HIGHER),
+        ("walk slowly past the laptop at 1 to 3 m, back and forth", 15, TX_LOW),
+        ("step away and stand still, out of the room if you can", 10, TX_LOW),
     ];
     host::say("[wifiscope] gate 1: carrier on A, measured on B\n");
     let mut out = Vec::new();
     head(&mut out, "gate1");
-    put(&mut out, "# port A, monostatic\nphase,tx_gain,tx_on,t_ms,rf0_a,rf0_b,");
+    put(&mut out, "# port A, monostatic\nphase,tx_gain,tx_on,t_ms,rf0_a,rf0_b,tries,");
     put(&mut out, STAT_HEAD);
     let t_start = host::now_ms();
     for (p, &(prompt, secs, txg)) in PHASES.iter().enumerate() {
@@ -503,9 +543,8 @@ fn gate1(h: i32) {
         host::sleep_ms(2000);
         let end = host::now_ms() + secs * 1000;
         while host::now_ms() < end {
-            for on in [false, true] {
-                carrier(h, if on { Some(txg) } else { None });
-                let s = block(h);
+            let (off, on_s, tries) = pair(h, txg);
+            for (on, s) in [(false, off), (true, on_s)] {
                 put_i(&mut out, p as i64);
                 out.push(b',');
                 put_i(&mut out, txg as i64);
@@ -517,6 +556,8 @@ fn gate1(h: i32) {
                 put_i(&mut out, rf0_read(h, phy::RF_PATH_A) as i64);
                 out.push(b',');
                 put_i(&mut out, rf0_read(h, phy::RF_PATH_B) as i64);
+                out.push(b',');
+                put_i(&mut out, tries as i64);
                 out.push(b',');
                 put_stat(&mut out, &s);
             }
@@ -533,14 +574,13 @@ fn gate2(h: i32) {
     host::say("[wifiscope] gate 2: channel switches, hands away\n");
     let mut out = Vec::new();
     head(&mut out, "gate2");
-    put(&mut out, "# port A, monostatic\nround,channel,tx_on,rf0_a,rf0_b,");
+    put(&mut out, "# port A, monostatic\nround,channel,tx_on,rf0_a,rf0_b,tries,");
     put(&mut out, STAT_HEAD);
     for round in 0..SWEEP_ROUNDS {
         for &ch in CH_SWEEP.iter() {
             tune(h, ch);
-            for on in [false, true] {
-                carrier(h, if on { Some(TX_LOW) } else { None });
-                let s = block(h);
+            let (off, on_s, tries) = pair(h, TX_LOW);
+            for (on, s) in [(false, off), (true, on_s)] {
                 put_i(&mut out, round as i64);
                 out.push(b',');
                 put_i(&mut out, ch as i64);
@@ -550,6 +590,8 @@ fn gate2(h: i32) {
                 put_i(&mut out, rf0_read(h, phy::RF_PATH_A) as i64);
                 out.push(b',');
                 put_i(&mut out, rf0_read(h, phy::RF_PATH_B) as i64);
+                out.push(b',');
+                put_i(&mut out, tries as i64);
                 out.push(b',');
                 put_stat(&mut out, &s);
             }
@@ -576,6 +618,12 @@ pub fn run(h: i32) {
     B_HOLD.store(hold, core::sync::atomic::Ordering::Relaxed);
     host::say(if hold { "[wifiscope] B is held in receive for gates 1 and 2\n" }
               else { "[wifiscope] B stays under the BB for gates 1 and 2\n" });
+    // The carrier's level drifts for the first seconds of switching.
+    let end = host::now_ms() + 5000;
+    while host::now_ms() < end {
+        let _ = pair(h, TX_LOW);
+    }
+    carrier(h, None);
     gate1(h);
     gate2(h);
 
