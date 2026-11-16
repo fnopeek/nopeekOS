@@ -216,17 +216,19 @@ pub fn position() -> Option<usize> {
     Some(d.buf_len - s.chan.residue(&mut s.regs, &d))
 }
 
-/// `HDMI_MAI_CTL` and `HDMI_SCHEDULER_CONTROL` while the stream runs:
-/// whether the MAI takes samples and the output is in HDMI mode.
-pub fn mai_state() -> Option<(u32, u32)> {
-    let g = STATE.lock();
-    let s = g.as_ref().filter(|s| s.running)?;
+/// `HDMI_MAI_CTL`, `HDMI_SCHEDULER_CONTROL` and the channel's CS while
+/// the stream runs: whether the MAI takes samples, the output is in HDMI
+/// mode, and the controller sees the request line (CS bit 3).
+pub fn mai_state() -> Option<(u32, u32, u32)> {
+    let mut g = STATE.lock();
+    let s = g.as_mut().filter(|s| s.running)?;
+    let cs = s.regs.read(Block::Dma, s.chan.ch as u64 * bcm2835_dma::CHAN_SIZE, 4);
     // SAFETY: registers of the running port's `hd` and `hdmi` windows from
     // the boot tree; the display module keeps the port powered while the
     // stream runs.
     unsafe {
         Some((core::ptr::read_volatile(s.mai_ctl as *const u32),
-              core::ptr::read_volatile(s.scheduler as *const u32)))
+              core::ptr::read_volatile(s.scheduler as *const u32), cs))
     }
 }
 

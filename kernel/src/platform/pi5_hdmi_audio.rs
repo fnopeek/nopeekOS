@@ -138,9 +138,13 @@ fn start(port: usize) -> Option<Stream> {
     }
     super::pi5_hdmi_dma::start();
     let _ = fiber::wait(0, crate::time::counter() + ms(100));
-    if let Some((mai, sched)) = super::pi5_hdmi_dma::mai_state() {
-        kprintln!("[npk] hdmi audio: 100 ms in, DMA periods {}, MAI_CTL {:#06x}, SCHEDULER_CONTROL {:#010x}",
-            super::pi5_hdmi_dma::periods(), mai, sched);
+    if let Some((mai, sched, cs)) = super::pi5_hdmi_dma::mai_state() {
+        // SCALER6_VERSION: 0x54 on D0 silicon, whose tree moves the DREQs.
+        let hvs = super::pi5_display_set::get().map(|s| s.hvs);
+        // SAFETY: the HVS's first register, read while the display runs.
+        let ver = hvs.map(|a| unsafe { core::ptr::read_volatile(a as *const u32) } & 0xff);
+        kprintln!("[npk] hdmi audio: 100 ms in, DMA periods {}, MAI_CTL {:#06x}, SCHEDULER_CONTROL {:#010x}, DMA CS {:#010x}, HVS version {:#x?}",
+            super::pi5_hdmi_dma::periods(), mai, sched, cs, ver);
     }
     STARTS.fetch_add(1, Ordering::Relaxed);
     STREAMING.store(port as u32, Ordering::Release);
