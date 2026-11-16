@@ -411,9 +411,58 @@ fn save(s: &mut SysRegs, h: &HostCtl) {
 pub struct Fault {
     pub esr: u64,
     pub far: u64,
-    pub hpfar: u64,
+    /// HPFAR_EL2 of a stage-2 abort, `None` when the guest's stage 1 no
+    /// longer translates FAR and the guest should simply retry.
+    pub hpfar: Option<u64>,
     /// DISR_EL1 after the ESB at the vector: an SError the guest caused.
     pub disr: u64,
+}
+
+const EC_IABT_LOW: u64 = 0x20;
+const EC_DABT_LOW: u64 = 0x24;
+const ESR_S1PTW: u64 = 1 << 7;
+const FSC_TYPE: u64 = 0x3c;
+const FSC_FAULT: u64 = 0x04;
+const FSC_ACCESS: u64 = 0x08;
+const FSC_PERM: u64 = 0x0c;
+const FSC_FAULT_LM1: u64 = 0x2b;
+const FSC_EXCL_ATOMIC: u64 = 0x35;
+const PAR_F: u64 = 1;
+/// PAR_EL1.PA, bits 51:12.
+const PAR_PA: u64 = ((1 << 52) - 1) & !0xfff;
+
+/// `__hpfar_valid`: the architecture fills HPFAR_EL2 for translation,
+/// access flag and exclusive-atomic faults and for a permission fault on
+/// a stage-1 table walk; for any other abort it is UNKNOWN.
+fn hpfar_valid(esr: u64) -> bool {
+    let fsc = esr & 0x3f;
+    let translation = fsc & FSC_TYPE == FSC_FAULT || fsc == FSC_FAULT_LM1;
+    let access = fsc & FSC_TYPE == FSC_ACCESS;
+    let perm = fsc & FSC_TYPE == FSC_PERM;
+    translation || access || (esr & ESR_S1PTW != 0 && perm) || fsc == FSC_EXCL_ATOMIC
+}
+
+/// `__get_fault_info` / `__translate_far_to_hpfar`: HPFAR_EL2, or the IPA
+/// of FAR resolved through the guest's stage 1 when HPFAR_EL2 is UNKNOWN.
+/// Runs while the guest's EL1 regime and HCR_EL2 are still in place.
+fn fault_hpfar(esr: u64, far: u64) -> Option<u64> {
+    let ec = esr >> 26;
+    if (ec != EC_IABT_LOW && ec != EC_DABT_LOW) || hpfar_valid(esr) {
+        return Some(rd!("HPFAR_EL2"));
+    }
+    // Stage 1 already checked the access rights, so the EL1 regime with a
+    // read serves for EL0 and EL1 accesses alike. PAR_EL1 is the guest's
+    // and not saved yet.
+    let par = rd!("PAR_EL1");
+    // SAFETY: an address translation of the guest's own regime; it only
+    // writes PAR_EL1, which is restored below.
+    unsafe { core::arch::asm!("at s1e1r, {}", "isb", in(reg) far, options(nostack, preserves_flags)) };
+    let tmp = rd!("PAR_EL1");
+    wr!("PAR_EL1", par);
+    if tmp & PAR_F != 0 {
+        return None;
+    }
+    Some(((tmp & PAR_PA) >> 12) << 4)
 }
 
 /// Run the guest once. Host interrupts are masked by the caller and stay
@@ -424,10 +473,12 @@ pub fn run(regs: &mut GuestRegs, host: &mut HostSave, s: &mut SysRegs, t: &Traps
     // `regs` and `host` stay borrowed across the call, and the exit path
     // restores every register the AAPCS64 keeps.
     let kind = unsafe { npk_guest_enter(regs, host) };
+    let esr = rd!("ESR_EL2");
+    let far = rd!("FAR_EL2");
     let f = Fault {
-        esr: rd!("ESR_EL2"),
-        far: rd!("FAR_EL2"),
-        hpfar: rd!("HPFAR_EL2"),
+        esr,
+        far,
+        hpfar: fault_hpfar(esr, far),
         disr: if ras { rd!("S3_0_C12_C1_1") } else { 0 },
     };
     if f.disr != 0 {

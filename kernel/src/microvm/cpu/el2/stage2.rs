@@ -131,6 +131,16 @@ fn publish() {
 /// every core. With HCR_EL2.TGE set TLB maintenance targets EL2&0, so TGE
 /// is cleared around it, with this VM's stage 2 loaded.
 fn flush_ipa(root: u64, ipa: Option<u64>) {
+    flush(root, ipa, false);
+}
+
+/// `__kvm_tlb_flush_vmid_ipa_nsh`: drop the translation of `ipa` on this
+/// core only, after a permission was relaxed (`kvm_pgtable_stage2_relax_perms`).
+fn flush_ipa_local(root: u64, ipa: u64) {
+    flush(root, Some(ipa), true);
+}
+
+fn flush(root: u64, ipa: Option<u64>, local: bool) {
     let irq = crate::arch::irq_save();
     // SAFETY: the calling core's own HCR_EL2/VTTBR_EL2; interrupts are
     // masked while TGE is clear, so no host code runs in that regime.
@@ -142,6 +152,9 @@ fn flush_ipa(root: u64, ipa: Option<u64>) {
         core::arch::asm!("msr VTTBR_EL2, {}", "isb", in(reg) vttbr(root), options(nostack, preserves_flags));
         core::arch::asm!("msr HCR_EL2, {}", "isb", in(reg) hcr & !(1u64 << 27), options(nostack, preserves_flags));
         match ipa {
+            Some(a) if local => core::arch::asm!(
+                "dsb nshst", "tlbi ipas2e1, {}", "dsb nsh", "tlbi vmalle1", "dsb nsh", "isb",
+                in(reg) (a >> 12) & 0xf_ffff_ffff, options(nostack, preserves_flags)),
             Some(a) => core::arch::asm!(
                 "dsb ishst", "tlbi ipas2e1is, {}", "dsb ish", "tlbi vmalle1is", "dsb ish", "isb",
                 in(reg) (a >> 12) & 0xf_ffff_ffff, options(nostack, preserves_flags)),
@@ -295,14 +308,17 @@ pub fn exec_fault(root: u64, gpa: u64) -> bool {
             (((e & ADDR_MASK) as *mut u64)).add(((gpa % TWO_MB) / 4096) as usize)
         };
         let v = leaf.read_volatile();
-        if v & VALID == 0 || v & XN == 0 {
+        if v & VALID == 0 {
             return false;
         }
-        invalidate_icache();
-        // Clearing XN relaxes the permission: no TLB maintenance needed
-        // beyond the barrier (KVM `stage2_relax_perms`).
-        leaf.write_volatile(v & !XN);
-        publish();
+        // Already executable: another vCPU relaxed it first and this core
+        // still holds the old entry (`-EAGAIN`, flushed all the same).
+        if v & XN != 0 {
+            invalidate_icache();
+            leaf.write_volatile(v & !XN);
+            publish();
+        }
+        flush_ipa_local(root, gpa);
         true
     }
 }

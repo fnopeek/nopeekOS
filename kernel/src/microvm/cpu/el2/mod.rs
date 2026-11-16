@@ -761,7 +761,10 @@ impl VmContext {
     /// A stage-2 abort (`kvm_handle_guest_abort`).
     fn abort(&mut self, ec: u64, f: switch::Fault) -> Result<Step, &'static str> {
         let iss = f.esr & 0x1ff_ffff;
-        let ipa = ((f.hpfar >> 4) << 12) | (f.far & 0xfff);
+        // The guest changed its stage 1 under the fault: let it retry
+        // (`kvm_handle_guest_abort` is never reached for it).
+        let Some(hpfar) = f.hpfar else { return Ok(Step::Continue) };
+        let ipa = ((hpfar >> 4) << 12) | (f.far & 0xfff);
         let fsc = iss & 0x3f;
         let gm = self.shared.guest_mem;
         let exec = ec == EC_IABT_LOW;
