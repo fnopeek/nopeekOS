@@ -126,6 +126,31 @@ def diag(d):
         print(f'  e.g. {r["what"]} path {r["path"]}: wanted {r["want"]}, read {r["got"]} ({r["method"]})')
 
 
+def matrix(d):
+    p = os.path.join(d, 'matrix.csv')
+    if not os.path.exists(p):
+        return
+    print('== Matrix: which port hears in which state')
+    groups = {}
+    for r in rows(p):
+        key = (r['b_hold'], r['a_tx'], r['port'])
+        groups.setdefault(key, []).append((Block(r), int(r['rf0_a']), int(r['rf0_b'])))
+    for (hold, tx, port), xs in sorted(groups.items()):
+        bs = [x[0] for x in xs]
+        live = sum(1 for b in bs if b.var > 25)
+        m = sum(b.mean for b in bs) / len(bs)
+        sd = math.sqrt(sum(b.var for b in bs) / len(bs))
+        ra = sorted({x[1] for x in xs})
+        rb = sorted({x[2] for x in xs})
+        print(f'  B {"held " if hold == "1" else "by BB"}  A {"TX" if tx == "1" else "rx"}  port {port}: '
+              f'live {live}/{len(bs)}  mean {m.real:7.2f}{m.imag:+7.2f}j  sd {sd:6.1f}  '
+              f'rf0 A {",".join(hex(v) for v in ra[:2])} B {",".join(hex(v) for v in rb[:2])}')
+    with open(p) as f:
+        for l in f:
+            if l.startswith('# chosen'):
+                print('  ' + l[2:].strip())
+
+
 def pairs(rs, key):
     """Pair each carrier-off row with the carrier-on row after it."""
     out = []
@@ -304,6 +329,7 @@ def main():
     d = sys.argv[1]
     diag(d)
     gate0(d)
+    matrix(d)
     gate1(d)
     gate2(d)
 

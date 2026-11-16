@@ -39,8 +39,9 @@ const SAMPLE_SEL: u32 = 0x1c3c;
 const SAMPLE_SEL_B: u32 = 0x80000 + 0x8003;
 const SAMPLE_SEL_A: u32 = 0xa0000 + 0x8003;
 
-/// RF 0x00 bits that must read back as written: mode, RX and TX gain.
-const RF0_CHECK: u32 = 0xf03ff;
+/// RF 0x00 bits that must read back as written: the mode. The gain bits
+/// read back as the RF holds them, not as written.
+const RF0_CHECK: u32 = 0xf0000;
 /// Lines kept in `diag.csv`.
 const DIAG_MAX: usize = 400;
 
@@ -50,6 +51,11 @@ const RF_MODE_TX: u32 = 0x20000;
 /// A's RF 0x00 in the BB's normal receive state, the carrier's off state.
 /// Standby is not used: with A in standby B receives nothing either.
 static A_IDLE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// B's RF 0x00 in the BB's normal receive state, held while B's 3-wire is
+/// off so the BB cannot gate B while A transmits.
+static B_IDLE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Whether gates 1 and 2 hold B that way; chosen by the matrix.
+static B_HOLD: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Samples per block.
 const BLOCK: usize = 2048;
@@ -345,8 +351,72 @@ fn carrier(h: i32, gain: Option<u32>) {
 fn tune(h: i32, ch: u8) {
     chip::set_channel(h, ch, 0, RTW_SC_DONT_CARE);
     setup_minimal(h);
+    b_hold(h, B_HOLD.load(core::sync::atomic::Ordering::Relaxed));
     carrier(h, None);
     host::delay_us(2000);
+}
+
+/// B under the BB (3-wire on) or held in its receive state (3-wire off).
+fn b_hold(h: i32, hold: bool) {
+    if hold {
+        host::w32_mask(h, REG_3WIRE2, BIT_3WIRE_EN, 0x0);
+        rf0(h, phy::RF_PATH_B, B_IDLE.load(core::sync::atomic::Ordering::Relaxed), "b_hold");
+    } else {
+        host::w32_mask(h, REG_3WIRE2, BIT_3WIRE_EN, 0x3);
+    }
+    host::delay_us(200);
+}
+
+/// Which port shows a receiver in which state: B held or not, A in
+/// receive or TX, port A or B. Three rounds of three blocks each. Returns
+/// whether holding B keeps it receiving while A transmits.
+fn matrix(h: i32) -> bool {
+    host::say("[wifiscope] matrix: which path hears while A transmits\n");
+    let mut out = Vec::new();
+    head(&mut out, "matrix");
+    put(&mut out, "round,b_hold,a_tx,port,rf0_a,rf0_b,");
+    put(&mut out, STAT_HEAD);
+    let mut alive = [0u32; 2];
+    for round in 0..3 {
+        for hold in [false, true] {
+            b_hold(h, hold);
+            for a_tx in [false, true] {
+                carrier(h, if a_tx { Some(TX_LOW) } else { None });
+                for port in [phy::RF_PATH_A, phy::RF_PATH_B] {
+                    host::w32(h, SAMPLE_SEL,
+                              if port == phy::RF_PATH_A { SAMPLE_SEL_A } else { SAMPLE_SEL_B });
+                    host::delay_us(50);
+                    for _ in 0..3 {
+                        let s = block(h);
+                        let n = s.n as i64;
+                        let var = (s.sii + s.sqq) - (s.si * s.si + s.sq * s.sq) / n;
+                        if a_tx && port == phy::RF_PATH_B && var > 25 * n {
+                            alive[hold as usize] += 1;
+                        }
+                        put_i(&mut out, round);
+                        out.push(b',');
+                        put_i(&mut out, hold as i64);
+                        out.push(b',');
+                        put_i(&mut out, a_tx as i64);
+                        out.push(b',');
+                        put(&mut out, if port == phy::RF_PATH_A { "A," } else { "B," });
+                        put_i(&mut out, rf0_read(h, phy::RF_PATH_A) as i64);
+                        out.push(b',');
+                        put_i(&mut out, rf0_read(h, phy::RF_PATH_B) as i64);
+                        out.push(b',');
+                        put_stat(&mut out, &s);
+                    }
+                }
+            }
+            carrier(h, None);
+        }
+    }
+    let hold = alive[1] > alive[0];
+    put(&mut out, if hold { "# chosen: b_hold 1\n" } else { "# chosen: b_hold 0\n" });
+    save("matrix.csv", &out);
+    b_hold(h, hold);
+    sample_b(h);
+    hold
 }
 
 // ── Gates ────────────────────────────────────────────────────────
@@ -488,10 +558,15 @@ pub fn run(h: i32) {
     host::sleep_ms(50);
     let saved = save_state(h);
     A_IDLE.store(saved.rf[0][0], core::sync::atomic::Ordering::Relaxed);
+    B_IDLE.store(saved.rf[0][1], core::sync::atomic::Ordering::Relaxed);
 
     gate0(h, &saved);
     setup_minimal(h);
     carrier(h, None);
+    let hold = matrix(h);
+    B_HOLD.store(hold, core::sync::atomic::Ordering::Relaxed);
+    host::say(if hold { "[wifiscope] B is held in receive for gates 1 and 2\n" }
+              else { "[wifiscope] B stays under the BB for gates 1 and 2\n" });
     gate1(h);
     gate2(h);
 
