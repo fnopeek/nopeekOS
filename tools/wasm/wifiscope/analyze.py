@@ -151,6 +151,33 @@ def matrix(d):
                 print('  ' + l[2:].strip())
 
 
+def port_of(p):
+    with open(p) as f:
+        for l in f:
+            if l.startswith('# port A'):
+                return 'port A, monostatic'
+    return 'port B'
+
+
+def unflip(series):
+    """Turn each value onto the half-plane of the first: a carrier whose
+    sign flips between switch-ons is the same carrier. Returns the count."""
+    ref = None
+    flips = 0
+    for ph in sorted(series):
+        out = []
+        for x in series[ph]:
+            z = x[1]
+            if ref is None and abs(z) > 0:
+                ref = z
+            if ref is not None and (z * ref.conjugate()).real < 0:
+                z = -z
+                flips += 1
+            out.append((x[0], z) + tuple(x[2:]))
+        series[ph] = out
+    return flips
+
+
 def pairs(rs, key):
     """Pair each carrier-off row with the carrier-on row after it."""
     out = []
@@ -168,10 +195,9 @@ def gate1(d):
     p = os.path.join(d, 'gate1.csv')
     if not os.path.exists(p):
         return
-    g = meta(p, 'rx_gain')
-    print(f'== Gate 1: carrier on A, measured on B ({"rx_gain " + g if g else "B on its AGC"})')
+    print(f'== Gate 1: carrier on A ({port_of(p)})')
     ps = pairs(rows(p), 'phase')
-    names = ['quiet', 'hand', 'quiet again', 'quiet, higher TX']
+    names = ['quiet', 'hand', 'quiet again', 'quiet, higher TX', 'walking 1-3 m', 'still, away']
     series = {}
     dead = 0
     for off, on in ps:
@@ -183,6 +209,9 @@ def gate1(d):
             (int(on['t_ms']), bn.mean - bo.mean, math.hypot(bn.sem, bo.sem), bn.peak))
     if dead:
         print(f'  {dead} pairs skipped: B silent (noise sd < 5) in one half')
+    flips = unflip(series)
+    if flips:
+        print(f'  {flips} pairs turned by 180 deg (the LO divider locks to either half)')
     summary = {}
     for ph, s in sorted(series.items()):
         ds = [x[1] for x in s]
@@ -190,9 +219,10 @@ def gate1(d):
         noise = sum(x[2] for x in s) / len(s)
         snr = abs(mean) / noise if noise else float('inf')
         summary[ph] = mean
+        spread = sum(abs(z - mean) for z in ds) / len(ds)
         print(f'  {names[ph]:17s}: carrier {abs(mean):7.2f} @ {math.degrees(cmath.phase(mean)):7.1f} deg'
               f'  SNR {snr:6.1f}  phase sd {circ_std_deg(ds):5.2f} deg'
-              f'  peak {max(x[3] for x in s)}  n {len(s)}')
+              f'  spread {spread:5.2f} (noise {noise:4.2f})  n {len(s)}')
     if 0 in summary:
         q = series[0]
         snr = abs(summary[0]) / (sum(x[2] for x in q) / len(q))
@@ -255,6 +285,15 @@ def gate2(d):
             dead += 1
             continue
         per_ch.setdefault(int(on['channel']), []).append(bn.mean - bo.mean)
+    flips = 0
+    for ch, zs in per_ch.items():
+        ref = zs[0]
+        for k, z in enumerate(zs):
+            if (z * ref.conjugate()).real < 0:
+                zs[k] = -z
+                flips += 1
+    if flips:
+        print(f'  {flips} pairs turned by 180 deg to their channel\'s first')
     if dead:
         print(f'  {dead} pairs skipped: B silent (noise sd < 5) in one half')
     worst = 0.0
@@ -270,9 +309,7 @@ def gate2(d):
     print(f'  phase reproducible after retune (sd < 5 deg): {verdict(worst < 5)}')
     slope(per_ch)
     if worst >= 5:
-        print('  -> the phase does not survive a retune: separate synthesizers or '
-              'an unlocked LO. Next step is the reference per channel '
-              '(normalise by the A->B crosstalk).')
+        print('  -> the phase does not survive a retune (after turning 180 deg flips)')
     try:
         import matplotlib
         matplotlib.use('Agg')

@@ -1,20 +1,25 @@
 //! The radar probe that runs after stage 4c in place of the link stages.
 //!
-//! Path B's ADC is read through the sample port the DAC calibration uses
+//! An ADC is read through the sample port the DAC calibration uses
 //! (`0x2dbc`, path selected in `0x1c3c`, rtw8822c.c:394-470) while path A is
-//! in standby or in TX mode without a baseband signal, so that what reaches B
-//! is A's carrier (its LO leakage). With A and B on the same frequency that
-//! carrier is a constant in B's baseband: the mean of a block of samples is
-//! one complex channel value.
+//! in its receive state or in TX mode without a baseband signal, so that A
+//! sends its bare carrier (its LO leakage). Received with the same LO the
+//! carrier is a constant in baseband: the mean of a block of samples is one
+//! complex channel value.
 //!
-//! Three measurements, each written to npkFS as CSV for host-side analysis:
+//! B's ADC shows nothing while A transmits, whether B is held in receive or
+//! not, so the measurement is monostatic: A's own receiver, which keeps
+//! running while A transmits, through A's antenna.
+//!
+//! Four measurements, each written to npkFS as CSV for host-side analysis:
 //!
 //! - gate 0: path A's port once, then path B's after each cumulative step
 //!   of the setup, plus one raw block of B in normal receive.
-//! - gate 1: A's carrier off and on in turn, with the hand prompts; B
-//!   stays in the BB's normal receive state.
+//! - matrix: both ports with A in receive and in TX, B under the BB or held.
+//! - gate 1: A's carrier off and on in turn on A's port, with the hand
+//!   prompts.
 //! - gate 2: the same off/on pair across channel switches, for the phase
-//!   after a retune.
+//!   after a retune and against frequency.
 //!
 //! The chip is powered off by the caller afterwards; restoring here only
 //! ends the transmission and gives the antenna back to coexistence.
@@ -235,7 +240,7 @@ fn head(out: &mut Vec<u8>, what: &str) {
     put(out, what);
     put(out, "\n# block ");
     put_i(out, BLOCK as i64);
-    put(out, " samples, 10-bit I/Q of path B, carrier from path A\n");
+    put(out, " samples, 10-bit I/Q, carrier from path A\n");
 }
 
 fn save(name: &str, out: &[u8]) {
@@ -330,12 +335,13 @@ fn sample_b(h: i32) {
     host::w32(h, SAMPLE_SEL, SAMPLE_SEL_B);
 }
 
-/// The setup gates 1 and 2 run with.
+/// The setup gates 1 and 2 run with, on A's port.
 fn setup_minimal(h: i32) {
     for k in 1..MINIMAL {
         step(h, k);
     }
-    sample_b(h);
+    host::w32(h, 0x1c24, 0x0001_0002);
+    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_A);
 }
 
 /// A's carrier at TX gain index `gain`, or standby.
@@ -476,16 +482,18 @@ fn gate0(h: i32, saved: &Saved) {
 
 fn gate1(h: i32) {
     // (prompt, seconds, TX gain index)
-    const PHASES: [(&str, u64, u32); 4] = [
+    const PHASES: [(&str, u64, u32); 6] = [
         ("keep hands away from the screen edge", 8, TX_LOW),
         ("hold a hand flat in front of the top screen edge, about 10 cm", 8, TX_LOW),
         ("hands away again", 8, TX_LOW),
         ("hands away, slightly stronger carrier", 5, TX_HIGHER),
+        ("walk slowly past the laptop at 1 to 3 m, back and forth", 15, TX_HIGHER),
+        ("step away and stand still, out of the room if you can", 8, TX_HIGHER),
     ];
     host::say("[wifiscope] gate 1: carrier on A, measured on B\n");
     let mut out = Vec::new();
     head(&mut out, "gate1");
-    put(&mut out, "# B in normal receive, AGC running\nphase,tx_gain,tx_on,t_ms,rf0_a,rf0_b,");
+    put(&mut out, "# port A, monostatic\nphase,tx_gain,tx_on,t_ms,rf0_a,rf0_b,");
     put(&mut out, STAT_HEAD);
     let t_start = host::now_ms();
     for (p, &(prompt, secs, txg)) in PHASES.iter().enumerate() {
@@ -525,7 +533,7 @@ fn gate2(h: i32) {
     host::say("[wifiscope] gate 2: channel switches, hands away\n");
     let mut out = Vec::new();
     head(&mut out, "gate2");
-    put(&mut out, "# B in normal receive, AGC running\nround,channel,tx_on,rf0_a,rf0_b,");
+    put(&mut out, "# port A, monostatic\nround,channel,tx_on,rf0_a,rf0_b,");
     put(&mut out, STAT_HEAD);
     for round in 0..SWEEP_ROUNDS {
         for &ch in CH_SWEEP.iter() {
@@ -564,6 +572,7 @@ pub fn run(h: i32) {
     setup_minimal(h);
     carrier(h, None);
     let hold = matrix(h);
+    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_A);
     B_HOLD.store(hold, core::sync::atomic::Ordering::Relaxed);
     host::say(if hold { "[wifiscope] B is held in receive for gates 1 and 2\n" }
               else { "[wifiscope] B stays under the BB for gates 1 and 2\n" });
