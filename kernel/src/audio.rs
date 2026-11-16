@@ -209,7 +209,7 @@ struct Mixer {
     /// Streams by index; a closed slot is reused, so indices stay put.
     slots: alloc::vec::Vec<Slot>,
     /// What `poll_mix` produces for each driver that set a format.
-    devices: alloc::vec::Vec<(u32, Format)>,
+    devices: alloc::vec::Vec<(crate::devices::Owner, Format)>,
 }
 
 static MIXER: Mutex<Mixer> =
@@ -285,24 +285,29 @@ pub fn set_format_for(slot: usize, pid: u32, fmt: Format) -> bool {
 /// The audio driver `pid` says what it plays: `poll_mix` produces this
 /// for it from now on. False for a format the mixer cannot produce.
 pub fn set_device_format(pid: u32, fmt: Format) -> bool {
+    set_device_format_as(crate::devices::Owner::Module(pid), fmt)
+}
+
+/// `set_device_format` for a driver of any owner, the kernel's own too.
+pub fn set_device_format_as(owner: crate::devices::Owner, fmt: Format) -> bool {
     if !fmt.valid(DEVICE_CHANNELS_MAX) {
         return false;
     }
     let mut m = MIXER.lock();
-    match m.devices.iter_mut().find(|d| d.0 == pid) {
+    match m.devices.iter_mut().find(|d| d.0 == owner) {
         Some(d) => d.1 = fmt,
-        None => m.devices.push((pid, fmt)),
+        None => m.devices.push((owner, fmt)),
     }
     true
 }
 
 /// Whether driver `pid` plays the mix: one of its outputs is the active
 /// one, or it entered none and no output is active at all.
-fn serves(pid: u32) -> bool {
-    use crate::devices::{self, Kind, Owner};
+fn serves(owner: crate::devices::Owner) -> bool {
+    use crate::devices::{self, Kind};
     let (outs, active) = devices::list(Kind::AudioOut);
     match active {
-        Some(a) => outs.iter().any(|e| e.handle == a && e.owner == Owner::Module(pid)),
+        Some(a) => outs.iter().any(|e| e.handle == a && e.owner == owner),
         None => true,
     }
 }
@@ -333,7 +338,7 @@ pub fn buffered_for(slot: usize, pid: u32) -> Option<usize> {
 /// its device format.
 pub fn release_owner(pid: u32) {
     let mut m = MIXER.lock();
-    m.devices.retain(|d| d.0 != pid);
+    m.devices.retain(|d| d.0 != crate::devices::Owner::Module(pid));
     for s in m.slots.iter_mut().filter(|s| s.active && s.owner == Some(pid)) {
         s.stop();
     }
@@ -403,10 +408,15 @@ pub fn play_oneshot(data: &[u8]) -> bool {
 /// (a whole number of frames). A driver whose output is not the active one
 /// gets silence and takes nothing from the streams.
 pub fn poll_mix(pid: u32, out: &mut [u8]) -> usize {
+    poll_mix_as(crate::devices::Owner::Module(pid), out)
+}
+
+/// `poll_mix` for a driver of any owner, the kernel's own too.
+pub fn poll_mix_as(owner: crate::devices::Owner, out: &mut [u8]) -> usize {
     let vol = VOLUME.load(Ordering::Relaxed) as i64;
-    let serving = serves(pid);
+    let serving = serves(owner);
     let mut m = MIXER.lock();
-    let dev = m.devices.iter().find(|d| d.0 == pid).map_or(DEFAULT_FORMAT, |d| d.1);
+    let dev = m.devices.iter().find(|d| d.0 == owner).map_or(DEFAULT_FORMAT, |d| d.1);
     let fb = dev.frame_bytes();
     if !serving {
         let n = out.len() - out.len() % fb;
@@ -440,6 +450,17 @@ pub fn poll_mix(pid: u32, out: &mut [u8]) -> usize {
     }
     shrink(&mut m.slots);
     frames * fb
+}
+
+/// Whether any stream is open: a driver that can stop its device lets it
+/// run only while something may play.
+pub fn any_open() -> bool {
+    MIXER.lock().slots.iter().any(|s| s.active)
+}
+
+/// Whether the kernel's own driver plays the mix (`serves`).
+pub fn kernel_serves() -> bool {
+    serves(crate::devices::Owner::Kernel)
 }
 
 /// Bytes currently buffered in a slot's ring (0 if closed). The virtio-snd
@@ -480,8 +501,11 @@ struct DisplayAudio {
     eld: [([u8; ELD_MAX], usize); DISPLAY_AUDIO_PORTS],
     /// The display driver serves requests (the component is bound).
     bound: bool,
-    /// `DISPLAY_AUDIO_POWER` | `DISPLAY_AUDIO_WAKE` the audio driver wants.
+    /// `DISPLAY_AUDIO_POWER` | `DISPLAY_AUDIO_WAKE` | `DISPLAY_AUDIO_STREAM`
+    /// the audio driver wants.
     want: u32,
+    /// The stream's port, channels and rate (`display_audio_params`).
+    params: u32,
     /// Moves with every request; `done` is the last one carried out.
     want_seq: u32,
     done_seq: u32,
@@ -494,6 +518,7 @@ static DISPLAY_AUDIO: Mutex<DisplayAudio> = Mutex::new(DisplayAudio {
     eld: [([0; ELD_MAX], 0); DISPLAY_AUDIO_PORTS],
     bound: false,
     want: 0,
+    params: 0,
     want_seq: 0,
     done_seq: 0,
     requester: None,
@@ -503,6 +528,9 @@ static DISPLAY_AUDIO: Mutex<DisplayAudio> = Mutex::new(DisplayAudio {
 pub const DISPLAY_AUDIO_POWER: u32 = 1;
 /// The codec wake signal is forced on (`codec_wake_override`).
 pub const DISPLAY_AUDIO_WAKE: u32 = 2;
+/// A stream plays to a port of the display (`hdmi_codec_ops`
+/// `audio_startup` + `prepare` while set, `audio_shutdown` when cleared).
+pub const DISPLAY_AUDIO_STREAM: u32 = 4;
 /// Request numbers fit beside the two bits in a positive i32.
 const DISPLAY_AUDIO_SEQ_MASK: u32 = 0x1FFF_FFFF;
 
@@ -521,6 +549,37 @@ pub fn display_audio_request(pid: u32, want: u32) -> Option<u32> {
     };
     crate::gpu::gpudev::wake_display_driver();
     Some(seq)
+}
+
+/// The kernel's own audio driver of a display port wants a stream
+/// (`DISPLAY_AUDIO_STREAM`) with `params` (`display_audio_params`), or
+/// none: the request's number, or None while no display driver serves.
+pub fn display_audio_stream(params: Option<u32>) -> Option<u32> {
+    let seq = {
+        let mut d = DISPLAY_AUDIO.lock();
+        if !d.bound {
+            return None;
+        }
+        d.want = if params.is_some() { DISPLAY_AUDIO_STREAM } else { 0 };
+        d.params = params.unwrap_or(0);
+        d.want_seq = (d.want_seq.wrapping_add(1) & DISPLAY_AUDIO_SEQ_MASK).max(1);
+        d.requester = None;
+        d.want_seq
+    };
+    crate::gpu::gpudev::wake_display_driver();
+    Some(seq)
+}
+
+/// `(port << 28) | (channels << 20) | rate` of the stream wanted, 0 for
+/// none.
+pub fn display_audio_params() -> u32 {
+    let d = DISPLAY_AUDIO.lock();
+    if d.want & DISPLAY_AUDIO_STREAM != 0 { d.params } else { 0 }
+}
+
+/// Pack a stream's parameters for `display_audio_stream`.
+pub fn display_audio_pack(port: u32, channels: u32, rate: u32) -> u32 {
+    (port & 0xf) << 28 | (channels & 0xff) << 20 | (rate & 0xf_ffff)
 }
 
 /// The last request the display driver carried out, or None while none

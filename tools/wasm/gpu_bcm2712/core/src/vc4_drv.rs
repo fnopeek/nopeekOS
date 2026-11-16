@@ -14,9 +14,11 @@
 //! stay masked.
 
 use crate::clk::FwClocks;
+use crate::hdmi_codec::HdmiCodec;
 use crate::hw::{Block, Hw};
 use crate::i2c_brcmstb::Bsc;
 use crate::irq_brcmstb_l2::{L2Intc, L2_2711_LVL_INTC_INIT, L2_LVL_INTC_INIT};
+use crate::linux::EINVAL;
 use crate::vc4_crtc::{vc4_crtc_mode_valid, Vc4Crtc};
 use crate::vc4_hdmi::{
     vc4_hdmi_connector_get_modes, vc4_hdmi_connector_init, vc4_hdmi_connector_mode_valid,
@@ -39,6 +41,13 @@ const DDC_IRQ: [u32; 2] = [1, 2];
 const MAX_WIDTH: u32 = 8192;
 const MAX_HEIGHT: u32 = 8192;
 
+/// `vc4_hdmi_audio_cpu_dai_drv`'s playback: 1 to 8 channels at these
+/// rates, as IEC958 subframes (`SNDRV_PCM_FMTBIT_IEC958_SUBFRAME_LE`, 32
+/// bits wide).
+const AUDIO_RATES: [u32; 7] = [32000, 44100, 48000, 88200, 96000, 176400, 192000];
+const AUDIO_CHANNELS_MAX: u32 = 8;
+const AUDIO_SAMPLE_WIDTH: u32 = 32;
+
 /// `struct vc4_dev` with the components bound to it.
 pub struct Vc4 {
     pub aon_intr: L2Intc,
@@ -54,6 +63,8 @@ pub struct Vc4 {
     pub connectors: Vec<drm_connector>,
     /// The current atomic state of every object.
     pub kms: crate::vc4_kms::Vc4KmsState,
+    /// The HDMI codec of each port (`drm_connector_hdmi_audio_init`).
+    pub hdmi_codec: [HdmiCodec; 2],
 }
 
 impl Vc4 {
@@ -77,7 +88,8 @@ impl Vc4 {
         let crtc = [Vc4Crtc::bind(hw, 0), Vc4Crtc::bind(hw, 1)];
         let connectors = vec![vc4_hdmi_connector_init(0), vc4_hdmi_connector_init(1)];
         let kms = crate::vc4_kms::Vc4KmsState::reset(&connectors, crtc.len());
-        let mut vc4 = Vc4 { aon_intr, disp_intr, bsc, clocks, hvs, hdmi, crtc, connectors, kms };
+        let hdmi_codec = [HdmiCodec::default(), HdmiCodec::default()];
+        let mut vc4 = Vc4 { aon_intr, disp_intr, bsc, clocks, hvs, hdmi, crtc, connectors, kms, hdmi_codec };
         // vc4_kms_load: drm_mode_config_reset, then every output the
         // firmware left running stopped.
         for i in 0..2 {
@@ -168,6 +180,33 @@ impl Vc4 {
             }
         }
         ports
+    }
+}
+
+/// A playback stream on HDMI `port`, in the order ASoC calls the HDMI
+/// codec: `audio_startup`, `audio_prepare` (again for new parameters),
+/// `audio_shutdown`. Linux's audio paths take no runtime-PM reference:
+/// they rely on the enabled encoder's (`pm_runtime_active`).
+impl Vc4 {
+    /// `hdmi_codec_startup`: 0, or -ENOTSUPP for a DVI sink, -EINVAL
+    /// while a stream runs.
+    pub fn audio_startup(&mut self, hw: &mut impl Hw, port: usize) -> i32 {
+        self.hdmi_codec[port].startup(&mut self.hdmi[port], hw, &self.connectors[port])
+    }
+
+    /// The CPU DAI's rates and channel counts as ALSA constrains them,
+    /// then `hdmi_codec_prepare`: 0, or -EINVAL.
+    pub fn audio_prepare(&mut self, hw: &mut impl Hw, port: usize, sample_rate: u32, channels: u32) -> i32 {
+        if !AUDIO_RATES.contains(&sample_rate) || channels == 0 || channels > AUDIO_CHANNELS_MAX {
+            return -EINVAL;
+        }
+        self.hdmi_codec[port].prepare(&mut self.hdmi[port], hw, &mut self.connectors[port], &self.hvs,
+            AUDIO_SAMPLE_WIDTH, sample_rate, channels)
+    }
+
+    /// `hdmi_codec_shutdown`.
+    pub fn audio_shutdown(&mut self, hw: &mut impl Hw, port: usize) {
+        self.hdmi_codec[port].shutdown(&mut self.hdmi[port], hw);
     }
 }
 

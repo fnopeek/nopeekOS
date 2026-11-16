@@ -604,7 +604,6 @@ pub(crate) fn npk_audio_open(ctx: &mut HostState) -> i32 {
     crate::audio::open_for(ctx.pid)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// The format of the caller's stream `slot` (`audio::Encoding` numbering);
 /// empties its ring. -1 for a foreign slot or a format the mixer does not
 /// take.
@@ -625,7 +624,6 @@ pub(crate) fn npk_audio_device_format(ctx: &mut HostState, rate: i32, encoding: 
     if crate::audio::set_device_format(ctx.pid, fmt) { 0 } else { -1 }
 }
 
-#[cfg(target_arch = "x86_64")]
 fn audio_format(rate: i32, encoding: i32, channels: i32) -> Option<crate::audio::Format> {
     let encoding = crate::audio::Encoding::from_abi(encoding)?;
     let rate = u32::try_from(rate).ok()?;
@@ -907,13 +905,16 @@ const WAIT_GPU_CMD: i32 = 64;
 /// Display audio waits for this module: it drives the display controller
 /// whose HDMI/DP audio the kernel has queued work for.
 fn display_audio_pending(ctx: &HostState) -> bool {
+    drives_display(ctx) && crate::audio::display_audio_pending()
+}
+
+/// The caller drives the display controller: the PCI class 03 device it
+/// owns, or on the Pi the display set it bound.
+fn drives_display(ctx: &HostState) -> bool {
     #[cfg(target_arch = "x86_64")]
-    return owned_pci_class(ctx) == Some(0x03) && crate::audio::display_audio_pending();
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        let _ = ctx;
-        false
-    }
+    return owned_pci_class(ctx) == Some(0x03);
+    #[cfg(target_arch = "aarch64")]
+    return ctx.hw.as_ref().is_some_and(|h| h.is_display());
 }
 
 /// Which of `mask`'s conditions hold right now. Bits the caller may not
@@ -4118,13 +4119,12 @@ fn owned_pci_class(ctx: &HostState) -> Option<u8> {
     (pci::owner(addr) == Some(pci::Owner::Module(ctx.pid))).then(|| pci::read8(addr, 0x0b))
 }
 
-#[cfg(target_arch = "x86_64")]
 /// The display driver reports the ELD of `port`'s sink, `len` 0 for none
 /// (`pin_eld_notify` of Linux' audio component). Only the driver of a
 /// display device may.
 pub(crate) fn npk_display_audio_set(mem: &mut [u8], ctx: &mut HostState, port: i32, ptr: i32, len: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_set")
-        || owned_pci_class(ctx) != Some(0x03)
+        || !drives_display(ctx)
     {
         return -1;
     }
@@ -4151,7 +4151,6 @@ pub(crate) fn npk_display_audio_get(mem: &mut [u8], ctx: &mut HostState, port: i
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// 0 until the display driver reported once, then a count that moves with
 /// every report.
 pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
@@ -4161,16 +4160,26 @@ pub(crate) fn npk_display_audio_generation(ctx: &mut HostState) -> i32 {
     crate::audio::display_audio_generation() as i32
 }
 
-#[cfg(target_arch = "x86_64")]
 /// The display driver binds the audio component, says request `done` is
 /// carried out, and learns what is wanted now: `(number << 2) | bits`.
 pub(crate) fn npk_display_audio_serve(ctx: &mut HostState, done: i32) -> i32 {
     if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_serve")
-        || owned_pci_class(ctx) != Some(0x03)
+        || !drives_display(ctx)
     {
         return -1;
     }
     crate::audio::display_audio_serve(done as u32) as i32
+}
+
+/// The display driver reads the wanted stream's port, channels and rate:
+/// `(port << 28) | (channels << 20) | rate`, 0 for none.
+pub(crate) fn npk_display_audio_params(ctx: &mut HostState) -> i32 {
+    if !capability::require(&ctx.cap_id, capability::Rights::HARDWARE, "npk_display_audio_params")
+        || !drives_display(ctx)
+    {
+        return -1;
+    }
+    crate::audio::display_audio_params() as i32
 }
 
 #[cfg(target_arch = "x86_64")]

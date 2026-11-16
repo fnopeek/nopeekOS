@@ -96,16 +96,28 @@ microphone on the jack is not set up yet.
 
 What Linux' audio component carries between the display driver and the
 audio driver. Every call needs `Rights::HARDWARE`; the display side is the
-driver of a PCI class 03 device, the audio side of a class 04 device.
+driver of a PCI class 03 device (on the Pi 5 the module that bound the
+display set), the audio side of a class 04 device.
 
 | Call | Side | Contract |
 |---|---|---|
 | `npk_display_audio_set(port, ptr, len) -> 0 / -1` | display | The ELD of `port`'s sink, `len` 0 for none (`pin_eld_notify`). |
 | `npk_display_audio_get(port, ptr, max) -> len` | audio | The ELD of `port`, 0 for no sink, `-(needed + 2)` for a short buffer (`get_eld`). |
 | `npk_display_audio_generation() -> n` | both | 0 until the display side reported once, then a count that moves with every report. |
-| `npk_display_audio_serve(done) -> want` | display | Binds the component and says request `done` is carried out; returns `(number << 2) \| bits` of what is wanted now. Bit 0: hold the display's audio power (`get_power` / `put_power`). Bit 1: force the codec wake signal (`codec_wake_override`). The display driver calls it on every pass of its service loop, and again after carrying out a new number. |
+| `npk_display_audio_serve(done) -> want` | display | Binds the component and says request `done` is carried out; returns `(number << 2) \| bits` of what is wanted now. Bit 0: hold the display's audio power (`get_power` / `put_power`). Bit 1: force the codec wake signal (`codec_wake_override`). Bit 2: a stream plays to a port: `hdmi_codec_ops` `audio_startup` and `prepare` while set, `audio_shutdown` once cleared. The display driver calls it on every pass of its service loop, and again after carrying out a new number. |
+| `npk_display_audio_params() -> p` | display | The stream bit 2 asks for: `(port << 28) \| (channels << 20) \| rate`, 0 for none. |
 | `npk_display_audio_request(bits) -> number` | audio | Asks for `bits` (as above) instead of what was asked before, and wakes the display driver. -2 while no display driver is bound, -3 when the bus has no Intel display device, so none will bind (`i915_gfx_present`); -1 refused. |
 | `npk_display_audio_done() -> number` | audio | The last request carried out; -2 while no display driver is bound. |
+
+On the Pi 5 the audio side is the kernel (`pi5_hdmi_audio`): the HDMI
+audio DMA controller sits behind no IOMMU, so no module may program it.
+A port with a reported ELD enters the device register as an audio output
+of rank 0. While that output plays the mix and a stream is open, the
+kernel asks for bit 2 with 48 kHz, 2 channels, waits until the request is
+carried out, then runs a ring of four 10 ms periods of IEC958 subframes
+(`SNDRV_PCM_FORMAT_IEC958_SUBFRAME_LE`, channel status as
+`snd_pcm_create_iec958_consumer_hw_params`) into the port's MAI FIFO. It
+stops 2 s after the last stream closed.
 
 What an audio module asked for is given back when it ends. When the
 display driver ends, nothing it carried out holds; a new one carries out

@@ -1,7 +1,8 @@
 //! `drivers/gpu/drm/vc4/vc4_hdmi.c` (Linux rpi-6.18), the BCM2712
 //! variants (`bcm2712_hdmi0_variant`, `bcm2712_hdmi1_variant`), built as
-//! with `CONFIG_DRM_VC4_HDMI_CEC=n`. Audio is not ported: its init
-//! registers ASoC devices and touches no register.
+//! with `CONFIG_DRM_VC4_HDMI_CEC=n`. Of audio, the codec callbacks
+//! (`vc4_hdmi_audio_funcs`); `vc4_hdmi_audio_init` registers ASoC devices
+//! and touches no register, and the MAI's DMA is the audio side's.
 //!
 //! Runtime PM is the PM core's for a device without parent, domain or
 //! autosuspend (`drivers/base/power/runtime.c`): a usage count, resume on
@@ -13,9 +14,10 @@ use crate::drm_scdc_helper::{drm_scdc_get_scrambling_status, drm_scdc_set_high_t
 use crate::hw::{Block, Hw, RPI_FIRMWARE_M2MC_CLK_ID, RPI_FIRMWARE_PIXEL_BVB_CLK_ID};
 use crate::i2c_brcmstb::{Bsc, Ddc};
 use crate::irq_brcmstb_l2::L2Intc;
-use crate::linux::{field_prep, wait_for, EINVAL, ENOMEM};
+use crate::hdmi_codec::hdmi_codec_params;
+use crate::linux::{field_prep, rational_best_approximation, wait_for, EINVAL, ENOMEM, ENOTSUPP};
 use crate::regs::*;
-use crate::vc4_hvs::Hvs;
+use crate::vc4_hvs::{Gen, Hvs};
 use alloc::format;
 use core::sync::atomic::{AtomicBool, Ordering};
 use alloc::string::String;
@@ -24,13 +26,14 @@ use drm_core::drm_edid::drm_edid_connector_add_modes;
 use drm_core::drm_hdmi_helper::drm_hdmi_compute_mode_clock;
 use drm_core::drm_hdmi_state_helper::{
     drm_atomic_helper_connector_hdmi_check, drm_atomic_helper_connector_hdmi_hotplug,
-    drm_atomic_helper_connector_hdmi_update_infoframes, drm_connector_hdmi_funcs, drm_hdmi_connector_mode_valid,
+    drm_atomic_helper_connector_hdmi_update_audio_infoframe, drm_atomic_helper_connector_hdmi_update_infoframes,
+    drm_connector_hdmi_funcs, drm_hdmi_connector_mode_valid,
 };
 use drm_core::drm_modes::{drm_display_mode, drm_mode_set_crtcinfo, drm_mode_status, drm_mode_vrefresh};
 use drm_core::regs::{
     CRTC_INTERLACE_HALVE_V, CRTC_STEREO_DOUBLE, DRM_MODE_CONNECTOR_HDMIA, DRM_MODE_FLAG_DBLCLK, DRM_MODE_FLAG_INTERLACE,
     DRM_MODE_FLAG_PHSYNC, DRM_MODE_FLAG_PVSYNC, HDMI_COLORSPACE_RGB, HDMI_COLORSPACE_YUV422, HDMI_COLORSPACE_YUV444,
-    MODE_CLOCK_HIGH, MODE_H_ILLEGAL, MODE_OK,
+    HDMI_INFOFRAME_TYPE_AUDIO, MODE_CLOCK_HIGH, MODE_H_ILLEGAL, MODE_OK,
 };
 
 /// The `aon_intr` lines of `hpd-connected` and `hpd-removed` per port
@@ -59,6 +62,8 @@ pub struct Vc4Hdmi {
     pub output_format: u32,
     /// `scrambling_work`: when the queued check is due (`now_us`).
     pub scrambling_work: Option<u64>,
+    /// `audio.streaming`.
+    pub audio_streaming: bool,
     rpm_usage: u32,
     rpm_active: bool,
     rpm_enabled: bool,
@@ -127,6 +132,11 @@ impl Vc4Hdmi {
         }
     }
 
+    /// `pm_runtime_active`: resumed, so the registers answer.
+    pub fn pm_runtime_active(&self) -> bool {
+        self.rpm_active
+    }
+
     /// `pm_runtime_put` / `pm_runtime_put_sync`: the last user suspends.
     pub fn pm_runtime_put(&mut self, hw: &mut impl Hw, clocks: &mut FwClocks) {
         if self.rpm_usage == 0 { return; }
@@ -152,6 +162,7 @@ impl Vc4Hdmi {
             output_bpc: 0,
             output_format: 0,
             scrambling_work: None,
+            audio_streaming: false,
             rpm_usage: 0,
             rpm_active: false,
             rpm_enabled: false,
@@ -692,6 +703,136 @@ impl Vc4Hdmi {
         ret
     }
 
+    /// `vc4_hdmi_audio_set_mai_clock`: the MAI's sample clock as a
+    /// fraction of the audio clock.
+    fn audio_set_mai_clock(&self, hw: &mut impl Hw, samplerate: u32) {
+        let hsm_clock = self.audio_clock.get_rate() as u32;
+        let (n, m) = rational_best_approximation(hsm_clock as u64, samplerate as u64,
+            (VC4_HD_MAI_SMP_N_MASK >> VC4_HD_MAI_SMP_N_MASK.trailing_zeros()) as u64,
+            (VC4_HD_MAI_SMP_M_MASK >> VC4_HD_MAI_SMP_M_MASK.trailing_zeros()) as u64 + 1);
+
+        self.write(hw, &HDMI_MAI_SMP,
+            field_prep(VC4_HD_MAI_SMP_N_MASK, n as u32) | field_prep(VC4_HD_MAI_SMP_M_MASK, (m as u32).wrapping_sub(1)));
+    }
+
+    /// `vc4_hdmi_set_n_cts`.
+    fn set_n_cts(&self, hw: &mut impl Hw, samplerate: u32) {
+        let mode = &self.saved_adjusted_mode;
+
+        let n = 128 * samplerate / 1000;
+        let tmp = mode.crtc_clock.wrapping_mul(1000) as i64 as u64 * n as u64;
+        let cts = (tmp / (128 * samplerate) as u64) as u32;
+
+        self.write(hw, &HDMI_CRP_CFG, VC4_HDMI_CRP_CFG_EXTERNAL_CTS_EN | field_prep(VC4_HDMI_CRP_CFG_N_MASK, n));
+
+        // We could get slightly more accurate clocks in some cases by
+        // providing a CTS_1 value. The two CTS values are alternated
+        // between based on the period fields
+        self.write(hw, &HDMI_CTS_0, cts);
+        self.write(hw, &HDMI_CTS_1, cts);
+    }
+
+    /// `vc4_hdmi_audio_startup`. `drm_dev_enter` cannot fail: the device
+    /// is never unplugged. BCM2712 has no `phy_rng_enable`.
+    pub fn audio_startup(&mut self, hw: &mut impl Hw, connector: &drm_connector) -> i32 {
+        if !vc4_hdmi_audio_can_stream(connector) {
+            return -ENOTSUPP;
+        }
+
+        self.audio_streaming = true;
+
+        self.write(hw, &HDMI_MAI_CTL,
+            VC4_HD_MAI_CTL_RESET | VC4_HD_MAI_CTL_FLUSH | VC4_HD_MAI_CTL_DLATE | VC4_HD_MAI_CTL_ERRORE
+                | VC4_HD_MAI_CTL_ERRORF);
+
+        0
+    }
+
+    /// `vc4_hdmi_audio_reset`.
+    fn audio_reset(&mut self, hw: &mut impl Hw) {
+        self.audio_streaming = false;
+        let ret = self.stop_packet(hw, HDMI_INFOFRAME_TYPE_AUDIO, false);
+        if ret != 0 {
+            drm_core::linux::Line::new().s(&format!("Failed to stop audio infoframe: {}", ret)).say();
+        }
+
+        self.write(hw, &HDMI_MAI_CTL, VC4_HD_MAI_CTL_RESET);
+        self.write(hw, &HDMI_MAI_CTL, VC4_HD_MAI_CTL_ERRORF);
+        self.write(hw, &HDMI_MAI_CTL, VC4_HD_MAI_CTL_FLUSH);
+    }
+
+    /// `vc4_hdmi_audio_shutdown`. BCM2712 has no `phy_rng_disable`.
+    pub fn audio_shutdown(&mut self, hw: &mut impl Hw) {
+        self.write(hw, &HDMI_MAI_CTL, VC4_HD_MAI_CTL_DLATE | VC4_HD_MAI_CTL_ERRORE | VC4_HD_MAI_CTL_ERRORF);
+
+        self.audio_streaming = false;
+        self.audio_reset(hw);
+    }
+
+    /// `vc4_hdmi_audio_prepare`: the MAI set up for the stream, N and CTS
+    /// for the mode's clock, and the stream's audio infoframe sent.
+    pub fn audio_prepare(&mut self, hw: &mut impl Hw, connector: &mut drm_connector, hvs: &Hvs,
+        params: &hdmi_codec_params) -> i32
+    {
+        let sample_rate = params.sample_rate;
+        let channels = params.channels;
+
+        if !vc4_hdmi_audio_can_stream(connector) {
+            return -EINVAL;
+        }
+
+        self.audio_set_mai_clock(hw, sample_rate);
+
+        self.write(hw, &HDMI_MAI_CTL,
+            field_prep(VC4_HD_MAI_CTL_CHNUM_MASK, channels) | VC4_HD_MAI_CTL_WHOLSMP | VC4_HD_MAI_CTL_CHALIGN
+                | VC4_HD_MAI_CTL_ENABLE);
+
+        let mai_sample_rate = sample_rate_to_mai_fmt(sample_rate);
+        let mai_audio_format = if params.iec_status0 & IEC958_AES0_NONAUDIO != 0 && params.channels == 8 {
+            VC4_HDMI_MAI_FORMAT_HBR
+        } else {
+            VC4_HDMI_MAI_FORMAT_PCM
+        };
+        self.write(hw, &HDMI_MAI_FMT,
+            field_prep(VC4_HDMI_MAI_FORMAT_SAMPLE_RATE_MASK, mai_sample_rate)
+                | field_prep(VC4_HDMI_MAI_FORMAT_AUDIO_FORMAT_MASK, mai_audio_format));
+
+        // The B frame identifier should match the value used by alsa-lib (8)
+        let mut audio_packet_config = VC4_HDMI_AUDIO_PACKET_ZERO_DATA_ON_SAMPLE_FLAT
+            | VC4_HDMI_AUDIO_PACKET_ZERO_DATA_ON_INACTIVE_CHANNELS
+            | field_prep(VC4_HDMI_AUDIO_PACKET_B_FRAME_IDENTIFIER_MASK, 0x8);
+
+        let channel_mask = genmask(channels - 1, 0);
+        audio_packet_config |= field_prep(VC4_HDMI_AUDIO_PACKET_CEA_MASK_MASK, channel_mask);
+
+        // Set the MAI threshold
+        match hvs.generation {
+            Gen::Gen6D => self.write(hw, &HDMI_MAI_THR,
+                field_prep(VC6_D_HD_MAI_THR_PANICHIGH_MASK, 0x10)
+                    | field_prep(VC6_D_HD_MAI_THR_PANICLOW_MASK, 0x10)
+                    | field_prep(VC6_D_HD_MAI_THR_DREQHIGH_MASK, 0x1c)
+                    | field_prep(VC6_D_HD_MAI_THR_DREQLOW_MASK, 0x1c)),
+            Gen::Gen6C => self.write(hw, &HDMI_MAI_THR,
+                field_prep(VC4_HD_MAI_THR_PANICHIGH_MASK, 0x10)
+                    | field_prep(VC4_HD_MAI_THR_PANICLOW_MASK, 0x10)
+                    | field_prep(VC4_HD_MAI_THR_DREQHIGH_MASK, 0x1c)
+                    | field_prep(VC4_HD_MAI_THR_DREQLOW_MASK, 0x1c)),
+        }
+
+        self.write(hw, &HDMI_MAI_CONFIG,
+            VC4_HDMI_MAI_CONFIG_BIT_REVERSE | VC4_HDMI_MAI_CONFIG_FORMAT_REVERSE
+                | field_prep(VC4_HDMI_MAI_CHANNEL_MASK_MASK, channel_mask));
+
+        let channel_map = vc5_hdmi_channel_map(channel_mask);
+        self.write(hw, &HDMI_MAI_CHANNEL_MAP, channel_map);
+        self.write(hw, &HDMI_AUDIO_PACKET_CONFIG, audio_packet_config);
+
+        self.set_n_cts(hw, sample_rate);
+
+        let mut funcs = Vc4HdmiFuncs { hdmi: self, hw, hvs };
+        drm_atomic_helper_connector_hdmi_update_audio_infoframe(connector, &params.cea, &mut funcs)
+    }
+
     /// `vc4_hdmi_encoder_post_crtc_disable`, gen 6 (the output stays
     /// enabled: clearing `VC4_HD_VID_CTL_ENABLE` locks the BCM2712 up).
     pub fn encoder_post_crtc_disable(&mut self, hw: &mut impl Hw, bsc: &mut Bsc) {
@@ -742,6 +883,54 @@ pub fn vc4_hdmi_supports_scrambling(connector: &drm_connector) -> bool {
     }
 
     display.hdmi.scdc.supported && display.hdmi.scdc.scrambling.supported
+}
+
+/// `IEC958_AES0_NONAUDIO` (include/sound/asoundef.h).
+const IEC958_AES0_NONAUDIO: u8 = 1 << 1;
+
+/// `GENMASK(h, l)` for 32 bits.
+fn genmask(h: u32, l: u32) -> u32 {
+    (u32::MAX >> (31 - h)) & (u32::MAX << l)
+}
+
+/// `vc4_hdmi_audio_can_stream`: a sink in DVI mode has no audio.
+fn vc4_hdmi_audio_can_stream(connector: &drm_connector) -> bool {
+    connector.display_info.is_hdmi
+}
+
+/// `sample_rate_to_mai_fmt`.
+fn sample_rate_to_mai_fmt(samplerate: u32) -> u32 {
+    match samplerate {
+        8000 => VC4_HDMI_MAI_SAMPLE_RATE_8000,
+        11025 => VC4_HDMI_MAI_SAMPLE_RATE_11025,
+        12000 => VC4_HDMI_MAI_SAMPLE_RATE_12000,
+        16000 => VC4_HDMI_MAI_SAMPLE_RATE_16000,
+        22050 => VC4_HDMI_MAI_SAMPLE_RATE_22050,
+        24000 => VC4_HDMI_MAI_SAMPLE_RATE_24000,
+        32000 => VC4_HDMI_MAI_SAMPLE_RATE_32000,
+        44100 => VC4_HDMI_MAI_SAMPLE_RATE_44100,
+        48000 => VC4_HDMI_MAI_SAMPLE_RATE_48000,
+        64000 => VC4_HDMI_MAI_SAMPLE_RATE_64000,
+        88200 => VC4_HDMI_MAI_SAMPLE_RATE_88200,
+        96000 => VC4_HDMI_MAI_SAMPLE_RATE_96000,
+        128000 => VC4_HDMI_MAI_SAMPLE_RATE_128000,
+        176400 => VC4_HDMI_MAI_SAMPLE_RATE_176400,
+        192000 => VC4_HDMI_MAI_SAMPLE_RATE_192000,
+        _ => VC4_HDMI_MAI_SAMPLE_RATE_NOT_INDICATED,
+    }
+}
+
+/// `vc5_hdmi_channel_map`: MAI channel `i` to HDMI channel `i`, four bits
+/// each.
+fn vc5_hdmi_channel_map(channel_mask: u32) -> u32 {
+    let mut channel_map = 0;
+
+    for i in 0..8 {
+        if channel_mask & (1 << i) != 0 {
+            channel_map |= i << (4 * i);
+        }
+    }
+    channel_map
 }
 
 /// `vc5_hdmi_find_yuv_csc_coeffs`: the `[3][4]` matrix for a colorspace.

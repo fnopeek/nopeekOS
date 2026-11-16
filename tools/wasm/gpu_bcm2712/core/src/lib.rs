@@ -11,6 +11,8 @@
 //! - [`i2c_brcmstb`]: the DDC controllers.
 //! - [`vc4_hvs`]: the HVS, which composes each output's planes.
 //! - [`vc4_hdmi`]: the two HDMI controllers.
+//! - [`hdmi_codec`]: an HDMI port's audio stream, as ASoC's HDMI codec
+//!   drives it.
 //! - [`clk`]: the firmware clocks and the DVP gates.
 //! - [`vc4_plane`]: a plane's display list entry and its memories.
 //! - [`vc4_crtc`]: the pixel valves.
@@ -27,6 +29,7 @@ pub mod cle;
 pub mod clk;
 pub mod drm_mm;
 pub mod drm_scdc_helper;
+pub mod hdmi_codec;
 pub mod hw;
 pub mod i2c_brcmstb;
 pub mod irq_brcmstb_l2;

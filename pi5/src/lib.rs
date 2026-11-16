@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod bcm2835_dma;
 pub mod clk_rp1;
 pub mod dwc3;
 pub mod eth;
@@ -20,6 +21,7 @@ pub mod fan;
 pub mod gem;
 pub mod gpio_rp1;
 pub mod hw;
+pub mod iec958;
 pub mod iommu;
 pub mod mip;
 pub mod pci;
@@ -33,6 +35,8 @@ pub mod vc4_regs;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_dma;
 #[cfg(test)]
 mod tests_eth;
 #[cfg(test)]

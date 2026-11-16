@@ -22,11 +22,16 @@
 //! wallpaper on the primary plane, each window in a premultiplied ARGB
 //! buffer of its own on an overlay, put on screen in one atomic commit per
 //! `OP_LAYERS`, as a compositor with KMS planes does. The HVS mixes them.
+//!
+//! HDMI audio's display side is the display-audio component
+//! ([`display_audio`]): the ELDs, and the MAI set up for the audio side's
+//! stream.
 
 #![no_std]
 
 extern crate alloc;
 
+mod display_audio;
 mod hw;
 mod scene;
 
@@ -37,6 +42,7 @@ use drm_core::linux::Line;
 use gpu_bcm2712_core::vc4_drv::Vc4;
 use gpu_bcm2712_core::vc4_kms::PlaneLayer;
 use alloc::vec::Vec;
+use display_audio::DisplayAudio;
 use hw::PiHw;
 
 // The default rights plus HARDWARE, which binding the display set
@@ -785,6 +791,8 @@ fn framebuffer(kfb: &KernelFb) -> drm_framebuffer {
 fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
     let mut jobs = [0u8; JOB_BYTES * 16];
     let mut seen = hw.arm_all();
+    let mut audio = DisplayAudio::new();
+    audio.report(vc4);
     loop {
         let now = npk_sys::now_us() as u64;
         let mut timeout_ms = 1000u64;
@@ -824,6 +832,7 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
             if vc4.aon_intr_handler(hw) != 0 {
                 let client = vc4.fbdev_probe(hw);
                 show(vc4, hw, &client, kfb);
+                audio.report(vc4);
                 // The commit showed the framebuffer again, without the
                 // cursor plane and the layers.
                 p.shown = 0;
@@ -842,6 +851,8 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
                 h.scrambling_wq(hw, &mut vc4.bsc);
             }
         }
+
+        audio.serve(vc4, hw);
 
         let n = npk_sys::gpudev_poll(&mut jobs);
         if n < 0 {

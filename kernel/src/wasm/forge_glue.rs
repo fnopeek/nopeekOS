@@ -895,7 +895,6 @@ host_imports! {
     // npk_audio_format(slot, rate, encoding, channels) -> 0 / -1.
     // encoding: 0 = S16LE, 1 = S32LE, 2 = F32LE; 1 or 2 channels; empties
     // the ring.
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_audio_format(slot: i32, rate: i32, encoding: i32, channels: i32) -> i32;
 
     // npk_audio_device_format(rate, encoding, channels) -> 0 / -1 (driver
@@ -921,19 +920,19 @@ host_imports! {
     // npk_display_audio_get(port, ptr, max) -> ELD length or -(needed + 2)
     // (audio driver);
     // npk_display_audio_generation() -> count of reports. Gated by
-    // HARDWARE and the class of the PCI device the caller owns.
-    #[cfg(target_arch = "x86_64")]
+    // HARDWARE and the display or multimedia device the caller drives.
     mem fn npk_display_audio_set(port: i32, ptr: i32, len: i32) -> i32;
     #[cfg(target_arch = "x86_64")]
     mem fn npk_display_audio_get(port: i32, ptr: i32, max: i32) -> i32;
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_display_audio_generation() -> i32;
     // npk_display_audio_serve(done) -> (number << 2) | bits (display driver);
     // npk_display_audio_request(bits) -> number, -2 unbound, -3 no Intel
     // display, -1 refused; npk_display_audio_done() -> number or -2 (audio
-    // driver). docs/spec/AUDIO.md.
-    #[cfg(target_arch = "x86_64")]
+    // driver); npk_display_audio_params() -> the wanted stream's
+    // (port << 28) | (channels << 20) | rate, 0 for none (display driver).
+    // docs/spec/AUDIO.md.
     ctx fn npk_display_audio_serve(done: i32) -> i32;
+    ctx fn npk_display_audio_params() -> i32;
     #[cfg(target_arch = "x86_64")]
     ctx fn npk_display_audio_request(bits: i32) -> i32;
     #[cfg(target_arch = "x86_64")]

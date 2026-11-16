@@ -227,3 +227,82 @@ impl drm_probe_funcs for Sink {
         alloc::vec![(0, alloc::vec![0])]
     }
 }
+
+/// The audio infoframe hdmi-codec builds for PCM, packed as hdmi.c packs
+/// it. By hand: header type 0x84, version 1, length 10; payload byte 0
+/// is coding type (0, from the stream) << 4 | (channels - 1), byte 3 the
+/// channel allocation; checksum 0x100 - the byte sum. 2 channels: sum
+/// 0x84 + 0x01 + 0x0a + 0x01 = 0x90, checksum 0x70. 8 channels with CA
+/// 0x13: sum 0x84 + 0x01 + 0x0a + 0x07 + 0x13 = 0xa9, checksum 0x57.
+#[test]
+fn audio_infoframe_packs_as_hdmi_c() {
+    use crate::hdmi::{hdmi_audio_infoframe, hdmi_audio_infoframe_init, hdmi_audio_infoframe_pack};
+    use crate::regs::HDMI_INFOFRAME_SIZE_MAX;
+
+    let pack = |channels: u8, ca: u8| {
+        let mut f = hdmi_audio_infoframe::default();
+        hdmi_audio_infoframe_init(&mut f);
+        f.channels = channels;
+        f.channel_allocation = ca;
+        let mut buf = [0xffu8; HDMI_INFOFRAME_SIZE_MAX as usize];
+        let n = hdmi_audio_infoframe_pack(&mut f, &mut buf);
+        buf[..n as usize].to_vec()
+    };
+    assert_eq!(pack(2, 0), [0x84, 0x01, 0x0a, 0x70, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(pack(8, 0x13), [0x84, 0x01, 0x0a, 0x57, 0x07, 0, 0, 0x13, 0, 0, 0, 0, 0, 0]);
+
+    let mut f = hdmi_audio_infoframe::default();
+    let mut buf = [0u8; 13];
+    assert_eq!(hdmi_audio_infoframe_pack(&mut f, &mut buf), -(crate::linux::EINVAL as isize));
+    hdmi_audio_infoframe_init(&mut f);
+    assert_eq!(hdmi_audio_infoframe_pack(&mut f, &mut buf), -(crate::linux::ENOSPC as isize));
+}
+
+/// The audio infoframe set by the sound side is written at once, kept
+/// on the connector, and written again with the state's infoframes.
+#[test]
+fn audio_infoframe_is_kept_and_rewritten() {
+    use crate::drm_connector::drm_connector_state;
+    use crate::drm_hdmi_state_helper::{
+        drm_atomic_helper_connector_hdmi_clear_audio_infoframe,
+        drm_atomic_helper_connector_hdmi_update_audio_infoframe,
+        drm_atomic_helper_connector_hdmi_update_infoframes, drm_connector_hdmi_funcs,
+    };
+    use crate::hdmi::{hdmi_audio_infoframe, hdmi_audio_infoframe_init};
+
+    #[derive(Default)]
+    struct Frames(Vec<(u32, Vec<u8>)>, Vec<u32>);
+    impl drm_connector_hdmi_funcs for Frames {
+        fn write_infoframe(&mut self, _c: &drm_connector, t: u32, b: &[u8]) -> i32 {
+            self.0.push((t, b.to_vec()));
+            0
+        }
+        fn clear_infoframe(&mut self, _c: &drm_connector, t: u32) -> i32 {
+            self.1.push(t);
+            0
+        }
+    }
+
+    let mut c = drm_connector::new(String::from("HDMI-A-1"), DRM_MODE_CONNECTOR_HDMIA);
+    let mut f = hdmi_audio_infoframe::default();
+    hdmi_audio_infoframe_init(&mut f);
+    f.channels = 2;
+    let mut funcs = Frames::default();
+
+    // A DVI sink takes no audio infoframe.
+    assert_eq!(drm_atomic_helper_connector_hdmi_update_audio_infoframe(&mut c, &f, &mut funcs), 0);
+    assert!(funcs.0.is_empty() && !c.hdmi.infoframes.audio.set);
+
+    c.display_info.is_hdmi = true;
+    assert_eq!(drm_atomic_helper_connector_hdmi_update_audio_infoframe(&mut c, &f, &mut funcs), 0);
+    assert_eq!(funcs.0, vec![(0x84, vec![0x84, 0x01, 0x0a, 0x70, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0])]);
+
+    let s = drm_connector_state::default();
+    assert_eq!(drm_atomic_helper_connector_hdmi_update_infoframes(&c, &s, &s, &mut funcs), 0);
+    assert_eq!(funcs.0.len(), 2);
+
+    assert_eq!(drm_atomic_helper_connector_hdmi_clear_audio_infoframe(&mut c, &mut funcs), 0);
+    assert_eq!(funcs.1, vec![0x84]);
+    assert_eq!(drm_atomic_helper_connector_hdmi_update_infoframes(&c, &s, &s, &mut funcs), 0);
+    assert_eq!(funcs.0.len(), 2);
+}

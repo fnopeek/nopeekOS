@@ -1,6 +1,6 @@
 [package]
 name = "nopeekos-kernel"
-version = "0.893.2"
+version = "0.894.0"
 edition = "2024"
 license = "AGPL-3.0-or-later"
 authors = ["nopeek"]

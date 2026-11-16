@@ -31,6 +31,9 @@ pub enum Block {
     V3dHub,
     V3dCore,
     V3dSms,
+    /// A `brcm,bcm2712-dma` controller from its channel 0 on, as
+    /// `bcm2835_dma_probe` rebases it.
+    Dma,
 }
 
 /// MMIO and delays. Widths are 1, 2 or 4 bytes.

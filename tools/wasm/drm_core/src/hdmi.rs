@@ -1,8 +1,7 @@
 //! drivers/video/hdmi.c + include/linux/hdmi.h (Linux rpi-6.18): the
-//! AVI, SPD and HDMI vendor infoframes and their packing. The audio
-//! infoframe (written by ALSA) and the Dynamic Range and Mastering
-//! infoframe (from an HDR metadata property) have no source here and are
-//! not ported.
+//! AVI, SPD, audio and HDMI vendor infoframes and their packing. The
+//! Dynamic Range and Mastering infoframe (from an HDR metadata property)
+//! has no source here and is not ported.
 
 use crate::linux::{EINVAL, ENOSPC};
 use crate::regs::*;
@@ -56,11 +55,28 @@ pub struct hdmi_vendor_infoframe {
     pub s3d_ext_data: u32,
 }
 
+/// `struct hdmi_audio_infoframe`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct hdmi_audio_infoframe {
+    pub r#type: u32,
+    pub version: u8,
+    pub length: u8,
+    pub channels: u8,
+    pub coding_type: u32,
+    pub sample_size: u32,
+    pub sample_frequency: u32,
+    pub coding_type_ext: u32,
+    pub channel_allocation: u8,
+    pub level_shift_value: u8,
+    pub downmix_inhibit: bool,
+}
+
 /// `union hdmi_infoframe`, the kinds this crate builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum hdmi_infoframe {
     avi(hdmi_avi_infoframe),
     spd(hdmi_spd_infoframe),
+    audio(hdmi_audio_infoframe),
     vendor(hdmi_vendor_infoframe),
 }
 
@@ -70,6 +86,7 @@ impl hdmi_infoframe {
         match self {
             hdmi_infoframe::avi(f) => f.r#type,
             hdmi_infoframe::spd(f) => f.r#type,
+            hdmi_infoframe::audio(f) => f.r#type,
             hdmi_infoframe::vendor(f) => f.r#type,
         }
     }
@@ -265,6 +282,85 @@ pub fn hdmi_spd_infoframe_pack(frame: &mut hdmi_spd_infoframe, buffer: &mut [u8]
     hdmi_spd_infoframe_pack_only(frame, buffer)
 }
 
+/// `hdmi_audio_infoframe_init`.
+pub fn hdmi_audio_infoframe_init(frame: &mut hdmi_audio_infoframe) -> i32 {
+    *frame = hdmi_audio_infoframe::default();
+
+    frame.r#type = HDMI_INFOFRAME_TYPE_AUDIO;
+    frame.version = 1;
+    frame.length = HDMI_AUDIO_INFOFRAME_SIZE as u8;
+
+    0
+}
+
+/// `hdmi_audio_infoframe_check_only`.
+fn hdmi_audio_infoframe_check_only(frame: &hdmi_audio_infoframe) -> i32 {
+    if frame.r#type != HDMI_INFOFRAME_TYPE_AUDIO || frame.version != 1
+        || frame.length as u32 != HDMI_AUDIO_INFOFRAME_SIZE
+    {
+        return -EINVAL;
+    }
+
+    0
+}
+
+/// `hdmi_audio_infoframe_check`.
+pub fn hdmi_audio_infoframe_check(frame: &hdmi_audio_infoframe) -> i32 {
+    hdmi_audio_infoframe_check_only(frame)
+}
+
+/// `hdmi_audio_infoframe_pack_payload`.
+fn hdmi_audio_infoframe_pack_payload(frame: &hdmi_audio_infoframe, buffer: &mut [u8]) {
+    let channels = if frame.channels >= 2 { frame.channels - 1 } else { 0 };
+
+    buffer[0] = ((frame.coding_type as u8 & 0xf) << 4) | (channels & 0x7);
+    buffer[1] = ((frame.sample_frequency as u8 & 0x7) << 2) | (frame.sample_size as u8 & 0x3);
+    buffer[2] = frame.coding_type_ext as u8 & 0x1f;
+    buffer[3] = frame.channel_allocation;
+    buffer[4] = (frame.level_shift_value & 0xf) << 3;
+
+    if frame.downmix_inhibit {
+        buffer[4] |= 1 << 7;
+    }
+}
+
+/// `hdmi_audio_infoframe_pack_only`: the packed length or a negative errno.
+pub fn hdmi_audio_infoframe_pack_only(frame: &hdmi_audio_infoframe, buffer: &mut [u8]) -> isize {
+    let ret = hdmi_audio_infoframe_check_only(frame);
+    if ret != 0 {
+        return ret as isize;
+    }
+
+    let length = HDMI_INFOFRAME_HEADER_SIZE as usize + frame.length as usize;
+
+    if buffer.len() < length {
+        return -ENOSPC as isize;
+    }
+
+    buffer.fill(0);
+
+    buffer[0] = frame.r#type as u8;
+    buffer[1] = frame.version;
+    buffer[2] = frame.length;
+    buffer[3] = 0; // checksum
+
+    hdmi_audio_infoframe_pack_payload(frame, &mut buffer[HDMI_INFOFRAME_HEADER_SIZE as usize..]);
+
+    hdmi_infoframe_set_checksum(buffer, length);
+
+    length as isize
+}
+
+/// `hdmi_audio_infoframe_pack`.
+pub fn hdmi_audio_infoframe_pack(frame: &mut hdmi_audio_infoframe, buffer: &mut [u8]) -> isize {
+    let ret = hdmi_audio_infoframe_check(frame);
+    if ret != 0 {
+        return ret as isize;
+    }
+
+    hdmi_audio_infoframe_pack_only(frame, buffer)
+}
+
 /// `hdmi_vendor_infoframe_init`.
 pub fn hdmi_vendor_infoframe_init(frame: &mut hdmi_vendor_infoframe) -> i32 {
     *frame = hdmi_vendor_infoframe::default();
@@ -377,6 +473,7 @@ pub fn hdmi_infoframe_pack(frame: &mut hdmi_infoframe, buffer: &mut [u8]) -> isi
     match frame {
         hdmi_infoframe::avi(f) => hdmi_avi_infoframe_pack(f, buffer),
         hdmi_infoframe::spd(f) => hdmi_spd_infoframe_pack(f, buffer),
+        hdmi_infoframe::audio(f) => hdmi_audio_infoframe_pack(f, buffer),
         hdmi_infoframe::vendor(f) => hdmi_vendor_infoframe_pack(f, buffer),
     }
 }

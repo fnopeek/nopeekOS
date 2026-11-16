@@ -3,9 +3,10 @@
 //! the core: the mode check against the sink's and the driver's TMDS
 //! limit, the EDID update on hotplug, the output format and bpc a commit
 //! uses and its infoframes. The driver's `drm_connector_hdmi_funcs` are
-//! [`drm_connector_hdmi_funcs`]. HDMI audio and CEC, which the hotplug
-//! notifies, are not ported; nor is the HDR infoframe, which needs an HDR
-//! metadata property.
+//! [`drm_connector_hdmi_funcs`]. The audio infoframe is the sound side's
+//! (`drm_atomic_helper_connector_hdmi_update_audio_infoframe`); CEC and
+//! the audio plug notification, which the hotplug drives, are not ported;
+//! nor is the HDR infoframe, which needs an HDR metadata property.
 
 use crate::drm_connector::{drm_connector, drm_connector_hdmi_infoframe, drm_connector_state, drm_connector_status};
 use crate::drm_edid::{
@@ -452,7 +453,7 @@ fn write_or_clear_infoframe(connector: &drm_connector, old_frame: &drm_connector
 }
 
 /// `drm_atomic_helper_connector_hdmi_update_infoframes`: the state's
-/// infoframes written (no audio infoframe: audio is not ported).
+/// infoframes written, and the connector's audio infoframe when one is set.
 pub fn drm_atomic_helper_connector_hdmi_update_infoframes(connector: &drm_connector,
                                                           old_conn_state: &drm_connector_state,
                                                           new_conn_state: &drm_connector_state,
@@ -467,6 +468,13 @@ pub fn drm_atomic_helper_connector_hdmi_update_infoframes(connector: &drm_connec
     let ret = write_or_clear_infoframe(connector, &old.avi, &new.avi, funcs);
     if ret != 0 {
         return ret;
+    }
+
+    if connector.hdmi.infoframes.audio.set {
+        let ret = write_infoframe(connector, &connector.hdmi.infoframes.audio, funcs);
+        if ret != 0 {
+            return ret;
+        }
     }
 
     let ret = write_or_clear_infoframe(connector, &old.hdr_drm, &new.hdr_drm, funcs);
@@ -484,6 +492,39 @@ pub fn drm_atomic_helper_connector_hdmi_update_infoframes(connector: &drm_connec
     }
 
     0
+}
+
+/// `drm_atomic_helper_connector_hdmi_update_audio_infoframe`: `frame`
+/// kept as the connector's audio infoframe and written.
+pub fn drm_atomic_helper_connector_hdmi_update_audio_infoframe(connector: &mut drm_connector,
+                                                               frame: &hdmi_audio_infoframe,
+                                                               funcs: &mut dyn drm_connector_hdmi_funcs) -> i32 {
+    if !connector.display_info.is_hdmi {
+        return 0;
+    }
+
+    let infoframe = drm_connector_hdmi_infoframe { data: Some(hdmi_infoframe::audio(*frame)), set: true };
+    connector.hdmi.infoframes.audio = infoframe;
+
+    write_infoframe(connector, &infoframe, funcs)
+}
+
+/// `drm_atomic_helper_connector_hdmi_clear_audio_infoframe`: the audio
+/// infoframe no longer sent.
+pub fn drm_atomic_helper_connector_hdmi_clear_audio_infoframe(connector: &mut drm_connector,
+                                                              funcs: &mut dyn drm_connector_hdmi_funcs) -> i32 {
+    if !connector.display_info.is_hdmi {
+        return 0;
+    }
+
+    connector.hdmi.infoframes.audio.set = false;
+
+    let infoframe = connector.hdmi.infoframes.audio;
+    let ret = clear_infoframe(connector, &infoframe, funcs);
+
+    connector.hdmi.infoframes.audio.data = None;
+
+    ret
 }
 
 /// `drm_atomic_helper_connector_hdmi_update`. `ddc` is the connector's

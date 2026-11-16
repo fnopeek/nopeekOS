@@ -683,3 +683,185 @@ fn csd_cfg_is_v3dvs() {
         assert_eq!(csd_cfg(&prog, r.rev, r.qpu_count, r.grid, r.code_va, r.cfg[6]), r.cfg, "{}", p.name);
     }
 }
+
+/// Registers as the last write left them, every write kept; a packet's
+/// status follows its enable bit, as the packet RAM does once it sent it.
+#[derive(Default)]
+struct AudioRegs {
+    vals: std::collections::BTreeMap<(String, u32), u32>,
+    writes: Vec<(Block, u32, u32)>,
+}
+
+impl Hw for AudioRegs {
+    fn read(&mut self, b: Block, off: u32) -> u32 {
+        use crate::regs::{HDMI_RAM_PACKET_CONFIG, HDMI_RAM_PACKET_STATUS};
+        let (reg, status) = HDMI_RAM_PACKET_STATUS[0];
+        if b == Block::Hdmi(0, reg) && off == status {
+            return self.read(b, HDMI_RAM_PACKET_CONFIG[0].1);
+        }
+        *self.vals.get(&(format!("{b:?}"), off)).unwrap_or(&0)
+    }
+    fn write(&mut self, b: Block, off: u32, v: u32) {
+        self.vals.insert((format!("{b:?}"), off), v);
+        self.writes.push((b, off, v));
+    }
+    fn now_us(&mut self) -> u64 { 0 }
+    fn delay_us(&mut self, _: u64) {}
+    fn irq_arm(&mut self, _: Spi) -> u64 { 0 }
+    fn irq_wait(&mut self, _: Spi, _: u64, _: u32) -> bool { true }
+    fn fw_clock(&mut self, _: u32, _: ClockOp) -> Option<u32> { Some(0) }
+    fn fw_display_done(&mut self) -> bool { true }
+}
+
+/// Run G bound and probed (HDMI-A-1 an HDMI sink with audio), with the
+/// encoder of port 0 set to the probed mode of `w`x`h`.
+fn audio_vc4(w: i32, h: i32) -> Vc4 {
+    let evs = parse(LOG);
+    let mut hw = Strict::new(upto(&evs, "drm_fb_helper_initial_config", &["vc4_txp_bind"]));
+    let mut vc4 = Vc4::bind(&mut hw).expect("bind");
+    let mut hw = Strict::new(segment(&evs, "drm_client_modeset_probe", 0));
+    vc4.fbdev_probe(&mut hw);
+    assert!(vc4.connectors[0].display_info.is_hdmi);
+    let mut mode = vc4.connectors[0].modes.iter()
+        .find(|m| (m.hdisplay as i32, m.vdisplay as i32) == (w, h) && drm_core::drm_modes::drm_mode_vrefresh(m) == 60)
+        .cloned().expect("mode");
+    assert_eq!(vc4.hdmi[0].encoder_atomic_check(&mut mode), 0);
+    vc4.hdmi[0].encoder_atomic_mode_set(&mode, &drm_core::drm_connector::drm_connector_state::default());
+    vc4
+}
+
+/// The register writes of `vc4_hdmi_audio_prepare` on port 0, up to the
+/// audio infoframe, for 2 channels at `rate` on a mode of `crtc_clock`
+/// kHz, derived by hand from vc4_hdmi.c and vc4_regs.h:
+/// - MAI_SMP: `rational_best_approximation(108 MHz, rate, 0xffffff,
+///   256)`, N in bits 31:8, M - 1 in 7:0; 108e6 / 48000 = 2250 / 1,
+///   108e6 / 44100 = 120000 / 49 (continued fraction [2448; 1, 48]).
+/// - MAI_CTL: CHNUM 2 (bits 7:4) | WHOLSMP | CHALIGN | ENABLE.
+/// - MAI_FMT: sample rate code (48 kHz 9, 44.1 kHz 8) in 15:8, PCM (2)
+///   in 23:16.
+/// - MAI_THR, D0 layout: 0x10 at 29:23 and 21:15, 0x1c at 13:7 and 6:0.
+/// - MAI_CONFIG: BIT_REVERSE | FORMAT_REVERSE | channel mask 0x3.
+/// - MAI_CHANNEL_MAP: channel 1 to 1 in bits 7:4.
+/// - AUDIO_PACKET_CONFIG: bits 29, 24, B frame 8 in 13:10, CEA mask 0x3.
+/// - CRP_CFG: EXTERNAL_CTS_EN | N = 128 * rate / 1000; CTS_0 = CTS_1 =
+///   crtc_clock * 1000 * N / (128 * rate).
+fn audio_prepare_writes(smp: u32, fmt: u32, n: u32, cts: u32) -> Vec<(Block, u32, u32)> {
+    use crate::hw::HdmiReg::{Hd, Hdmi};
+    vec![
+        (Block::Hdmi(0, Hd), 0x20, smp),
+        (Block::Hdmi(0, Hd), 0x10, 0x0000_3028),
+        (Block::Hdmi(0, Hd), 0x18, fmt),
+        (Block::Hdmi(0, Hd), 0x14, 0x0808_0e1c),
+        (Block::Hdmi(0, Hdmi), 0xa8, 0x0c00_0003),
+        (Block::Hdmi(0, Hdmi), 0xa4, 0x0000_0010),
+        (Block::Hdmi(0, Hdmi), 0xc0, 0x2100_2003),
+        (Block::Hdmi(0, Hdmi), 0xd0, 0x0100_0000 | n),
+        (Block::Hdmi(0, Hdmi), 0xd4, cts),
+        (Block::Hdmi(0, Hdmi), 0xd8, cts),
+    ]
+}
+
+#[test]
+fn audio_n_cts_and_mai_clock_at_4k60_and_1080p60() {
+    for (w, h, cts) in [(3840, 2160, 594_000), (1920, 1080, 148_500)] {
+        let mut vc4 = audio_vc4(w, h);
+        assert_eq!(vc4.hvs.generation, Gen::Gen6D);
+        let mut hw = AudioRegs::default();
+        assert_eq!(vc4.audio_startup(&mut hw, 0), 0);
+        let start = hw.writes.len();
+        assert_eq!(vc4.audio_prepare(&mut hw, 0, 48000, 2), 0);
+        assert_eq!(hw.writes[start..start + 10], audio_prepare_writes(2250 << 8, 0x0002_0900, 6144, cts)[..]);
+    }
+
+    let mut vc4 = audio_vc4(1920, 1080);
+    let mut hw = AudioRegs::default();
+    assert_eq!(vc4.audio_startup(&mut hw, 0), 0);
+    let start = hw.writes.len();
+    assert_eq!(vc4.audio_prepare(&mut hw, 0, 44100, 2), 0);
+    // N 5644 (5644.8 floored), CTS 148500000 * 5644 / 5644800 = 148478.
+    assert_eq!(hw.writes[start..start + 10],
+        audio_prepare_writes(120_000 << 8 | 48, 0x0002_0800, 5644, 148_478)[..]);
+}
+
+/// The whole stream on port 0: startup resets the MAI, prepare ends with
+/// the audio infoframe in packet slot 4 (type 0x84 - 0x80), shutdown
+/// stops it. The 2-channel PCM infoframe, by hand from hdmi.c and
+/// hdmi-codec.c: header 84 01 0a, payload byte 0 = coding type 0 << 4 |
+/// (channels - 1), every other payload byte 0 (stream sample size and
+/// rate, CA 0x00), checksum 0x100 - (0x84 + 0x01 + 0x0a + 0x01) = 0x70.
+/// Packed seven bytes per two words: 0x000a0184, 0x00000170, then 0.
+#[test]
+fn audio_stream_writes_the_infoframe() {
+    use crate::hw::HdmiReg::{Hd, Hdmi, Packet};
+    let mut vc4 = audio_vc4(3840, 2160);
+    let mut hw = AudioRegs::default();
+    assert_eq!(vc4.audio_startup(&mut hw, 0), 0);
+    assert_eq!(hw.writes, vec![(Block::Hdmi(0, Hd), 0x10, 0x8207)]);
+    assert!(vc4.hdmi[0].audio_streaming);
+    assert_eq!(vc4.audio_startup(&mut hw, 0), -crate::linux::EINVAL, "one stream at a time");
+
+    let mut hw = AudioRegs::default();
+    assert_eq!(vc4.audio_prepare(&mut hw, 0, 48000, 2), 0);
+    let mut slot = [0u32; 9];
+    for &(b, off, v) in &hw.writes {
+        if b == Block::Hdmi(0, Packet) && (4 * 0x24..5 * 0x24).contains(&off) {
+            slot[((off - 4 * 0x24) / 4) as usize] = v;
+        }
+    }
+    assert_eq!(slot, [0x000a_0184, 0x0000_0170, 0, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(hw.writes.last(), Some(&(Block::Hdmi(0, Hdmi), 0xc4, 1 << 4)));
+    assert!(vc4.connectors[0].hdmi.infoframes.audio.set);
+
+    let mut hw = AudioRegs::default();
+    hw.vals.insert((format!("{:?}", Block::Hdmi(0, Hdmi)), 0xc4), 1 << 31 | 1 << 4);
+    vc4.audio_shutdown(&mut hw, 0);
+    assert_eq!(hw.writes, vec![
+        (Block::Hdmi(0, Hd), 0x10, 0x8006),
+        (Block::Hdmi(0, Hdmi), 0xc4, 1 << 31),
+        (Block::Hdmi(0, Hd), 0x10, 0x1),
+        (Block::Hdmi(0, Hd), 0x10, 0x2),
+        (Block::Hdmi(0, Hd), 0x10, 0x200),
+    ]);
+    assert!(!vc4.hdmi[0].audio_streaming);
+    assert_eq!(vc4.audio_startup(&mut AudioRegs::default(), 0), 0);
+}
+
+/// `hdmi_codec_get_ch_alloc_table_idx` against the ELD's speakers: a
+/// 5.1 sink (FL/FR, LFE, FC, RL/RR: allocation bits 0 to 3) takes 6 and
+/// 8 channels as CA 0x0b, the first entry of that count its speakers
+/// cover; a stereo-only sink cannot take 6. The CA is infoframe byte 7,
+/// the low byte of the slot's third word.
+#[test]
+fn audio_channel_allocation_follows_the_eld() {
+    use crate::hw::HdmiReg::Packet;
+    let ca = |spk: u8, channels: u32| -> Result<u8, i32> {
+        let mut vc4 = audio_vc4(1920, 1080);
+        vc4.connectors[0].eld[7] = spk;
+        let mut hw = AudioRegs::default();
+        assert_eq!(vc4.audio_startup(&mut hw, 0), 0);
+        let ret = vc4.audio_prepare(&mut hw, 0, 48000, channels);
+        if ret != 0 {
+            return Err(ret);
+        }
+        let w2 = hw.writes.iter().find(|w| (w.0, w.1) == (Block::Hdmi(0, Packet), 4 * 0x24 + 8)).unwrap().2;
+        Ok(w2 as u8)
+    };
+    assert_eq!(ca(0x0f, 6), Ok(0x0b));
+    assert_eq!(ca(0x0f, 8), Ok(0x0b));
+    assert_eq!(ca(0x01, 6), Err(-crate::linux::EINVAL));
+    assert_eq!(ca(0x01, 2), Ok(0x00));
+}
+
+/// Rates and channel counts outside `vc4_hdmi_audio_cpu_dai_drv` fail as
+/// ALSA's hardware constraints would, before a register is touched.
+#[test]
+fn audio_prepare_keeps_to_the_dai() {
+    let mut vc4 = audio_vc4(1920, 1080);
+    let mut hw = AudioRegs::default();
+    assert_eq!(vc4.audio_startup(&mut hw, 0), 0);
+    hw.writes.clear();
+    assert_eq!(vc4.audio_prepare(&mut hw, 0, 22050, 2), -crate::linux::EINVAL);
+    assert_eq!(vc4.audio_prepare(&mut hw, 0, 48000, 9), -crate::linux::EINVAL);
+    assert_eq!(vc4.audio_prepare(&mut hw, 0, 48000, 0), -crate::linux::EINVAL);
+    assert!(hw.writes.is_empty());
+}

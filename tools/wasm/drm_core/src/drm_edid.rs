@@ -2102,6 +2102,16 @@ fn drm_eld_calc_baseline_block_size(eld: &[u8]) -> usize {
         + drm_eld_sad_count(eld) * 3
 }
 
+/// `drm_eld_size` (drm_eld.h): the ELD's length in bytes.
+pub fn drm_eld_size(eld: &[u8]) -> usize {
+    DRM_ELD_HEADER_BLOCK_SIZE as usize + eld[DRM_ELD_BASELINE_ELD_LEN as usize] as usize * 4
+}
+
+/// `drm_eld_get_spk_alloc` (drm_eld.h): the speaker allocation bits.
+pub fn drm_eld_get_spk_alloc(eld: &[u8]) -> u8 {
+    eld[DRM_ELD_SPEAKER as usize] & DRM_ELD_SPEAKER_MASK as u8
+}
+
 /// `drm_edid_to_eld`: the ELD the connector carries for audio.
 fn drm_edid_to_eld(connector: &mut drm_connector, drm_edid: Option<&drm_edid>) {
     let Some(d) = drm_edid else { return };

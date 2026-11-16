@@ -252,6 +252,9 @@ pub fn rpi_firmware_clk_get_max_rate(hw: &mut impl Hw, id: u32) -> u32 {
     hw.fw_clock(id, ClockOp::MaxRate).unwrap_or(0)
 }
 
+/// `clk_108MHz`, the fixed clock that feeds the DVP's gates (bcm2712.dtsi).
+const DVP_PARENT_RATE: u64 = 108_000_000;
+
 /// `DVP_HT_RPI_MISC_CONFIG` of `clk-bcm2711-dvp.c`.
 const DVP_HT_RPI_MISC_CONFIG: u32 = 0x08;
 
@@ -266,6 +269,11 @@ pub struct DvpGate {
 impl DvpGate {
     pub fn new(hdmi: u8) -> Self {
         DvpGate { bit: 3 + hdmi as u32, enable_count: 0 }
+    }
+
+    /// `clk_get_rate`: a gate has no `recalc_rate`, so its parent's rate.
+    pub fn get_rate(&self) -> u64 {
+        DVP_PARENT_RATE
     }
 
     /// `clk_gate_endisable`.

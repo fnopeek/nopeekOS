@@ -199,6 +199,14 @@ pub struct drm_connector_hdmi {
     pub product: String,
     /// `BIT(HDMI_COLORSPACE_*)`.
     pub supported_formats: u32,
+    /// `infoframes.audio`: the audio infoframe the sound side set last.
+    pub infoframes: drm_connector_hdmi_connector_infoframes,
+}
+
+/// The `infoframes` of `struct drm_connector_hdmi`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct drm_connector_hdmi_connector_infoframes {
+    pub audio: drm_connector_hdmi_infoframe,
 }
 
 /// `struct drm_connector_hdmi_infoframe`.

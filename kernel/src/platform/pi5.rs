@@ -30,7 +30,7 @@ impl Board {
             Block::Rp1Bar0 => &self.bar0,
             Block::Rp1Bar1 => &self.bar1,
             Block::Mbox | Block::Iommu | Block::IommuCache | Block::Avs | Block::Pm
-            | Block::V3dHub | Block::V3dCore | Block::V3dSms => unreachable!("not on the PCIe path"),
+            | Block::V3dHub | Block::V3dCore | Block::V3dSms | Block::Dma => unreachable!("not on the PCIe path"),
         }
     }
 }

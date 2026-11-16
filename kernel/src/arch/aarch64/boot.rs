@@ -293,6 +293,7 @@ pub extern "C" fn kernel_main(dtb: usize) -> ! {
     crate::platform::pi5::init(&fdt);
     crate::platform::pi5_eth::init(&fdt);
     crate::platform::pi5_fan::init(&fdt);
+    crate::platform::pi5_hdmi_audio::init();
     crate::microvm::init();
     let Some(id) = crate::platform::pi5_sd::init(&fdt) else {
         if let Some((s, e)) = crate::microvm::selftest::initrd(&fdt) {

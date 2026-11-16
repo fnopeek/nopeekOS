@@ -26,3 +26,7 @@ pub mod rpi_fw;
 pub mod pi5_display;
 #[cfg(target_arch = "aarch64")]
 pub mod pi5_display_set;
+#[cfg(target_arch = "aarch64")]
+pub mod pi5_hdmi_dma;
+#[cfg(target_arch = "aarch64")]
+pub mod pi5_hdmi_audio;
