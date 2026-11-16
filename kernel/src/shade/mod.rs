@@ -339,7 +339,6 @@ pub fn is_window_fullscreen(window_id: u32) -> bool {
 /// controls, without Mod held (a host gesture). A button pressed there
 /// holds the pointer in the guest until its release (implicit grab), so a
 /// drag may leave the window; a press anywhere else never reaches it.
-#[cfg(target_arch = "x86_64")]
 pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     use crate::microvm::devices::virtio_input_pci::{push_input_event, ABS_MAX};
     const EV_SYN: u16 = 0x00;
@@ -434,15 +433,12 @@ pub fn forward_pointer_to_guest(evt: &crate::xhci::MouseEvent) {
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 static LAST_ABS: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(u64::MAX);
 /// The buttons the guest holds down.
-#[cfg(target_arch = "x86_64")]
 static LAST_BTN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 /// The host's buttons at the last event, to tell a press from a hold.
-#[cfg(target_arch = "x86_64")]
 static LAST_HOST_BTN: core::sync::atomic::AtomicU8 =
     core::sync::atomic::AtomicU8::new(0);
 
@@ -1473,7 +1469,6 @@ pub fn poll_render() {
     }
 
     // The guest named its windows: the panel shows them from the next notify.
-    #[cfg(target_arch = "x86_64")]
     {
     let titles = crate::microvm::devices::virtio_console_pci::take_titles();
     if titles.iter().any(Option::is_some) {
@@ -1723,7 +1718,6 @@ pub fn handle_mouse(evt: &crate::xhci::MouseEvent) {
     // consumer's path, so this is race-free. forward_pointer_to_guest no-ops
     // unless a Surface window is focused, so this is free in normal desktop
     // use.
-    #[cfg(target_arch = "x86_64")]
     forward_pointer_to_guest(evt);
 
     // Horizontal scrolling — two fingers left/right on a touchpad, wheel

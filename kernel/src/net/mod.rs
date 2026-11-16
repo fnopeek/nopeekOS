@@ -73,11 +73,8 @@ pub fn poll() {
     // poll the mouse.
     // Core 0 drains the host NIC even while a microvm runs: the tap consumes
     // whatever it pulls in via the data-plane worker.
-    #[cfg(target_arch = "x86_64")]
     let skip_nic_drain = crate::microvm::vm_active()
         && crate::smp::per_core::current_core_id() == 0;
-    #[cfg(not(target_arch = "x86_64"))]
-    let skip_nic_drain = false;
     if !skip_nic_drain
         && POLLING
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -128,7 +125,6 @@ pub fn poll_rx_only() {
     use core::sync::atomic::Ordering::Relaxed;
     let rd = crate::time::counter;
     // `igc_poll` cleans TX before RX: a sender stopped on a full ring goes on.
-    #[cfg(target_arch = "x86_64")]
     crate::microvm::devices::nat::egress_room();
     if POLLING
         .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)

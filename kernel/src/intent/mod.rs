@@ -885,12 +885,9 @@ fn read_line_with_tab(session: &mut IntentSession, vault: &'static Mutex<Vault>,
             // microvm is the foreground task, so do not sleep: spin
             // straight back to feed it more slices (a hlt here allows
             // only one slice per timer tick). Without a VM we still halt.
-            #[cfg(target_arch = "x86_64")]
             if !crate::microvm::vm_active() {
                 core0_wait();
             }
-            #[cfg(not(target_arch = "x86_64"))]
-            core0_wait();
             continue;
         } else {
             let serial = serial::SERIAL.lock();

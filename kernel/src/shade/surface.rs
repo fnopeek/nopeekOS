@@ -179,10 +179,7 @@ fn frame_max() -> usize {
 }
 
 /// The guest's displays; without a guest there are none to hold.
-#[cfg(target_arch = "x86_64")]
 const GUEST_OUTPUTS: usize = crate::microvm::devices::virtio_gpu_pci::MAX_OUTPUTS as usize;
-#[cfg(not(target_arch = "x86_64"))]
-const GUEST_OUTPUTS: usize = 0;
 
 /// Whether a new `px_count`-pixel buffer may join the `held` pixels of all
 /// surfaces. A tile is never larger than the screen, so neither is a frame;
@@ -542,7 +539,6 @@ pub fn set_tile_size(window_id: u32, w: u32, h: u32) {
         surf.tile_h = h;
         surf.display_dirty = true;
         ANY_DISPLAY_DIRTY.store(true, Ordering::Release);
-        #[cfg(target_arch = "x86_64")]
         crate::microvm::cpu::note_device_work();
     }
 }

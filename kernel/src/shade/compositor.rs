@@ -1214,7 +1214,6 @@ impl Compositor {
                     // to power off (best-effort — it may already have
                     // exited, which is what closed this window).
                     crate::shade::surface::remove_surface(id.0);
-                    #[cfg(target_arch = "x86_64")]
                     crate::microvm::vm_close_for_window(id.0);
                 }
             }

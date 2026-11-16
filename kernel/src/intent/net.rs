@@ -174,7 +174,6 @@ pub fn intent_netstat(args: &str) {
             }
         }
     }
-    #[cfg(target_arch = "x86_64")]
     bridge_report();
     kprintln!();
 }
@@ -215,7 +214,6 @@ fn print_tcp_info(i: &crate::net::tcp::TcpInfo) {
 /// not coming back or the mapping no longer matches. If both climb and the
 /// guest sees nothing, the loss is in delivery, and the `lost` counters name
 /// the cause. Per-second figures need two calls a few seconds apart.
-#[cfg(target_arch = "x86_64")]
 fn bridge_report() {
     let b = crate::microvm::devices::nat::bridge_stats();
     let up = crate::microvm::guest_running();
