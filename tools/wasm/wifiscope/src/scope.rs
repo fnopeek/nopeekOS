@@ -9,13 +9,19 @@
 //!
 //! Three measurements, each written to npkFS as CSV for host-side analysis:
 //!
-//! - gate 0: B alone at five RX gains, plus one raw block.
+//! - gate 0: both ports with the BB in its normal receive state, then B
+//!   alone at five RX gains, plus one raw block.
 //! - gate 1: A's carrier off and on in turn, with the hand prompts.
 //! - gate 2: the same off/on pair across channel switches, for the phase
 //!   after a retune.
 //!
 //! The chip is powered off by the caller afterwards; restoring here only
 //! ends the transmission and gives the antenna back to coexistence.
+//!
+//! RF 0x00 is written through the direct window and read back; if the
+//! value does not hold, once more over the serial path with that path's
+//! 3-wire enabled for the write. Every write and its read-back go to
+//! `diag.csv`.
 
 use alloc::vec::Vec;
 
@@ -30,6 +36,12 @@ const SAMPLE_PORT: u32 = 0x2dbc;
 /// Sample source select; path B raw ADC as in `rtw8822c_dac_cal_adc`.
 const SAMPLE_SEL: u32 = 0x1c3c;
 const SAMPLE_SEL_B: u32 = 0x80000 + 0x8003;
+const SAMPLE_SEL_A: u32 = 0xa0000 + 0x8003;
+
+/// RF 0x00 bits that must read back as written: mode, RX and TX gain.
+const RF0_CHECK: u32 = 0xf03ff;
+/// Lines kept in `diag.csv`.
+const DIAG_MAX: usize = 400;
 
 /// RF 0x00 `[19:16]`.
 const RF_MODE_STANDBY: u32 = 0x10000;
@@ -62,6 +74,62 @@ const BB_SAVE: [u32; 19] = [
     0x1b00, 0x520, REG_RFTXEN_GCK_A,
 ];
 const RF_SAVE: [u32; 1] = [0x00];
+
+static DIAG: npk_sys::cell::Single<(Vec<u8>, usize)> =
+    npk_sys::cell::Single::new((Vec::new(), 0));
+
+fn diag(what: &str, path: usize, want: u32, got: u32, how: &str) {
+    DIAG.with(|(out, lines)| {
+        if *lines >= DIAG_MAX {
+            return;
+        }
+        *lines += 1;
+        put_i(out, host::now_ms() as i64);
+        out.push(b',');
+        put(out, what);
+        out.push(b',');
+        put(out, if path == phy::RF_PATH_A { "A" } else { "B" });
+        put(out, ",0x");
+        put_hex(out, want);
+        put(out, ",0x");
+        put_hex(out, got);
+        out.push(b',');
+        put(out, how);
+        out.push(b'\n');
+    });
+}
+
+fn put_hex(out: &mut Vec<u8>, v: u32) {
+    for k in (0..5).rev() {
+        out.push(b"0123456789abcdef"[((v >> (k * 4)) & 0xf) as usize]);
+    }
+}
+
+fn rf0_read(h: i32, path: usize) -> u32 {
+    phy::read_rf(h, path, 0x00, phy::RFREG_MASK)
+}
+
+/// Write RF 0x00 of `path` and confirm it by reading back.
+fn rf0(h: i32, path: usize, val: u32, what: &str) -> bool {
+    phy::write_rf_reg(h, path, 0x00, phy::RFREG_MASK, val);
+    host::delay_us(5);
+    let got = rf0_read(h, path);
+    if got & RF0_CHECK == val & RF0_CHECK {
+        diag(what, path, val, got, "direct");
+        return true;
+    }
+    diag(what, path, val, got, "direct-failed");
+    let reg = if path == phy::RF_PATH_A { REG_3WIRE } else { REG_3WIRE2 };
+    let old = host::r32(h, reg);
+    host::w32_mask(h, reg, BIT_3WIRE_EN, 0x3);
+    phy::write_rf_reg_mix(h, path, 0x00, phy::RFREG_MASK, val);
+    host::delay_us(20);
+    host::w32(h, reg, old);
+    let got = rf0_read(h, path);
+    let ok = got & RF0_CHECK == val & RF0_CHECK;
+    diag(what, path, val, got, if ok { "sipi" } else { "sipi-failed" });
+    ok
+}
 
 struct Saved {
     bb: [u32; BB_SAVE.len()],
@@ -203,8 +271,8 @@ fn save_state(h: i32) -> Saved {
 fn restore_state(h: i32, s: &Saved) {
     carrier(h, None);
     for (k, &r) in RF_SAVE.iter().enumerate() {
-        phy::write_rf_reg_mix(h, phy::RF_PATH_A, r, phy::RFREG_MASK, s.rf[k][0]);
-        phy::write_rf_reg_mix(h, phy::RF_PATH_B, r, phy::RFREG_MASK, s.rf[k][1]);
+        phy::write_rf_reg(h, phy::RF_PATH_A, r, phy::RFREG_MASK, s.rf[k][0]);
+        phy::write_rf_reg(h, phy::RF_PATH_B, r, phy::RFREG_MASK, s.rf[k][1]);
     }
     host::w8(h, 0x1bcc, s.bcc);
     for (k, &r) in BB_SAVE.iter().enumerate() {
@@ -243,18 +311,17 @@ fn setup_bb(h: i32) {
 }
 
 fn rx_gain(h: i32, gain: u32) {
-    phy::write_rf_reg_mix(h, phy::RF_PATH_B, 0x00, phy::RFREG_MASK,
-                          RF_MODE_RX | (gain << 5));
+    rf0(h, phy::RF_PATH_B, RF_MODE_RX | (gain << 5), "rx_gain");
     host::delay_us(100);
 }
 
 /// A's carrier at TX gain index `gain`, or standby.
 fn carrier(h: i32, gain: Option<u32>) {
-    let v = match gain {
-        Some(g) => RF_MODE_TX | g,
-        None => RF_MODE_STANDBY,
+    let (v, what) = match gain {
+        Some(g) => (RF_MODE_TX | g, "carrier_on"),
+        None => (RF_MODE_STANDBY, "carrier_off"),
     };
-    phy::write_rf_reg_mix(h, phy::RF_PATH_A, 0x00, phy::RFREG_MASK, v);
+    rf0(h, phy::RF_PATH_A, v, what);
     host::delay_us(100);
 }
 
@@ -268,16 +335,43 @@ fn tune(h: i32, ch: u8, gain: u32) {
 
 // ── Gates ────────────────────────────────────────────────────────
 
+fn gate0_rows(h: i32, out: &mut Vec<u8>, src: &str, gain: i64) {
+    for rep in 0..10 {
+        let s = block(h);
+        put(out, src);
+        out.push(b',');
+        put_i(out, gain);
+        out.push(b',');
+        put_i(out, rep);
+        out.push(b',');
+        put_stat(out, &s);
+    }
+}
+
 fn gate0(h: i32) {
-    host::say("[wifiscope] gate 0: path B alone, five RX gains\n");
+    host::say("[wifiscope] gate 0: both ports live, then path B at five RX gains\n");
     let mut out = Vec::new();
     head(&mut out, "gate0");
-    put(&mut out, "rx_gain,rep,");
+    put(&mut out, "src,rx_gain,");
+    put(&mut out, "rep,");
     put(&mut out, STAT_HEAD);
+
+    // The BB's own receive state: 3-wire on, gains from the AGC.
+    diag("live", phy::RF_PATH_A, 0, rf0_read(h, phy::RF_PATH_A), "read");
+    diag("live", phy::RF_PATH_B, 0, rf0_read(h, phy::RF_PATH_B), "read");
+    host::w32(h, 0x1c24, 0x0001_0002);
+    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_B);
+    gate0_rows(h, &mut out, "live_B", -1);
+    host::w32(h, SAMPLE_SEL, SAMPLE_SEL_A);
+    gate0_rows(h, &mut out, "live_A", -1);
+
+    setup_bb(h);
+    carrier(h, None);
     for &g in RX_GAINS.iter() {
         rx_gain(h, g);
         for rep in 0..10 {
             let s = block(h);
+            put(&mut out, "B,");
             put_i(&mut out, g as i64);
             out.push(b',');
             put_i(&mut out, rep);
@@ -396,9 +490,8 @@ fn gate2(h: i32, gain: u32) {
 pub fn run(h: i32) {
     host::say("[wifiscope] probe: channel 36, lowest TX gain, about 45 s\n");
     chip::set_channel(h, CH_START, 0, RTW_SC_DONT_CARE);
+    host::sleep_ms(50);
     let saved = save_state(h);
-    setup_bb(h);
-    carrier(h, None);
 
     gate0(h);
     let gain = pick_gain(h);
@@ -411,5 +504,12 @@ pub fn run(h: i32) {
     gate2(h, gain);
 
     restore_state(h, &saved);
+    DIAG.with(|(d, _)| {
+        let mut out = Vec::new();
+        head(&mut out, "diag: RF 0x00 writes and read-backs");
+        put(&mut out, "t_ms,what,path,want,got,method\n");
+        out.extend_from_slice(d);
+        save("diag.csv", &out);
+    });
     host::say("[wifiscope] probe done, files in wifiscope/\n");
 }

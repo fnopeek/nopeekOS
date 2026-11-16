@@ -202,7 +202,7 @@ pub fn read_rf(h: i32, rf_path: usize, addr: u32, mask: u32) -> u32 {
 }
 
 /// phy.c:1047-1070 `rtw_phy_write_rf_reg`
-fn write_rf_reg(h: i32, rf_path: usize, addr: u32, mask: u32, data: u32) -> bool {
+pub fn write_rf_reg(h: i32, rf_path: usize, addr: u32, mask: u32, data: u32) -> bool {
     if rf_path >= RF_BASE_ADDR.len() {
         return false;
     }

@@ -70,25 +70,52 @@ def gate0(d):
     p = os.path.join(d, 'gate0.csv')
     if not os.path.exists(p):
         return
-    print('== Gate 0: path B alone')
-    by_gain = {}
+    print('== Gate 0: the sample port')
+    groups = {}
     for r in rows(p):
-        by_gain.setdefault(int(r['rx_gain']), []).append(Block(r))
+        key = (r.get('src', 'B'), int(r['rx_gain']))
+        groups.setdefault(key, []).append(Block(r))
     rate = None
-    for g, bs in sorted(by_gain.items()):
+    sd_of = {}
+    for (src, g), bs in groups.items():
         m = sum(b.mean for b in bs) / len(bs)
         sd = math.sqrt(sum(b.var for b in bs) / len(bs))
+        sd_of[(src, g)] = sd
         spread = max(abs(b.mean - m) for b in bs)
         rate = sum(b.n for b in bs) / (sum(b.dt_us for b in bs) / 1e6)
-        print(f'  rx_gain {g:2d}: mean {m.real:7.2f}{m.imag:+7.2f}j  '
+        label = f'{src} gain {g}' if g >= 0 else f'{src} (BB normal)'
+        print(f'  {label:18s}: mean {m.real:7.2f}{m.imag:+7.2f}j  '
               f'noise sd {sd:6.2f}  mean spread {spread:5.2f}  peak {max(b.peak for b in bs)}')
-    sds = [math.sqrt(sum(b.var for b in bs) / len(bs)) for bs in by_gain.values()]
-    alive = max(sds) > 1.5 * min(sds) + 0.5
     print(f'  read rate {rate / 1e3:.0f} k samples/s')
-    print(f'  port alive (noise changes with gain): {verdict(alive)}')
+    b_sds = [v for (src, g), v in sd_of.items() if src == 'B']
+    alive = bool(b_sds) and max(b_sds) > 1.5 * min(b_sds) + 0.5
+    print(f'  B follows its RX gain: {verdict(alive)}')
+    live = sd_of.get(('live_B', -1))
+    if live is not None and b_sds:
+        print(f'  B in normal receive vs. B forced: noise {live:.2f} vs {min(b_sds):.2f}..{max(b_sds):.2f}')
     if not alive:
-        print('  -> the samples do not follow the RX gain: the port is not '
-              'showing path B\'s ADC; everything after this is meaningless')
+        print('  -> path B does not react to the forced RX gain; check diag.csv '
+              'for whether RF 0x00 took the value')
+
+
+def diag(d):
+    p = os.path.join(d, 'diag.csv')
+    if not os.path.exists(p):
+        return
+    print('== RF 0x00 writes (diag.csv)')
+    rs = rows(p)
+    for r in rs:
+        if r['what'] == 'live':
+            print(f'  path {r["path"]} in normal receive: RF0 = {r["got"]}')
+    counts = {}
+    for r in rs:
+        if r['what'] != 'live':
+            counts[(r['what'], r['method'])] = counts.get((r['what'], r['method']), 0) + 1
+    for (what, how), n in sorted(counts.items()):
+        print(f'  {what:12s} {how:14s} {n}')
+    bad = [r for r in rs if r['method'].endswith('failed')]
+    for r in bad[:5]:
+        print(f'  e.g. {r["what"]} path {r["path"]}: wanted {r["want"]}, read {r["got"]} ({r["method"]})')
 
 
 def pairs(rs, key):
@@ -207,6 +234,7 @@ def main():
         print(__doc__)
         sys.exit(2)
     d = sys.argv[1]
+    diag(d)
     gate0(d)
     gate1(d)
     gate2(d)
