@@ -466,7 +466,7 @@ const LATE_QUIT_MS: u64 = 60_000;
 #[cfg(target_arch = "x86_64")]
 const BIND_WAIT_MS: u64 = 20_000;
 #[cfg(target_arch = "x86_64")]
-const RUN_WAIT_MS: u64 = 600_000;
+const RUN_WAIT_MS: u64 = 3_600_000;
 #[cfg(target_arch = "x86_64")]
 const POLL_MS: u64 = 50;
 

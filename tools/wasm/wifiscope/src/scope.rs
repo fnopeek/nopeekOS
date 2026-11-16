@@ -71,9 +71,9 @@ const RAW: usize = 4096;
 const TX_LOW: u32 = 0x00;
 
 /// Band 4: the only band where a carrier showed on B.
-const CH_START: u8 = 149;
+pub(crate) const CH_START: u8 = 149;
 /// Gate 2 stays off the DFS channels 52 to 144.
-const CH_SWEEP: [u8; 9] = [36, 40, 44, 48, 149, 153, 157, 161, 165];
+pub(crate) const CH_SWEEP: [u8; 9] = [36, 40, 44, 48, 149, 153, 157, 161, 165];
 const SWEEP_ROUNDS: u32 = 6;
 
 /// Registers the probe changes, restored before the chip goes off.
@@ -142,7 +142,7 @@ fn rf0(h: i32, path: usize, val: u32, what: &str) -> bool {
     ok
 }
 
-struct Saved {
+pub(crate) struct Saved {
     bb: [u32; BB_SAVE.len()],
     rf: [[u32; 2]; RF_SAVE.len()],
     bcc: u8,
@@ -151,13 +151,13 @@ struct Saved {
 }
 
 #[derive(Clone, Copy, Default)]
-struct Stat {
-    n: u32,
-    si: i64,
-    sq: i64,
-    sii: i64,
-    sqq: i64,
-    siq: i64,
+pub(crate) struct Stat {
+    pub(crate) n: u32,
+    pub(crate) si: i64,
+    pub(crate) sq: i64,
+    pub(crate) sii: i64,
+    pub(crate) sqq: i64,
+    pub(crate) siq: i64,
     min_i: i32,
     max_i: i32,
     min_q: i32,
@@ -195,7 +195,7 @@ const TRIES: u32 = 4;
 
 /// One off/on pair. The carrier does not come on at every switch-on; a
 /// short probe checks it and switches again, up to `TRIES` times.
-fn pair(h: i32, txg: u32) -> (Stat, Stat, u32) {
+pub(crate) fn pair(h: i32, txg: u32) -> (Stat, Stat, u32) {
     carrier(h, None);
     let off = block(h);
     let n = off.n as i64;
@@ -217,7 +217,7 @@ fn pair(h: i32, txg: u32) -> (Stat, Stat, u32) {
     (off, on, tries)
 }
 
-fn block(h: i32) -> Stat {
+pub(crate) fn block(h: i32) -> Stat {
     let mut s = Stat { min_i: i32::MAX, max_i: i32::MIN, min_q: i32::MAX,
                        max_q: i32::MIN, ..Stat::default() };
     let t0 = host::now_us();
@@ -240,11 +240,11 @@ fn block(h: i32) -> Stat {
 
 // ── CSV ──────────────────────────────────────────────────────────
 
-fn put(out: &mut Vec<u8>, s: &str) {
+pub(crate) fn put(out: &mut Vec<u8>, s: &str) {
     out.extend_from_slice(s.as_bytes());
 }
 
-fn put_i(out: &mut Vec<u8>, v: i64) {
+pub(crate) fn put_i(out: &mut Vec<u8>, v: i64) {
     if v < 0 {
         out.push(b'-');
     }
@@ -284,7 +284,7 @@ fn head(out: &mut Vec<u8>, what: &str) {
     put(out, " samples, 10-bit I/Q, carrier from path A\n");
 }
 
-fn save(name: &str, out: &[u8]) {
+pub(crate) fn save(name: &str, out: &[u8]) {
     let mut path = Vec::with_capacity(32);
     path.extend_from_slice(b"wifiscope/");
     path.extend_from_slice(name.as_bytes());
@@ -296,7 +296,7 @@ fn save(name: &str, out: &[u8]) {
 
 // ── Chip state ───────────────────────────────────────────────────
 
-fn save_state(h: i32) -> Saved {
+pub(crate) fn save_state(h: i32) -> Saved {
     let mut s = Saved {
         bb: [0; BB_SAVE.len()],
         rf: [[0; 2]; RF_SAVE.len()],
@@ -314,7 +314,7 @@ fn save_state(h: i32) -> Saved {
     s
 }
 
-fn restore_state(h: i32, s: &Saved) {
+pub(crate) fn restore_state(h: i32, s: &Saved) {
     carrier(h, None);
     host::w8(h, 0x1bcc, s.bcc);
     for (k, &r) in BB_SAVE.iter().enumerate() {
@@ -377,7 +377,7 @@ fn sample_b(h: i32) {
 }
 
 /// The setup gates 1 and 2 run with, on A's port.
-fn setup_minimal(h: i32) {
+pub(crate) fn setup_minimal(h: i32) {
     for k in 1..MINIMAL {
         step(h, k);
     }
@@ -386,7 +386,7 @@ fn setup_minimal(h: i32) {
 }
 
 /// A's carrier at TX gain index `gain`, or standby.
-fn carrier(h: i32, gain: Option<u32>) {
+pub(crate) fn carrier(h: i32, gain: Option<u32>) {
     let (v, what) = match gain {
         Some(g) => (RF_MODE_TX | g, "carrier_on"),
         None => (A_IDLE.load(core::sync::atomic::Ordering::Relaxed), "carrier_off"),
@@ -395,7 +395,7 @@ fn carrier(h: i32, gain: Option<u32>) {
     host::delay_us(100);
 }
 
-fn tune(h: i32, ch: u8) {
+pub(crate) fn tune(h: i32, ch: u8) {
     chip::set_channel(h, ch, 0, RTW_SC_DONT_CARE);
     setup_minimal(h);
     b_hold(h, B_HOLD.load(core::sync::atomic::Ordering::Relaxed));
@@ -601,16 +601,31 @@ fn gate2(h: i32) {
     save("gate2.csv", &out);
 }
 
-/// Runs the three measurements on the chip stage 4c left on channel 1.
+/// Stage 4c passed and the probe took the card: the app shows the live
+/// view rather than the bring-up's failure.
+pub(crate) static BROUGHT_UP: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// The probe on the chip stage 4c left on channel 1: the live view until
+/// the user quits, then the chip state as found.
 pub fn run(h: i32) {
-    host::say("[wifiscope] probe: channel 149, lowest TX gain, about a minute\n");
+    BROUGHT_UP.store(true, core::sync::atomic::Ordering::Relaxed);
     chip::set_channel(h, CH_START, 0, RTW_SC_DONT_CARE);
     host::sleep_ms(50);
     let saved = save_state(h);
     A_IDLE.store(saved.rf[0][0], core::sync::atomic::Ordering::Relaxed);
     B_IDLE.store(saved.rf[0][1], core::sync::atomic::Ordering::Relaxed);
+    setup_minimal(h);
+    carrier(h, None);
 
-    gate0(h, &saved);
+    crate::live::run(h);
+
+    restore_state(h, &saved);
+}
+
+/// The scripted gates 0 to 2 with their CSV files.
+pub(crate) fn gates(h: i32, saved: &Saved) {
+    gate0(h, saved);
     setup_minimal(h);
     carrier(h, None);
     let hold = matrix(h);
@@ -627,7 +642,6 @@ pub fn run(h: i32) {
     gate1(h);
     gate2(h);
 
-    restore_state(h, &saved);
     DIAG.with(|(d, _)| {
         let mut out = Vec::new();
         head(&mut out, "diag: RF 0x00 writes and read-backs");
@@ -635,5 +649,5 @@ pub fn run(h: i32) {
         out.extend_from_slice(d);
         save("diag.csv", &out);
     });
-    host::say("[wifiscope] probe done, files in wifiscope/\n");
+    host::say("[wifiscope] gates done, files in wifiscope/\n");
 }

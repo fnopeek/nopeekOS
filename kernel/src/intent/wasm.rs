@@ -223,18 +223,6 @@ pub fn intent_run_driver(args: &str) {
     spawn_driver(module_name, wasm_bytes, &hash, dev, super::active_terminal());
 }
 
-/// Start the installed driver `module_name` on the PCI function its name selects,
-/// its output in terminal `term_idx`. False if it could not be started.
-#[cfg(target_arch = "x86_64")]
-pub(super) fn start_driver(module_name: &str, term_idx: u8) -> bool {
-    let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return false };
-    let Some(dev) = auto_detect_device(module_name) else {
-        kprintln!("[npk] No PCI device found for driver '{}'", module_name);
-        return false;
-    };
-    spawn_driver(module_name, wasm_bytes, &hash, dev, term_idx)
-}
-
 #[cfg(target_arch = "x86_64")]
 fn spawn_driver(module_name: &str, wasm_bytes: alloc::vec::Vec<u8>, hash: &[u8; 32],
                 dev: crate::drivers::pci::PciDevice, term_idx: u8) -> bool {

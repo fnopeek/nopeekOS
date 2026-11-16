@@ -368,13 +368,21 @@ pub fn wlan_verb_writes(verb: &str) -> bool {
 #[cfg(target_arch = "x86_64")]
 const SCOPE_MODULE: &str = "wifiscope";
 
+/// Start `name` as a windowed app; it binds the card itself with the
+/// HARDWARE right its `.npk.caps` declares.
+#[cfg(target_arch = "x86_64")]
+fn start_app(name: &str, _term: u8) -> bool {
+    crate::shade::launch_app(name);
+    true
+}
+
 #[cfg(target_arch = "x86_64")]
 pub fn intent_wlan_manage(args: &str) {
     use crate::drivers::wifi as w;
     let a = args.trim();
     let (verb, rest) = a.split_once(' ').map_or((a, ""), |(v, r)| (v, r.trim()));
     match verb {
-        "scope" => match w::hand_over(SCOPE_MODULE, super::current_terminal(), super::wasm::start_driver) {
+        "scope" => match w::hand_over(SCOPE_MODULE, super::current_terminal(), start_app) {
             Ok(()) => kprintln!("[wlan] lending the card to {}: WiFi is off until it ends", SCOPE_MODULE),
             Err(e) => kprintln!("[wlan] scope: {}", e),
         },

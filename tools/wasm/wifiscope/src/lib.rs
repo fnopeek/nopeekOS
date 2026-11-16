@@ -1,6 +1,7 @@
 //! wifiscope: a copy of `wifi_rtl8822ce` that brings the RTL8822CE up to
-//! stage 4c and then runs the radar probe in `scope.rs` instead of the link
-//! stages. `wlan scope` lends it the card and restarts the driver after.
+//! stage 4c and then, in its own window, runs the radar probe (`scope.rs`,
+//! `live.rs`) instead of the link stages. `wlan scope` lends it the card and
+//! restarts the driver after.
 //!
 //! What follows is the driver's own description.
 //!
@@ -60,6 +61,7 @@ mod txpower;
 mod regs;
 mod regdb;
 mod scope;
+mod live;
 use regs::*;
 use alloc::vec::Vec;
 use npk_sys::cell::Single;
@@ -278,7 +280,13 @@ pub extern "C" fn _start() {
         beacon_loss: false,
         cur_bw: 0,
     });
+    live::splash("bringing the card up, a few seconds");
     DEV.with(driver_main);
+    if !scope::BROUGHT_UP.load(Ordering::Relaxed) {
+        live::hold_message("The card did not come up for wifiscope. If the WiFi driver holds it, \
+                            start wifiscope with `wlan scope` in a terminal; the kernel log has \
+                            the details. Esc closes.");
+    }
 }
 
 /// The driver run after the verbosity is set, on the one `rtwdev`.
