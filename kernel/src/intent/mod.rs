@@ -1968,7 +1968,6 @@ pub fn run_loop(vault: &'static Mutex<Vault>, session_id: CapId) -> ! {
 
 /// Integer parabolic sine: `x` is a full-circle phase (0..65536), `amp` the
 /// peak amplitude. No FPU use, so it is safe to call from kernel context.
-#[cfg(target_arch = "x86_64")]
 fn isin_fixed(x: u16, amp: i64) -> i16 {
     const HALF: u32 = 1 << 15; // 32768 = pi
     let xi = x as u32;
@@ -1979,8 +1978,8 @@ fn isin_fixed(x: u16, amp: i64) -> i16 {
 
 /// `beep [hz]`: play a short test tone through the audio mailbox → HDA driver
 /// → speaker, exercising the app → mailbox → driver → hardware path. Needs
-/// `audio_hda` running (autostart) to be audible.
-#[cfg(target_arch = "x86_64")]
+/// `audio_hda` running (autostart) to be audible; on the Pi the kernel's
+/// HDMI audio, whose state it prints after.
 fn intent_beep(args: &str) {
     const SR: u32 = 48000;
     const MS: u32 = 150;
@@ -1999,6 +1998,14 @@ fn intent_beep(args: &str) {
         kprintln!("beep {} Hz", hz);
     } else {
         kprintln!("beep: no free audio slot (is audio_hda running?)");
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        // Outside a fiber the wait is a spin, as `mic`'s.
+        if !crate::smp::fiber::yield_sleep(1500) {
+            crate::time::delay_us(1_500_000);
+        }
+        crate::platform::pi5_hdmi_audio::report();
     }
 }
 
@@ -2460,7 +2467,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "mouse" => {
             system::intent_mouse(args);
         }
-        #[cfg(target_arch = "x86_64")]
         "beep" | "test-audio" => {
             intent_beep(args);
         }
@@ -2468,7 +2474,6 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
         "mic" => {
             intent_mic(args);
         }
-        #[cfg(target_arch = "x86_64")]
         "volume" | "vol" => {
             let a = args.trim();
             if a.is_empty() {

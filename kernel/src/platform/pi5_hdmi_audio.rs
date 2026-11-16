@@ -31,6 +31,14 @@ const IDLE_STOP_MS: u64 = 2000;
 const POLL_MS: u64 = 200;
 
 static WAKER: AtomicU32 = AtomicU32::new(u32::MAX);
+/// The port entered in the register, `NONE` for none.
+static ENTERED: AtomicU32 = AtomicU32::new(NONE);
+/// The port the stream runs on, `NONE` for none.
+static STREAMING: AtomicU32 = AtomicU32::new(NONE);
+/// Streams started and refused since boot.
+static STARTS: AtomicU32 = AtomicU32::new(0);
+static REFUSED: AtomicU32 = AtomicU32::new(0);
+const NONE: u32 = u32::MAX;
 
 fn ms(n: u64) -> u64 {
     n * (crate::time::counter_hz() / 1000)
@@ -118,18 +126,24 @@ fn start(port: usize) -> Option<Stream> {
         s.fill_one();
     }
     let params = audio::display_audio_pack(port as u32, CHANNELS as u32, RATE);
-    let ok = audio::display_audio_stream(Some(params)).is_some_and(carried_out);
+    let seq = audio::display_audio_stream(Some(params));
+    let ok = seq.is_some_and(carried_out);
     if !ok {
-        kprintln!("[npk] hdmi audio: the display driver did not prepare HDMI{}", port);
+        REFUSED.fetch_add(1, Ordering::Relaxed);
+        kprintln!("[npk] hdmi audio: the display driver did not prepare HDMI{} ({})", port,
+            if seq.is_none() { "no display driver bound" } else { "request not carried out" });
         let _ = audio::display_audio_stream(None);
         super::pi5_hdmi_dma::close();
         return None;
     }
     super::pi5_hdmi_dma::start();
+    STARTS.fetch_add(1, Ordering::Relaxed);
+    STREAMING.store(port as u32, Ordering::Release);
     Some(s)
 }
 
 fn stop() {
+    STREAMING.store(NONE, Ordering::Release);
     super::pi5_hdmi_dma::stop();
     if let Some(seq) = audio::display_audio_stream(None) {
         let _ = carried_out(seq);
@@ -163,6 +177,10 @@ fn audio_fiber(_: u64) {
                     entered = Some((p, h));
                 }
             }
+            ENTERED.store(entered.map_or(NONE, |e| e.0 as u32), Ordering::Release);
+            if let Some((p, _)) = entered {
+                kprintln!("[npk] hdmi audio: HDMI{} has an audio sink", p);
+            }
         }
         let want = entered.is_some() && audio::kernel_serves() && audio::any_open();
         let now = crate::time::counter();
@@ -182,6 +200,22 @@ fn audio_fiber(_: u64) {
         if fiber::wait(fiber::SIG_EVENT, crate::time::counter() + next).is_none() {
             return;
         }
+    }
+}
+
+/// What `beep` prints after its tone: how far the path got.
+pub fn report() {
+    let port = |v: u32| if v == NONE { alloc::string::String::from("none") } else { alloc::format!("HDMI{}", v) };
+    let mut eld = [0u8; audio::ELD_MAX];
+    let elds: [usize; 2] = [0, 1].map(|p| audio::display_audio_get(p, &mut eld).unwrap_or(0));
+    kprintln!("[npk] hdmi audio: display driver bound {}, ELD bytes HDMI0 {} HDMI1 {}",
+        audio::display_audio_done().is_some(), elds[0], elds[1]);
+    kprintln!("[npk] hdmi audio: output {}, plays the mix {}, stream {}, started {} refused {}",
+        port(ENTERED.load(Ordering::Acquire)), audio::kernel_serves(),
+        port(STREAMING.load(Ordering::Acquire)), STARTS.load(Ordering::Relaxed), REFUSED.load(Ordering::Relaxed));
+    if STREAMING.load(Ordering::Acquire) != NONE {
+        kprintln!("[npk] hdmi audio: DMA periods {}, read position {:?}",
+            super::pi5_hdmi_dma::periods(), super::pi5_hdmi_dma::position());
     }
 }
 
