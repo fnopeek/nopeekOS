@@ -45,8 +45,11 @@ const RF0_CHECK: u32 = 0xf03ff;
 const DIAG_MAX: usize = 400;
 
 /// RF 0x00 `[19:16]`.
-const RF_MODE_STANDBY: u32 = 0x10000;
 const RF_MODE_TX: u32 = 0x20000;
+
+/// A's RF 0x00 in the BB's normal receive state, the carrier's off state.
+/// Standby is not used: with A in standby B receives nothing either.
+static A_IDLE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Samples per block.
 const BLOCK: usize = 2048;
@@ -57,10 +60,11 @@ const RAW: usize = 4096;
 const TX_LOW: u32 = 0x00;
 const TX_HIGHER: u32 = 0x08;
 
-const CH_START: u8 = 36;
+/// Band 4: the only band where a carrier showed on B.
+const CH_START: u8 = 149;
 /// Gate 2 stays off the DFS channels 52 to 144.
-const CH_SWEEP: [u8; 4] = [36, 48, 149, 165];
-const SWEEP_ROUNDS: u32 = 10;
+const CH_SWEEP: [u8; 9] = [36, 40, 44, 48, 149, 153, 157, 161, 165];
+const SWEEP_ROUNDS: u32 = 6;
 
 /// Registers the probe changes, restored before the chip goes off.
 const BB_SAVE: [u32; 19] = [
@@ -332,7 +336,7 @@ fn setup_minimal(h: i32) {
 fn carrier(h: i32, gain: Option<u32>) {
     let (v, what) = match gain {
         Some(g) => (RF_MODE_TX | g, "carrier_on"),
-        None => (RF_MODE_STANDBY, "carrier_off"),
+        None => (A_IDLE.load(core::sync::atomic::Ordering::Relaxed), "carrier_off"),
     };
     rf0(h, phy::RF_PATH_A, v, what);
     host::delay_us(100);
@@ -411,7 +415,7 @@ fn gate1(h: i32) {
     host::say("[wifiscope] gate 1: carrier on A, measured on B\n");
     let mut out = Vec::new();
     head(&mut out, "gate1");
-    put(&mut out, "# B in normal receive, AGC running\nphase,tx_gain,tx_on,t_ms,rf0_b,");
+    put(&mut out, "# B in normal receive, AGC running\nphase,tx_gain,tx_on,t_ms,rf0_a,rf0_b,");
     put(&mut out, STAT_HEAD);
     let t_start = host::now_ms();
     for (p, &(prompt, secs, txg)) in PHASES.iter().enumerate() {
@@ -432,6 +436,8 @@ fn gate1(h: i32) {
                 out.push(b',');
                 put_i(&mut out, (host::now_ms() - t_start) as i64);
                 out.push(b',');
+                put_i(&mut out, rf0_read(h, phy::RF_PATH_A) as i64);
+                out.push(b',');
                 put_i(&mut out, rf0_read(h, phy::RF_PATH_B) as i64);
                 out.push(b',');
                 put_stat(&mut out, &s);
@@ -449,7 +455,7 @@ fn gate2(h: i32) {
     host::say("[wifiscope] gate 2: channel switches, hands away\n");
     let mut out = Vec::new();
     head(&mut out, "gate2");
-    put(&mut out, "# B in normal receive, AGC running\nround,channel,tx_on,rf0_b,");
+    put(&mut out, "# B in normal receive, AGC running\nround,channel,tx_on,rf0_a,rf0_b,");
     put(&mut out, STAT_HEAD);
     for round in 0..SWEEP_ROUNDS {
         for &ch in CH_SWEEP.iter() {
@@ -463,6 +469,8 @@ fn gate2(h: i32) {
                 out.push(b',');
                 put_i(&mut out, on as i64);
                 out.push(b',');
+                put_i(&mut out, rf0_read(h, phy::RF_PATH_A) as i64);
+                out.push(b',');
                 put_i(&mut out, rf0_read(h, phy::RF_PATH_B) as i64);
                 out.push(b',');
                 put_stat(&mut out, &s);
@@ -475,10 +483,11 @@ fn gate2(h: i32) {
 
 /// Runs the three measurements on the chip stage 4c left on channel 1.
 pub fn run(h: i32) {
-    host::say("[wifiscope] probe: channel 36, lowest TX gain, about 45 s\n");
+    host::say("[wifiscope] probe: channel 149, lowest TX gain, about a minute\n");
     chip::set_channel(h, CH_START, 0, RTW_SC_DONT_CARE);
     host::sleep_ms(50);
     let saved = save_state(h);
+    A_IDLE.store(saved.rf[0][0], core::sync::atomic::Ordering::Relaxed);
 
     gate0(h, &saved);
     setup_minimal(h);

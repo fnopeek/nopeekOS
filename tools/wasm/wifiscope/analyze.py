@@ -148,10 +148,16 @@ def gate1(d):
     ps = pairs(rows(p), 'phase')
     names = ['quiet', 'hand', 'quiet again', 'quiet, higher TX']
     series = {}
+    dead = 0
     for off, on in ps:
         bo, bn = Block(off), Block(on)
+        if bo.var < 25 or bn.var < 25:
+            dead += 1
+            continue
         series.setdefault(int(on['phase']), []).append(
             (int(on['t_ms']), bn.mean - bo.mean, math.hypot(bn.sem, bo.sem), bn.peak))
+    if dead:
+        print(f'  {dead} pairs skipped: B silent (noise sd < 5) in one half')
     summary = {}
     for ph, s in sorted(series.items()):
         ds = [x[1] for x in s]
@@ -204,7 +210,8 @@ def plot1(d, series, names):
     a1.set_ylabel('|carrier| (ADC units)')
     a2.set_ylabel('phase (deg)')
     a2.set_xlabel('time (s)')
-    a1.legend()
+    if series:
+        a1.legend()
     fig.tight_layout()
     fig.savefig(os.path.join(d, 'gate1.png'), dpi=120)
     print(f'  plot: {os.path.join(d, "gate1.png")}')
@@ -216,9 +223,15 @@ def gate2(d):
         return
     print('== Gate 2: phase after channel switches')
     per_ch = {}
+    dead = 0
     for off, on in pairs(rows(p), 'channel'):
-        z = Block(on).mean - Block(off).mean
-        per_ch.setdefault(int(on['channel']), []).append(z)
+        bo, bn = Block(off), Block(on)
+        if bo.var < 25 or bn.var < 25:
+            dead += 1
+            continue
+        per_ch.setdefault(int(on['channel']), []).append(bn.mean - bo.mean)
+    if dead:
+        print(f'  {dead} pairs skipped: B silent (noise sd < 5) in one half')
     worst = 0.0
     for ch, zs in sorted(per_ch.items()):
         sd = circ_std_deg(zs)
@@ -226,7 +239,11 @@ def gate2(d):
         m = sum(zs) / len(zs)
         print(f'  ch {ch:3d}: carrier {abs(m):7.2f} @ {math.degrees(cmath.phase(m)):7.1f} deg'
               f'  phase sd over {len(zs)} retunes {sd:6.2f} deg')
+    if not per_ch:
+        print('  no pair with B receiving in both halves: no verdict')
+        return
     print(f'  phase reproducible after retune (sd < 5 deg): {verdict(worst < 5)}')
+    slope(per_ch)
     if worst >= 5:
         print('  -> the phase does not survive a retune: separate synthesizers or '
               'an unlocked LO. Next step is the reference per channel '
@@ -242,10 +259,42 @@ def gate2(d):
         ax.plot(range(len(zs)), [math.degrees(cmath.phase(z)) for z in zs], 'o-', label=f'ch {ch}')
     ax.set_xlabel('round')
     ax.set_ylabel('carrier phase (deg)')
-    ax.legend()
+    if per_ch:
+        ax.legend()
     fig.tight_layout()
     fig.savefig(os.path.join(d, 'gate2.png'), dpi=120)
     print(f'  plot: {os.path.join(d, "gate2.png")}')
+
+
+def slope(per_ch):
+    """Phase against frequency within each band: a straight line is a
+    path delay, and its slope the extra path length."""
+    c = 299792458.0
+    bands = {'low (36-48)': lambda ch: ch <= 48, 'high (149-165)': lambda ch: ch >= 149}
+    for name, inband in bands.items():
+        pts = []
+        for ch, zs in sorted(per_ch.items()):
+            if not inband(ch) or not zs:
+                continue
+            m = sum(zs) / len(zs)
+            if abs(m) < 5:
+                continue
+            pts.append((5000 + 5 * ch, cmath.phase(m)))
+        if len(pts) < 3:
+            print(f'  band {name}: carrier on fewer than 3 channels, no slope')
+            continue
+        ph = [pts[0][1]]
+        for _, p in pts[1:]:
+            d = p - ph[-1]
+            d -= 2 * math.pi * round(d / (2 * math.pi))
+            ph.append(ph[-1] + d)
+        f = [x[0] * 1e6 for x in pts]
+        fm, pm = sum(f) / len(f), sum(ph) / len(ph)
+        k = sum((a - fm) * (b - pm) for a, b in zip(f, ph)) / sum((a - fm) ** 2 for a in f)
+        res = math.sqrt(sum((b - pm - k * (a - fm)) ** 2 for a, b in zip(f, ph)) / len(f))
+        tau = -k / (2 * math.pi)
+        print(f'  band {name}: phase slope {math.degrees(k) * 1e6:+.3f} deg/MHz, '
+              f'delay {tau * 1e9:+.2f} ns = path {tau * c:+.2f} m, fit residual {math.degrees(res):.1f} deg')
 
 
 def main():
