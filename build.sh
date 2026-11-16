@@ -886,13 +886,18 @@ PI_FW="${PI_FW:-$HOME/.cache/nopeekos/pi5/firmware}"
 PI_SD_IMG="$PROJECT_DIR/target/pi5-sd.img"
 
 fetch_pi_firmware() {
-    [ -f "$PI_FW/boot/bcm2712-rpi-5-b.dtb" ] && return
+    [ -f "$PI_FW/boot/bcm2712-rpi-5-b.dtb" ] && [ -f "$PI_FW/boot/overlays/bcm2712d0.dtbo" ] && return
+    if [ -d "$PI_FW/.git" ]; then
+        git -C "$PI_FW" sparse-checkout add '/boot/overlays/bcm2712d0.dtbo'
+        return
+    fi
     log "Fetching the Pi 5 device trees (raspberrypi/firmware, sparse)..."
     mkdir -p "$(dirname "$PI_FW")"
     git clone -q --depth 1 --filter=blob:none --sparse \
         https://github.com/raspberrypi/firmware.git "$PI_FW"
     git -C "$PI_FW" sparse-checkout set --no-cone '/boot/bcm2712*' \
         '/boot/overlays/overlay_map.dtb' '/boot/overlays/vc4-kms-v3d-pi5.dtbo' \
+        '/boot/overlays/bcm2712d0.dtbo' \
         '/boot/LICENCE.broadcom'
 }
 
@@ -989,7 +994,9 @@ PYEOF
     mcopy -i "$part" "$dir/config.txt" ::config.txt
     mcopy -i "$part" "$PI_FW"/boot/bcm2712*.dtb ::
     mmd -i "$part" ::overlays
-    for o in overlay_map.dtb vc4-kms-v3d-pi5.dtbo; do
+    # bcm2712d0: the firmware applies it on D0 silicon (its DREQs, pin
+    # controllers); without it a D0 board runs on the C1 tree.
+    for o in overlay_map.dtb vc4-kms-v3d-pi5.dtbo bcm2712d0.dtbo; do
         [ -f "$PI_FW/boot/overlays/$o" ] && mcopy -i "$part" "$PI_FW/boot/overlays/$o" ::overlays/
     done
     mcopy -i "$part" "$dir/SEED.BIN" ::SEED.BIN
