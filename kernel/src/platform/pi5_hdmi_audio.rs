@@ -137,6 +137,11 @@ fn start(port: usize) -> Option<Stream> {
         return None;
     }
     super::pi5_hdmi_dma::start();
+    let _ = fiber::wait(0, crate::time::counter() + ms(100));
+    if let Some((mai, sched)) = super::pi5_hdmi_dma::mai_state() {
+        kprintln!("[npk] hdmi audio: 100 ms in, DMA periods {}, MAI_CTL {:#06x}, SCHEDULER_CONTROL {:#010x}",
+            super::pi5_hdmi_dma::periods(), mai, sched);
+    }
     STARTS.fetch_add(1, Ordering::Relaxed);
     STREAMING.store(port as u32, Ordering::Release);
     Some(s)

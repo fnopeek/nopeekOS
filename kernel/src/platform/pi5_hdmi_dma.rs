@@ -20,6 +20,9 @@ use spin::Mutex;
 /// `HDMI_MAI_DATA` in the `hd` window (`vc6_hdmi_hdmi0_fields`,
 /// `vc6_hdmi_hdmi1_fields`).
 const MAI_DATA: [u64; 2] = [0x1c, 0x3c];
+/// `HDMI_MAI_CTL` in the `hd` window, `HDMI_SCHEDULER_CONTROL` in `hdmi`.
+const MAI_CTL: [u64; 2] = [0x10, 0x30];
+const SCHEDULER_CONTROL: u64 = 0xe8;
 const PAGE: usize = 4096;
 
 /// The controller's registers from its own `reg` on; channel offsets count
@@ -52,6 +55,9 @@ struct State {
     ring_pages: usize,
     d: Cyclic,
     running: bool,
+    /// `HDMI_MAI_CTL` and `HDMI_SCHEDULER_CONTROL` of the port.
+    mai_ctl: u64,
+    scheduler: u64,
 }
 
 // SAFETY: the MMIO window and the DMA pages are plain addresses owned by
@@ -139,6 +145,7 @@ pub fn open(port: usize, periods: usize, period_bytes: usize, on_period: fn()) -
         return None;
     };
     let (hd, _) = named(&fdt, &hdmi, b"hd")?;
+    let (hdmi_win, _) = named(&fdt, &hdmi, b"hdmi")?;
     let (reg_base, reg_size) = fdt.reg0(&ctrl)?;
     let mask = fdt.prop_u32(&ctrl, b"brcm,dma-channel-mask")?;
     let (origin, mut chans) = bcm2835_dma::channels(reg_base, reg_size, mask);
@@ -172,7 +179,8 @@ pub fn open(port: usize, periods: usize, period_bytes: usize, on_period: fn()) -
     // A channel the firmware left running is stopped first.
     let _ = chan.abort(&mut regs);
     *ON_PERIOD.lock() = Some(on_period);
-    *STATE.lock() = Some(State { regs, chan, irq, cbs, cb_pages, ring, ring_pages, d, running: false });
+    *STATE.lock() = Some(State { regs, chan, irq, cbs, cb_pages, ring, ring_pages, d, running: false,
+        mai_ctl: hd + MAI_CTL[port], scheduler: hdmi_win + SCHEDULER_CONTROL });
     crate::arch::aarch64::gic::enable(irq, on_irq);
     kprintln!("[npk] hdmi audio: HDMI{} on DMA channel {} (DREQ {}, IRQ {}), {} x {} bytes",
         port, ch, cell & 0x1f, irq, periods, period_bytes);
@@ -206,6 +214,20 @@ pub fn position() -> Option<usize> {
     let s = g.as_mut()?;
     let d = s.d;
     Some(d.buf_len - s.chan.residue(&mut s.regs, &d))
+}
+
+/// `HDMI_MAI_CTL` and `HDMI_SCHEDULER_CONTROL` while the stream runs:
+/// whether the MAI takes samples and the output is in HDMI mode.
+pub fn mai_state() -> Option<(u32, u32)> {
+    let g = STATE.lock();
+    let s = g.as_ref().filter(|s| s.running)?;
+    // SAFETY: registers of the running port's `hd` and `hdmi` windows from
+    // the boot tree; the display module keeps the port powered while the
+    // stream runs.
+    unsafe {
+        Some((core::ptr::read_volatile(s.mai_ctl as *const u32),
+              core::ptr::read_volatile(s.scheduler as *const u32)))
+    }
 }
 
 /// Periods completed since `start`.
