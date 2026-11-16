@@ -77,11 +77,12 @@ static APP_META_BYTES: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.b
     *include_bytes!(concat!(env!("OUT_DIR"), "/app_meta.bin"));
 
 // The default rights plus HARDWARE, which binding the PCI device requires,
-// and WRITE for the CSV files in `wifiscope/`. A section replaces the
-// default, so READ, EXECUTE and RENDER are listed.
+// WRITE for the CSV files in `wifiscope/` and CANVAS for the live view's
+// pixels. A section replaces the default, so READ, EXECUTE and RENDER are
+// listed.
 #[unsafe(link_section = ".npk.caps")]
 #[used]
-static NPK_CAPS: [u8; 1] = [0x01 | 0x02 | 0x04 | 0x08 | 0x40]; // READ|WRITE|EXEC|RENDER|HARDWARE
+static NPK_CAPS: [u8; 1] = [0x01 | 0x02 | 0x04 | 0x08 | 0x20 | 0x40]; // READ|WRITE|EXEC|RENDER|CANVAS|HARDWARE
 
 // The scan lists grow with the cells in the air.
 #[global_allocator]
