@@ -467,10 +467,15 @@ the WiFi NIC and on which PCI function. A fiber on core 0 then:
 1. sends `QUIT` and waits up to 15 s for the driver to release the card;
    if it does not, the hand-over is cancelled, and a driver that ends
    within another 60 s is started again;
-2. starts `wifiscope` as autostart starts a module (rights from its
-   `.npk.caps`) and waits up to 20 s for it to bind the card, then up to
-   600 s for it to release it;
-3. clears both queues and starts the driver again under its own name.
+2. starts `wifiscope` as the `driver` intent starts one (a capability for
+   the card plus the rights in its `.npk.caps`), its output in the
+   terminal `wlan scope` was typed in, and waits up to 20 s for it to bind
+   the card, then up to 600 s for it to release it;
+3. clears both queues and starts the driver again under its own name, as
+   autostart does.
+
+The hand-over's own messages go to the same terminal and to the kernel
+log.
 
 wifid sees `LINK_DOWN` (0) and later `DRIVER_UP`, and joins as after a boot.
 One hand-over runs at a time. No module can end another: the kernel sends

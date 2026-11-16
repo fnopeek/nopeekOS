@@ -430,8 +430,27 @@ static NIC_DRIVER: Mutex<Option<(alloc::string::String, crate::drivers::pci::Pci
     Mutex::new(None);
 
 #[cfg(target_arch = "x86_64")]
-/// One hand-over at a time: the module it waits for, empty when idle.
-static HANDOVER: Mutex<Option<alloc::string::String>> = Mutex::new(None);
+/// One hand-over at a time, empty when idle.
+static HANDOVER: Mutex<Option<Handover>> = Mutex::new(None);
+
+#[cfg(target_arch = "x86_64")]
+#[derive(Clone)]
+struct Handover {
+    module: alloc::string::String,
+    /// The terminal `wlan scope` was typed in: the module's output and the
+    /// hand-over's messages go there.
+    term: u8,
+    /// Starts a driver module with its output in a terminal; the intent
+    /// layer's, handed down.
+    start: fn(&str, u8) -> bool,
+}
+
+#[cfg(target_arch = "x86_64")]
+fn tell(term: u8, msg: &str) {
+    crate::kprintln!("{}", msg);
+    crate::shade::terminal::write_idx(term as usize, msg);
+    crate::shade::terminal::write_idx(term as usize, "\n");
+}
 
 #[cfg(target_arch = "x86_64")]
 /// Called when a WASM driver registers its NIC.
@@ -455,7 +474,9 @@ const POLL_MS: u64 = 50;
 /// Lend the WiFi card to `module` and start the driver again afterwards.
 /// Returns at once; a fiber on core 0 (where launching must run) does the
 /// waiting.
-pub fn hand_over(module: &str) -> Result<(), &'static str> {
+pub fn hand_over(module: &str, term: u8, start: fn(&str, u8) -> bool)
+    -> Result<(), &'static str>
+{
     let Some((_, addr)) = NIC_DRIVER.lock().clone() else {
         return Err("no WiFi driver has registered since boot");
     };
@@ -467,7 +488,7 @@ pub fn hand_over(module: &str) -> Result<(), &'static str> {
         if h.is_some() {
             return Err("a hand-over is already running");
         }
-        *h = Some(alloc::string::String::from(module));
+        *h = Some(Handover { module: alloc::string::String::from(module), term, start });
     }
     if !crate::smp::fiber::admit(0, handover_fiber, 0) {
         *HANDOVER.lock() = None;
@@ -493,50 +514,49 @@ fn wait_until(ms: u64, done: impl Fn() -> bool) -> bool {
 #[cfg(target_arch = "x86_64")]
 fn handover_fiber(_: u64) {
     use crate::drivers::pci;
-    let Some(module) = HANDOVER.lock().clone() else { return };
+    let Some(Handover { module, term, start }) = HANDOVER.lock().clone() else { return };
     let Some((driver, addr)) = NIC_DRIVER.lock().clone() else {
         *HANDOVER.lock() = None;
         return;
     };
     let held = || matches!(pci::owner(addr), Some(pci::Owner::Module(_)));
 
-    crate::kprintln!("[wlan] {}: asking {} to end", module, driver);
+    tell(term, &alloc::format!("[wlan] {}: asking {} to end", module, driver));
     if !send_cmd(&[CMD_QUIT]) {
-        crate::kprintln!("[wlan] command queue full, hand-over cancelled");
+        tell(term, "[wlan] command queue full, hand-over cancelled");
         *HANDOVER.lock() = None;
         return;
     }
     if !wait_until(QUIT_WAIT_MS, || !held()) {
         // The QUIT stays queued: a driver that ends later is started again,
         // without the measurement, rather than leaving the card dead.
-        crate::kprintln!("[wlan] {} did not end within {} s, hand-over cancelled",
-            driver, QUIT_WAIT_MS / 1000);
+        tell(term, &alloc::format!("[wlan] {} did not end within {} s, hand-over cancelled",
+            driver, QUIT_WAIT_MS / 1000));
         if wait_until(LATE_QUIT_MS, || !held()) {
             reset();
-            crate::kprintln!("[wlan] {} ended late, starting it again", driver);
+            tell(term, &alloc::format!("[wlan] {} ended late, starting it again", driver));
             crate::shade::start_autostart_list(alloc::vec![driver]);
         }
         *HANDOVER.lock() = None;
         return;
     }
 
-    crate::kprintln!("[wlan] card free, starting {}", module);
-    crate::shade::start_autostart_list(alloc::vec![module.clone()]);
-    if wait_until(BIND_WAIT_MS, held) {
+    tell(term, &alloc::format!("[wlan] card free, starting {}", module));
+    if start(&module, term) && wait_until(BIND_WAIT_MS, held) {
         if !wait_until(RUN_WAIT_MS, || !held()) {
-            crate::kprintln!("[wlan] {} still holds the card after {} s; {} is not restarted",
-                module, RUN_WAIT_MS / 1000, driver);
+            tell(term, &alloc::format!("[wlan] {} still holds the card after {} s; {} is not restarted",
+                module, RUN_WAIT_MS / 1000, driver));
             *HANDOVER.lock() = None;
             return;
         }
-        crate::kprintln!("[wlan] {} ended", module);
+        tell(term, &alloc::format!("[wlan] {} ended", module));
     } else {
-        crate::kprintln!("[wlan] {} did not bind the card", module);
+        tell(term, &alloc::format!("[wlan] {} did not bind the card", module));
     }
 
     // Whatever wifid queued meanwhile was meant for the old instance.
     reset();
-    crate::kprintln!("[wlan] starting {} again", driver);
+    tell(term, &alloc::format!("[wlan] starting {} again, it reconnects on its own", driver));
     crate::shade::start_autostart_list(alloc::vec![driver]);
     *HANDOVER.lock() = None;
 }

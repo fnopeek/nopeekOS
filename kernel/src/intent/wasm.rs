@@ -182,7 +182,6 @@ fn run_interactive_on(module_name: &str, use_forge: bool) {
 /// If no BDF given, auto-detects by module name.
 #[cfg(target_arch = "x86_64")]
 pub fn intent_run_driver(args: &str) {
-    use crate::{wasm, capability};
     use crate::drivers::pci;
 
     let mut parts = args.trim().splitn(2, ' ');
@@ -221,6 +220,26 @@ pub fn intent_run_driver(args: &str) {
             return;
         }
     };
+    spawn_driver(module_name, wasm_bytes, &hash, dev, super::active_terminal());
+}
+
+/// Start the installed driver `module_name` on the PCI function its name selects,
+/// its output in terminal `term_idx`. False if it could not be started.
+#[cfg(target_arch = "x86_64")]
+pub(super) fn start_driver(module_name: &str, term_idx: u8) -> bool {
+    let Some((wasm_bytes, hash)) = fetch_store_module(module_name) else { return false };
+    let Some(dev) = auto_detect_device(module_name) else {
+        kprintln!("[npk] No PCI device found for driver '{}'", module_name);
+        return false;
+    };
+    spawn_driver(module_name, wasm_bytes, &hash, dev, term_idx)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn spawn_driver(module_name: &str, wasm_bytes: alloc::vec::Vec<u8>, hash: &[u8; 32],
+                dev: crate::drivers::pci::PciDevice, term_idx: u8) -> bool {
+    use crate::{wasm, capability};
+    use crate::drivers::pci;
 
     // One card, one driver. A second instance would map the same MMIO, reset
     // the card and reload its firmware under the running one, post its own
@@ -232,7 +251,7 @@ pub fn intent_run_driver(args: &str) {
                    refusing a second instance (it would reset the card under the \
                    running one). Stop the first, or use `wlan` to inspect a \
                    network driver.", a.bus, a.device, a.function, pid);
-        return;
+        return false;
     }
 
     // A capability for this PCI device, plus what the module declares in
@@ -249,7 +268,7 @@ pub fn intent_run_driver(args: &str) {
         None, // no expiry for drivers
     ) {
         Ok(id) => id,
-        Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return; }
+        Err(e) => { kprintln!("[npk] Cap delegation failed: {}", e); return false; }
     };
 
     kprint!("[npk] Driver '{}' for {:02x}:{:02x}.{} [{:04x}:{:04x}] (hash: ",
@@ -257,10 +276,11 @@ pub fn intent_run_driver(args: &str) {
     for b in &hash[..4] { kprint!("{:02x}", b); }
     kprintln!("...)");
 
-    let term_idx = super::active_terminal();
-    if !wasm::spawn_on_worker(wasm_bytes.to_vec(), driver_cap, term_idx, module_name) {
+    if !wasm::spawn_on_worker(wasm_bytes, driver_cap, term_idx, module_name) {
         kprintln!("[npk] Failed to spawn driver '{}'", module_name);
+        return false;
     }
+    true
 }
 
 #[cfg(target_arch = "x86_64")]

@@ -374,7 +374,7 @@ pub fn intent_wlan_manage(args: &str) {
     let a = args.trim();
     let (verb, rest) = a.split_once(' ').map_or((a, ""), |(v, r)| (v, r.trim()));
     match verb {
-        "scope" => match w::hand_over(SCOPE_MODULE) {
+        "scope" => match w::hand_over(SCOPE_MODULE, super::current_terminal(), super::wasm::start_driver) {
             Ok(()) => kprintln!("[wlan] lending the card to {}: WiFi is off until it ends", SCOPE_MODULE),
             Err(e) => kprintln!("[wlan] scope: {}", e),
         },
