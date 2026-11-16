@@ -1,0 +1,782 @@
+//! `rtw_sta_info` and `rtw_update_sta_info`: rate adaptation,
+//! main.c:1117-1240.
+//!
+//! The driver does not send the firmware a single rate but a mask of which
+//! of the 64 rates the peer supports. The firmware picks from it
+//! continuously and reports its choice via C2H.
+//!
+//! In Linux the mask comes from `ieee80211_sta`, which mac80211 builds from
+//! the association response. There is no mac80211 here, so the response's
+//! HT, VHT and supported-rates elements are parsed in this module. A
+//! guessed rate mask transmits too fast and loses every packet.
+#![allow(dead_code)]
+
+use crate::regs::*;
+
+/// main.h:775-799 `struct rtw_sta_info`: the fields `send_ra_info` reads.
+/// The rest is Linux bookkeeping (work queues, averages).
+#[derive(Default, Clone, Copy)]
+pub struct StaInfo {
+    pub mac_id: u8,
+    pub rate_id: u8,
+    pub bw_mode: u8,
+    pub stbc_en: u8,
+    pub ldpc_en: u8,
+    pub sgi_enable: bool,
+    pub vht_enable: bool,
+    pub init_ra_lv: u8,
+    pub ra_mask: u64,
+    pub rssi_level: u8,
+    /// main.h:760 `DECLARE_EWMA(rssi, 10, 16)`: fed per frame by
+    /// `rtw_rx_addr_match`, read by the watchdog every two seconds.
+    pub avg_rssi: crate::dm::Ewma,
+    /// main.h `si->ra_report.desc_rate`: the rate the firmware last chose.
+    /// Arrives as C2H `RA_RPT` and is the input to `rtw_phy_rrsr_update`.
+    pub ra_report_desc_rate: u8,
+}
+
+/// What the AP's association response yields; in Linux `ieee80211_sta`,
+/// filled by mac80211.
+#[derive(Default, Clone, Copy)]
+pub struct PeerCaps {
+    pub ht_supported: bool,
+    pub ht_cap: u16,
+    /// `ht_cap.mcs.rx_mask[0..4]`
+    pub ht_mcs: [u8; 4],
+    /// Byte 2 of the HT capabilities element, split: the length exponent
+    /// (bits 1:0) and the minimum spacing (bits 4:2).
+    pub ht_ampdu_factor: u8,
+    pub ht_ampdu_density: u8,
+    pub vht_supported: bool,
+    pub vht_cap: u32,
+    /// `vht_cap.vht_mcs.rx_mcs_map`: what the peer can receive.
+    /// `get_vht_ra_mask` builds the TX mask from it (main.c:1011).
+    pub vht_mcs_map: u16,
+    /// `vht_cap.vht_mcs.tx_mcs_map`: what the peer can transmit. A different
+    /// map: `get_highest_vht_tx_rate` reads this one (tx.c:132), and an AP may
+    /// advertise it differently.
+    pub vht_tx_mcs_map: u16,
+    /// Bitmask of the legacy rates, as `supp_rates[NL80211_BAND_2GHZ]`:
+    /// bits 0..3 = CCK 1/2/5.5/11, bits 4..11 = OFDM 6..54.
+    pub supp_rates: u16,
+    /// 0 = 20 MHz, 1 = 40, 2 = 80 (`ieee80211_sta.bandwidth`)
+    pub bandwidth: u8,
+    // ── Operation elements from the association response ────────────
+    //
+    // These are authoritative, not the beacon's. Linux reads them here:
+    // `ieee80211_assoc_success` calls `ieee80211_config_bw(link, elems, ...)`
+    // with the response's elements (mlme.c:7666), and
+    // `ieee80211_determine_ap_chan` derives mode and width from them.
+    /// Byte 1 of the HT operation element (id 61): bits 1:0 the secondary
+    /// channel offset, bit 2 "STA Channel Width".
+    pub ht_op_info: u8,
+    pub ht_op_seen: bool,
+    /// Bytes 0:2 of the VHT operation element (id 192): width and the two
+    /// center channel segments.
+    pub vht_op_chanwidth: u8,
+    pub vht_op_cch0: u8,
+    pub vht_op_cch1: u8,
+    /// Bytes 3:4, the "Basic VHT-MCS and NSS Set": what a station must support
+    /// at minimum to join this BSS.
+    pub vht_op_basic_mcs: u16,
+    pub vht_op_seen: bool,
+    /// The basic rates (high bit set in the rate elements), in the bit order
+    /// of `supp_rates`: `bss_conf.basic_rates`.
+    pub basic_rates: u16,
+    /// Capability field bit 10 (`WLAN_CAPABILITY_SHORT_SLOT_TIME`).
+    pub short_slot_cap: bool,
+    /// The WMM parameter element (`_ieee80211_sta_wmm_params` in mac80211
+    /// mlme.c), per mac80211 AC order VO, VI, BE, BK:
+    /// (AIFSN, CWmin, CWmax, TXOP in 32 us). `None` when the AP sent none
+    /// or an invalid one; the defaults then stay.
+    pub wmm: Option<[WmmAc; 4]>,
+}
+
+/// One access category of the WMM parameter element.
+#[derive(Default, Clone, Copy)]
+pub struct WmmAc {
+    pub aifs: u8,
+    pub cw_min: u16,
+    pub cw_max: u16,
+    pub txop: u16,
+}
+
+/// mac80211 `_ieee80211_sta_wmm_params` (mlme.c:3644-3778). `b` is the vendor element
+/// body: OUI, type, subtype, version, QoS info, reserved, then one record
+/// of four bytes per AC.
+fn parse_wmm_params(b: &[u8]) -> Option<[WmmAc; 4]> {
+    if b.len() < 8 || b[5] != 1 {
+        return None;
+    }
+    // `ecw2cw`: 2^ecw - 1.
+    let ecw2cw = |ecw: u8| (1u16 << ecw) - 1;
+    let mut p = [WmmAc::default(); 4];
+    let mut pos = 8;
+    while pos + 4 <= b.len() {
+        let r = &b[pos..pos + 4];
+        // ACI 1 = BK, 2 = VI, 3 = VO, else BE; mac80211 AC order VO, VI, BE, BK.
+        let ac = match (r[0] >> 5) & 0x03 {
+            1 => 3,
+            2 => 1,
+            3 => 0,
+            _ => 2,
+        };
+        let mut aifs = r[0] & 0x0f;
+        if aifs < 2 {
+            // "AP has invalid WMM params (AIFSN=%d for ACI %d), will use 2"
+            aifs = 2;
+        }
+        p[ac] = WmmAc {
+            aifs,
+            cw_max: ecw2cw((r[1] & 0xf0) >> 4),
+            cw_min: ecw2cw(r[1] & 0x0f),
+            txop: u16::from_le_bytes([r[2], r[3]]),
+        };
+        if p[ac].cw_min == 0 || p[ac].cw_min > p[ac].cw_max {
+            return None;
+        }
+        pos += 4;
+    }
+    // "WMM specification requires all 4 ACIs."
+    if p.iter().any(|a| a.cw_min == 0) {
+        return None;
+    }
+    Some(p)
+}
+
+/// Parse the elements of an association response.
+///
+/// This is upper-layer work (mac80211 builds `ieee80211_sta` from it in
+/// Linux); it lives here because `rtw_update_sta_info` needs these values.
+pub fn parse_assoc_resp(f: &[u8]) -> PeerCaps {
+    let mut c = PeerCaps::default();
+    if f.len() >= 26 {
+        c.short_slot_cap = u16::from_le_bytes([f[24], f[25]]) & (1 << 10) != 0;
+    }
+    // 24 header + capabilities(2) + status(2) + AID(2) = 30, then elements.
+    let mut i = 30usize;
+    while i + 2 <= f.len() {
+        let id = f[i] as u32;
+        let len = f[i + 1] as usize;
+        if i + 2 + len > f.len() {
+            break;
+        }
+        let b = &f[i + 2..i + 2 + len];
+        if id == WLAN_EID_SUPP_RATES || id == WLAN_EID_EXT_SUPP_RATES {
+            for &r in b {
+                // The high bit marks a basic rate and is not part of the value.
+                c.supp_rates |= rate_bit(r & 0x7f);
+                if r & 0x80 != 0 {
+                    c.basic_rates |= rate_bit(r & 0x7f);
+                }
+            }
+        } else if id == WLAN_EID_HT_CAPABILITY && len >= 26 {
+            c.ht_supported = true;
+            c.ht_cap = u16::from_le_bytes([b[0], b[1]]);
+            // Byte 2 holds the A-MPDU parameters: bits 1:0 the length exponent,
+            // bits 4:2 the minimum spacing. They say how much the AP can receive
+            // in one burst, i.e. the two values the TX descriptor needs.
+            //
+            // Split here, as Linux does in `ieee80211_ht_cap_ie_to_sta_ht_cap`
+            // (net/mac80211/ht.c), which stores `ampdu_factor` and `ampdu_density`
+            // separately; `get_tx_ampdu_factor` in `tx.c` receives them ready.
+            c.ht_ampdu_factor = b[2] & 0x03; // IEEE80211_HT_AMPDU_PARM_FACTOR
+            c.ht_ampdu_density = (b[2] & 0x1c) >> 2; // ..._PARM_DENSITY
+            // `ht_cap.mcs` starts at offset 3 (after cap and ampdu).
+            c.ht_mcs.copy_from_slice(&b[3..7]);
+        } else if id == WLAN_EID_HT_OPERATION && len >= 2 {
+            c.ht_op_info = b[1];
+            c.ht_op_seen = true;
+        } else if id == WLAN_EID_VHT_OPERATION && len >= 5 {
+            c.vht_op_chanwidth = b[0];
+            c.vht_op_cch0 = b[1];
+            c.vht_op_cch1 = b[2];
+            c.vht_op_basic_mcs = u16::from_le_bytes([b[3], b[4]]);
+            c.vht_op_seen = true;
+        } else if id == 221 && len >= 5 && b[..3] == [0x00, 0x50, 0xf2]
+            && b[3] == 2 && b[4] == 1
+        {
+            // WLAN_EID_VENDOR_SPECIFIC, Microsoft OUI, WMM type 2,
+            // parameter element subtype 1.
+            c.wmm = parse_wmm_params(b);
+        } else if id == WLAN_EID_VHT_CAPABILITY && len >= 12 {
+            c.vht_supported = true;
+            c.vht_cap = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            c.vht_mcs_map = u16::from_le_bytes([b[4], b[5]]);
+            // Offset 8:9, after rx_mcs_map (4:5) and rx_highest (6:7).
+            c.vht_tx_mcs_map = u16::from_le_bytes([b[8], b[9]]);
+        }
+        i += 2 + len;
+    }
+
+    // `ieee80211_sta.bandwidth`: mac80211 computes it from the capabilities
+    // and the BSS channel width. Without the latter this is what the peer
+    // supports.
+    c.bandwidth = if c.vht_supported {
+        2
+    } else if c.ht_supported && c.ht_cap & IEEE80211_HT_CAP_SUP_WIDTH_20_40 as u16 != 0 {
+        1
+    } else {
+        0
+    };
+    c
+}
+
+/// Map a rate in units of 500 kbit/s to its bit in `supp_rates`, in the
+/// order of `ieee80211_rate` in the 2.4 GHz band.
+fn rate_bit(half_mbps: u8) -> u16 {
+    match half_mbps {
+        2 => 1 << 0,    // 1 Mbit
+        4 => 1 << 1,    // 2
+        11 => 1 << 2,   // 5.5
+        22 => 1 << 3,   // 11
+        12 => 1 << 4,   // 6
+        18 => 1 << 5,   // 9
+        24 => 1 << 6,   // 12
+        36 => 1 << 7,   // 18
+        48 => 1 << 8,   // 24
+        72 => 1 << 9,   // 36
+        96 => 1 << 10,  // 48
+        108 => 1 << 11, // 54
+        _ => 0,
+    }
+}
+
+/// main.c:1139-1163 `get_vht_ra_mask`
+fn get_vht_ra_mask(mut mcs_map: u16) -> u64 {
+    let mut ra_mask = 0u64;
+    let mut nss = 12u32;
+    for _ in 0..4 {
+        match mcs_map & 0x3 {
+            2 => ra_mask |= 0x3ffu64 << nss, // MCS9
+            1 => ra_mask |= 0x1ffu64 << nss, // MCS8
+            0 => ra_mask |= 0x0ffu64 << nss, // MCS7
+            _ => {}
+        }
+        mcs_map >>= 2;
+        nss += 10;
+    }
+    ra_mask
+}
+
+/// main.c:1165-1183 `rtw_rate_mask_rssi`
+fn rate_mask_rssi(rssi_level: u8, wireless_set: u32) -> u64 {
+    if wireless_set == WIRELESS_CCK {
+        return 0xffff_ffff_ffff_ffff;
+    }
+    match rssi_level {
+        0 => 0xffff_ffff_ffff_ffff,
+        1 => 0xffff_ffff_ffff_fff0,
+        2 => 0xffff_ffff_ffff_efe0,
+        3 => 0xffff_ffff_ffff_cfc0,
+        4 => 0xffff_ffff_ffff_8f80,
+        _ => 0xffff_ffff_ffff_0f00,
+    }
+}
+
+/// main.c:1185-1194 `rtw_rate_mask_recover`
+fn rate_mask_recover(mut ra_mask: u64, bak: u64) -> u64 {
+    let legacy = RA_MASK_CCK_RATES as u64 | RA_MASK_OFDM_RATES as u64;
+    if ra_mask & !legacy == 0 {
+        ra_mask |= bak & !legacy;
+    }
+    if ra_mask == 0 {
+        ra_mask |= bak & legacy;
+    }
+    ra_mask
+}
+
+/// main.c:1240-1310 `get_rate_id`
+fn get_rate_id(wireless_set: u32, bw_mode: u8, tx_num: u8) -> u8 {
+    let cck = WIRELESS_CCK;
+    let ofdm = WIRELESS_OFDM;
+    let ht = WIRELESS_HT;
+    let vht = WIRELESS_VHT;
+    if wireless_set == cck {
+        crate::tx::RTW_RATEID_B_20M
+    } else if wireless_set == ofdm {
+        crate::tx::RTW_RATEID_G
+    } else if wireless_set == cck | ofdm {
+        RTW_RATEID_BG as u8
+    } else if wireless_set == ofdm | ht {
+        match tx_num {
+            1 => RTW_RATEID_GN_N1SS as u8,
+            2 => RTW_RATEID_GN_N2SS as u8,
+            _ => 0,
+        }
+    } else if wireless_set == cck | ofdm | ht {
+        if bw_mode == 1 {
+            match tx_num {
+                1 => RTW_RATEID_BGN_40M_1SS as u8,
+                2 => RTW_RATEID_BGN_40M_2SS as u8,
+                _ => 0,
+            }
+        } else {
+            match tx_num {
+                1 => RTW_RATEID_BGN_20M_1SS as u8,
+                2 => RTW_RATEID_BGN_20M_2SS as u8,
+                _ => 0,
+            }
+        }
+    } else if wireless_set == ofdm | vht {
+        match tx_num {
+            1 => RTW_RATEID_ARFR1_AC_1SS as u8,
+            2 => RTW_RATEID_ARFR0_AC_2SS as u8,
+            _ => 0,
+        }
+    } else if wireless_set == cck | ofdm | vht {
+        if bw_mode >= 2 {
+            match tx_num {
+                1 => RTW_RATEID_ARFR1_AC_1SS as u8,
+                2 => RTW_RATEID_ARFR0_AC_2SS as u8,
+                _ => 0,
+            }
+        } else {
+            match tx_num {
+                1 => RTW_RATEID_ARFR2_AC_2G_1SS as u8,
+                2 => RTW_RATEID_ARFR3_AC_2G_2SS as u8,
+                _ => 0,
+            }
+        }
+    } else {
+        0
+    }
+    // The 3SS and 4SS branches are omitted: `hw_cap.nss` is at most 2 on
+    // this chip, and `tx_num` comes only from it.
+}
+
+/// main.c:1312-1430 `rtw_update_sta_info`, 2.4 GHz band.
+///
+/// `rtw_rate_mask_cfg` is omitted: it only applies with `use_cfg_mask`,
+/// which in Linux a user command (`cfg80211_bitrate_mask`) sets; without
+/// it the function returns unchanged.
+pub fn update_sta_info(si: &mut StaInfo, c: &PeerCaps, nss: u8,
+                       band_2g: bool) -> u32 {
+    let mut ra_mask = 0u64;
+    let mut stbc_en = 0u8;
+    let mut ldpc_en = 0u8;
+    let mut tx_num = 1u8;
+    let mut is_vht_enable = false;
+
+    if c.vht_supported {
+        is_vht_enable = true;
+        ra_mask |= get_vht_ra_mask(c.vht_mcs_map);
+        if c.vht_cap & IEEE80211_VHT_CAP_RXSTBC_MASK != 0 {
+            stbc_en = VHT_STBC_EN;
+        }
+        if c.vht_cap & IEEE80211_VHT_CAP_RXLDPC != 0 {
+            ldpc_en = VHT_LDPC_EN;
+        }
+    } else if c.ht_supported {
+        ra_mask |= ((c.ht_mcs[3] as u64) << 36)
+            | ((c.ht_mcs[2] as u64) << 28)
+            | ((c.ht_mcs[1] as u64) << 20)
+            | ((c.ht_mcs[0] as u64) << 12);
+        if c.ht_cap & IEEE80211_HT_CAP_RX_STBC as u16 != 0 {
+            stbc_en = HT_STBC_EN;
+        }
+        if c.ht_cap & IEEE80211_HT_CAP_LDPC_CODING as u16 != 0 {
+            ldpc_en = HT_LDPC_EN;
+        }
+    }
+
+    if nss == 1 {
+        ra_mask &= RA_MASK_VHT_RATES_1SS as u64 | RA_MASK_HT_RATES_1SS as u64;
+    } else if nss == 2 {
+        ra_mask &= RA_MASK_VHT_RATES_2SS as u64 | RA_MASK_HT_RATES_2SS as u64
+            | RA_MASK_VHT_RATES_1SS as u64 | RA_MASK_HT_RATES_1SS as u64;
+    }
+
+    let wireless_set;
+    let ra_mask_bak;
+    if band_2g {
+        ra_mask |= c.supp_rates as u64;
+        ra_mask_bak = ra_mask;
+        if c.vht_supported {
+            ra_mask &= RA_MASK_VHT_RATES as u64 | RA_MASK_CCK_IN_VHT as u64
+                | RA_MASK_OFDM_IN_VHT as u64;
+            wireless_set = WIRELESS_CCK | WIRELESS_OFDM | WIRELESS_HT
+                | WIRELESS_VHT;
+        } else if c.ht_supported {
+            ra_mask &= RA_MASK_HT_RATES as u64 | RA_MASK_CCK_IN_HT as u64
+                | RA_MASK_OFDM_IN_HT_2G as u64;
+            wireless_set = WIRELESS_CCK | WIRELESS_OFDM | WIRELESS_HT;
+        } else if c.supp_rates <= 0xf {
+            wireless_set = WIRELESS_CCK;
+        } else {
+            ra_mask &= RA_MASK_OFDM_RATES as u64 | RA_MASK_CCK_IN_BG as u64;
+            wireless_set = WIRELESS_CCK | WIRELESS_OFDM;
+        }
+    } else {
+        ra_mask |= (c.supp_rates as u64) << 4;
+        ra_mask_bak = ra_mask;
+        if c.vht_supported {
+            ra_mask &= RA_MASK_VHT_RATES as u64 | RA_MASK_OFDM_IN_VHT as u64;
+            wireless_set = WIRELESS_OFDM | WIRELESS_VHT;
+        } else if c.ht_supported {
+            ra_mask &= RA_MASK_HT_RATES as u64 | RA_MASK_OFDM_IN_HT_5G as u64;
+            wireless_set = WIRELESS_OFDM | WIRELESS_HT;
+        } else {
+            wireless_set = WIRELESS_OFDM;
+        }
+    }
+
+    let (bw_mode, is_support_sgi) = match c.bandwidth {
+        2 => (2u8, c.vht_supported
+              && c.vht_cap & IEEE80211_VHT_CAP_SHORT_GI_80 != 0),
+        1 => (1u8, c.ht_supported
+              && c.ht_cap & IEEE80211_HT_CAP_SGI_40 as u16 != 0),
+        _ => (0u8, c.ht_supported
+              && c.ht_cap & IEEE80211_HT_CAP_SGI_20 as u16 != 0),
+    };
+
+    if c.vht_supported || c.ht_supported {
+        tx_num = nss;
+    }
+
+    let rate_id = get_rate_id(wireless_set, bw_mode, tx_num);
+
+    ra_mask &= rate_mask_rssi(si.rssi_level, wireless_set);
+    ra_mask = rate_mask_recover(ra_mask, ra_mask_bak);
+
+    si.bw_mode = bw_mode;
+    si.stbc_en = stbc_en;
+    si.ldpc_en = ldpc_en;
+    si.sgi_enable = is_support_sgi;
+    si.vht_enable = is_vht_enable;
+    si.ra_mask = ra_mask;
+    si.rate_id = rate_id;
+    wireless_set
+}
+
+// ════════════════════════════════════════════════════════════════
+// Our own capabilities, which we must also advertise
+// ════════════════════════════════════════════════════════════════
+
+/// main.c:1580-1600 `rtw_init_ht_cap`, as a complete HT element
+/// (802.11 §9.4.2.55: id 45, 26-byte body).
+///
+/// Without this element in the association request the AP treats us as a
+/// legacy station and omits HT from its response as well.
+///
+/// `rx_ldpc` and `tx_stbc` are both `true` on the 8822C
+/// (rtw8822c.c:5391-5392).
+pub fn build_ht_cap_ie(out: &mut [u8], hw_cap_bw: u8, nss: u8) -> usize {
+    let mut cap = IEEE80211_HT_CAP_SGI_20
+        | IEEE80211_HT_CAP_MAX_AMSDU
+        | (1 << IEEE80211_HT_CAP_RX_STBC_SHIFT);
+    cap |= IEEE80211_HT_CAP_LDPC_CODING; // rx_ldpc
+    cap |= IEEE80211_HT_CAP_TX_STBC; // tx_stbc
+    // SM power save: disabled. rtw88 does not set these bits in
+    // `rtw_init_ht_cap` because in Linux mac80211 builds the element and adds
+    // them for the association request (`mlme.c:1425-1444`,
+    // `cap &= ~IEEE80211_HT_CAP_SM_PS` followed by `switch (smps)`; a normal
+    // station is `IEEE80211_SMPS_OFF` and gets `WLAN_HT_CAP_SM_PS_DISABLED`).
+    //
+    // Left unset, the bits are zero, which means `WLAN_HT_CAP_SM_PS_STATIC`:
+    // only one RX chain active. An AP honours that and sends a single
+    // spatial stream (at most MCS7).
+    cap |= WLAN_HT_CAP_SM_PS_DISABLED << IEEE80211_HT_CAP_SM_PS_SHIFT;
+    // `hw_cap.bw & BIT(RTW_CHANNEL_WIDTH_40)`
+    if hw_cap_bw & (1 << 1) != 0 {
+        cap |= IEEE80211_HT_CAP_SUP_WIDTH_20_40
+            | IEEE80211_HT_CAP_DSSSCCK40
+            | IEEE80211_HT_CAP_SGI_40;
+    }
+
+    out[0] = WLAN_EID_HT_CAPABILITY as u8;
+    out[1] = 26;
+    let b = &mut out[2..28];
+    b.fill(0);
+    b[0..2].copy_from_slice(&(cap as u16).to_le_bytes());
+    // A-MPDU: factor in bits 1:0, density in bits 4:2.
+    b[2] = (IEEE80211_HT_MAX_AMPDU_64K as u8 & 0x3)
+        | ((IEEE80211_HT_MPDU_DENSITY_2 as u8 & 0x7) << 2);
+    // Supported MCS set: rx_mask[0..10], rx_highest(2), tx_params(1), rest 0.
+    for i in 0..nss.min(4) as usize {
+        b[3 + i] = 0xff;
+    }
+    b[3 + 4] = 0x01; // `mcs.rx_mask[4] = 0x01`
+    b[3 + 10..3 + 12].copy_from_slice(&(150u16 * nss as u16).to_le_bytes());
+    b[3 + 12] = IEEE80211_HT_MCS_TX_DEFINED as u8;
+    28
+}
+
+/// main.c:1602-1643 `rtw_init_vht_cap`, as a complete VHT element
+/// (802.11 §9.4.2.157: id 191, 12-byte body).
+///
+/// Returns early if the efuse reports anything other than VHT, the same
+/// condition as in Linux. `bfee_sts_cap` is 3 (main.c:1905), and
+/// `rf_path_num > 1` holds here.
+pub fn build_vht_cap_ie(out: &mut [u8], hw_cap_ptcl: u8, nss: u8,
+                        rf_path_num: u8, ap_vht_cap: Option<u32>) -> usize {
+    if hw_cap_ptcl != EFUSE_HW_CAP_IGNORE as u8
+        && hw_cap_ptcl != EFUSE_HW_CAP_PTCL_VHT as u8
+    {
+        return 0;
+    }
+    let mut cap = IEEE80211_VHT_CAP_MAX_MPDU_LENGTH_11454
+        | IEEE80211_VHT_CAP_SHORT_GI_80
+        | IEEE80211_VHT_CAP_RXSTBC_1
+        | IEEE80211_VHT_CAP_HTC_VHT
+        | IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK;
+    if rf_path_num > 1 {
+        cap |= IEEE80211_VHT_CAP_TXSTBC;
+    }
+    cap |= IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE
+        | IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE;
+    cap |= 3 << IEEE80211_VHT_CAP_BEAMFORMEE_STS_SHIFT; // bfee_sts_cap
+    cap |= IEEE80211_VHT_CAP_RXLDPC; // rx_ldpc
+
+    // ── mac80211 trims what rtw88 set ────────────────────────────
+    //
+    // `ieee80211_add_vht_ie` (mlme.c:1481-1526). In Linux the driver's
+    // capabilities do not go out unchanged; mac80211 restricts them, and its
+    // comment says why:
+    //
+    //     Some APs apparently get confused if our capabilities are
+    //     better than theirs, so restrict what we advertise in the
+    //     assoc request.
+    //
+    // Without the AP's capabilities as reference nothing is trimmed, so a
+    // scan without the AP's beacon advertises the same as one with it.
+    if let Some(ap) = ap_vht_cap {
+        if ap & IEEE80211_VHT_CAP_SU_BEAMFORMER_CAPABLE == 0 {
+            cap &= !(IEEE80211_VHT_CAP_SU_BEAMFORMEE_CAPABLE
+                | IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE);
+        } else if ap & IEEE80211_VHT_CAP_MU_BEAMFORMER_CAPABLE == 0 {
+            cap &= !IEEE80211_VHT_CAP_MU_BEAMFORMEE_CAPABLE;
+        }
+        // Also the number of space-time streams we accept as beamformee: never
+        // more than the AP says it transmits.
+        let ap_sts = ap & IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
+        let our_sts = cap & IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
+        if ap_sts < our_sts {
+            cap &= !IEEE80211_VHT_CAP_BEAMFORMEE_STS_MASK;
+            cap |= ap_sts;
+        }
+    }
+
+    let mut mcs_map = 0u16;
+    for i in 0..8u16 {
+        let v = if (i as u8) < nss {
+            IEEE80211_VHT_MCS_SUPPORT_0_9 as u16
+        } else {
+            IEEE80211_VHT_MCS_NOT_SUPPORTED as u16
+        };
+        mcs_map |= v << (i * 2);
+    }
+    let highest = 390u16 * nss as u16;
+
+    out[0] = WLAN_EID_VHT_CAPABILITY as u8;
+    out[1] = 12;
+    let b = &mut out[2..14];
+    b[0..4].copy_from_slice(&cap.to_le_bytes());
+    b[4..6].copy_from_slice(&mcs_map.to_le_bytes()); // rx_mcs_map
+    b[6..8].copy_from_slice(&highest.to_le_bytes()); // rx_highest
+    b[8..10].copy_from_slice(&mcs_map.to_le_bytes()); // tx_mcs_map
+    b[10..12].copy_from_slice(&highest.to_le_bytes()); // tx_highest
+    14
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Block ack: answering and sending ADDBA
+//
+// In rtw88 this is mac80211's job, not the driver's:
+// `rtw_ops_ampdu_action` handles `IEEE80211_AMPDU_RX_START` with an empty
+// `break`. RX aggregation is pure 802.11 management; the hardware
+// generates the block acks itself because they must go out one SIFS
+// (16 us) after the aggregate.
+// ═══════════════════════════════════════════════════════════════════
+
+/// Contents of an ADDBA request (802.11 §9.6.7.2,
+/// `struct ieee80211_mgmt.u.action.u.addba_req`).
+#[derive(Clone, Copy, Default)]
+pub struct AddbaReq {
+    pub dialog_token: u8,
+    pub amsdu: bool,
+    pub policy: u16,
+    pub tid: u8,
+    pub buf_size: u16,
+    pub timeout: u16,
+    pub ssn: u16,
+}
+
+/// Parse the frame. `f` is the whole 802.11 frame from `frame_control`;
+/// category and action code follow the 24-byte header.
+pub fn parse_addba_req(f: &[u8]) -> Option<AddbaReq> {
+    // 24 header + category + action + token + capab + timeout + ssn
+    if f.len() < 24 + 1 + 1 + 1 + 2 + 2 + 2 {
+        return None;
+    }
+    if f[24] != DOT11_ACTION_CAT_BA || f[25] != DOT11_ACTION_ADDBA_REQ {
+        return None;
+    }
+    let capab = u16::from_le_bytes([f[27], f[28]]);
+    Some(AddbaReq {
+        dialog_token: f[26],
+        amsdu: capab & ADDBA_PARAM_AMSDU_MASK != 0,
+        policy: (capab & ADDBA_PARAM_POLICY_MASK) >> 1,
+        tid: ((capab & ADDBA_PARAM_TID_MASK) >> 2) as u8,
+        buf_size: (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6,
+        timeout: u16::from_le_bytes([f[29], f[30]]),
+        ssn: u16::from_le_bytes([f[31], f[32]]),
+    })
+}
+
+/// A DELBA (802.11-2020 §9.6.4.4): category, action, then the parameter
+/// field with the initiator bit (11) and the TID (12..15), then the reason.
+/// Returns the TID and whether the sender was the session's originator
+/// (`WLAN_BACK_INITIATOR`).
+pub fn parse_delba(f: &[u8]) -> Option<(u8, bool)> {
+    if f.len() < 24 + 1 + 1 + 2 + 2 {
+        return None;
+    }
+    if f[24] != DOT11_ACTION_CAT_BA || f[25] != DOT11_ACTION_DELBA {
+        return None;
+    }
+    let params = u16::from_le_bytes([f[26], f[27]]);
+    let tid = ((params & IEEE80211_DELBA_PARAM_TID_MASK) >> 12) as u8;
+    let initiator = (params & IEEE80211_DELBA_PARAM_INITIATOR_MASK) >> 11 == 1;
+    Some((tid, initiator))
+}
+
+/// tx.c:95-105 `get_tx_ampdu_factor`.
+///
+/// The descriptor holds not the exponent but `MAX_AGG_NUM`, whose value
+/// times two is the number of frames. The smallest A-MPDU length is 8 K,
+/// so the base is 8/2 = 4.
+///
+/// Exponents 0..3 give 3, 7, 15, 31, and 31 is the largest value the
+/// five-bit field holds.
+pub fn tx_ampdu_factor(ampdu_factor: u8) -> u8 {
+    // `0x4` rather than `4` so `seqdiff.py` can match the number against
+    // Linux's `BIT(2)`; the comparison reads hex literals.
+    (0x4u8 << ampdu_factor) - 1
+}
+
+/// tx.c:107-110 `get_tx_ampdu_density`: bits 4:2, the minimum spacing
+/// between two frames in an aggregate.
+pub fn tx_ampdu_density(ampdu_density: u8) -> u8 {
+    ampdu_density
+}
+
+/// The window size we request.
+///
+/// mac80211 uses `IEEE80211_MAX_AMPDU_BUF_HT` (64) for a non-HE station
+/// and notes why it is not the driver's value: some APs crash with
+/// smaller values (agg-tx.c:472-481).
+pub const BA_TX_BUF_SIZE: u16 = 64;
+
+/// Build the ADDBA request: `ieee80211_send_addba_request`
+/// (net/mac80211/agg-tx.c:61-101), field for field.
+///
+/// Without it every frame we send goes out individually. The per-TXOP
+/// cost (AIFS, backoff, preamble, SIFS, ACK) is nearly fixed while the
+/// data time shrinks with the rate, so on a fast link this matters most.
+///
+/// `ssn` is the sequence number the session starts at; it is shifted left
+/// by four because the low four bits of the field are the fragment number.
+///
+/// `amsdu` is set even though we build no A-MSDUs: Linux sets the bit
+/// unconditionally; it says what the sender may send, not what it sends.
+pub fn build_addba_req(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
+                       tid: u8, dialog_token: u8, ssn: u16,
+                       buf_size: u16, timeout: u16) -> usize {
+    out.fill(0);
+    out[0] = DOT11_FC_ACTION;
+    out[1] = 0x00;
+    out[4..10].copy_from_slice(bssid); // addr1 = receiver
+    out[10..16].copy_from_slice(mac); // addr2 = us
+    out[16..22].copy_from_slice(bssid); // addr3 = BSSID
+
+    out[24] = DOT11_ACTION_CAT_BA;
+    out[25] = DOT11_ACTION_ADDBA_REQ;
+    out[26] = dialog_token;
+
+    let capab = ADDBA_PARAM_AMSDU_MASK
+        | ADDBA_PARAM_POLICY_MASK // 1 = immediate block ack
+        | (((tid as u16) << 2) & ADDBA_PARAM_TID_MASK)
+        | ((buf_size << 6) & ADDBA_PARAM_BUF_SIZE_MASK);
+    out[27..29].copy_from_slice(&capab.to_le_bytes());
+    out[29..31].copy_from_slice(&timeout.to_le_bytes());
+    out[31..33].copy_from_slice(&(ssn << 4).to_le_bytes());
+    33
+}
+
+/// Contents of an ADDBA response (802.11 §9.6.7.3).
+///
+/// The field order differs from the request: here the status precedes the
+/// capabilities. Parsing both frames with one parser would read the status
+/// as the window.
+#[derive(Clone, Copy)]
+pub struct AddbaResp {
+    pub dialog_token: u8,
+    pub status: u16,
+    pub tid: u8,
+    pub buf_size: u16,
+    pub amsdu: bool,
+    pub timeout: u16,
+}
+
+/// `ieee80211_process_addba_resp` (net/mac80211/agg-tx.c:969-1000), the
+/// parsing part.
+pub fn parse_addba_resp(f: &[u8]) -> Option<AddbaResp> {
+    // 24 header + category + action + token + status + capab + timeout
+    if f.len() < 24 + 1 + 1 + 1 + 2 + 2 + 2 {
+        return None;
+    }
+    if f[24] != DOT11_ACTION_CAT_BA || f[25] != DOT11_ACTION_ADDBA_RESP {
+        return None;
+    }
+    let capab = u16::from_le_bytes([f[29], f[30]]);
+    Some(AddbaResp {
+        dialog_token: f[26],
+        status: u16::from_le_bytes([f[27], f[28]]),
+        amsdu: capab & ADDBA_PARAM_AMSDU_MASK != 0,
+        tid: ((capab & ADDBA_PARAM_TID_MASK) >> 2) as u8,
+        buf_size: (capab & ADDBA_PARAM_BUF_SIZE_MASK) >> 6,
+        timeout: u16::from_le_bytes([f[31], f[32]]),
+    })
+}
+
+/// Build the response: `ieee80211_send_addba_resp` (net/mac80211/agg-rx.c),
+/// field for field.
+///
+/// `buf_size` is our decision: the AP asks how many frames it may have
+/// outstanding, and mac80211 answers
+/// `min(requested, hw.max_rx_aggregation_subframes)`, which is
+/// `IEEE80211_MAX_AMPDU_BUF_HT` = 64 (main.c:953), not overridden by rtw88.
+///
+/// 64 is the protocol limit: the compressed block ack carries a 64-bit
+/// bitmap, one bit per frame. More requires 802.11ax (`..._BUF_HE` = 256)
+/// or 802.11be (`..._BUF_EHT` = 1024); the 8822CE is 802.11ac. The
+/// reorder buffer (`RO_WIN`) has the same size.
+///
+/// `amsdu` is set as in Linux: mac80211 sets the bit from
+/// `SUPPORTS_AMSDU_IN_AMPDU` (agg-rx.c:239, 256), and rtw88 sets that flag
+/// for the 8822C (`amsdu_in_ampdu = true`, rtw8822c.c:5356; main.c:2271).
+/// A-MSDUs are unpacked by `amsdu_to_8023s`.
+pub fn build_addba_resp(out: &mut [u8; 256], mac: &[u8; 6], bssid: &[u8; 6],
+                        req: &AddbaReq, buf_size: u16) -> usize {
+    out.fill(0);
+    out[0] = DOT11_FC_ACTION;
+    out[1] = 0x00;
+    out[4..10].copy_from_slice(bssid); // addr1 = receiver
+    out[10..16].copy_from_slice(mac); // addr2 = us
+    out[16..22].copy_from_slice(bssid); // addr3 = BSSID
+
+    out[24] = DOT11_ACTION_CAT_BA;
+    out[25] = DOT11_ACTION_ADDBA_RESP;
+    out[26] = req.dialog_token;
+    out[27..29].copy_from_slice(&WLAN_STATUS_SUCCESS.to_le_bytes());
+
+    // capab: A-MSDU on, policy and TID as requested, our window size.
+    let capab = ADDBA_PARAM_AMSDU_MASK
+        | ((req.policy << 1) & ADDBA_PARAM_POLICY_MASK)
+        | (((req.tid as u16) << 2) & ADDBA_PARAM_TID_MASK)
+        | ((buf_size << 6) & ADDBA_PARAM_BUF_SIZE_MASK);
+    out[29..31].copy_from_slice(&capab.to_le_bytes());
+    out[31..33].copy_from_slice(&req.timeout.to_le_bytes());
+    33
+}

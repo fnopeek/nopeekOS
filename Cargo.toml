@@ -5,6 +5,7 @@ exclude = [
     "tools/wasm/wallpaper",
     "tools/wasm/top",
     "tools/wasm/wifi_rtl8822ce",
+    "tools/wasm/wifiscope",
     "tools/wasm/gpu_intel_tgl",
     "tools/wasm/gpu_amd_renoir",
     "tools/wasm/gpu_bcm2712",
