@@ -5,10 +5,10 @@
 //! startup and prepare when a stream starts, prepare again for new
 //! parameters, shutdown when it ends.
 //!
-//! A stream holds the port's runtime PM from startup to shutdown, and
-//! starts only on a port whose encoder is enabled. Linux's audio paths
-//! take no reference and rely on the encoder's; holding one keeps the
-//! MAI's registers reachable for the shutdown after the output went off.
+//! As in Linux the audio paths take no runtime-PM reference of their own:
+//! a stream starts only on a port whose encoder holds it resumed, and a
+//! shutdown after the output went off leaves the registers alone (the
+//! next resume resets the port).
 
 use alloc::vec::Vec;
 use drm_core::drm_connector::{drm_connector_status, MAX_ELD_BYTES};
@@ -124,28 +124,25 @@ fn params() -> Option<Stream> {
     Some(s)
 }
 
-/// `audio_startup` on `port` with its runtime PM held; false when the
-/// encoder is off or the codec refused.
+/// `audio_startup` on `port`; false when the encoder is off or the codec
+/// refused.
 fn start(vc4: &mut Vc4, hw: &mut PiHw, port: usize) -> bool {
     if !vc4.hdmi[port].pm_runtime_active() {
         Line::new().s("audio: port ").dec(port as u64).s(" has no output, no stream").say();
         return false;
     }
-    if vc4.hdmi[port].pm_runtime_resume_and_get(hw, &mut vc4.clocks).is_err() {
-        return false;
-    }
     let ret = vc4.audio_startup(hw, port);
     if ret != 0 {
         Line::new().s("audio: startup on port ").dec(port as u64).s(" failed: -").dec(ret.unsigned_abs() as u64).say();
-        vc4.hdmi[port].pm_runtime_put(hw, &mut vc4.clocks);
         return false;
     }
     true
 }
 
-/// `audio_shutdown` on `port`, then its runtime PM released.
+/// `audio_shutdown` on `port` while its encoder keeps it resumed.
 fn stop(vc4: &mut Vc4, hw: &mut PiHw, port: usize) {
-    vc4.audio_shutdown(hw, port);
-    vc4.hdmi[port].pm_runtime_put(hw, &mut vc4.clocks);
+    if vc4.hdmi[port].pm_runtime_active() {
+        vc4.audio_shutdown(hw, port);
+    }
     Line::new().s("audio: port ").dec(port as u64).s(" stopped").say();
 }
