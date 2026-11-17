@@ -1116,20 +1116,32 @@ pub fn place_worker(claim: bool) -> usize {
 }
 
 /// Up to `n` distinct cores for short-lived helper fibers (the disk-image
-/// prefetch): never a vCPU's core or a pumping driver's, protected host cores
-/// first (vCPUs never go there), then any other. At least one core.
+/// prefetch): never a vCPU's core or a pumping driver's, and never one of
+/// the free cores the guest's APs will be placed on when it starts them. A
+/// helper beside a vCPU holds the vCPU out of its guest for a whole chunk
+/// read, and the guest's other vCPUs then wait on it in their IPIs and TLB
+/// flushes. Protected host cores first (vCPUs never go there), then the
+/// other host cores, Core 0 among them, then free cores the APs leave over.
+/// At least one core.
 pub fn place_helpers(n: usize) -> alloc::vec::Vec<usize> {
     let ncores = crate::smp::per_core::core_count().min(32);
-    let all = ((1u64 << ncores) - 1) as u32 & !1;
-    let mut taken = VCPU_CORES.load(Ordering::Acquire);
+    let all = ((1u64 << ncores) - 1) as u32;
+    let vcpus = VCPU_CORES.load(Ordering::Acquire);
+    let mut taken = vcpus;
     if let Some(c) = crate::netdev::wasm_nic_core() { taken |= 1 << c; }
     if let Some(c) = crate::wifi::manager_core() { taken |= 1 << c; }
+    let free = all & !1 & !VM_CORE_MASK.load(Ordering::Acquire) & !taken;
+    let aps_left = (guest_vcpus() as u32).saturating_sub(vcpus.count_ones());
+    let mut spare = free.count_ones().saturating_sub(aps_left);
     let protected = PROTECTED_CORES.load(Ordering::Acquire);
+    let host = all & !free;
     let mut out = alloc::vec::Vec::new();
     for _ in 0..n {
-        let Some(c) = least_fibered(all & protected & !taken)
-            .or_else(|| least_fibered(all & !taken))
-        else { break };
+        let c = least_fibered_or_zero(protected & !taken)
+            .or_else(|| least_fibered_or_zero(host & !taken))
+            .or_else(|| if spare > 0 { least_fibered_or_zero(free & !taken) } else { None });
+        let Some(c) = c else { break };
+        if free & (1 << c) != 0 { spare -= 1; }
         taken |= 1 << c;
         out.push(c);
     }
@@ -1137,6 +1149,14 @@ pub fn place_helpers(n: usize) -> alloc::vec::Vec<usize> {
         out.push(place_worker(false));
     }
     out
+}
+
+/// `least_fibered` over every core in `candidates`, Core 0 included.
+fn least_fibered_or_zero(candidates: u32) -> Option<usize> {
+    let n = crate::smp::per_core::core_count().min(32);
+    (0..n)
+        .filter(|&c| candidates & (1 << c) != 0)
+        .min_by_key(|&c| crate::smp::fiber::fiber_count(c))
 }
 
 /// Reserve a distinct idle worker core (1..core_count()) for an AP vCPU fiber,
