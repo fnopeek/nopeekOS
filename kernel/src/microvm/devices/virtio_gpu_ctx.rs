@@ -145,7 +145,13 @@ fn timelines() -> Timelines {
 }
 
 /// The GPU driver side offers native contexts (stage 7).
+/// The first ccmds of a VM, logged with how they ended: the trail of a
+/// native context that stops early.
+const CCMDS_LOGGED: u32 = 24;
+static CCMDS_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 pub fn set_backend(b: Option<Box<dyn Backend>>) {
+    CCMDS_SEEN.store(0, core::sync::atomic::Ordering::Relaxed);
     *TIMELINES.lock() = b.as_ref().map_or(Timelines::NONE, |b| b.timelines());
     *BACKEND.lock() = b;
 }
@@ -417,6 +423,10 @@ fn run_submit_inner(job: &SubmitJob, stream: &[u8], deadline: u64) -> Result<u64
         let mut rsp = Vec::new();
         super::gpu_backend::note(super::gpu_backend::STAT_CCMD, 1);
         let ran = b.ccmd(job.handle, &stream[off..off + len], &mut rsp, deadline);
+        if CCMDS_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < CCMDS_LOGGED {
+            crate::kprintln!("[gpu] ccmd {} ({} B) on context {:#x} ring {}: {}, {} B response",
+                word(0), len, job.handle, job.ring, if ran.is_ok() { "ok" } else { "refused" }, rsp.len());
+        }
         // The header (amdgpu's `async_error`) is written even when the
         // handler failed: the guest reads it to see the context lost.
         let words = b.shmem_update(job.handle, false);

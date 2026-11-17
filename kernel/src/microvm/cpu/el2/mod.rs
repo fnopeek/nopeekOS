@@ -474,7 +474,7 @@ impl VmContext {
     fn device_deadline(&self) -> Option<u64> {
         let sh = self.shared.dev.try_lock()?;
         let mut dev = crate::microvm::devices::gpu_backend::resume_tsc();
-        if sh.pci.virtio_snd.playing() {
+        if sh.pci.virtio_snd.playing() || crate::microvm::devices::gpu_backend::waits_inline() {
             let t = crate::time::counter() + crate::time::counter_hz() / 1000;
             dev = Some(dev.map_or(t, |d| d.min(t)));
         }
@@ -1078,7 +1078,7 @@ fn collect_device_irqs(sh: &mut VmDevices, gm: &GuestMem, me: u8) {
     if gpu_backend::take_irq() {
         raise_line(virtio_gpu_pci::IRQ_LINE, me);
     }
-    if gpu_backend::vblank(crate::time::counter(), gm) {
+    if gpu_backend::vblank(crate::time::counter(), gm) || gpu_backend::retire_inline(gm) {
         raise_line(virtio_gpu_pci::IRQ_LINE, me);
     }
     if sh.pci.virtio_snd.pump(gm) {

@@ -164,6 +164,26 @@ pub fn vblank(now: u64, gm: &super::guest_mem::GuestMem) -> bool {
     (advanced | after_inline_service(&mut gpu, gm)) && !notify_queue(0)
 }
 
+/// Without a worker, fenced completions and held FLUSHes wait for a vCPU
+/// to look again: the guest waits on those fences, so no kick of its own
+/// brings them.
+pub fn waits_inline() -> bool {
+    !WORKER_RUNNING.load(Ordering::Acquire) && GPU.try_lock().is_some_and(|g| g.retire_waits())
+}
+
+/// `waits_inline`'s look, from a vCPU: what is done goes back to the
+/// guest. True when its interrupt should be raised.
+pub fn retire_inline(gm: &super::guest_mem::GuestMem) -> bool {
+    if WORKER_RUNNING.load(Ordering::Acquire) {
+        return false;
+    }
+    let Some(mut gpu) = GPU.try_lock() else { return false };
+    if !gpu.retire_waits() {
+        return false;
+    }
+    gpu.retire(gm) && !notify_queue(0)
+}
+
 /// After a vCPU served the controlq itself: a SUBMIT_3D it stopped at
 /// goes to the worker if there is one, so the vCPU does not wait for the
 /// GPU driver. Without a worker it runs here, under the device lock the
