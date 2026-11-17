@@ -810,7 +810,26 @@ pub const GUEST_SMP: bool = true;
 /// stable) by the MP-table builder, the `maxcpus=` cmdline, and the IPI
 /// broadcast loops — all see the same value for one run.
 pub fn guest_vcpus() -> u8 {
-    vcpu_cores().clamp(1, MAX_VCPUS_CAP) as u8
+    let n = match asked_vcpus() {
+        0 => vcpu_cores(),
+        n => n.min(crate::smp::per_core::core_count().saturating_sub(1)),
+    };
+    n.clamp(1, MAX_VCPUS_CAP) as u8
+}
+
+/// `set microvm_vcpus N`: the guest's vCPUs, one per worker core at most
+/// (Core 0 is never one). More than fit beside a reserved net worker core
+/// gives up that reservation: the worker then shares a vCPU's core
+/// (`reserve_offload_core`). 0 when unset. Snapshotted while no VM exists,
+/// as `guest_vcpus` must not change under a running guest.
+static ASKED_VCPUS: AtomicU32 = AtomicU32::new(0);
+
+fn asked_vcpus() -> usize {
+    if VM_RUN_STATE.load(Ordering::Acquire) == VM_IDLE {
+        let n = crate::config::get("microvm_vcpus").and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or(0);
+        ASKED_VCPUS.store(n, Ordering::Release);
+    }
+    ASKED_VCPUS.load(Ordering::Acquire) as usize
 }
 
 /// Cores left for vCPUs once Core 0, the net worker and the protected cores
@@ -895,7 +914,10 @@ fn reserve_offload_core() -> bool {
     //
     // Needs >= 3 cores: Core 0 + >= 1 vCPU + 1 worker. Below that,
     // co-location is the lesser evil against starving the guest.
-    RESERVE_OFFLOAD_CORE && crate::smp::per_core::core_count() >= 3
+    let cores = crate::smp::per_core::core_count();
+    // Asked for more vCPUs than leave the worker a core of its own.
+    let beside = cores.saturating_sub(2).saturating_sub(protected_cores().count_ones() as usize);
+    RESERVE_OFFLOAD_CORE && cores >= 3 && asked_vcpus() <= beside
 }
 
 /// Run the GPU backend (the per-frame framebuffer copy + write_frame) off the
