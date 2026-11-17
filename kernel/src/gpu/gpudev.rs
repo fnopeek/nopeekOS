@@ -1078,9 +1078,14 @@ pub fn bo_for_format(addr: u64, size: u64, width: u32, height: u32, pitch: u32, 
             return Some(id);
         }
         // Freed without `release` and the address reused for a different
-        // buffer: the module forgets the old one.
+        // buffer: the module forgets the old one, after the scene being
+        // encoded if that names it already (as `bo_for_pages` does).
         st.by_addr.remove(&addr);
-        retire(&mut st, id, None);
+        if st.pinned.contains(&id) {
+            st.deferred.push((id, None));
+        } else {
+            retire(&mut st, id, None);
+        }
     }
     let id = st.next_id;
     st.next_id += 1;

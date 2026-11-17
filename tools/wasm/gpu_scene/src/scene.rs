@@ -32,6 +32,15 @@ fn refused(line: u32) -> i32 {
 pub fn refused_at() -> u32 {
     REFUSED_AT.swap(0, core::sync::atomic::Ordering::Relaxed)
 }
+
+static UNKNOWN_BUFFER: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// The source buffer the last refused scene named and the module did not
+/// know, if that was why.
+pub fn unknown_buffer() -> Option<u32> {
+    let v = UNKNOWN_BUFFER.swap(u32::MAX, core::sync::atomic::Ordering::Relaxed);
+    (v != u32::MAX).then_some(v)
+}
 const ENOMEM: i32 = 12;
 const E2BIG: i32 = 7;
 const PAGE: u32 = 4096;
@@ -320,7 +329,10 @@ pub fn check_scene(job: &dyn payload, bytes: u32, bufs: &dyn buffers, mem: &mut 
             return Err(refused(line!()));
         }
         let src = |id: u32| -> Result<Option<surface>, i32> {
-            let s = bufs.surface(id).ok_or_else(|| refused(line!()))?;
+            let s = bufs.surface(id).ok_or_else(|| {
+                UNKNOWN_BUFFER.store(id, core::sync::atomic::Ordering::Relaxed);
+                refused(line!())
+            })?;
             if s.width == 0 || s.height == 0 {
                 return Ok(None);
             }

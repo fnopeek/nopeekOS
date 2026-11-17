@@ -406,6 +406,9 @@ impl Scenes {
                 if at != 0 {
                     l.s(" by gpu_scene/src/scene.rs:").dec(at as u64);
                 }
+                if let Some(id) = gpu_scene::scene::unknown_buffer() {
+                    l.s(", source buffer ").dec(id as u64).s(" not bound here");
+                }
                 l.say();
                 Some(e)
             }

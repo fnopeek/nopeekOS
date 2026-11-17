@@ -179,8 +179,9 @@ fn clock_unprepare(min: u32, t: &mut Phases) {
 
 /// Power transitions reported in full; after them only the slow ones.
 const POWER_REPORTED: u32 = 4;
-/// A transition this slow (us) is reported always.
-const POWER_SLOW_US: u64 = 2000;
+/// A transition this slow (us) is reported always: a usual one takes
+/// about 4.5 ms, nearly all of it the firmware switching the clock.
+const POWER_SLOW_US: u64 = 20_000;
 static POWER_REPORTS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// The steps of one power transition, timed.

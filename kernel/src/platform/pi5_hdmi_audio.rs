@@ -9,12 +9,19 @@
 //! A port with a sink enters the device register as an audio output. The
 //! stream runs while that output plays the mix and a stream is open, as an
 //! ALSA PCM runs while an application holds it open.
+//!
+//! The ring holds `PERIODS` periods. Each completed period refills it in
+//! the DMA interrupt, when the stream and the mixer are free at that
+//! moment (never waited for there), else in the driver's fiber, which the
+//! interrupt wakes: a fiber alone can be held up behind a busy one on its
+//! core for longer than the ring lasts.
 
 use crate::audio::{self, Encoding, Format};
 use crate::devices::{self, Kind, Owner};
 use crate::kprintln;
 use crate::smp::fiber;
 use core::sync::atomic::{AtomicU32, Ordering};
+use spin::Mutex;
 use pi5_core::iec958::{self, Encoder};
 
 const RATE: u32 = 48000;
@@ -47,7 +54,20 @@ fn ms(n: u64) -> u64 {
     n * (crate::time::counter_hz() / 1000)
 }
 
+/// The running stream; the fiber starts and stops it, the interrupt and
+/// the fiber refill it.
+static STREAM: Mutex<Option<Stream>> = Mutex::new(None);
+/// `audio::kernel_serves`, as the fiber last saw it, for the interrupt.
+static SERVES: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
+/// In interrupt context: refill when nothing holds the stream or the
+/// mixer, and wake the fiber, which reports and refills otherwise.
 fn on_period() {
+    if let Some(mut g) = STREAM.try_lock() {
+        if let Some(s) = g.as_mut() {
+            s.refill(true);
+        }
+    }
     let w = WAKER.load(Ordering::Acquire);
     if w != u32::MAX {
         fiber::signal(w, fiber::SIG_EVENT);
@@ -79,6 +99,9 @@ struct Stream {
     written: u64,
     enc: Encoder,
     mix: alloc::vec::Vec<u8>,
+    /// One period of subframes, encoded before it goes to the ring (on the
+    /// heap: the interrupt runs on the stack of whatever it interrupted).
+    frames: alloc::vec::Vec<u32>,
     /// Refills that came after the controller had reached a period not
     /// written since its last turn, and the periods it played again.
     late: u64,
@@ -92,28 +115,35 @@ struct Stream {
 }
 
 impl Stream {
-    /// Mix one period into ring slot `written % PERIODS`.
-    fn fill_one(&mut self) {
-        audio::poll_mix_as(Owner::Kernel, &mut self.mix);
-        let mut frames = [0u32; PERIOD_FRAMES * CHANNELS];
-        for (i, s) in frames.iter_mut().enumerate() {
+    /// Mix one period into ring slot `written % PERIODS`. In interrupt
+    /// context (`irq`) only when the mixer is free; false when it was not.
+    fn fill_one(&mut self, irq: bool) -> bool {
+        if irq {
+            if audio::try_poll_mix_as(Owner::Kernel, SERVES.load(Ordering::Acquire), &mut self.mix).is_none() {
+                return false;
+            }
+        } else {
+            audio::poll_mix_as(Owner::Kernel, &mut self.mix);
+        }
+        for (i, s) in self.frames.iter_mut().enumerate() {
             let b = &self.mix[i * 4..i * 4 + 4];
             *s = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         }
-        self.enc.encode(&mut frames, CHANNELS);
+        self.enc.encode(&mut self.frames, CHANNELS);
         let slot = (self.written % PERIODS as u64) as usize;
         let dst = self.ring + (slot * PERIOD_BYTES) as u64;
-        for (i, w) in frames.iter().enumerate() {
+        for (i, w) in self.frames.iter().enumerate() {
             // SAFETY: inside the ring `pi5_hdmi_dma::open` returned, which
             // stays allocated until `close`; uncached, so the controller
             // reads what is written.
             unsafe { core::ptr::write_volatile((dst + i as u64 * 4) as *mut u32, *w) };
         }
         self.written += 1;
+        true
     }
 
     /// Keep `PERIODS - 1` periods ahead of the controller.
-    fn refill(&mut self) {
+    fn refill(&mut self, irq: bool) {
         let done = super::pi5_hdmi_dma::periods();
         if self.written < done + 1 {
             // The controller caught up: it plays whatever the slots hold.
@@ -122,9 +152,10 @@ impl Stream {
             self.written = done + 1;
         }
         while self.written < done + PERIODS as u64 {
-            self.fill_one();
+            if !self.fill_one(irq) {
+                return;
+            }
         }
-        self.report(done);
     }
 
     /// Every `REPORT_MS`: the rate the controller plays at since the start,
@@ -154,14 +185,15 @@ impl Stream {
 }
 
 /// Open the ring, have the display driver prepare the port, start.
-fn start(port: usize) -> Option<Stream> {
-    let status = iec958::consumer_status(RATE)?;
-    let ring = super::pi5_hdmi_dma::open(port, PERIODS, PERIOD_BYTES, on_period)?;
+fn start(port: usize) -> bool {
+    let Some(status) = iec958::consumer_status(RATE) else { return false };
+    let Some(ring) = super::pi5_hdmi_dma::open(port, PERIODS, PERIOD_BYTES, on_period) else { return false };
     let mut s = Stream {
         ring,
         written: 0,
         enc: Encoder::new(status),
         mix: alloc::vec![0u8; PERIOD_BYTES],
+        frames: alloc::vec![0u32; PERIOD_FRAMES * CHANNELS],
         late: 0,
         replayed: 0,
         started: 0,
@@ -170,7 +202,7 @@ fn start(port: usize) -> Option<Stream> {
         dry_then: (0, 0),
     };
     for _ in 0..PERIODS - 1 {
-        s.fill_one();
+        s.fill_one(false);
     }
     let params = audio::display_audio_pack(port as u32, CHANNELS as u32, RATE);
     let seq = audio::display_audio_stream(Some(params));
@@ -181,12 +213,13 @@ fn start(port: usize) -> Option<Stream> {
             if seq.is_none() { "no display driver bound" } else { "request not carried out" });
         let _ = audio::display_audio_stream(None);
         super::pi5_hdmi_dma::close();
-        return None;
+        return false;
     }
-    super::pi5_hdmi_dma::start();
     s.started = crate::time::counter();
     s.reported = s.started;
     s.dry_then = audio::dry_counts();
+    *STREAM.lock() = Some(s);
+    super::pi5_hdmi_dma::start();
     let _ = fiber::wait(0, crate::time::counter() + ms(100));
     if let Some((mai, sched, cs)) = super::pi5_hdmi_dma::mai_state() {
         // SCALER6_VERSION: 0x54 on D0 silicon, whose tree moves the DREQs.
@@ -198,12 +231,15 @@ fn start(port: usize) -> Option<Stream> {
     }
     STARTS.fetch_add(1, Ordering::Relaxed);
     STREAMING.store(port as u32, Ordering::Release);
-    Some(s)
+    true
 }
 
 fn stop() {
     STREAMING.store(NONE, Ordering::Release);
     super::pi5_hdmi_dma::stop();
+    // After the controller stopped, before its ring goes: the interrupt
+    // finds no stream from here on.
+    *STREAM.lock() = None;
     if let Some(seq) = audio::display_audio_stream(None) {
         let _ = carried_out(seq);
     }
@@ -217,7 +253,8 @@ fn audio_fiber(_: u64) {
     let fmt = Format { rate: RATE, encoding: Encoding::S32, channels: CHANNELS as u8 };
     audio::set_device_format_as(Owner::Kernel, fmt);
     let mut entered: Option<(usize, u32)> = None;
-    let mut stream: Option<(usize, Stream)> = None;
+    // The port the stream runs on.
+    let mut stream: Option<usize> = None;
     let mut idle_since: Option<u64> = None;
     loop {
         let sink = port_with_sink();
@@ -241,18 +278,25 @@ fn audio_fiber(_: u64) {
                 kprintln!("[npk] hdmi audio: HDMI{} has an audio sink", p);
             }
         }
-        let want = entered.is_some() && audio::kernel_serves() && audio::any_open();
+        let serves = audio::kernel_serves();
+        SERVES.store(serves, Ordering::Release);
+        let want = entered.is_some() && serves && audio::any_open();
         let now = crate::time::counter();
         idle_since = if want { None } else { Some(idle_since.unwrap_or(now)) };
         match (&mut stream, entered) {
             (None, Some((p, _))) if want => {
-                stream = start(p).map(|s| (p, s));
+                stream = start(p).then_some(p);
             }
             (Some(_), _) if idle_since.is_some_and(|t| now - t > ms(IDLE_STOP_MS)) => {
                 stream = None;
                 stop();
             }
-            (Some((_, s)), _) => s.refill(),
+            (Some(_), _) => {
+                if let Some(s) = STREAM.lock().as_mut() {
+                    s.refill(false);
+                    s.report(super::pi5_hdmi_dma::periods());
+                }
+            }
             _ => {}
         }
         let next = if stream.is_some() { ms(PERIODS as u64 * 10) } else { ms(POLL_MS) };

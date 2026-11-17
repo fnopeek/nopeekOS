@@ -417,9 +417,23 @@ pub fn poll_mix(pid: u32, out: &mut [u8]) -> usize {
 
 /// `poll_mix` for a driver of any owner, the kernel's own too.
 pub fn poll_mix_as(owner: crate::devices::Owner, out: &mut [u8]) -> usize {
-    let vol = VOLUME.load(Ordering::Relaxed) as i64;
     let serving = serves(owner);
     let mut m = MIXER.lock();
+    mix(&mut m, owner, serving, out, false)
+}
+
+/// `poll_mix_as` from interrupt context, with `serving` (`kernel_serves`)
+/// known from before, as that looks into the device register: None,
+/// without waiting, while the mixer is held. Nothing is allocated or
+/// freed; a one-shot sound that ended is closed by the next `poll_mix_as`.
+#[cfg(target_arch = "aarch64")]
+pub fn try_poll_mix_as(owner: crate::devices::Owner, serving: bool, out: &mut [u8]) -> Option<usize> {
+    let mut m = MIXER.try_lock()?;
+    Some(mix(&mut m, owner, serving, out, true))
+}
+
+fn mix(m: &mut Mixer, owner: crate::devices::Owner, serving: bool, out: &mut [u8], irq: bool) -> usize {
+    let vol = VOLUME.load(Ordering::Relaxed) as i64;
     let dev = m.devices.iter().find(|d| d.0 == owner).map_or(DEFAULT_FORMAT, |d| d.1);
     let fb = dev.frame_bytes();
     if !serving {
@@ -437,7 +451,9 @@ pub fn poll_mix_as(owner: crate::devices::Owner, out: &mut [u8]) -> usize {
             let step = ((s.fmt.rate as u64) << 32) / dev.rate as u64;
             let Some(x) = s.next_frame(step) else {
                 if s.auto_close {
-                    s.stop();
+                    if !irq {
+                        s.stop();
+                    }
                 } else if s.fed {
                     s.fed = false;
                     DRY_TIMES.fetch_add(1, Ordering::Relaxed);
@@ -458,7 +474,9 @@ pub fn poll_mix_as(owner: crate::devices::Owner, out: &mut [u8]) -> usize {
             encode(dev.encoding, v, &mut out[o + c * sb..o + c * sb + sb]);
         }
     }
-    shrink(&mut m.slots);
+    if !irq {
+        shrink(&mut m.slots);
+    }
     frames * fb
 }
 
