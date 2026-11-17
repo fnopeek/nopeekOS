@@ -250,6 +250,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  VA=iHD; grep -qE 'npkgpu=amdgpu( |$)' /proc/cmdline && VA=radeonsi; \
                  HW=$GPU; grep -qE 'npkgpu=v3d( |$)' /proc/cmdline && { HW=0; VA=; }; \
                  EGLV=/opt/npk-mesa/share/glvnd/egl_vendor.d/50_mesa.json; \
+                 [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && export __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV LD_LIBRARY_PATH=/opt/npk-mesa/lib; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm WLR_LIBINPUT_NO_DEVICES=1 \
                  LIBSEAT_BACKEND=seatd \
@@ -386,7 +387,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
                  [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && [ -x /usr/bin/eglinfo ] && \
-                   su -s /bin/sh app -c \"XDG_RUNTIME_DIR=/tmp/xrt WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV EGL_LOG_LEVEL=debug MESA_DEBUG=1 eglinfo -B -p wayland 2>&1\" | head -60 | sed 's/^/<0>[egl] /' > /dev/kmsg & \
+                   su -s /bin/sh app -c \"XDG_RUNTIME_DIR=/tmp/xrt WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV LD_LIBRARY_PATH=/opt/npk-mesa/lib EGL_LOG_LEVEL=debug MESA_DEBUG=1 eglinfo -B -p wayland 2>&1\" | head -60 | sed 's/^/<0>[egl] /' > /dev/kmsg & \
                  i=0; while [ ! -S /tmp/xrt/pulse/native ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  if [ -S /tmp/xrt/pulse/native ]; then echo \"<0>[pw] pipewire-pulse up after ${i}x5ms\" > /dev/kmsg; \
                  else echo '<0>[pw] pipewire-pulse did not come up' > /dev/kmsg; \
@@ -412,7 +413,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
                  [ $GPU = 1 ] && [ -n \"$VA\" ] && echo \"export LIBVA_DRIVER_NAME=$VA\" >> /tmp/app.sh; \
-                 [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && echo \"export __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV\" >> /tmp/app.sh; \
+                 [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && echo \"export __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV LD_LIBRARY_PATH=/opt/npk-mesa/lib\" >> /tmp/app.sh; \
                  echo 'export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus' >> /tmp/app.sh; \
                  [ $FR = 1 ] && echo 'export MOZ_LOG=FFmpegVideo:4' >> /tmp/app.sh; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \

@@ -4,7 +4,8 @@
 # in a throwaway Arch Linux ARM root run through qemu-user
 # (microvm/linux/alarm.sh).
 #
-# Only the v3d Gallium driver, OpenGL ES and EGL for Wayland, no LLVM. It
+# Only the v3d Gallium driver, OpenGL ES, EGL for Wayland and GBM (the
+# guest's GLES2 compositor allocates through it), no LLVM. It
 # installs below /opt/npk-mesa with its own RUNPATH, beside Arch Linux
 # ARM's mesa, which stays for llvmpipe: libgallium carries the release in
 # its name, so the two would collide in one directory. The guest's init
@@ -34,7 +35,7 @@ MESON_OPTS="--prefix=$PREFIX --buildtype=release -Db_ndebug=true
     -Dc_link_args=-Wl,-rpath,$PREFIX/lib -Dcpp_link_args=-Wl,-rpath,$PREFIX/lib
     -Dgallium-drivers=v3d -Dvulkan-drivers=[] -Dplatforms=wayland
     -Dglx=disabled -Dglvnd=enabled -Degl=enabled -Dgles1=disabled -Dgles2=enabled -Dopengl=true
-    -Dgbm=disabled -Dllvm=disabled -Dvideo-codecs=[] -Dgallium-va=disabled
+    -Dgbm=enabled -Dllvm=disabled -Dvideo-codecs=[] -Dgallium-va=disabled
     -Dlibunwind=disabled -Dvalgrind=disabled -Dlmsensors=disabled -Dzstd=enabled"
 
 mkdir -p "$CACHE"
@@ -73,4 +74,4 @@ guest_run "$STAGE/root" "
 "
 cp "$STAGE/out.tar.gz" "$OUT"
 echo "$OUT: $(stat -c%s "$OUT") bytes"
-tar -tzf "$OUT" | grep -E "libEGL_mesa|libgallium|50_mesa"
+tar -tzf "$OUT" | grep -E "libEGL_mesa|libgallium|libgbm|dri_gbm|50_mesa"

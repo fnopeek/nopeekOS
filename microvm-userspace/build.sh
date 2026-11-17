@@ -129,7 +129,7 @@ if [ "$GUEST_ARCH" = x86_64 ]; then
     arch_fetch
     green "verified $ARCH_TARBALL, packages from snapshot $ARCH_SNAPSHOT"
 else
-    for f in npkwm/npkwm portal/portal-npk portal/npk-capture-probe npkcam/npk-camera; do
+    for f in npkwm/npkwm npkwm/npkwm-gles2 portal/portal-npk portal/npk-capture-probe npkcam/npk-camera; do
         [ -f "$REPO_ROOT/microvm/linux/$f$GUEST_SUFFIX" ] \
             || { red "missing microvm/linux/$f$GUEST_SUFFIX — run ARCH=aarch64 microvm/linux/${f%%/*}/build.sh"; exit 1; }
     done
@@ -274,12 +274,11 @@ guest_run "$WORK/root" "
     # The compositor for a guest with a GPU (microvm/linux/npkwm/build.sh
     # gles2); the init runs it instead of PID-1's npkwm when the host offers
     # native contexts.
-    # Not on aarch64: its compositor stays on pixman.
+    # On aarch64 it composes through /opt/npk-mesa's v3d (the init points
+    # EGL and GBM there).
     NPKWMS=\$REPO_ROOT/microvm/linux/npkwm/npkwm\$GUEST_SUFFIX
-    if [ \"\$GUEST_ARCH\" = x86_64 ]; then
-        install -D -m 0755 \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2 \$R/usr/libexec/npk/npkwm-gles2
-        NPKWMS=\"\$NPKWMS \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2\"
-    fi
+    install -D -m 0755 \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2\$GUEST_SUFFIX \$R/usr/libexec/npk/npkwm-gles2
+    NPKWMS=\"\$NPKWMS \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2\$GUEST_SUFFIX\"
     # The guest's portal backend (microvm/linux/portal): Access, without
     # which xdg-desktop-portal offers no Camera portal, and ScreenCast.
     install -D -m 0755 \$REPO_ROOT/microvm/linux/portal/portal-npk\$GUEST_SUFFIX \$R/usr/libexec/npk/portal-npk
