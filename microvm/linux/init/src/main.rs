@@ -150,7 +150,10 @@ fn launch_wayland(kmsg_fd: i64) {
     // wlroots finds no input devices and never reacts to the DRM
     // hotplug raised on a tile resize. `trigger` replays uevents for
     // already-present devices (event0, card0); `settle` waits for
-    // /run/udev/data to be populated before npkwm enumerates. Degrades
+    // /run/udev/data to be populated before npkwm enumerates. udevd
+    // forks before it listens and loads its rules, and trigger and settle
+    // count a udevd that is not listening yet as done (`udev_ping` with
+    // `ignore_connection_failure`): a ping waits for it first. Degrades
     // with a WARN if udev is absent — npkwm still starts, just
     // input/hotplug-blind. `WLR_LIBINPUT_NO_DEVICES`: an input device that
     // appears only after the settle (a guest still probing) arrives through
@@ -243,7 +246,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  mkdir -p /run/udev; \
                  echo '<0>[init] tmpfs and users ready' > /dev/kmsg; \
                  /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null; \
-                 echo '<0>[init] udevd started' > /dev/kmsg; \
+                 i=0; until udevadm control --ping --timeout=10 2>/dev/null || [ $i -ge 200 ]; do sleep 0.01; i=$((i+1)); done; \
+                 echo \"<0>[init] udevd started (answered after $i retries)\" > /dev/kmsg; \
                  udevadm trigger --type=devices --action=add --subsystem-match=drm --subsystem-match=input --subsystem-match=sound 2>/dev/null; \
                  echo '<0>[init] udev triggered' > /dev/kmsg; \
                  udevadm settle --timeout=10 2>/dev/null; \
