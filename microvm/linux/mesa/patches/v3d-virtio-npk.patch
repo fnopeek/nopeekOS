@@ -1,0 +1,1308 @@
+Gallium v3d over a virtio-gpu DRM native context (context type 6,
+docs/spec/V3D_NATIVE_CONTEXT.md in nopeekOS).
+
+The loader picks v3d for a virtio_gpu render node whose DRM capset has
+context_type 6 (v3d_drm_probe_nctx). The screen then routes its DRM
+ioctls through screen->ioctl: natively to the v3d kernel driver, or
+through vdrm to the host as ccmds (v3d_virtio.c). Static GET_PARAMs come
+from the capset; PERFMON, MULTISYNC_EXT and CPU_QUEUE are reported
+unsupported. Submissions run on ring 1 with the guest's syncobjs.
+
+Apply with: patch -p1 against mesa-26.2.7.
+
+diff --git a/meson.build b/meson.build
+index 37f2fd4..c3158d1 100644
+--- a/meson.build
++++ b/meson.build
+@@ -354,6 +354,7 @@ endif
+ 
+ with_vdrm = [
+   with_amdgpu_virtio,
++  with_gallium_v3d,
+   freedreno_kmds.contains('virtio'),
+   with_gallium_asahi,
+   with_asahi_vk,
+diff --git a/src/broadcom/common/v3d_virtio_proto.h b/src/broadcom/common/v3d_virtio_proto.h
+new file mode 100644
+index 0000000..2641d7c
+--- /dev/null
++++ b/src/broadcom/common/v3d_virtio_proto.h
+@@ -0,0 +1,147 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++/* The V3D virtio-gpu native context wire format: V3D's DRM ioctls sent
++ * as ccmds. All fields are little-endian; every request is a multiple of
++ * 8 bytes. A response starts with its length and a negative errno or 0.
++ */
++
++#ifndef V3D_VIRTIO_PROTO_H
++#define V3D_VIRTIO_PROTO_H
++
++#include <assert.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#include "virtio/virtio-gpu/drm_hw.h"
++
++enum v3d_ccmd {
++   V3D_CCMD_NOP = 1,
++   V3D_CCMD_CREATE_BO,
++   V3D_CCMD_GET_BO_OFFSET,
++   V3D_CCMD_WAIT_BO,
++   V3D_CCMD_SUBMIT_CL,
++   V3D_CCMD_SUBMIT_TFU,
++   V3D_CCMD_SUBMIT_CSD,
++   V3D_CCMD_GET_PARAM,
++};
++
++/* The ring that submissions run on, in order. */
++#define V3D_VIRTIO_RING_IDX 1
++
++#define V3D_CCMD(_cmd, _len) (struct vdrm_ccmd_req){ \
++      .cmd = V3D_CCMD_##_cmd,                       \
++      .len = (_len),                                \
++   }
++
++struct v3d_shmem {
++   struct vdrm_shmem base;
++
++   /* Submissions the host refused or that failed on the GPU. */
++   uint32_t async_error;
++   uint32_t pad;
++};
++
++struct v3d_ccmd_rsp {
++   struct vdrm_ccmd_rsp hdr;
++   int32_t ret;
++};
++
++/* Sent inside VIRTGPU_RESOURCE_CREATE_BLOB (HOST3D, blob_id). */
++struct v3d_ccmd_create_bo_req {
++   struct vdrm_ccmd_req hdr;
++   uint32_t size;
++   uint32_t flags;
++   uint32_t blob_id;
++   uint32_t pad;
++};
++
++struct v3d_ccmd_get_bo_offset_req {
++   struct vdrm_ccmd_req hdr;
++   uint32_t res_id;
++   uint32_t pad;
++};
++
++struct v3d_ccmd_get_bo_offset_rsp {
++   struct v3d_ccmd_rsp hdr;
++   uint32_t offset;
++   uint32_t pad;
++};
++
++struct v3d_ccmd_wait_bo_req {
++   struct vdrm_ccmd_req hdr;
++   uint32_t res_id;
++   uint32_t pad;
++   uint64_t timeout_ns;
++};
++
++struct v3d_ccmd_submit_cl_req {
++   struct vdrm_ccmd_req hdr;
++   uint32_t bcl_start;
++   uint32_t bcl_end;
++   uint32_t rcl_start;
++   uint32_t rcl_end;
++   uint32_t qma;
++   uint32_t qms;
++   uint32_t qts;
++   uint32_t flags;
++   uint32_t nr_res;
++   uint32_t pad;
++   uint32_t res_ids[];
++};
++
++struct v3d_ccmd_submit_tfu_req {
++   struct vdrm_ccmd_req hdr;
++   uint32_t icfg;
++   uint32_t iia;
++   uint32_t iis;
++   uint32_t ica;
++   uint32_t iua;
++   uint32_t ioa;
++   uint32_t ios;
++   uint32_t coef[4];
++   uint32_t ioc;
++   /* 0 for none. */
++   uint32_t res_ids[4];
++};
++
++struct v3d_ccmd_submit_csd_req {
++   struct vdrm_ccmd_req hdr;
++   uint32_t cfg[7];
++   uint32_t coef[4];
++   uint32_t flags;
++   uint32_t nr_res;
++   uint32_t pad;
++   uint32_t res_ids[];
++};
++
++struct v3d_ccmd_get_param_req {
++   struct vdrm_ccmd_req hdr;
++   uint32_t param;
++   uint32_t pad;
++};
++
++struct v3d_ccmd_get_param_rsp {
++   struct v3d_ccmd_rsp hdr;
++   uint64_t value;
++};
++
++static_assert(sizeof(struct vdrm_ccmd_req) == 16, "ccmd header");
++static_assert(offsetof(struct v3d_shmem, async_error) == 8, "shmem");
++static_assert(sizeof(struct v3d_shmem) == 16, "shmem");
++static_assert(sizeof(struct v3d_ccmd_rsp) == 8, "rsp");
++static_assert(sizeof(struct v3d_ccmd_create_bo_req) == 32, "CREATE_BO");
++static_assert(sizeof(struct v3d_ccmd_get_bo_offset_req) == 24, "GET_BO_OFFSET");
++static_assert(sizeof(struct v3d_ccmd_get_bo_offset_rsp) == 16, "GET_BO_OFFSET");
++static_assert(offsetof(struct v3d_ccmd_wait_bo_req, timeout_ns) == 24, "WAIT_BO");
++static_assert(sizeof(struct v3d_ccmd_wait_bo_req) == 32, "WAIT_BO");
++static_assert(offsetof(struct v3d_ccmd_submit_cl_req, res_ids) == 56, "SUBMIT_CL");
++static_assert(offsetof(struct v3d_ccmd_submit_tfu_req, ioc) == 60, "SUBMIT_TFU");
++static_assert(sizeof(struct v3d_ccmd_submit_tfu_req) == 80, "SUBMIT_TFU");
++static_assert(offsetof(struct v3d_ccmd_submit_csd_req, flags) == 60, "SUBMIT_CSD");
++static_assert(offsetof(struct v3d_ccmd_submit_csd_req, res_ids) == 72, "SUBMIT_CSD");
++static_assert(sizeof(struct v3d_ccmd_get_param_req) == 24, "GET_PARAM");
++static_assert(sizeof(struct v3d_ccmd_get_param_rsp) == 16, "GET_PARAM");
++
++#endif /* V3D_VIRTIO_PROTO_H */
+diff --git a/src/gallium/auxiliary/target-helpers/drm_helper.h b/src/gallium/auxiliary/target-helpers/drm_helper.h
+index 65481b3..cabf30b 100644
+--- a/src/gallium/auxiliary/target-helpers/drm_helper.h
++++ b/src/gallium/auxiliary/target-helpers/drm_helper.h
+@@ -308,7 +308,8 @@ pipe_v3d_create_screen(int fd, const struct pipe_screen_config *config)
+    return screen ? debug_screen_wrap(screen) : NULL;
+ }
+ 
+-DRM_DRIVER_DESCRIPTOR(v3d, v3d_driconf, ARRAY_SIZE(v3d_driconf))
++DRM_DRIVER_DESCRIPTOR(v3d, v3d_driconf, ARRAY_SIZE(v3d_driconf),
++                      .probe_nctx = v3d_drm_probe_nctx)
+ 
+ #else
+ DRM_DRIVER_DESCRIPTOR_STUB(v3d)
+diff --git a/src/gallium/drivers/v3d/meson.build b/src/gallium/drivers/v3d/meson.build
+index d228bdd..1c6caa3 100644
+--- a/src/gallium/drivers/v3d/meson.build
++++ b/src/gallium/drivers/v3d/meson.build
+@@ -23,6 +23,8 @@ files_libv3d = files(
+   'v3d_screen.c',
+   'v3d_screen.h',
+   'v3d_uniforms.c',
++  'v3d_virtio.c',
++  'v3d_virtio.h',
+ )
+ 
+ files_per_version = files(
+@@ -63,7 +65,7 @@ libv3d = static_library(
+   ],
+   include_directories : [
+     inc_src, inc_include, inc_gallium, inc_gallium_aux, inc_broadcom,
+-    inc_gallium_drivers,
++    inc_gallium_drivers, inc_virtio_vdrm,
+   ],
+   c_args : [v3d_args],
+   cpp_args : [v3d_args],
+@@ -77,6 +79,6 @@ libv3d = static_library(
+ 
+ driver_v3d = declare_dependency(
+   compile_args : '-DGALLIUM_V3D',
+-  link_with : [libv3d, libv3dwinsys, libbroadcom_cle, libbroadcom_v3d],
++  link_with : [libv3d, libv3dwinsys, libbroadcom_cle, libbroadcom_v3d, libvdrm],
+   dependencies : [idep_nir, idep_broadcom_perfcntrs],
+ )
+diff --git a/src/gallium/drivers/v3d/v3d_bufmgr.c b/src/gallium/drivers/v3d/v3d_bufmgr.c
+index e82fd06..6d2be45 100644
+--- a/src/gallium/drivers/v3d/v3d_bufmgr.c
++++ b/src/gallium/drivers/v3d/v3d_bufmgr.c
+@@ -151,7 +151,7 @@ v3d_bo_alloc(struct v3d_screen *screen, uint32_t size, const char *name)
+         };
+ 
+  retry:
+-        ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_CREATE_BO, &create);
++        ret = v3d_screen_ioctl(screen, DRM_IOCTL_V3D_CREATE_BO, &create);
+         MESA_TRACE_SCOPE("%s size=%u name=\"%s\"", __func__, size, name);
+ 
+         if (ret != 0) {
+@@ -211,7 +211,7 @@ v3d_bo_free(struct v3d_bo *bo)
+         struct drm_gem_close c;
+         memset(&c, 0, sizeof(c));
+         c.handle = bo->handle;
+-        int ret = v3d_ioctl(screen->fd, DRM_IOCTL_GEM_CLOSE, &c);
++        int ret = v3d_screen_ioctl(screen, DRM_IOCTL_GEM_CLOSE, &c);
+         if (ret != 0)
+                 mesa_loge("close object %d: %s", bo->handle, strerror(errno));
+ 
+@@ -353,7 +353,7 @@ v3d_bo_open_handle(struct v3d_screen *screen,
+         struct drm_v3d_get_bo_offset get = {
+                 .handle = handle,
+         };
+-        int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_GET_BO_OFFSET, &get);
++        int ret = v3d_screen_ioctl(screen, DRM_IOCTL_V3D_GET_BO_OFFSET, &get);
+         if (ret) {
+                 mesa_loge("Failed to get BO offset: %s", strerror(errno));
+                 free(bo->map);
+@@ -382,7 +382,7 @@ v3d_bo_open_name(struct v3d_screen *screen, uint32_t name)
+         };
+         mtx_lock(&screen->bo_handles_mutex);
+ 
+-        int ret = v3d_ioctl(screen->fd, DRM_IOCTL_GEM_OPEN, &o);
++        int ret = v3d_screen_ioctl(screen, DRM_IOCTL_GEM_OPEN, &o);
+         if (ret) {
+                 mesa_loge("Failed to open bo %d: %s", name, strerror(errno));
+                 mtx_unlock(&screen->bo_handles_mutex);
+@@ -395,11 +395,14 @@ v3d_bo_open_name(struct v3d_screen *screen, uint32_t name)
+ struct v3d_bo *
+ v3d_bo_open_dmabuf(struct v3d_screen *screen, int fd)
+ {
+-        uint32_t handle;
++        struct drm_prime_handle prime = {
++                .fd = fd,
++        };
+ 
+         mtx_lock(&screen->bo_handles_mutex);
+ 
+-        int ret = drmPrimeFDToHandle(screen->fd, fd, &handle);
++        int ret = v3d_screen_ioctl(screen, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime);
++        uint32_t handle = prime.handle;
+         int size;
+         if (ret) {
+                 mesa_loge("Failed to get v3d handle for dmabuf %d", fd);
+@@ -421,9 +424,14 @@ v3d_bo_open_dmabuf(struct v3d_screen *screen, int fd)
+ int
+ v3d_bo_get_dmabuf(struct v3d_bo *bo)
+ {
+-        int fd;
+-        int ret = drmPrimeHandleToFD(bo->screen->fd, bo->handle,
+-                                     DRM_CLOEXEC | DRM_RDWR, &fd);
++        struct drm_prime_handle prime = {
++                .handle = bo->handle,
++                .flags = DRM_CLOEXEC | DRM_RDWR,
++                .fd = -1,
++        };
++        int ret = v3d_screen_ioctl(bo->screen, DRM_IOCTL_PRIME_HANDLE_TO_FD,
++                                   &prime);
++        int fd = prime.fd;
+         if (ret != 0) {
+                 mesa_loge("Failed to export gem bo %d to dmabuf", bo->handle);
+                 return -1;
+@@ -443,7 +451,7 @@ v3d_bo_flink(struct v3d_bo *bo, uint32_t *name)
+         struct drm_gem_flink flink = {
+                 .handle = bo->handle,
+         };
+-        int ret = v3d_ioctl(bo->screen->fd, DRM_IOCTL_GEM_FLINK, &flink);
++        int ret = v3d_screen_ioctl(bo->screen, DRM_IOCTL_GEM_FLINK, &flink);
+         if (ret) {
+                 mesa_loge("Failed to flink bo %d: %s", bo->handle, strerror(errno));
+                 free(bo);
+@@ -456,13 +464,14 @@ v3d_bo_flink(struct v3d_bo *bo, uint32_t *name)
+         return true;
+ }
+ 
+-static int v3d_wait_bo_ioctl(int fd, uint32_t handle, uint64_t timeout_ns)
++static int v3d_wait_bo_ioctl(struct v3d_screen *screen, uint32_t handle,
++                             uint64_t timeout_ns)
+ {
+         struct drm_v3d_wait_bo wait = {
+                 .handle = handle,
+                 .timeout_ns = timeout_ns,
+         };
+-        int ret = v3d_ioctl(fd, DRM_IOCTL_V3D_WAIT_BO, &wait);
++        int ret = v3d_screen_ioctl(screen, DRM_IOCTL_V3D_WAIT_BO, &wait);
+         if (ret == -1)
+                 return -errno;
+         else
+@@ -478,12 +487,12 @@ v3d_bo_wait(struct v3d_bo *bo, uint64_t timeout_ns, const char *reason)
+         MESA_TRACE_SCOPE("%s reason=\"%s\"", __func__, reason);
+ 
+         if (V3D_DBG(PERF) && timeout_ns && reason) {
+-                if (v3d_wait_bo_ioctl(screen->fd, bo->handle, 0) == -ETIME) {
++                if (v3d_wait_bo_ioctl(screen, bo->handle, 0) == -ETIME) {
+                         mesa_logw("Blocking on %s BO for %s", bo->name, reason);
+                 }
+         }
+ 
+-        int ret = v3d_wait_bo_ioctl(screen->fd, bo->handle, timeout_ns);
++        int ret = v3d_wait_bo_ioctl(screen, bo->handle, timeout_ns);
+         if (ret) {
+                 if (ret != -ETIME) {
+                         mesa_loge("wait failed: %d", ret);
+@@ -508,7 +517,7 @@ v3d_bo_map_unsynchronized(struct v3d_bo *bo)
+         struct drm_v3d_mmap_bo map;
+         memset(&map, 0, sizeof(map));
+         map.handle = bo->handle;
+-        ret = v3d_ioctl(bo->screen->fd, DRM_IOCTL_V3D_MMAP_BO, &map);
++        ret = v3d_screen_ioctl(bo->screen, DRM_IOCTL_V3D_MMAP_BO, &map);
+         offset = map.offset;
+         if (ret != 0) {
+                 mesa_loge("map ioctl failure");
+diff --git a/src/gallium/drivers/v3d/v3d_context.c b/src/gallium/drivers/v3d/v3d_context.c
+index d639c68..ae3bbe0 100644
+--- a/src/gallium/drivers/v3d/v3d_context.c
++++ b/src/gallium/drivers/v3d/v3d_context.c
+@@ -382,7 +382,7 @@ v3d_get_reset_count(struct v3d_context *v3d, bool per_context)
+                                        DRM_V3D_PARAM_GLOBAL_RESET_COUNTER,
+         };
+         ASSERTED int ret =
+-                v3d_ioctl(v3d->fd, DRM_IOCTL_V3D_GET_PARAM, &reset_counter);
++                v3d_screen_ioctl(v3d->screen, DRM_IOCTL_V3D_GET_PARAM, &reset_counter);
+         assert(!ret);
+ 
+         return reset_counter.value;
+diff --git a/src/gallium/drivers/v3d/v3d_job.c b/src/gallium/drivers/v3d/v3d_job.c
+index 229754c..5c9796e 100644
+--- a/src/gallium/drivers/v3d/v3d_job.c
++++ b/src/gallium/drivers/v3d/v3d_job.c
+@@ -710,7 +710,7 @@ v3d_job_submit(struct v3d_context *v3d, struct v3d_job *job)
+ 
+         if (!V3D_DBG(NORAST)) {
+                 int ret;
+-                ret = v3d_ioctl(v3d->fd, DRM_IOCTL_V3D_SUBMIT_CL, &job->submit);
++                ret = v3d_screen_ioctl(v3d->screen, DRM_IOCTL_V3D_SUBMIT_CL, &job->submit);
+                 if (ret) {
+                         mesa_loge_once("Draw call returned %s.  Expect corruption.",
+                                        strerror(errno));
+diff --git a/src/gallium/drivers/v3d/v3d_query.c b/src/gallium/drivers/v3d/v3d_query.c
+index f65c42a..cea5c67 100644
+--- a/src/gallium/drivers/v3d/v3d_query.c
++++ b/src/gallium/drivers/v3d/v3d_query.c
+@@ -246,7 +246,7 @@ v3d_submit_timestamp_query(struct pipe_context *pctx, struct v3d_bo *bo,
+         submit.flags |= DRM_V3D_SUBMIT_EXTENSION;
+         submit.extensions = (uintptr_t)(void *)&ms.ext;
+ 
+-        ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_SUBMIT_CPU, &submit);
++        ret = v3d_screen_ioctl(screen, DRM_IOCTL_V3D_SUBMIT_CPU, &submit);
+         if (ret)
+            mesa_loge("Failed to submit cpu job: %s", strerror(errno));
+ 
+diff --git a/src/gallium/drivers/v3d/v3d_query_perfcnt.c b/src/gallium/drivers/v3d/v3d_query_perfcnt.c
+index 47b8ed7..8c7f4e0 100644
+--- a/src/gallium/drivers/v3d/v3d_query_perfcnt.c
++++ b/src/gallium/drivers/v3d/v3d_query_perfcnt.c
+@@ -44,7 +44,7 @@ kperfmon_destroy(struct v3d_context *v3d, struct v3d_perfmon_state *perfmon)
+         struct drm_v3d_perfmon_destroy destroyreq;
+ 
+         destroyreq.id = perfmon->kperfmon_id;
+-        int ret = v3d_ioctl(v3d->fd, DRM_IOCTL_V3D_PERFMON_DESTROY, &destroyreq);
++        int ret = v3d_screen_ioctl(v3d->screen, DRM_IOCTL_V3D_PERFMON_DESTROY, &destroyreq);
+         if (ret != 0)
+                 mesa_loge("Failed to destroy perfmon %d: %s",
+                           perfmon->kperfmon_id, strerror(errno));
+@@ -93,7 +93,7 @@ v3d_begin_query_perfcnt(struct v3d_context *v3d, struct v3d_query *query)
+                 createreq.counters[i] = pquery->perfmon->counters[i];
+ 
+         createreq.ncounters = pquery->num_queries;
+-        ret = v3d_ioctl(v3d->fd, DRM_IOCTL_V3D_PERFMON_CREATE, &createreq);
++        ret = v3d_screen_ioctl(v3d->screen, DRM_IOCTL_V3D_PERFMON_CREATE, &createreq);
+         if (ret != 0)
+                 return false;
+ 
+@@ -165,7 +165,7 @@ v3d_get_query_result_perfcnt(struct v3d_context *v3d, struct v3d_query *query,
+ 
+                 req.id = pquery->perfmon->kperfmon_id;
+                 req.values_ptr = (uintptr_t)pquery->perfmon->values;
+-                ret = v3d_ioctl(v3d->fd, DRM_IOCTL_V3D_PERFMON_GET_VALUES, &req);
++                ret = v3d_screen_ioctl(v3d->screen, DRM_IOCTL_V3D_PERFMON_GET_VALUES, &req);
+                 if (ret != 0) {
+                         mesa_loge("Can't request perfmon counters values");
+                         return false;
+diff --git a/src/gallium/drivers/v3d/v3d_screen.c b/src/gallium/drivers/v3d/v3d_screen.c
+index 3a09b05..51d160b 100644
+--- a/src/gallium/drivers/v3d/v3d_screen.c
++++ b/src/gallium/drivers/v3d/v3d_screen.c
+@@ -43,6 +43,7 @@
+ #include "v3d_screen.h"
+ #include "v3d_context.h"
+ #include "v3d_resource.h"
++#include "v3d_virtio.h"
+ #include "compiler/v3d_compiler.h"
+ #include "drm-uapi/drm_fourcc.h"
+ 
+@@ -96,17 +97,28 @@ v3d_screen_destroy(struct pipe_screen *pscreen)
+ 
+         u_transfer_helper_destroy(pscreen->transfer_helper);
+ 
++        v3d_virtio_fini(screen);
+         close(screen->fd);
+         ralloc_free(pscreen);
+ }
+ 
++static int
++v3d_native_ioctl(struct v3d_screen *screen, unsigned long request, void *arg)
++{
++        if (request == DRM_IOCTL_PRIME_FD_TO_HANDLE ||
++            request == DRM_IOCTL_PRIME_HANDLE_TO_FD)
++                return drmIoctl(screen->fd, request, arg);
++
++        return v3d_ioctl(screen->fd, request, arg);
++}
++
+ static bool
+ v3d_has_feature(struct v3d_screen *screen, enum drm_v3d_param feature)
+ {
+         struct drm_v3d_get_param p = {
+                 .param = feature,
+         };
+-        int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_GET_PARAM, &p);
++        int ret = v3d_screen_ioctl(screen, DRM_IOCTL_V3D_GET_PARAM, &p);
+ 
+         if (ret != 0)
+                 return false;
+@@ -789,6 +801,7 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
+ 
+         screen->fd = fd;
+         screen->ro = ro;
++        screen->ioctl = v3d_native_ioctl;
+ 
+         list_inithead(&screen->bo_cache.time_list);
+         (void)mtx_init(&screen->bo_handles_mutex, mtx_plain);
+@@ -798,7 +811,14 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
+         screen->sim_file = v3d_simulator_init(screen->fd);
+ #endif
+ 
+-        if (!v3d_get_device_info(screen->fd, &screen->devinfo, &v3d_ioctl))
++        v3d_ioctl_fun devinfo_ioctl = &v3d_ioctl;
++        if (v3d_virtio_is_virtgpu(screen->fd)) {
++                if (!v3d_virtio_init(screen))
++                        goto fail;
++                devinfo_ioctl = &v3d_virtio_devinfo_ioctl;
++        }
++
++        if (!v3d_get_device_info(screen->fd, &screen->devinfo, devinfo_ioctl))
+                 goto fail;
+ 
+         screen->perfcnt = v3d_perfcntrs_init(&screen->devinfo, screen->fd);
+@@ -880,6 +900,7 @@ v3d_screen_create(int fd, const struct pipe_screen_config *config,
+         return pscreen;
+ 
+ fail:
++        v3d_virtio_fini(screen);
+         close(fd);
+         ralloc_free(pscreen);
+         return NULL;
+diff --git a/src/gallium/drivers/v3d/v3d_screen.h b/src/gallium/drivers/v3d/v3d_screen.h
+index 4f6a7d1..ff00fc0 100644
+--- a/src/gallium/drivers/v3d/v3d_screen.h
++++ b/src/gallium/drivers/v3d/v3d_screen.h
+@@ -50,11 +50,20 @@ struct v3d_bo;
+ 
+ struct v3d_simulator_file;
+ 
++struct v3d_virtio;
++
+ struct v3d_screen {
+         struct pipe_screen base;
+         struct renderonly *ro;
+         int fd;
+ 
++        /* The kernel interface: v3d's DRM ioctls, or their translation
++         * to a virtio-gpu native context (virtio set).
++         */
++        int (*ioctl)(struct v3d_screen *screen, unsigned long request,
++                     void *arg);
++        struct v3d_virtio *virtio;
++
+         struct v3d_device_info devinfo;
+ 
+         const char *name;
+@@ -106,6 +115,12 @@ v3d_screen(struct pipe_screen *screen)
+         return (struct v3d_screen *)screen;
+ }
+ 
++static inline int
++v3d_screen_ioctl(struct v3d_screen *screen, unsigned long request, void *arg)
++{
++        return screen->ioctl(screen, request, arg);
++}
++
+ struct pipe_screen *v3d_screen_create(int fd,
+                                       const struct pipe_screen_config *config,
+                                       struct renderonly *ro);
+diff --git a/src/gallium/drivers/v3d/v3d_virtio.c b/src/gallium/drivers/v3d/v3d_virtio.c
+new file mode 100644
+index 0000000..a3bdb0f
+--- /dev/null
++++ b/src/gallium/drivers/v3d/v3d_virtio.c
+@@ -0,0 +1,631 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++/* V3D through a virtio-gpu DRM native context: the driver's DRM ioctls
++ * become ccmds (common/v3d_virtio_proto.h). GEM handles stay guest
++ * handles; the host names objects by their resource id. Syncobjs are the
++ * guest's own and travel with the submission's execbuffer.
++ */
++
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include <xf86drm.h>
++
++#include "common/v3d_virtio_proto.h"
++#include "drm-uapi/v3d_drm.h"
++#include "drm-uapi/virtgpu_drm.h"
++#include "util/log.h"
++#include "util/macros.h"
++#include "util/sparse_array.h"
++#include "util/u_atomic.h"
++#include "util/u_math.h"
++#include "vdrm.h"
++
++#include "v3d_screen.h"
++#include "v3d_virtio.h"
++
++/* What this backend implements of the capset's supports bits. */
++#define V3D_VIRTIO_SUPPORTS (VIRTGPU_V3D_SUPPORTS_TFU |         \
++                             VIRTGPU_V3D_SUPPORTS_CSD |         \
++                             VIRTGPU_V3D_SUPPORTS_CACHE_FLUSH | \
++                             VIRTGPU_V3D_SUPPORTS_SUPER_PAGES)
++
++struct v3d_virtio_handle {
++        uint32_t res_id;
++        /* Seen by another process or device: listed in execbuffers so
++         * the guest kernel fences it (implicit sync).
++         */
++        bool shared;
++};
++
++struct v3d_virtio {
++        struct vdrm_device *vdrm;
++        /* struct v3d_virtio_handle, indexed by GEM handle. */
++        struct util_sparse_array handles;
++        uint32_t next_blob_id;
++        uint32_t async_error;
++};
++
++static int
++fail(int err)
++{
++        errno = err;
++        return -1;
++}
++
++static int
++get_caps(int fd, struct virgl_renderer_capset_drm *caps)
++{
++        struct drm_virtgpu_get_caps args = {
++                .cap_set_id = VIRTGPU_DRM_CAPSET_DRM,
++                .cap_set_ver = 0,
++                .addr = (uintptr_t)caps,
++                .size = sizeof(*caps),
++        };
++
++        memset(caps, 0, sizeof(*caps));
++        return drmIoctl(fd, DRM_IOCTL_VIRTGPU_GET_CAPS, &args);
++}
++
++/* The parameters the capset answers. */
++static bool
++caps_param(const struct virgl_renderer_capset_drm *caps, uint32_t param,
++           uint64_t *value)
++{
++        uint32_t supports = caps->u.v3d.supports & V3D_VIRTIO_SUPPORTS;
++
++        switch (param) {
++        case DRM_V3D_PARAM_V3D_HUB_IDENT1:
++                *value = caps->u.v3d.hub_ident1;
++                return true;
++        case DRM_V3D_PARAM_V3D_HUB_IDENT2:
++                *value = caps->u.v3d.hub_ident2;
++                return true;
++        case DRM_V3D_PARAM_V3D_HUB_IDENT3:
++                *value = caps->u.v3d.hub_ident3;
++                return true;
++        case DRM_V3D_PARAM_V3D_CORE0_IDENT0:
++                *value = caps->u.v3d.core0_ident0;
++                return true;
++        case DRM_V3D_PARAM_V3D_CORE0_IDENT1:
++                *value = caps->u.v3d.core0_ident1;
++                return true;
++        case DRM_V3D_PARAM_V3D_CORE0_IDENT2:
++                *value = caps->u.v3d.core0_ident2;
++                return true;
++        case DRM_V3D_PARAM_SUPPORTS_TFU:
++                *value = !!(supports & VIRTGPU_V3D_SUPPORTS_TFU);
++                return true;
++        case DRM_V3D_PARAM_SUPPORTS_CSD:
++                *value = !!(supports & VIRTGPU_V3D_SUPPORTS_CSD);
++                return true;
++        case DRM_V3D_PARAM_SUPPORTS_CACHE_FLUSH:
++                *value = !!(supports & VIRTGPU_V3D_SUPPORTS_CACHE_FLUSH);
++                return true;
++        case DRM_V3D_PARAM_SUPPORTS_PERFMON:
++                *value = !!(supports & VIRTGPU_V3D_SUPPORTS_PERFMON);
++                return true;
++        case DRM_V3D_PARAM_SUPPORTS_MULTISYNC_EXT:
++                *value = !!(supports & VIRTGPU_V3D_SUPPORTS_MULTISYNC_EXT);
++                return true;
++        case DRM_V3D_PARAM_SUPPORTS_CPU_QUEUE:
++                *value = !!(supports & VIRTGPU_V3D_SUPPORTS_CPU_QUEUE);
++                return true;
++        case DRM_V3D_PARAM_SUPPORTS_SUPER_PAGES:
++                *value = !!(supports & VIRTGPU_V3D_SUPPORTS_SUPER_PAGES);
++                return true;
++        case DRM_V3D_PARAM_MAX_PERF_COUNTERS:
++                /* Counter names come from the kernel only with PERFMON. */
++                *value = (supports & VIRTGPU_V3D_SUPPORTS_PERFMON) ?
++                         caps->u.v3d.max_perf_counters : 0;
++                return true;
++        default:
++                return false;
++        }
++}
++
++static bool
++is_reset_counter(uint32_t param)
++{
++        return param == DRM_V3D_PARAM_GLOBAL_RESET_COUNTER ||
++               param == DRM_V3D_PARAM_CONTEXT_RESET_COUNTER;
++}
++
++bool
++v3d_virtio_is_virtgpu(int fd)
++{
++        drmVersionPtr version = drmGetVersion(fd);
++        if (!version)
++                return false;
++
++        bool ret = strcmp(version->name, "virtio_gpu") == 0;
++        drmFreeVersion(version);
++        return ret;
++}
++
++/* For v3d_get_device_info(), before a screen exists. */
++int
++v3d_virtio_devinfo_ioctl(int fd, unsigned long request, void *arg)
++{
++        struct drm_v3d_get_param *p = arg;
++        struct virgl_renderer_capset_drm caps;
++
++        if (request != DRM_IOCTL_V3D_GET_PARAM)
++                return fail(EINVAL);
++
++        if (get_caps(fd, &caps))
++                return -1;
++        if (caps.context_type != VIRTGPU_DRM_CONTEXT_V3D)
++                return fail(ENODEV);
++
++        uint64_t value;
++        if (caps_param(&caps, p->param, &value)) {
++                p->value = value;
++                return 0;
++        }
++
++        /* Only their presence is asked here; the host counts them. */
++        if (is_reset_counter(p->param)) {
++                p->value = 0;
++                return 0;
++        }
++
++        return fail(EINVAL);
++}
++
++static struct v3d_virtio_handle *
++handle_get(struct v3d_virtio *v, uint32_t handle)
++{
++        struct v3d_virtio_handle *h = util_sparse_array_get(&v->handles, handle);
++
++        if (!h->res_id)
++                h->res_id = vdrm_handle_to_res_id(v->vdrm, handle);
++
++        return h;
++}
++
++static void
++handle_close(struct v3d_virtio *v, uint32_t handle)
++{
++        struct v3d_virtio_handle *h = util_sparse_array_get(&v->handles, handle);
++
++        h->res_id = 0;
++        h->shared = false;
++        vdrm_bo_close(v->vdrm, handle);
++}
++
++static int
++get_bo_offset(struct v3d_virtio *v, uint32_t res_id, uint32_t *offset)
++{
++        struct v3d_ccmd_get_bo_offset_req req = {
++                .hdr = V3D_CCMD(GET_BO_OFFSET, sizeof(req)),
++                .res_id = res_id,
++        };
++        struct v3d_ccmd_get_bo_offset_rsp *rsp =
++                vdrm_alloc_rsp(v->vdrm, &req.hdr, sizeof(*rsp));
++
++        if (vdrm_send_req(v->vdrm, &req.hdr, true))
++                return fail(EIO);
++        if (rsp->hdr.ret)
++                return fail(-rsp->hdr.ret);
++
++        *offset = rsp->offset;
++        return 0;
++}
++
++static int
++virtio_create_bo(struct v3d_virtio *v, struct drm_v3d_create_bo *args)
++{
++        uint32_t blob_id = p_atomic_inc_return(&v->next_blob_id);
++        /* Blob id 0 is the shmem. */
++        if (!blob_id)
++                blob_id = p_atomic_inc_return(&v->next_blob_id);
++
++        struct v3d_ccmd_create_bo_req req = {
++                .hdr = V3D_CCMD(CREATE_BO, sizeof(req)),
++                .size = args->size,
++                .flags = args->flags,
++                .blob_id = blob_id,
++        };
++        uint32_t handle =
++                vdrm_bo_create(v->vdrm, args->size,
++                               VIRTGPU_BLOB_FLAG_USE_MAPPABLE |
++                               VIRTGPU_BLOB_FLAG_USE_SHAREABLE,
++                               blob_id, 0, &req.hdr);
++        if (!handle)
++                return fail(ENOMEM);
++
++        struct v3d_virtio_handle *h = util_sparse_array_get(&v->handles, handle);
++        h->res_id = vdrm_handle_to_res_id(v->vdrm, handle);
++        h->shared = false;
++
++        uint32_t offset;
++        if (!h->res_id || get_bo_offset(v, h->res_id, &offset)) {
++                handle_close(v, handle);
++                return fail(ENOMEM);
++        }
++
++        args->handle = handle;
++        args->offset = offset;
++        return 0;
++}
++
++static int
++virtio_get_bo_offset(struct v3d_virtio *v, struct drm_v3d_get_bo_offset *args)
++{
++        struct v3d_virtio_handle *h = handle_get(v, args->handle);
++        if (!h->res_id)
++                return fail(ENOENT);
++
++        return get_bo_offset(v, h->res_id, &args->offset);
++}
++
++static int
++virtio_wait_bo(struct v3d_virtio *v, struct drm_v3d_wait_bo *args)
++{
++        struct v3d_virtio_handle *h = handle_get(v, args->handle);
++        if (!h->res_id)
++                return fail(ENOENT);
++
++        struct v3d_ccmd_wait_bo_req req = {
++                .hdr = V3D_CCMD(WAIT_BO, sizeof(req)),
++                .res_id = h->res_id,
++                .timeout_ns = args->timeout_ns,
++        };
++        struct v3d_ccmd_rsp *rsp = vdrm_alloc_rsp(v->vdrm, &req.hdr, sizeof(*rsp));
++
++        if (vdrm_send_req(v->vdrm, &req.hdr, true))
++                return fail(EIO);
++        if (rsp->ret)
++                return fail(-rsp->ret);
++
++        return 0;
++}
++
++static int
++virtio_get_param(struct v3d_virtio *v, struct drm_v3d_get_param *args)
++{
++        uint64_t value;
++        if (caps_param(&v->vdrm->caps, args->param, &value)) {
++                args->value = value;
++                return 0;
++        }
++
++        if (!is_reset_counter(args->param))
++                return fail(EINVAL);
++
++        struct v3d_ccmd_get_param_req req = {
++                .hdr = V3D_CCMD(GET_PARAM, sizeof(req)),
++                .param = args->param,
++        };
++        struct v3d_ccmd_get_param_rsp *rsp =
++                vdrm_alloc_rsp(v->vdrm, &req.hdr, sizeof(*rsp));
++
++        if (vdrm_send_req(v->vdrm, &req.hdr, true))
++                return fail(EIO);
++        if (rsp->hdr.ret)
++                return fail(-rsp->hdr.ret);
++
++        args->value = rsp->value;
++        return 0;
++}
++
++static int
++virtio_mmap_bo(struct v3d_screen *screen, struct drm_v3d_mmap_bo *args)
++{
++        struct drm_virtgpu_map map = {
++                .handle = args->handle,
++        };
++
++        if (drmIoctl(screen->fd, DRM_IOCTL_VIRTGPU_MAP, &map))
++                return -1;
++
++        args->offset = map.offset;
++        return 0;
++}
++
++static int
++virtio_prime_import(struct v3d_virtio *v, struct drm_prime_handle *args)
++{
++        uint32_t handle = vdrm_dmabuf_to_handle(v->vdrm, args->fd);
++        if (!handle)
++                return fail(EINVAL);
++
++        handle_get(v, handle)->shared = true;
++        args->handle = handle;
++        return 0;
++}
++
++static int
++virtio_prime_export(struct v3d_virtio *v, struct drm_prime_handle *args)
++{
++        int fd = vdrm_bo_export_dmabuf(v->vdrm, args->handle);
++        if (fd < 0)
++                return fail(EINVAL);
++
++        handle_get(v, args->handle)->shared = true;
++        args->fd = fd;
++        return 0;
++}
++
++static void
++check_async_error(struct v3d_virtio *v)
++{
++        struct v3d_shmem *shmem = (struct v3d_shmem *)v->vdrm->shmem;
++        uint32_t async_error = p_atomic_read(&shmem->async_error);
++
++        if (async_error != v->async_error) {
++                mesa_loge("v3d: the host failed %u submission(s)",
++                          async_error - v->async_error);
++                v->async_error = async_error;
++        }
++}
++
++/* Translates GEM handles to resource ids into res_ids, and collects the
++ * shared ones into guest_handles.
++ */
++static int
++translate_handles(struct v3d_virtio *v, const uint32_t *handles, uint32_t count,
++                  uint32_t *res_ids, uint32_t *guest_handles,
++                  uint32_t *guest_count)
++{
++        *guest_count = 0;
++
++        for (uint32_t i = 0; i < count; i++) {
++                if (!handles[i]) {
++                        res_ids[i] = 0;
++                        continue;
++                }
++
++                struct v3d_virtio_handle *h = handle_get(v, handles[i]);
++                if (!h->res_id)
++                        return fail(ENOENT);
++
++                res_ids[i] = h->res_id;
++                if (h->shared)
++                        guest_handles[(*guest_count)++] = handles[i];
++        }
++
++        return 0;
++}
++
++static int
++execbuf(struct v3d_virtio *v, struct vdrm_ccmd_req *req,
++        uint32_t *guest_handles, uint32_t guest_count,
++        const uint32_t *in_syncs, unsigned in_count, uint32_t out_sync)
++{
++        struct drm_virtgpu_execbuffer_syncobj in[2] = { 0 };
++        struct drm_virtgpu_execbuffer_syncobj out = {
++                .handle = out_sync,
++        };
++        unsigned nr_in = 0;
++
++        assert(in_count <= ARRAY_SIZE(in));
++        for (unsigned i = 0; i < in_count; i++) {
++                bool seen = false;
++                for (unsigned j = 0; j < nr_in; j++)
++                        seen |= in[j].handle == in_syncs[i];
++                if (in_syncs[i] && !seen)
++                        in[nr_in++].handle = in_syncs[i];
++        }
++
++        struct vdrm_execbuf_params p = {
++                .ring_idx = V3D_VIRTIO_RING_IDX,
++                .req = req,
++                .handles = guest_handles,
++                .num_handles = guest_count,
++                .in_syncobjs = nr_in ? in : NULL,
++                .num_in_syncobjs = nr_in,
++                .out_syncobjs = out_sync ? &out : NULL,
++                .num_out_syncobjs = out_sync ? 1 : 0,
++                .fence_fd = -1,
++        };
++
++        int ret = vdrm_execbuf(v->vdrm, &p);
++        check_async_error(v);
++
++        return ret ? fail(EIO) : 0;
++}
++
++static int
++virtio_submit_cl(struct v3d_virtio *v, struct drm_v3d_submit_cl *args)
++{
++        if ((args->flags & DRM_V3D_SUBMIT_EXTENSION) || args->perfmon_id)
++                return fail(EINVAL);
++
++        uint32_t count = args->bo_handle_count;
++        size_t len = align(sizeof(struct v3d_ccmd_submit_cl_req) +
++                           count * sizeof(uint32_t), 8);
++        struct v3d_ccmd_submit_cl_req *req = calloc(1, len);
++        uint32_t *guest_handles = malloc(MAX2(count, 1) * sizeof(uint32_t));
++        uint32_t guest_count;
++        int ret = -1;
++
++        if (!req || !guest_handles) {
++                errno = ENOMEM;
++                goto out;
++        }
++
++        req->hdr = V3D_CCMD(SUBMIT_CL, len);
++        req->bcl_start = args->bcl_start;
++        req->bcl_end = args->bcl_end;
++        req->rcl_start = args->rcl_start;
++        req->rcl_end = args->rcl_end;
++        req->qma = args->qma;
++        req->qms = args->qms;
++        req->qts = args->qts;
++        req->flags = args->flags & DRM_V3D_SUBMIT_CL_FLUSH_CACHE;
++        req->nr_res = count;
++
++        if (translate_handles(v, (const uint32_t *)(uintptr_t)args->bo_handles,
++                              count, req->res_ids, guest_handles, &guest_count))
++                goto out;
++
++        uint32_t in_syncs[] = { args->in_sync_bcl, args->in_sync_rcl };
++        ret = execbuf(v, &req->hdr, guest_handles, guest_count,
++                      in_syncs, ARRAY_SIZE(in_syncs), args->out_sync);
++
++out:
++        free(guest_handles);
++        free(req);
++        return ret;
++}
++
++static int
++virtio_submit_tfu(struct v3d_virtio *v, struct drm_v3d_submit_tfu *args)
++{
++        if (args->flags & DRM_V3D_SUBMIT_EXTENSION)
++                return fail(EINVAL);
++
++        struct v3d_ccmd_submit_tfu_req req = {
++                .hdr = V3D_CCMD(SUBMIT_TFU, sizeof(req)),
++                .icfg = args->icfg,
++                .iia = args->iia,
++                .iis = args->iis,
++                .ica = args->ica,
++                .iua = args->iua,
++                .ioa = args->ioa,
++                .ios = args->ios,
++                .ioc = args->v71.ioc,
++        };
++        memcpy(req.coef, args->coef, sizeof(req.coef));
++
++        uint32_t guest_handles[ARRAY_SIZE(args->bo_handles)];
++        uint32_t guest_count;
++        if (translate_handles(v, args->bo_handles, ARRAY_SIZE(args->bo_handles),
++                              req.res_ids, guest_handles, &guest_count))
++                return -1;
++
++        return execbuf(v, &req.hdr, guest_handles, guest_count,
++                       &args->in_sync, 1, args->out_sync);
++}
++
++static int
++virtio_submit_csd(struct v3d_virtio *v, struct drm_v3d_submit_csd *args)
++{
++        if ((args->flags & DRM_V3D_SUBMIT_EXTENSION) || args->perfmon_id)
++                return fail(EINVAL);
++
++        uint32_t count = args->bo_handle_count;
++        size_t len = align(sizeof(struct v3d_ccmd_submit_csd_req) +
++                           count * sizeof(uint32_t), 8);
++        struct v3d_ccmd_submit_csd_req *req = calloc(1, len);
++        uint32_t *guest_handles = malloc(MAX2(count, 1) * sizeof(uint32_t));
++        uint32_t guest_count;
++        int ret = -1;
++
++        if (!req || !guest_handles) {
++                errno = ENOMEM;
++                goto out;
++        }
++
++        req->hdr = V3D_CCMD(SUBMIT_CSD, len);
++        memcpy(req->cfg, args->cfg, sizeof(req->cfg));
++        memcpy(req->coef, args->coef, sizeof(req->coef));
++        req->flags = args->flags & DRM_V3D_SUBMIT_CL_FLUSH_CACHE;
++        req->nr_res = count;
++
++        if (translate_handles(v, (const uint32_t *)(uintptr_t)args->bo_handles,
++                              count, req->res_ids, guest_handles, &guest_count))
++                goto out;
++
++        ret = execbuf(v, &req->hdr, guest_handles, guest_count,
++                      &args->in_sync, 1, args->out_sync);
++
++out:
++        free(guest_handles);
++        free(req);
++        return ret;
++}
++
++static int
++v3d_virtio_ioctl(struct v3d_screen *screen, unsigned long request, void *arg)
++{
++        struct v3d_virtio *v = screen->virtio;
++
++        switch (request) {
++        case DRM_IOCTL_V3D_CREATE_BO:
++                return virtio_create_bo(v, arg);
++        case DRM_IOCTL_V3D_GET_BO_OFFSET:
++                return virtio_get_bo_offset(v, arg);
++        case DRM_IOCTL_V3D_WAIT_BO:
++                return virtio_wait_bo(v, arg);
++        case DRM_IOCTL_V3D_MMAP_BO:
++                return virtio_mmap_bo(screen, arg);
++        case DRM_IOCTL_V3D_GET_PARAM:
++                return virtio_get_param(v, arg);
++        case DRM_IOCTL_V3D_SUBMIT_CL:
++                return virtio_submit_cl(v, arg);
++        case DRM_IOCTL_V3D_SUBMIT_TFU:
++                return virtio_submit_tfu(v, arg);
++        case DRM_IOCTL_V3D_SUBMIT_CSD:
++                return virtio_submit_csd(v, arg);
++        case DRM_IOCTL_GEM_CLOSE: {
++                struct drm_gem_close *c = arg;
++                handle_close(v, c->handle);
++                return 0;
++        }
++        case DRM_IOCTL_GEM_OPEN: {
++                struct drm_gem_open *o = arg;
++                if (drmIoctl(screen->fd, request, arg))
++                        return -1;
++                handle_get(v, o->handle)->shared = true;
++                return 0;
++        }
++        case DRM_IOCTL_GEM_FLINK: {
++                struct drm_gem_flink *f = arg;
++                if (drmIoctl(screen->fd, request, arg))
++                        return -1;
++                handle_get(v, f->handle)->shared = true;
++                return 0;
++        }
++        case DRM_IOCTL_PRIME_FD_TO_HANDLE:
++                return virtio_prime_import(v, arg);
++        case DRM_IOCTL_PRIME_HANDLE_TO_FD:
++                return virtio_prime_export(v, arg);
++        default:
++                /* SUBMIT_CPU and PERFMON_*: not in the capset. */
++                return fail(EINVAL);
++        }
++}
++
++bool
++v3d_virtio_init(struct v3d_screen *screen)
++{
++        struct vdrm_device *vdrm =
++                vdrm_device_connect(screen->fd, VIRTGPU_DRM_CONTEXT_V3D);
++        if (!vdrm) {
++                mesa_loge("v3d: virtio-gpu offers no V3D native context");
++                return false;
++        }
++
++        struct v3d_virtio *v = calloc(1, sizeof(*v));
++        if (!v) {
++                vdrm_device_close(vdrm);
++                return false;
++        }
++
++        v->vdrm = vdrm;
++        util_sparse_array_init(&v->handles, sizeof(struct v3d_virtio_handle),
++                               512);
++        v->async_error = ((struct v3d_shmem *)vdrm->shmem)->async_error;
++
++        screen->virtio = v;
++        screen->ioctl = v3d_virtio_ioctl;
++        return true;
++}
++
++void
++v3d_virtio_fini(struct v3d_screen *screen)
++{
++        struct v3d_virtio *v = screen->virtio;
++        if (!v)
++                return;
++
++        util_sparse_array_finish(&v->handles);
++        vdrm_device_close(v->vdrm);
++        free(v);
++        screen->virtio = NULL;
++}
+diff --git a/src/gallium/drivers/v3d/v3d_virtio.h b/src/gallium/drivers/v3d/v3d_virtio.h
+new file mode 100644
+index 0000000..ed8c108
+--- /dev/null
++++ b/src/gallium/drivers/v3d/v3d_virtio.h
+@@ -0,0 +1,17 @@
++/*
++ * SPDX-License-Identifier: MIT
++ */
++
++#ifndef V3D_VIRTIO_H
++#define V3D_VIRTIO_H
++
++#include <stdbool.h>
++
++struct v3d_screen;
++
++bool v3d_virtio_is_virtgpu(int fd);
++bool v3d_virtio_init(struct v3d_screen *screen);
++void v3d_virtio_fini(struct v3d_screen *screen);
++int v3d_virtio_devinfo_ioctl(int fd, unsigned long request, void *arg);
++
++#endif /* V3D_VIRTIO_H */
+diff --git a/src/gallium/drivers/v3d/v3dx_draw.c b/src/gallium/drivers/v3d/v3dx_draw.c
+index 0c5e771..d6dfe1d 100644
+--- a/src/gallium/drivers/v3d/v3dx_draw.c
++++ b/src/gallium/drivers/v3d/v3dx_draw.c
+@@ -1580,7 +1580,7 @@ v3d_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
+         v3d->last_perfmon = v3d->active_perfmon;
+ 
+         if (!V3D_DBG(NORAST)) {
+-                int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_SUBMIT_CSD,
++                int ret = v3d_screen_ioctl(screen, DRM_IOCTL_V3D_SUBMIT_CSD,
+                                     &submit);
+                 if (ret) {
+                         mesa_loge_once("CSD submit call returned %s. Expect corruption.",
+diff --git a/src/gallium/drivers/v3d/v3dx_tfu.c b/src/gallium/drivers/v3d/v3dx_tfu.c
+index 45ae1d9..bd19f0d 100644
+--- a/src/gallium/drivers/v3d/v3dx_tfu.c
++++ b/src/gallium/drivers/v3d/v3dx_tfu.c
+@@ -201,7 +201,7 @@ v3dX(tfu)(struct pipe_context *pctx,
+         tfu.v71.ioc |= (last_level - base_level) << V3D71_TFU_IOC_NUMMM_SHIFT;
+ #endif /* V3D_VERSION >= 71*/
+ 
+-        int ret = v3d_ioctl(screen->fd, DRM_IOCTL_V3D_SUBMIT_TFU, &tfu);
++        int ret = v3d_screen_ioctl(screen, DRM_IOCTL_V3D_SUBMIT_TFU, &tfu);
+         if (ret != 0) {
+                 mesa_loge("Failed to submit TFU job: %d", ret);
+                 return false;
+diff --git a/src/gallium/winsys/v3d/drm/v3d_drm_public.h b/src/gallium/winsys/v3d/drm/v3d_drm_public.h
+index 157a319..821fc7b 100644
+--- a/src/gallium/winsys/v3d/drm/v3d_drm_public.h
++++ b/src/gallium/winsys/v3d/drm/v3d_drm_public.h
+@@ -24,13 +24,17 @@
+ #ifndef __V3D_DRM_PUBLIC_H__
+ #define __V3D_DRM_PUBLIC_H__
+ 
++#include <stdbool.h>
++
+ struct pipe_screen;
+ struct pipe_screen_config;
+ struct renderonly;
++struct virgl_renderer_capset_drm;
+ 
+ struct pipe_screen *v3d_drm_screen_create(int drmFD,
+                                           const struct pipe_screen_config *config);
+ struct pipe_screen *v3d_drm_screen_create_renderonly(int fd, struct renderonly *ro,
+                                                      const struct pipe_screen_config *config);
++bool v3d_drm_probe_nctx(int fd, const struct virgl_renderer_capset_drm *caps);
+ 
+ #endif /* __V3D_DRM_PUBLIC_H__ */
+diff --git a/src/gallium/winsys/v3d/drm/v3d_drm_winsys.c b/src/gallium/winsys/v3d/drm/v3d_drm_winsys.c
+index 0386cde..fde4bd6 100644
+--- a/src/gallium/winsys/v3d/drm/v3d_drm_winsys.c
++++ b/src/gallium/winsys/v3d/drm/v3d_drm_winsys.c
+@@ -28,6 +28,7 @@
+ #include "util/u_screen.h"
+ 
+ #include "v3d_drm_public.h"
++#include "virtio/virtio-gpu/drm_hw.h"
+ 
+ #include "v3d/v3d_screen.h"
+ 
+@@ -45,3 +46,19 @@ v3d_drm_screen_create_renderonly(int fd, struct renderonly *ro,
+    return u_pipe_screen_lookup_or_create(fd, config,
+                                          ro, v3d_screen_create);
+ }
++
++/**
++ * Whether virtgpu offers a V3D native context of a V3D this driver knows.
++ */
++bool
++v3d_drm_probe_nctx(int fd, const struct virgl_renderer_capset_drm *caps)
++{
++   if (caps->context_type != VIRTGPU_DRM_CONTEXT_V3D)
++      return false;
++
++   uint32_t major = (caps->u.v3d.core0_ident0 >> 24) & 0xff;
++   uint32_t minor = caps->u.v3d.core0_ident1 & 0xf;
++   uint32_t ver = major * 10 + minor;
++
++   return ver == 42 || ver == 71;
++}
+diff --git a/src/virtio/virtio-gpu/drm_hw.h b/src/virtio/virtio-gpu/drm_hw.h
+index 9f7244c..a06134b 100644
+--- a/src/virtio/virtio-gpu/drm_hw.h
++++ b/src/virtio/virtio-gpu/drm_hw.h
+@@ -31,6 +31,7 @@ struct virgl_renderer_capset_drm {
+ #define VIRTGPU_DRM_CONTEXT_MSM      1
+ #define VIRTGPU_DRM_CONTEXT_AMDGPU   2
+ #define VIRTGPU_DRM_CONTEXT_I915     3
++#define VIRTGPU_DRM_CONTEXT_V3D      6
+    uint32_t context_type;
+    uint32_t pad;
+    union {
+@@ -69,9 +70,27 @@ struct virgl_renderer_capset_drm {
+          uint32_t pci_domain;
+          uint32_t pci_device_id;
+       } intel;  /* context_type == VIRTGPU_DRM_CONTEXT_I915 */
++      struct {
++         uint32_t hub_ident1;
++         uint32_t hub_ident2;
++         uint32_t hub_ident3;
++         uint32_t core0_ident0;
++         uint32_t core0_ident1;
++         uint32_t core0_ident2;
++         uint32_t supports;  /* VIRTGPU_V3D_SUPPORTS_x */
++         uint32_t max_perf_counters;
++      } v3d;  /* context_type == VIRTGPU_DRM_CONTEXT_V3D */
+    } u;
+ };
+ 
++#define VIRTGPU_V3D_SUPPORTS_TFU           (1 << 0)
++#define VIRTGPU_V3D_SUPPORTS_CSD           (1 << 1)
++#define VIRTGPU_V3D_SUPPORTS_CACHE_FLUSH   (1 << 2)
++#define VIRTGPU_V3D_SUPPORTS_PERFMON       (1 << 3)
++#define VIRTGPU_V3D_SUPPORTS_MULTISYNC_EXT (1 << 4)
++#define VIRTGPU_V3D_SUPPORTS_CPU_QUEUE     (1 << 5)
++#define VIRTGPU_V3D_SUPPORTS_SUPER_PAGES   (1 << 6)
++
+ /**
+  * Defines the layout of shmem buffer used for host->guest communication.
+  */

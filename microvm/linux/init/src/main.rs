@@ -246,6 +246,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    [ \"$(cat $d/device 2>/dev/null)\" = 0x0010 ] && [ \"$(cut -c5 $d/features 2>/dev/null)\" = 1 ] && GPU=1; \
                  done; \
                  VA=iHD; grep -qE 'npkgpu=amdgpu( |$)' /proc/cmdline && VA=radeonsi; \
+                 HW=$GPU; grep -qE 'npkgpu=v3d( |$)' /proc/cmdline && { HW=0; VA=; }; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
                  LIBSEAT_BACKEND=seatd \
@@ -320,10 +321,13 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.download.useDownloadDir|true' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
-                   case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled|media.av1.enabled|media.mediasource.webm.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
+                   case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; \
+                     media.av1.enabled|media.mediasource.webm.enabled) [ $HW = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
-                 [ $GPU = 1 ] && for p in 'media.ffmpeg.vaapi.enabled|true' 'media.hardware-video-decoding.force-enabled|true' 'webgl.disabled|false'; \
+                 [ $HW = 1 ] && for p in 'media.ffmpeg.vaapi.enabled|true' 'media.hardware-video-decoding.force-enabled|true'; \
+                 do echo \"user_pref(\\\"${p%|*}\\\", ${p#*|});\" >> /tmp/moz/user.js; done; \
+                 [ $GPU = 1 ] && for p in 'webgl.disabled|false'; \
                  do echo \"user_pref(\\\"${p%|*}\\\", ${p#*|});\" >> /tmp/moz/user.js; done; \
                  echo 'user_pref(\"browser.cache.disk.parent_directory\", \"/tmp/bcache\");' >> /tmp/moz/user.js; \
                  echo 'user_pref(\"browser.download.dir\", \"/tmp/npkhome/downloads\");' >> /tmp/moz/user.js; \
@@ -400,7 +404,9 @@ fn launch_wayland(kmsg_fd: i64) {
                  [ -n \"$SCU\" ] || SCU=release_to_os_interval_ms=-1; \
                  [ \"$SCU\" = off ] || { echo \"export SCUDO_OPTIONS=$SCU\" >> /tmp/app.sh; \
                    echo \"<0>[wl] SCUDO_OPTIONS=$SCU\" > /dev/kmsg; }; \
-                 [ $GPU = 1 ] && echo \"export LIBVA_DRIVER_NAME=$VA\" >> /tmp/app.sh; \
+                 [ $GPU = 1 ] && [ -n \"$VA\" ] && echo \"export LIBVA_DRIVER_NAME=$VA\" >> /tmp/app.sh; \
+                 EGLV=/opt/npk-mesa/share/glvnd/egl_vendor.d/50_mesa.json; \
+                 [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && echo \"export __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV\" >> /tmp/app.sh; \
                  echo 'export DBUS_SESSION_BUS_ADDRESS=unix:path=/tmp/xrt/bus' >> /tmp/app.sh; \
                  [ $FR = 1 ] && echo 'export MOZ_LOG=FFmpegVideo:4' >> /tmp/app.sh; \
                  for e in $(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkenv=//p'); do \

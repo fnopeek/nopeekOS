@@ -23,7 +23,8 @@
 #
 # `ARCH=aarch64` builds the bundle for the arm64 guest from Arch Linux ARM
 # (alarm.env): packages pinned by packages-<name>-aarch64.txt, ALARM's own
-# Mesa (no native-context overlays), npkwm, portal and camera built for
+# Mesa plus Mesa's v3d with the V3D native context in /opt/npk-mesa
+# (microvm/linux/mesa/build-v3d.sh), npkwm, portal and camera built for
 # aarch64. Its files carry an -aarch64 suffix, e.g.
 # firefox-160.0-alarm20261115-aarch64, its asset is microvm-<name>-aarch64.
 
@@ -111,6 +112,7 @@ source "$REPO_ROOT/microvm/linux/mesa/mesa.env"
 MESA_OVERLAY="${HOME}/.cache/nopeekos/mesa/mesa-${MESA_VERSION}-npk.tar.gz"
 source "$REPO_ROOT/microvm/linux/ihd/ihd.env"
 IHD_OVERLAY="${HOME}/.cache/nopeekos/ihd/ihd-${IHD_VERSION}-npk.tar.gz"
+MESA_V3D_OVERLAY="${HOME}/.cache/nopeekos/mesa/mesa-v3d-${MESA_V3D_VERSION}-npk-aarch64.tar.gz"
 
 cyan()  { printf '\033[0;36m[npk]\033[0m %s\n' "$1"; }
 green() { printf '\033[0;32m[npk]\033[0m %s\n' "$1"; }
@@ -131,6 +133,7 @@ else
         [ -f "$REPO_ROOT/microvm/linux/$f$GUEST_SUFFIX" ] \
             || { red "missing microvm/linux/$f$GUEST_SUFFIX — run ARCH=aarch64 microvm/linux/${f%%/*}/build.sh"; exit 1; }
     done
+    [ -f "$MESA_V3D_OVERLAY" ] || { red "missing $MESA_V3D_OVERLAY — run microvm/linux/mesa/build-v3d.sh"; exit 1; }
     alarm_fetch
     green "verified $ALARM_KEYRING, packages pinned by ${PKG_LIST##*/}"
 fi
@@ -152,7 +155,7 @@ mkdir -p "$OUT_DIR"
 
 # The aarch64 root gets its packages, base included, from the pin list.
 ALARM_NO_BASE=1
-export MESA_VERSION MESA_OVERLAY IHD_OVERLAY PKG_LIST PID1_BIN REPO_ROOT OUT_DIR
+export MESA_VERSION MESA_OVERLAY IHD_OVERLAY MESA_V3D_VERSION MESA_V3D_OVERLAY PKG_LIST PID1_BIN REPO_ROOT OUT_DIR
 export BUNDLE_NAME SNAPSHOT_TAG BUNDLE_REV ARCH_SNAPSHOT WORK
 export GUEST_ARCH GUEST_SUFFIX ALARM_NO_BASE ALARM_UPDATE ALARM_MIRROR
 guest_run "$WORK/root" "
@@ -225,6 +228,20 @@ guest_run "$WORK/root" "
         SNAPSHOT_TAG=alarm\${PINDATE//-/}
         echo \"Arch Linux ARM, pinned \$PINDATE\" > \$WORK/base-name
         cyan \"\${#FILES[@]} packages as pinned on \$PINDATE\"
+
+        # Mesa's v3d with the V3D native context (microvm/linux/mesa/
+        # build-v3d.sh) below /opt/npk-mesa, beside ALARM's mesa, which
+        # stays for llvmpipe; the init picks it when the host offers one.
+        alarm_mesa=\$(alarm_pacman -Q mesa | awk '{print \$2}' | sed 's/^[0-9]*://; s/-[0-9.]*\$//')
+        [ \"\$alarm_mesa\" = \"\$MESA_V3D_VERSION\" ] || red \"ALARM mesa is \$alarm_mesa, mesa.env pins \$MESA_V3D_VERSION for v3d\"
+        tar -xzf \"\$MESA_V3D_OVERLAY\" -C \$R
+        for so in \$(tar -tzf \"\$MESA_V3D_OVERLAY\" | grep '\\.so'); do
+            [ -L \"\$R/\$so\" ] || [ ! -f \"\$R/\$so\" ] && continue
+            for lib in \$(readelf -d \"\$R/\$so\" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+                [ -e \"\$R/usr/lib/\$lib\" ] || [ -e \"\$R/opt/npk-mesa/lib/\$lib\" ] || red \"\$so needs \$lib, not in the image\"
+            done
+        done
+        cyan \"mesa \$MESA_V3D_VERSION v3d with the native context in /opt/npk-mesa\"
     fi
 
     mkdir -p \$R/usr/libexec/npk/bb
@@ -257,7 +274,7 @@ guest_run "$WORK/root" "
     # The compositor for a guest with a GPU (microvm/linux/npkwm/build.sh
     # gles2); the init runs it instead of PID-1's npkwm when the host offers
     # native contexts.
-    # Not on aarch64: its host offers no native contexts.
+    # Not on aarch64: its compositor stays on pixman.
     NPKWMS=\$REPO_ROOT/microvm/linux/npkwm/npkwm\$GUEST_SUFFIX
     if [ \"\$GUEST_ARCH\" = x86_64 ]; then
         install -D -m 0755 \$REPO_ROOT/microvm/linux/npkwm/npkwm-gles2 \$R/usr/libexec/npk/npkwm-gles2

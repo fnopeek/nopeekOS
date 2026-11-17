@@ -64,16 +64,20 @@ fields little-endian, 8-byte aligned. A response starts with its length.
 | 8 | `GET_PARAM` | `param` u32, pad | `len`, `ret`, `value` u64 |
 
 - **Addresses.** `CREATE_BO` makes an object of at least `size` bytes,
-  zeroed. `GET_BO_OFFSET` gives its V3D address in the guest context's
+  zeroed; when it cannot, there is no object, and the guest's
+  `RESOURCE_CREATE_BLOB` for that blob id fails. `GET_BO_OFFSET` gives its V3D address in the guest context's
   own address space: every context has a page table of its own, and only
   its objects (and resources attached to it) are in it. Addresses are
   stable for the object's life.
 - **Memory.** The guest maps an object through `MAP_BLOB`; the host maps
   it uncached (`VIRTIO_GPU_MAP_CACHE_WC`), as V3D does not snoop the
   CPU's caches.
+- **Requests.** Every other ccmd goes on ring 0; one with a response
+  (`GET_BO_OFFSET`, `WAIT_BO`, `GET_PARAM`) is answered in the shared
+  memory before `seqno` moves past it.
 - **Submissions.** `SUBMIT_*` run in the order sent on the context's ring
-  (`ring_idx` 1), each after the one before finished; the SUBMIT_3D's
-  fence on that ring signals when its jobs are done. `res_ids` name the
+  (`ring_idx` 1), each after the one before finished; the fence of the
+  SUBMIT_3D that carried one, on that ring, signals when its jobs are done. `res_ids` name the
   objects the job reads or writes: unknown ones refuse the submission
   (`async_error` counts it). `SUBMIT_CL` `flags` bit 0 is
   `DRM_V3D_SUBMIT_CL_FLUSH_CACHE`; `SUBMIT_CSD` `flags` likewise.
@@ -85,4 +89,8 @@ fields little-endian, 8-byte aligned. A response starts with its length.
   `CONTEXT_RESET_COUNTER`; anything else returns `-EINVAL` (it is in the
   capset).
 - **`WAIT_BO`** returns once no submission that names the object is
-  running or queued, or `-ETIME` after `timeout_ns`.
+  running or queued, or `-ETIME` after `timeout_ns`, counted from the
+  request.
+- **Shared objects.** The host knows objects by `res_id` only; a dma-buf
+  shared with another guest process is synchronised by the guest kernel's
+  fences on the resource, as for any virtio-gpu buffer.
