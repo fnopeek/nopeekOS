@@ -122,6 +122,11 @@ unsafe extern "C" {
     fn npk_v3d_open() -> i32;
     fn npk_v3d_map(pages_ptr: i32, n: i32) -> i64;
     fn npk_v3d_unmap(va: i64) -> i32;
+    fn npk_v3d_ctx_create() -> i32;
+    fn npk_v3d_ctx_destroy(v3d_ctx: i32) -> i32;
+    fn npk_v3d_ctx_map(v3d_ctx: i32, pages_ptr: i32, n: i32) -> i64;
+    fn npk_v3d_ctx_unmap(v3d_ctx: i32, va: i64) -> i32;
+    fn npk_v3d_switch(v3d_ctx: i32) -> i32;
     fn npk_v3d_power(on: i32) -> i32;
     fn npk_v3d_reset() -> i32;
     fn npk_v3d_mmu_fault(out_ptr: i32) -> i32;
@@ -312,6 +317,17 @@ plain! {
     fn v3d_open = npk_v3d_open() -> i32;
     /// AArch64: the V3D mapping at `va` taken away; 0 or -1.
     fn v3d_unmap = npk_v3d_unmap(va: i64) -> i32;
+    /// AArch64: a V3D address space of its own for a client, its number
+    /// (context 0 is the module's), or -1.
+    fn v3d_ctx_create = npk_v3d_ctx_create() -> i32;
+    /// AArch64: context `v3d_ctx` and its mappings gone (not 0, not the
+    /// loaded one); 0 or -1.
+    fn v3d_ctx_destroy = npk_v3d_ctx_destroy(v3d_ctx: i32) -> i32;
+    /// AArch64: the mapping at `va` of context `v3d_ctx` taken away; 0 or -1.
+    fn v3d_ctx_unmap = npk_v3d_ctx_unmap(v3d_ctx: i32, va: i64) -> i32;
+    /// AArch64: context `v3d_ctx`'s page table for V3D's next jobs; 0,
+    /// -16 while a job still runs, or -1.
+    fn v3d_switch = npk_v3d_switch(v3d_ctx: i32) -> i32;
     /// AArch64: V3D powered up (`on` 1) or down (0), as runtime PM does;
     /// before 0 the caller has masked V3D's interrupts and cleaned its
     /// caches, after 1 it enables them. 0 or -1.
@@ -1197,4 +1213,10 @@ pub fn v3d_mmu_fault() -> Option<(u32, u64)> {
 pub fn v3d_map(pages: &[u64]) -> i64 {
     // SAFETY: FFI; the kernel reads `pages.len()` u64s, borrowed for the call.
     unsafe { npk_v3d_map(pages.as_ptr() as i32, pages.len() as i32) }
+}
+
+/// AArch64: `v3d_map` into context `v3d_ctx`.
+pub fn v3d_ctx_map(v3d_ctx: i32, pages: &[u64]) -> i64 {
+    // SAFETY: FFI; the kernel reads `pages.len()` u64s, borrowed for the call.
+    unsafe { npk_v3d_ctx_map(v3d_ctx, pages.as_ptr() as i32, pages.len() as i32) }
 }

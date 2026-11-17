@@ -191,8 +191,9 @@ pub fn take(pid: u32) -> bool {
     }
 }
 
-/// Its module lets go of the set.
+/// Its module lets go of the set, and of the V3D contexts it made.
 pub fn release() {
+    super::pi5_v3d::release();
     OWNER.store(0, Ordering::Release);
 }
 

@@ -1,13 +1,19 @@
 //! V3D on the Pi 5, the kernel's share (`pi5_core::v3d`): power, the SMS,
-//! the invariant state and the MMU's page table, brought up when the
+//! the invariant state and the MMU's page tables, brought up when the
 //! display module opens V3D. The module runs jobs through the windows of
 //! the display set without the MMU registers; V3D reaches exactly the
-//! pages mapped here.
+//! pages mapped in the context whose table is loaded.
+//!
+//! A context is a page table with its own V3D addresses and fault page.
+//! Context 0 is the module's own; the module makes more for the clients
+//! it serves, and asks for a context's table between jobs (`switch`),
+//! which is refused while V3D still works.
 //!
 //! Only pages granted to the display device can be mapped
 //! (`drivers::iommu` reports every grant and revoke here, whether or not
-//! the HVS's IOMMU translates); a mapping goes with the last grant of any
-//! of its pages, so a buffer the kernel takes back is never in reach.
+//! the HVS's IOMMU translates); every mapping of a page, in any context,
+//! goes with the page's last grant, so a buffer the kernel takes back is
+//! never in reach.
 
 use super::dt::Fdt;
 use crate::hw::Mmio;
@@ -56,13 +62,54 @@ struct Mapping {
     pages: Vec<u64>,
 }
 
-struct State {
-    regs: Regs,
+/// Page tables at most: each takes 4 MiB.
+const CONTEXTS: usize = 16;
+const PT_PAGES: usize = PT_ENTRIES * 4 / PAGE as usize;
+
+/// One address space of V3D.
+struct Ctx {
     /// The page table: `PT_ENTRIES` words, uncached.
     pt: u64,
     /// Where an access outside the page table lands (`ILLEGAL_ADDR`).
     scratch: u64,
     va: Va,
+    /// Mappings by first V3D page.
+    maps: BTreeMap<u32, Mapping>,
+}
+
+impl Ctx {
+    fn new() -> Option<Ctx> {
+        let pt = crate::arch::aarch64::dma::alloc(PT_PAGES, 1, 1 << 40)?;
+        let Some(scratch) = crate::arch::aarch64::dma::alloc(1, 1, 1 << 40) else {
+            crate::arch::aarch64::dma::free(pt, PT_PAGES);
+            return None;
+        };
+        // SAFETY: fresh uncached pages owned by this context.
+        unsafe {
+            core::ptr::write_bytes(pt as *mut u8, 0, PT_PAGES * PAGE as usize);
+            core::ptr::write_bytes(scratch as *mut u8, 0, PAGE as usize);
+        }
+        Some(Ctx { pt, scratch, va: Va::new(1, PT_ENTRIES as u32), maps: BTreeMap::new() })
+    }
+
+    fn pt(&mut self) -> &mut [u32] {
+        // SAFETY: `self.pt` is the uncached page table of `PT_ENTRIES`
+        // words this context allocated; `STATE` is held.
+        unsafe { core::slice::from_raw_parts_mut(self.pt as *mut u32, PT_ENTRIES) }
+    }
+
+    fn free(self) {
+        crate::arch::aarch64::dma::free(self.pt, PT_PAGES);
+        crate::arch::aarch64::dma::free(self.scratch, 1);
+    }
+}
+
+struct State {
+    regs: Regs,
+    /// Contexts by number; 0 always exists.
+    ctxs: Vec<Option<Ctx>>,
+    /// The context whose table V3D uses (or uses once powered).
+    active: usize,
     ident: Ident,
     /// Powered and its state programmed (runtime-active, in Linux's terms).
     /// The page table may change while it is off; resuming programs it.
@@ -70,10 +117,20 @@ struct State {
     /// The clock's lowest and highest rate (`raspberrypi_clk_register`).
     min_rate: u32,
     max_rate: u32,
-    /// Mappings by first V3D page.
-    maps: BTreeMap<u32, Mapping>,
-    /// Physical page to the mapping that holds it.
-    by_page: BTreeMap<u64, u32>,
+    /// Physical page to the mappings that hold it: context, first page.
+    by_page: BTreeMap<u64, Vec<(usize, u32)>>,
+}
+
+impl State {
+    fn ctx(&mut self, id: usize) -> Option<&mut Ctx> {
+        self.ctxs.get_mut(id)?.as_mut()
+    }
+
+    /// The active context's table and fault page.
+    fn active_tables(&self) -> (u64, u64) {
+        let c = self.ctxs[self.active].as_ref().expect("the active context exists");
+        (c.pt, c.scratch)
+    }
 }
 
 // SAFETY: the page table and windows are owned by this state, reached only
@@ -181,7 +238,8 @@ fn resume_locked(s: &mut State) -> bool {
         return false;
     }
     v3d::init_hw_state(&mut s.regs);
-    if let Err(e) = v3d::mmu_set_page_table(&mut s.regs, s.pt, s.scratch) {
+    let (pt, scratch) = s.active_tables();
+    if let Err(e) = v3d::mmu_set_page_table(&mut s.regs, pt, scratch) {
         kprintln!("[npk] v3d: {:?}", e);
         return false;
     }
@@ -221,39 +279,29 @@ pub fn open() -> Option<Ident> {
     }
     clock_prepare(max_rate, &mut Phases::start())?;
 
-    let pt_pages = (PT_ENTRIES * 4) / PAGE as usize;
-    let pt = crate::arch::aarch64::dma::alloc(pt_pages, 1, 1 << 40)?;
-    let Some(scratch) = crate::arch::aarch64::dma::alloc(1, 1, 1 << 40) else {
-        crate::arch::aarch64::dma::free(pt, pt_pages);
-        return None;
-    };
-    // SAFETY: fresh uncached pages owned by this state.
-    unsafe {
-        core::ptr::write_bytes(pt as *mut u8, 0, pt_pages * PAGE as usize);
-        core::ptr::write_bytes(scratch as *mut u8, 0, PAGE as usize);
-    }
+    let ctx0 = Ctx::new()?;
     if let Err(e) = v3d::resume_sms(&mut regs) {
         kprintln!("[npk] v3d: {:?}", e);
+        ctx0.free();
         return None;
     }
     let ident = match v3d::ident(&mut regs) {
         Ok(i) => i,
-        Err(e) => { kprintln!("[npk] v3d: {:?}", e); return None; }
+        Err(e) => { kprintln!("[npk] v3d: {:?}", e); ctx0.free(); return None; }
     };
+    let (pt, scratch) = (ctx0.pt, ctx0.scratch);
     let mut st = State {
         regs,
-        pt,
-        scratch,
-        va: Va::new(1, PT_ENTRIES as u32),
+        ctxs: alloc::vec![Some(ctx0)],
+        active: 0,
         ident,
         powered: false,
         min_rate,
         max_rate,
-        maps: BTreeMap::new(),
         by_page: BTreeMap::new(),
     };
     v3d::init_hw_state(&mut st.regs);
-    if let Err(e) = v3d::mmu_set_page_table(&mut st.regs, st.pt, st.scratch) {
+    if let Err(e) = v3d::mmu_set_page_table(&mut st.regs, pt, scratch) {
         kprintln!("[npk] v3d: {:?}", e);
         return None;
     }
@@ -327,7 +375,8 @@ pub fn power(on: bool) -> bool {
 
 /// The kernel's share of `v3d_reset` after a hang: the SMS reset, V3D
 /// reset through its power domain (`reset_control_reset`) with the
-/// invariant state again, then the page table. The module has disabled
+/// invariant state again, then the active context's page table, which
+/// the reset leaves as it was. The module has disabled
 /// V3D's interrupts and resets them after (`v3d_irq_disable`,
 /// `v3d_irq_reset`).
 pub fn reset() -> bool {
@@ -341,11 +390,46 @@ pub fn reset() -> bool {
     }
     v3d::reset_v3d_domain(&mut s.regs);
     v3d::init_hw_state(&mut s.regs);
-    if let Err(e) = v3d::mmu_set_page_table(&mut s.regs, s.pt, s.scratch) {
+    let (pt, scratch) = s.active_tables();
+    if let Err(e) = v3d::mmu_set_page_table(&mut s.regs, pt, scratch) {
         kprintln!("[npk] v3d: {:?}", e);
         return false;
     }
     true
+}
+
+/// The module let go of the display set: its clients' contexts go, and
+/// the next module starts on context 0. A job of a client may still run
+/// under the client's table, so V3D is reset (as after a hang) before
+/// those tables are freed.
+pub fn release() {
+    let mut g = STATE.lock();
+    let Some(s) = g.as_mut() else { return };
+    if s.active == 0 && s.ctxs.iter().skip(1).all(Option::is_none) {
+        return;
+    }
+    s.active = 0;
+    if s.powered {
+        if !v3d::reset_sms(&mut s.regs) {
+            kprintln!("[npk] v3d: Failed to wait for SMS reset");
+        }
+        v3d::reset_v3d_domain(&mut s.regs);
+        v3d::init_hw_state(&mut s.regs);
+        let (pt, scratch) = s.active_tables();
+        if let Err(e) = v3d::mmu_set_page_table(&mut s.regs, pt, scratch) {
+            kprintln!("[npk] v3d: {:?}", e);
+        }
+    }
+    for id in 1..s.ctxs.len() {
+        let starts: Vec<u32> = s.ctxs[id].as_ref().map(|c| c.maps.keys().copied().collect()).unwrap_or_default();
+        for start in starts {
+            unmap_locked(s, id, start);
+        }
+        if let Some(c) = s.ctxs[id].take() {
+            c.free();
+        }
+    }
+    s.ctxs.truncate(1);
 }
 
 /// `v3d_hub_irq` after an MMU interrupt: the client and address, the error
@@ -360,38 +444,91 @@ pub fn mmu_fault() -> Option<v3d::MmuFault> {
     Some(v3d::mmu_fault(&mut s.regs, w))
 }
 
-/// `v3d_mmu_flush_all`: only while V3D is powered; a resume programs the
-/// page table and flushes.
-fn flush(s: &mut State) {
-    if s.powered {
+/// `v3d_mmu_flush_all` after context `ctx`'s table changed: only while
+/// it is the one loaded and V3D is powered; a resume or switch programs
+/// the table and flushes.
+fn flush(s: &mut State, ctx: usize) {
+    if s.powered && s.active == ctx {
         let _ = v3d::mmu_flush_all(&mut s.regs);
     }
 }
 
-fn pt(s: &mut State) -> &mut [u32] {
-    // SAFETY: `s.pt` is the uncached page table of `PT_ENTRIES` words this
-    // state allocated; `STATE` is held.
-    unsafe { core::slice::from_raw_parts_mut(s.pt as *mut u32, PT_ENTRIES) }
+/// A new context: an empty page table with addresses of its own. Its
+/// number, or None when `CONTEXTS` exist or memory is short.
+pub fn ctx_create() -> Option<u32> {
+    let mut guard = STATE.lock();
+    let s = guard.as_mut()?;
+    let free = s.ctxs.iter().position(Option::is_none);
+    if free.is_none() && s.ctxs.len() >= CONTEXTS {
+        kprintln!("[npk] v3d: no context beyond {}", CONTEXTS);
+        return None;
+    }
+    let c = Ctx::new()?;
+    let id = match free {
+        Some(i) => { s.ctxs[i] = Some(c); i }
+        None => { s.ctxs.push(Some(c)); s.ctxs.len() - 1 }
+    };
+    Some(id as u32)
 }
 
-/// Map the 4 KiB pages `pages` (physical, in order) at a new V3D address;
-/// every one must be granted to the display device now. The address in
-/// bytes, or None.
-pub fn map(pages: &[u64]) -> Option<u32> {
+/// Context `id` gone with all its mappings. Not context 0, not the one
+/// loaded (switch away first).
+pub fn ctx_destroy(id: u32) -> bool {
+    let id = id as usize;
+    let mut guard = STATE.lock();
+    let Some(s) = guard.as_mut() else { return false };
+    if id == 0 || id == s.active || s.ctx(id).is_none() {
+        return false;
+    }
+    let starts: Vec<u32> = s.ctxs[id].as_ref().map(|c| c.maps.keys().copied().collect()).unwrap_or_default();
+    for start in starts {
+        unmap_locked(s, id, start);
+    }
+    if let Some(c) = s.ctxs[id].take() {
+        c.free();
+    }
+    true
+}
+
+/// Context `id`'s table for V3D's next jobs. Refused while V3D still
+/// works (`v3d::busy`): a job must never go on under another table. A
+/// powered-off V3D takes it when it resumes.
+pub fn switch(id: u32) -> Result<(), v3d::Error> {
+    let id = id as usize;
+    let mut guard = STATE.lock();
+    let Some(s) = guard.as_mut() else { return Err(v3d::Error::Busy) };
+    let Some(c) = s.ctx(id) else { return Err(v3d::Error::Busy) };
+    let (pt, scratch) = (c.pt, c.scratch);
+    if s.active == id {
+        return Ok(());
+    }
+    if s.powered {
+        v3d::switch_page_table(&mut s.regs, pt, scratch)?;
+    }
+    s.active = id;
+    Ok(())
+}
+
+/// Map the 4 KiB pages `pages` (physical, in order) at a new V3D address
+/// of context `ctx`; every one must be granted to the display device now.
+/// The address in bytes, or None.
+pub fn map(ctx: u32, pages: &[u64]) -> Option<u32> {
+    let ctx = ctx as usize;
     if pages.is_empty() || pages.iter().any(|p| p % PAGE != 0) {
         return None;
     }
-    {
-        let g = GRANTED.lock();
-        if let Some(p) = pages.iter().find(|p| !g.contains_key(p)) {
-            kprintln!("[npk] v3d: map of {} pages refused, page {:#x} not granted", pages.len(), p);
-            return None;
-        }
+    // Held across the mapping, so a revoke cannot pass between the check
+    // and the page table (`note` takes it before `STATE`).
+    let granted = GRANTED.lock();
+    if let Some(p) = pages.iter().find(|p| !granted.contains_key(p)) {
+        kprintln!("[npk] v3d: map of {} pages refused, page {:#x} not granted", pages.len(), p);
+        return None;
     }
     let mut guard = STATE.lock();
     let s = guard.as_mut()?;
+    let c = s.ctx(ctx)?;
     let n = pages.len() as u32;
-    let Some(start) = s.va.alloc(n) else {
+    let Some(start) = c.va.alloc(n) else {
         kprintln!("[npk] v3d: no {} free pages of V3D addresses", n);
         return None;
     };
@@ -403,57 +540,62 @@ pub fn map(pages: &[u64]) -> Option<u32> {
             _ => runs.push((p, PAGE)),
         }
     }
-    if !v3d::insert_ptes(pt(s), start, &runs) {
-        s.va.free(start, n);
+    if !v3d::insert_ptes(c.pt(), start, &runs) {
+        c.va.free(start, n);
         return None;
     }
-    flush(s);
+    c.maps.insert(start, Mapping { va: start, pages: pages.to_vec() });
     for &p in pages {
-        s.by_page.insert(p, start);
+        s.by_page.entry(p).or_default().push((ctx, start));
     }
-    s.maps.insert(start, Mapping { va: start, pages: pages.to_vec() });
+    flush(s, ctx);
+    drop(granted);
     Some(start << v3d::V3D_MMU_PAGE_SHIFT)
 }
 
-fn unmap_locked(s: &mut State, start: u32) {
-    let Some(m) = s.maps.remove(&start) else { return };
-    v3d::remove_ptes(pt(s), m.va, m.pages.len() as u32);
-    flush(s);
+fn unmap_locked(s: &mut State, ctx: usize, start: u32) {
+    let Some(c) = s.ctx(ctx) else { return };
+    let Some(m) = c.maps.remove(&start) else { return };
+    v3d::remove_ptes(c.pt(), m.va, m.pages.len() as u32);
+    c.va.free(m.va, m.pages.len() as u32);
+    flush(s, ctx);
     for p in &m.pages {
-        s.by_page.remove(p);
+        if let Some(v) = s.by_page.get_mut(p) {
+            v.retain(|&e| e != (ctx, start));
+            if v.is_empty() {
+                s.by_page.remove(p);
+            }
+        }
     }
-    s.va.free(m.va, m.pages.len() as u32);
 }
 
-/// Take the mapping at V3D address `va` (bytes) away.
-pub fn unmap(va: u32) -> bool {
+/// Take the mapping at V3D address `va` (bytes) of context `ctx` away.
+pub fn unmap(ctx: u32, va: u32) -> bool {
     let mut guard = STATE.lock();
     let Some(s) = guard.as_mut() else { return false };
     let start = va >> v3d::V3D_MMU_PAGE_SHIFT;
-    if !s.maps.contains_key(&start) {
+    if !s.ctx(ctx as usize).is_some_and(|c| c.maps.contains_key(&start)) {
         return false;
     }
-    unmap_locked(s, start);
+    unmap_locked(s, ctx as usize, start);
     true
 }
 
 /// `drivers::iommu`: `pages` pages from `phys` granted to the display
 /// device (+1) or revoked (-1). A page's last revoke takes every mapping
-/// holding it away.
+/// holding it away, in every context.
 pub fn note(phys: u64, pages: usize, grant: bool) {
+    let mut g = GRANTED.lock();
     let mut gone = Vec::new();
-    {
-        let mut g = GRANTED.lock();
-        for i in 0..pages as u64 {
-            let p = (phys & !(PAGE - 1)) + i * PAGE;
-            if grant {
-                *g.entry(p).or_insert(0) += 1;
-            } else if let Some(c) = g.get_mut(&p) {
-                *c -= 1;
-                if *c == 0 {
-                    g.remove(&p);
-                    gone.push(p);
-                }
+    for i in 0..pages as u64 {
+        let p = (phys & !(PAGE - 1)) + i * PAGE;
+        if grant {
+            *g.entry(p).or_insert(0) += 1;
+        } else if let Some(c) = g.get_mut(&p) {
+            *c -= 1;
+            if *c == 0 {
+                g.remove(&p);
+                gone.push(p);
             }
         }
     }
@@ -462,8 +604,12 @@ pub fn note(phys: u64, pages: usize, grant: bool) {
     }
     let mut guard = STATE.lock();
     let Some(s) = guard.as_mut() else { return };
-    let starts: Vec<u32> = gone.iter().filter_map(|p| s.by_page.get(p).copied()).collect();
-    for start in starts {
-        unmap_locked(s, start);
+    let mut held: Vec<(usize, u32)> = gone.iter().filter_map(|p| s.by_page.get(p)).flatten().copied().collect();
+    held.sort_unstable();
+    held.dedup();
+    for (ctx, start) in held {
+        unmap_locked(s, ctx, start);
     }
+    drop(guard);
+    drop(g);
 }

@@ -2,9 +2,11 @@
 //! `drivers/pmdomain/bcm/bcm2835-power.c` (the GRAFX and V3D power
 //! domains of `brcm,bcm2712-pm`), `drivers/gpu/drm/v3d/v3d_power.c` (the
 //! SMS), `v3d_gem.c` (`v3d_init_core`, `v3d_reset_sms`), `v3d_drv.c` (the
-//! identification) and `v3d_mmu.c` (the page table). Jobs, caches and
-//! interrupts are the driver module's; the page table, and so what memory
-//! V3D reaches, stays here.
+//! identification) and `v3d_mmu.c` (the page table). Jobs and interrupts
+//! are the driver module's; the page tables, and so what memory V3D
+//! reaches, stay here. V3D has one page table register and no address
+//! space IDs: a context of its own is a page table of its own, loaded only
+//! while V3D runs nothing ([`busy`], [`switch_page_table`]).
 //!
 //! [`Va`] hands out V3D addresses: Linux's `drm_mm` over the 4 GiB the
 //! MMU translates, page by page.
@@ -32,8 +34,22 @@ const PM_INRUSH_20_MA: u32 = 3;
 const V3D_HUB_IDENT1: u64 = 0x0000c;
 const V3D_HUB_IDENT3: u64 = 0x00014;
 const V3D_CTL_IDENT1: u64 = 0x00004;
+const V3D_CTL_SLCACTL: u64 = 0x00024;
+const V3D_CTL_L2TCACTL: u64 = 0x00030;
+const V3D_L2TCACTL_TMUWCF: u32 = 1 << 8;
+const V3D_L2TCACTL_FLM_FLUSH: u32 = 0;
+const V3D_L2TCACTL_FLM_CLEAN: u32 = 2;
+const V3D_L2TCACTL_FLM_SHIFT: u32 = 1;
+const V3D_L2TCACTL_L2TFLS: u32 = 1 << 0;
 const V3D_CTL_L2TFLSTA: u64 = 0x00034;
 const V3D_CTL_L2TFLEND: u64 = 0x00038;
+const V3D_CLE_CT0EA: u64 = 0x00108;
+const V3D_CLE_CT0CA: u64 = 0x00110;
+const V3D_CSD_STATUS: u64 = 0x00900;
+const V3D_CSD_STATUS_HAVE_CURRENT_DISPATCH: u32 = 1 << 1;
+const V3D_CSD_STATUS_HAVE_QUEUED_DISPATCH: u32 = 1 << 0;
+const V3D_TFU_CS: u64 = 0x00700;
+const V3D_TFU_CS_BUSY: u32 = 1 << 0;
 const V3D_MMUC_CONTROL: u64 = 0x01000;
 const V3D_MMUC_CONTROL_FLUSHING: u32 = 1 << 2;
 const V3D_MMUC_CONTROL_FLUSH: u32 = 1 << 1;
@@ -98,6 +114,10 @@ pub enum Error {
     Flush,
     /// Not V3D 7.1.
     Version(u32),
+    /// A page table switch while V3D still runs a job.
+    Busy,
+    /// `Timeout waiting for TMU write combiner flush` / `L2T clean`.
+    Clean,
 }
 
 /// `wait_for(cond, ms)`: poll every 10 us until `cond` or `ms` passed.
@@ -329,6 +349,61 @@ pub fn mmu_set_page_table(hw: &mut impl Hw, pt_pa: u64, scratch_pa: u64) -> Resu
         (scratch_pa >> V3D_MMU_PAGE_SHIFT) as u32 | V3D_MMU_ILLEGAL_ADDR_ENABLE);
     hw.w32(Block::V3dHub, V3D_MMUC_CONTROL, V3D_MMUC_CONTROL_ENABLE);
     mmu_flush_all(hw)
+}
+
+/// Whether V3D may still be working: a dispatch current or queued
+/// (`V3D_CSD_STATUS`), the TFU busy (`V3D_TFU_CS`), or a control list
+/// thread short of its end address (`CTnCA` != `CTnEA`).
+pub fn busy(hw: &mut impl Hw) -> bool {
+    let csd = hw.r32(Block::V3dCore, V3D_CSD_STATUS);
+    if csd & (V3D_CSD_STATUS_HAVE_CURRENT_DISPATCH | V3D_CSD_STATUS_HAVE_QUEUED_DISPATCH) != 0 {
+        return true;
+    }
+    if hw.r32(Block::V3dHub, V3D_TFU_CS) & V3D_TFU_CS_BUSY != 0 {
+        return true;
+    }
+    (0..2).any(|q| hw.r32(Block::V3dCore, V3D_CLE_CT0CA + 4 * q) != hw.r32(Block::V3dCore, V3D_CLE_CT0EA + 4 * q))
+}
+
+/// `v3d_clean_caches` on V3D 7.1: the TMU write combiner flushed, then
+/// the texture L2 cleaned, each waited for.
+pub fn clean_caches(hw: &mut impl Hw) -> Result<(), Error> {
+    hw.w32(Block::V3dCore, V3D_CTL_L2TCACTL, V3D_L2TCACTL_TMUWCF);
+    if !wait_for(hw, 100, |r| r(Block::V3dCore, V3D_CTL_L2TCACTL) & V3D_L2TCACTL_TMUWCF == 0) {
+        return Err(Error::Clean);
+    }
+    hw.w32(Block::V3dCore, V3D_CTL_L2TCACTL,
+        V3D_L2TCACTL_L2TFLS | (V3D_L2TCACTL_FLM_CLEAN << V3D_L2TCACTL_FLM_SHIFT));
+    if !wait_for(hw, 100, |r| r(Block::V3dCore, V3D_CTL_L2TCACTL) & V3D_L2TCACTL_L2TFLS == 0) {
+        return Err(Error::Clean);
+    }
+    Ok(())
+}
+
+/// `v3d_invalidate_caches` on V3D 7.1: the texture L2 flushed (waited
+/// for here, as nothing runs behind it), the slice caches invalidated.
+pub fn invalidate_caches(hw: &mut impl Hw) -> Result<(), Error> {
+    hw.w32(Block::V3dCore, V3D_CTL_L2TCACTL,
+        V3D_L2TCACTL_L2TFLS | (V3D_L2TCACTL_FLM_FLUSH << V3D_L2TCACTL_FLM_SHIFT));
+    if !wait_for(hw, 100, |r| r(Block::V3dCore, V3D_CTL_L2TCACTL) & V3D_L2TCACTL_L2TFLS == 0) {
+        return Err(Error::Clean);
+    }
+    hw.w32(Block::V3dCore, V3D_CTL_SLCACTL, (0xf << 24) | (0xf << 16) | (0xf << 8) | 0xf);
+    Ok(())
+}
+
+/// Another context's page table at `pt_pa`, its fault page at
+/// `scratch_pa`. Refused while V3D is [`busy`]; then the caches, which
+/// hold lines by V3D address, cleaned and invalidated, and the table
+/// loaded as `v3d_mmu_set_page_table` loads it, with the MMU's TLB and
+/// cache flushed.
+pub fn switch_page_table(hw: &mut impl Hw, pt_pa: u64, scratch_pa: u64) -> Result<(), Error> {
+    if busy(hw) {
+        return Err(Error::Busy);
+    }
+    clean_caches(hw)?;
+    invalidate_caches(hw)?;
+    mmu_set_page_table(hw, pt_pa, scratch_pa)
 }
 
 fn is_aligned(page: u32, page_address: u32, alignment: u64) -> bool {

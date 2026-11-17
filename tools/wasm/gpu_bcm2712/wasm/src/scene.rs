@@ -674,6 +674,49 @@ impl Composer {
         (self.sched.signaled(f), self.sched.failed(f))
     }
 
+    /// What a context switch costs, after the self-tests' jobs: a second
+    /// page table loaded and the module's again, `SWITCH_RUNS` times, with
+    /// V3D idle (the kernel's check must agree that it is). One line.
+    pub fn switch_test(&mut self, hw: &mut PiHw) {
+        const SWITCH_RUNS: u32 = 8;
+        self.drain(hw);
+        if self.power_up(hw).is_err() {
+            return;
+        }
+        let ctx = npk_sys::v3d_ctx_create();
+        if ctx < 0 {
+            Line::new().s("v3d: no second context").say();
+            return;
+        }
+        let (mut min, mut max, mut busy) = (u64::MAX, 0u64, 0u32);
+        for _ in 0..SWITCH_RUNS {
+            let t0 = npk_sys::now_us() as u64;
+            let there = npk_sys::v3d_switch(ctx);
+            let back = npk_sys::v3d_switch(0);
+            let us = npk_sys::now_us() as u64 - t0;
+            if there == -16 || back == -16 {
+                busy += 1;
+                continue;
+            }
+            if there != 0 || back != 0 {
+                Line::new().s("v3d: context switch failed (").dec(there.unsigned_abs() as u64).s(", ")
+                    .dec(back.unsigned_abs() as u64).s(")").say();
+                break;
+            }
+            (min, max) = (min.min(us), max.max(us));
+        }
+        let _ = npk_sys::v3d_switch(0);
+        let _ = npk_sys::v3d_ctx_destroy(ctx);
+        let mut l = Line::new();
+        l.s("v3d: to a second page table and back in ");
+        if min == u64::MAX {
+            l.s("- us");
+        } else {
+            l.dec(min).s("..").dec(max).s(" us");
+        }
+        l.s(", ").dec(busy as u64).s(" of ").dec(SWITCH_RUNS as u64).s(" refused as busy").say();
+    }
+
     /// The draw path proved: one render pass into a 64x48 buffer of the
     /// module's, an opaque fill over all of it and a half-transparent one
     /// over part, read back against render::blend. 48 rows end inside a

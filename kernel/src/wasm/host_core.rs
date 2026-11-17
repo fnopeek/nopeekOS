@@ -2088,20 +2088,75 @@ pub(crate) fn npk_v3d_open(ctx: &mut HostState) -> i32 {
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn npk_v3d_map(mem: &mut [u8], ctx: &mut HostState, pages_ptr: i32, n: i32) -> i64 {
     if bound_set(ctx).is_none() || n <= 0 || n > V3D_MAP_MAX_PAGES { return -1; }
+    v3d_map(mem, 0, pages_ptr, n)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn v3d_map(mem: &mut [u8], v3d_ctx: u32, pages_ptr: i32, n: i32) -> i64 {
+    if n <= 0 || n > V3D_MAP_MAX_PAGES { return -1; }
     let Some(b) = guest(mem, pages_ptr, n as usize * 8) else { return -1 };
     let pages: alloc::vec::Vec<u64> = b.chunks_exact(8)
         .map(|c| u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
         .collect();
-    crate::platform::pi5_v3d::map(&pages).map_or(-1, |va| va as i64)
+    crate::platform::pi5_v3d::map(v3d_ctx, &pages).map_or(-1, |va| va as i64)
 }
 
-/// `npk_v3d_unmap(va) -> 0 | -1`: the mapping at V3D address `va` taken
-/// away.
+/// `npk_v3d_unmap(va) -> 0 | -1`: the mapping at V3D address `va` of
+/// context 0 taken away.
 #[cfg(target_arch = "aarch64")]
 pub(crate) fn npk_v3d_unmap(ctx: &mut HostState, va: i64) -> i32 {
     if bound_set(ctx).is_none() { return -1; }
     let Ok(va) = u32::try_from(va) else { return -1 };
-    if crate::platform::pi5_v3d::unmap(va) { 0 } else { -1 }
+    if crate::platform::pi5_v3d::unmap(0, va) { 0 } else { -1 }
+}
+
+/// `npk_v3d_ctx_create() -> context | -1`: a V3D address space of its own
+/// (`pi5_v3d::ctx_create`), for a client the module serves.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_ctx_create(ctx: &mut HostState) -> i32 {
+    let Some(s) = bound_set(ctx) else { return -1 };
+    if !s.has_v3d() { return -1; }
+    crate::platform::pi5_v3d::ctx_create().map_or(-1, |id| id as i32)
+}
+
+/// `npk_v3d_ctx_destroy(context) -> 0 | -1`: the context and its mappings
+/// gone; not 0, not the one loaded.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_ctx_destroy(ctx: &mut HostState, v3d_ctx: i32) -> i32 {
+    if bound_set(ctx).is_none() { return -1; }
+    let Ok(id) = u32::try_from(v3d_ctx) else { return -1 };
+    if crate::platform::pi5_v3d::ctx_destroy(id) { 0 } else { -1 }
+}
+
+/// `npk_v3d_ctx_map(context, pages_ptr, n) -> V3D address | -1`:
+/// `npk_v3d_map` into another context.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_ctx_map(mem: &mut [u8], ctx: &mut HostState, v3d_ctx: i32, pages_ptr: i32, n: i32) -> i64 {
+    if bound_set(ctx).is_none() { return -1; }
+    let Ok(id) = u32::try_from(v3d_ctx) else { return -1 };
+    v3d_map(mem, id, pages_ptr, n)
+}
+
+/// `npk_v3d_ctx_unmap(context, va) -> 0 | -1`.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_ctx_unmap(ctx: &mut HostState, v3d_ctx: i32, va: i64) -> i32 {
+    if bound_set(ctx).is_none() { return -1; }
+    let (Ok(id), Ok(va)) = (u32::try_from(v3d_ctx), u32::try_from(va)) else { return -1 };
+    if crate::platform::pi5_v3d::unmap(id, va) { 0 } else { -1 }
+}
+
+/// `npk_v3d_switch(context) -> 0 | -16 | -1`: the context's page table
+/// for V3D's next jobs (`pi5_v3d::switch`); -16 (EBUSY) while a job still
+/// runs, -1 for no such context or a failed flush.
+#[cfg(target_arch = "aarch64")]
+pub(crate) fn npk_v3d_switch(ctx: &mut HostState, v3d_ctx: i32) -> i32 {
+    if bound_set(ctx).is_none() { return -1; }
+    let Ok(id) = u32::try_from(v3d_ctx) else { return -1 };
+    match crate::platform::pi5_v3d::switch(id) {
+        Ok(()) => 0,
+        Err(pi5_core::v3d::Error::Busy) => -16,
+        Err(_) => -1,
+    }
 }
 
 /// `npk_v3d_power(on) -> 0 | -1`: V3D's runtime PM (`pi5_v3d::power`).

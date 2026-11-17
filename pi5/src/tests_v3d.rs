@@ -155,3 +155,41 @@ fn an_mmu_fault_is_read_and_cleared_as_v3d_hub_irq_does() {
     assert_eq!(f, MmuFault { axi_id: 0x3a, addr: 0x0012_3456 << 4 });
     assert_eq!(r.writes, vec![(Block::V3dHub, 0x1200, 0x060d_0c01 | (1 << 12))]);
 }
+
+/// `Regs` whose texture L2 finishes every flush and clean at once.
+#[derive(Default)]
+struct Caches(Regs);
+
+impl Hw for Caches {
+    fn read(&mut self, b: Block, off: u64, w: u8) -> u32 {
+        self.0.read(b, off, w)
+    }
+    fn write(&mut self, b: Block, off: u64, w: u8, v: u32) {
+        self.0.write(b, off, w, v);
+        if b == Block::V3dCore && off == 0x30 {
+            self.0.vals.insert((format!("{b:?}"), off), v & !((1 << 8) | 1));
+        }
+    }
+    fn delay_us(&mut self, _: u64) {}
+}
+
+#[test]
+fn a_page_table_switch_waits_for_idle_and_cleans_first() {
+    // Busy: a dispatch queued, the TFU working, a control list short of its end.
+    for (b, off, v) in [(Block::V3dCore, 0x900u64, 1u32), (Block::V3dCore, 0x900, 2), (Block::V3dHub, 0x700, 1),
+                        (Block::V3dCore, 0x114, 0x1000)] {
+        let mut r = Caches::default();
+        r.0.vals.insert((format!("{b:?}"), off), v);
+        assert_eq!(switch_page_table(&mut r, 0x1_0000_0000, 0x5000), Err(Error::Busy));
+        assert!(r.0.writes.is_empty());
+    }
+    // Idle (both threads at their end): clean, invalidate, then the table.
+    let mut r = Caches::default();
+    r.0.vals.insert(("V3dCore".into(), 0x110), 0x2000);
+    r.0.vals.insert(("V3dCore".into(), 0x108), 0x2000);
+    switch_page_table(&mut r, 0x1_0000_0000, 0x5000).unwrap();
+    let w: Vec<(u64, u32)> = r.0.writes.iter().map(|w| (w.1, w.2)).collect();
+    assert_eq!(&w[..4], &[(0x30, 1 << 8), (0x30, 1 | (2 << 1)), (0x30, 1), (0x24, 0x0f0f_0f0f)]);
+    assert_eq!(w[4], (0x1204, 0x100000));
+    assert_eq!(w[6], (0x1230, 5 | (1 << 31)));
+}

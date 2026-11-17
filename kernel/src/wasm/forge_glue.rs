@@ -1264,6 +1264,26 @@ host_imports! {
     #[cfg(target_arch = "aarch64")]
     ctx fn npk_v3d_unmap(va: i64) -> i32;
 
+    // npk_v3d_ctx_create() -> context or -1: a V3D address space of its own.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_ctx_create() -> i32;
+
+    // npk_v3d_ctx_destroy(context) -> 0 or -1.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_ctx_destroy(v3d_ctx: i32) -> i32;
+
+    // npk_v3d_ctx_map(context, pages_ptr, n) -> V3D address or -1.
+    #[cfg(target_arch = "aarch64")]
+    mem fn npk_v3d_ctx_map(v3d_ctx: i32, pages_ptr: i32, n: i32) -> i64;
+
+    // npk_v3d_ctx_unmap(context, va) -> 0 or -1.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_ctx_unmap(v3d_ctx: i32, va: i64) -> i32;
+
+    // npk_v3d_switch(context) -> 0, -16 while V3D works, or -1.
+    #[cfg(target_arch = "aarch64")]
+    ctx fn npk_v3d_switch(v3d_ctx: i32) -> i32;
+
     // npk_v3d_power(on) -> 0 or -1: V3D's runtime PM.
     #[cfg(target_arch = "aarch64")]
     ctx fn npk_v3d_power(on: i32) -> i32;
