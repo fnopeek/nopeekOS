@@ -506,6 +506,7 @@ fn queue_prefetch(chunks: &Arc<Chunks>, order: Vec<usize>) {
         let cores = crate::microvm::cpu::place_helpers(WORKERS);
         // One worker per core; fewer cores than workers means fewer workers.
         RUNNING.store(cores.len(), Ordering::Release);
+        crate::kprintln!("[virtio-blk] prefetch on cores {:?}", cores);
         for core in cores {
             crate::smp::fiber::admit_with_stack(core, worker_entry, 0, WORKER_STACK_BYTES);
         }

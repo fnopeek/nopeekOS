@@ -45,7 +45,8 @@ pub const RPI_FIRMWARE_SET_CLOCK_RATE: u32 = 0x0003_8002;
 /// `clk-raspberrypi.c`: the clock-state word's on bit.
 pub const RPI_FIRMWARE_STATE_ENABLE_BIT: u32 = 1 << 0;
 
-/// `enum rpi_firmware_clk_id`, the clocks the display uses.
+/// `enum rpi_firmware_clk_id`: the CPU clock and the clocks the display uses.
+pub const RPI_FIRMWARE_ARM_CLK_ID: u32 = 3;
 pub const RPI_FIRMWARE_CORE_CLK_ID: u32 = 4;
 pub const RPI_FIRMWARE_V3D_CLK_ID: u32 = 5;
 pub const RPI_FIRMWARE_M2MC_CLK_ID: u32 = 13;

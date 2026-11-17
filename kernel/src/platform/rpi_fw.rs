@@ -74,7 +74,19 @@ pub fn init(fdt: &Fdt) -> bool {
     fw::startup(&mut mbox);
     *FW.lock() = Some(Firmware { mbox, buf, irq });
     print_revision();
+    print_arm_clock();
     true
+}
+
+/// The CPU clock as the firmware runs it: nothing here changes it (no
+/// cpufreq), so this is the rate every core runs at.
+fn print_arm_clock() {
+    let id = fw::RPI_FIRMWARE_ARM_CLK_ID;
+    let (rate, measured) = (clock_rate(id), clock_measured(id));
+    let (min, max) = (clock_min_rate(id), clock_max_rate(id));
+    let mhz = |v: Option<u32>| v.map_or(alloc::string::String::from("-"), |v| alloc::format!("{}", v / 1_000_000));
+    kprintln!("[npk] firmware: ARM clock {} MHz (measured {}, min {}, max {})",
+        mhz(rate), mhz(measured), mhz(min), mhz(max));
 }
 
 /// `rpi_firmware_print_firmware_revision` and `_hash`.

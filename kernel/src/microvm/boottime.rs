@@ -135,6 +135,25 @@ impl core::fmt::Display for DiskSoFar {
     }
 }
 
+/// The vCPUs' time split and exits since the previous guest milestone:
+/// in the guest, halted, and the rest outside it (exit handling, and any
+/// time the vCPU's fiber waited while others ran on its core).
+fn vcpus_since_last_mark() -> alloc::string::String {
+    let vt = crate::microvm::cpu::vcpu_time_snapshot();
+    let ex = crate::microvm::cpu::vm_exit_snapshot();
+    let (vt0, ex0) = core::mem::replace(&mut *MARK_PREV.lock(), (vt, ex));
+    let hz = counter_hz().max(1);
+    let d = |i: usize| vt[i].saturating_sub(vt0[i]) * 1000 / hz;
+    let (guest, halted) = (d(crate::microvm::cpu::VT_GUEST), d(crate::microvm::cpu::VT_HALTED));
+    let other = d(crate::microvm::cpu::VT_OUTSIDE).saturating_sub(halted);
+    let exits: u64 = (0..VMEXIT_BUCKETS).map(|i| ex[i].saturating_sub(ex0[i])).sum();
+    alloc::format!(" | vCPUs since last: guest {} ms, halted {} ms, outside {} ms, {} exits",
+        guest, halted, other, exits)
+}
+
+static MARK_PREV: Mutex<([u64; VT_BUCKETS], [u64; VMEXIT_BUCKETS])> =
+    Mutex::new(([0; VT_BUCKETS], [0; VMEXIT_BUCKETS]));
+
 static DISK_T0: Mutex<[u64; IO_COUNTERS]> = Mutex::new([0; IO_COUNTERS]);
 static DISK_LOADS0: AtomicU64 = AtomicU64::new(0);
 static DISK_LOAD_CYCLES0: AtomicU64 = AtomicU64::new(0);
@@ -164,6 +183,7 @@ pub fn start() {
     WIN_STATE.store(WIN_IDLE, Ordering::Relaxed);
     *APP_SNAP.lock() = None;
     *DISK_T0.lock() = io_counters();
+    *MARK_PREV.lock() = (crate::microvm::cpu::vcpu_time_snapshot(), crate::microvm::cpu::vm_exit_snapshot());
     DISK_LOADS0.store(crate::microvm::devices::blk_image::GUEST_LOADS.load(Ordering::Relaxed), Ordering::Relaxed);
     DISK_LOAD_CYCLES0.store(
         crate::microvm::devices::blk_image::GUEST_LOAD_CYCLES.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -202,7 +222,8 @@ pub fn guest_line(s: &str) {
         let bit = 1u32 << i;
         if seen & bit == 0 && s.contains(needle) {
             GUEST_SEEN.fetch_or(bit, Ordering::Relaxed);
-            kprintln!("[boottime] +{} ms {}{}", ms, label, DiskSoFar);
+            let vcpus = vcpus_since_last_mark();
+            kprintln!("[boottime] +{} ms {}{}{}", ms, label, DiskSoFar, vcpus);
             // The AP bring-up window ends where the session gets going.
             if *label == "session: compositor start" {
                 kprintln!("[ripsample] window: AP opened .. compositor start");
