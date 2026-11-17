@@ -154,7 +154,10 @@ fn launch_wayland(kmsg_fd: i64) {
     // with a WARN if udev is absent — npkwm still starts, just
     // input/hotplug-blind. `WLR_LIBINPUT_NO_DEVICES`: an input device that
     // appears only after the settle (a guest still probing) arrives through
-    // the monitor instead of keeping npkwm from starting.
+    // the monitor instead of keeping npkwm from starting. With the v3d
+    // native context the compositor and the browser load /opt/npk-mesa:
+    // its variables go on su's command line (and into app.sh), as su is
+    // setuid and glibc drops LD_LIBRARY_PATH from its environment.
     // The browser's allocator (scudo) keeps freed memory instead of handing
     // it back with madvise/munmap every few seconds: each hand-back is a TLB
     // shootdown on every vCPU the process ran on, and under an upload they
@@ -250,7 +253,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  VA=iHD; grep -qE 'npkgpu=amdgpu( |$)' /proc/cmdline && VA=radeonsi; \
                  HW=$GPU; grep -qE 'npkgpu=v3d( |$)' /proc/cmdline && { HW=0; VA=; }; \
                  EGLV=/opt/npk-mesa/share/glvnd/egl_vendor.d/50_mesa.json; \
-                 [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && export __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV LD_LIBRARY_PATH=/opt/npk-mesa/lib; \
+                 MESAENV=; [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && MESAENV=\"__EGL_VENDOR_LIBRARY_FILENAMES=$EGLV LD_LIBRARY_PATH=/opt/npk-mesa/lib EGL_LOG_LEVEL=debug\"; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
                  WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm WLR_LIBINPUT_NO_DEVICES=1 \
                  LIBSEAT_BACKEND=seatd \
@@ -265,7 +268,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  echo \"<0>[wl] ${WM##*/} start (seatd after ${i}x5ms, $N input devices)\" > /dev/kmsg; \
                  WMENV=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkwmenv=//p' | tr '\\n' ' '); \
                  [ -n \"$WMENV\" ] && echo \"<0>[wl] npkwm env $WMENV\" > /dev/kmsg; \
-                 su -s /bin/sh wl -c \"$WMENV XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
+                 su -s /bin/sh wl -c \"$WMENV $MESAENV XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
                  WLPID=$!; \
                  APP=firefox; ADIR=/usr/lib/$APP; \
                  nice -n 19 sh -c \"for r in 0 64 128; do dd if=$ADIR/libxul.so of=/dev/null bs=1M skip=\\$r count=64 2>/dev/null & done; \
@@ -386,8 +389,12 @@ fn launch_wayland(kmsg_fd: i64) {
                  ( tail -F /tmp/pipewire.log 2>/dev/null | while read -r l; do echo \"<0>[pw] $l\" > /dev/kmsg; done ) & \
                  i=0; while [ ! -S /tmp/wlrt/wayland-0 ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  echo \"<0>[wl] npkwm up after ${i}x5ms\" > /dev/kmsg; \
-                 [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && [ -x /usr/bin/eglinfo ] && \
-                   su -s /bin/sh app -c \"XDG_RUNTIME_DIR=/tmp/xrt WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV LD_LIBRARY_PATH=/opt/npk-mesa/lib EGL_LOG_LEVEL=debug MESA_DEBUG=1 eglinfo -B -p wayland 2>&1\" | head -60 | sed 's/^/<0>[egl] /' > /dev/kmsg & \
+                 [ $GPU = 1 ] && [ -z \"$VA\" ] && [ -f $EGLV ] && [ -x /usr/bin/eglinfo ] && { \
+                   ls -l /dev/dri 2>&1 | sed 's/^/<0>[egl] dri: /' > /dev/kmsg; \
+                   head -30 /tmp/npkwm.log 2>/dev/null | sed 's/^/<0>[wl] log: /' > /dev/kmsg; \
+                   for pl in surfaceless gbm wayland; do \
+                     su -s /bin/sh app -c \"XDG_RUNTIME_DIR=/tmp/xrt WAYLAND_DISPLAY=/tmp/wlrt/wayland-0 __EGL_VENDOR_LIBRARY_FILENAMES=$EGLV LD_LIBRARY_PATH=/opt/npk-mesa/lib EGL_LOG_LEVEL=debug MESA_DEBUG=1 eglinfo -B -p $pl 2>&1\" | head -40 | sed \"s/^/<0>[egl] $pl: /\" > /dev/kmsg; \
+                   done; } & \
                  i=0; while [ ! -S /tmp/xrt/pulse/native ] && [ $i -lt 400 ]; do sleep 0.005; i=$((i+1)); done; \
                  if [ -S /tmp/xrt/pulse/native ]; then echo \"<0>[pw] pipewire-pulse up after ${i}x5ms\" > /dev/kmsg; \
                  else echo '<0>[pw] pipewire-pulse did not come up' > /dev/kmsg; \
