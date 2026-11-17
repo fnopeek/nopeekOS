@@ -3,7 +3,9 @@
 //! RTC in UTC after each sync (`hwclock --systohc`).
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use super::wall::{format, mark_synced, now, set};
+#[cfg(target_arch = "x86_64")]
+use super::wall::set;
+use super::wall::{format, mark_synced, now_ns, set_ns};
 
 /// An NTP sync is queued or running.
 static SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
@@ -31,20 +33,25 @@ pub fn init_from_rtc() -> Option<u64> {
     Some(t)
 }
 
-/// Step the clock to an NTP answer and write it to the RTC, so the next
-/// boot starts close to right even without a network.
-fn step(unix: u64) {
-    let before = now();
-    set(unix);
+/// A step smaller than this (ms) is not reported by the periodic check.
+const QUIET_STEP_MS: i64 = 50;
+
+/// Step the clock to an NTP answer, UTC nanoseconds `ns` as of
+/// `time::uptime_ns` `at`, and write it to the RTC, so the next boot
+/// starts close to right even without a network.
+fn step(ns: u64, at: u64) {
+    let before = now_ns().map(|b| b.saturating_sub(crate::time::uptime_ns().saturating_sub(at)));
+    set_ns(ns, at);
     let first = mark_synced();
+    let unix = ns / 1_000_000_000;
     #[cfg(target_arch = "x86_64")]
     if !crate::rtc::write_unix_time(unix) {
         crate::kprintln!("[npk] time: RTC write failed");
     }
-    let off = before.map(|b| unix as i64 - b as i64).unwrap_or(0);
+    let off_ms = before.map(|b| (ns as i64 - b as i64) / 1_000_000).unwrap_or(0);
     // The periodic check stays quiet while the clock holds.
-    if first || off != 0 {
-        crate::kprintln!("[npk] NTP: {} (stepped {:+} s)", format(unix), off);
+    if first || off_ms.abs() >= QUIET_STEP_MS {
+        crate::kprintln!("[npk] NTP: {} (stepped {:+} ms)", format(unix), off_ms);
     }
 }
 
@@ -56,35 +63,37 @@ fn step(unix: u64) {
 /// `AGREE_SECS` of the median), and the clock never goes back before a time
 /// a signed release has proved.
 pub fn sync_now() -> bool {
-    let t0 = crate::time::ticks();
     let mut asked: alloc::vec::Vec<[u8; 4]> = alloc::vec::Vec::new();
-    let mut answers: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+    // Each answer as UTC nanoseconds and the uptime it holds for.
+    let mut got: alloc::vec::Vec<(u64, u64)> = alloc::vec::Vec::new();
     for host in NTP_HOSTS {
         let Some(ip) = crate::net::dns::resolve(host) else { continue };
         if asked.contains(&ip) { continue; }
         asked.push(ip);
         if let Some(t) = crate::net::ntp::query(ip) {
-            // Back to the moment the sync began, so slow answers compare.
-            answers.push(t.saturating_sub(crate::time::ticks().saturating_sub(t0) / 100));
+            got.push(t);
         }
     }
+    // All carried forward to one moment, so answers taken apart compare.
+    let at = crate::time::uptime_ns();
+    let mut answers: alloc::vec::Vec<u64> = got.iter().map(|&(ns, t)| ns + (at - t)).collect();
     answers.sort_unstable();
     let Some(&median) = answers.get(answers.len() / 2) else {
         crate::kprintln!("[npk] NTP: no answer");
         return false;
     };
-    let agree = answers.iter().filter(|&&t| t.abs_diff(median) <= AGREE_SECS).count();
+    let agree = answers.iter().filter(|&&t| t.abs_diff(median) <= AGREE_SECS * 1_000_000_000).count();
     if agree < 2 || agree * 2 <= answers.len() {
         crate::kprintln!("[npk] NTP: {} of {} answers agree, clock left alone", agree, answers.len());
         return false;
     }
     let floor = proven_floor();
-    if median < floor {
+    if median / 1_000_000_000 < floor {
         crate::kprintln!("[npk] NTP: answer is before {} (a signed release), clock left alone",
             format(floor));
         return false;
     }
-    step(median.saturating_add(crate::time::ticks().saturating_sub(t0) / 100));
+    step(median, at);
     true
 }
 
@@ -104,8 +113,9 @@ pub fn request_sync() {
     if SYNC_RUNNING.swap(true, Ordering::AcqRel) {
         return;
     }
+    // A fiber: its network waits let the core's other fibers run.
     if crate::smp::scheduler::worker_count() > 0 {
-        crate::smp::scheduler::spawn("ntp", sync_task, 0);
+        crate::smp::scheduler::spawn_fiber(sync_task, 0);
     } else {
         sync_task(0);
     }

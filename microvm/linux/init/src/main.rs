@@ -304,6 +304,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    'layout.css.prefers-color-scheme.content-override|0' \
                    'security.sandbox.warn_unprivileged_namespaces|false' \
                    'media.av1.enabled|false' \
+                   'media.mediasource.vp9.enabled|false' \
                    'browser.startup.page|3' \
                    'browser.sessionstore.interval|5000' \
                    'browser.warnOnQuit|false' \
@@ -319,7 +320,7 @@ fn launch_wayland(kmsg_fd: i64) {
                    'browser.download.useDownloadDir|true' \
                    'toolkit.legacyUserProfileCustomizations.stylesheets|true'; \
                  do k=${p%|*}; v=${p#*|}; \
-                   case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled|media.av1.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
+                   case $k in gfx.webrender.software|gfx.webrender.max-partial-present-rects|gfx.canvas.accelerated|widget.dmabuf.force-enabled|layers.gpu-process.enabled|media.av1.enabled|media.mediasource.vp9.enabled) [ $GPU = 1 ] && { sed -i \"/\\\"$k\\\"/d\" /tmp/moz/prefs.js 2>/dev/null; chown 1000:1000 /tmp/moz/prefs.js 2>/dev/null; continue; };; esac; \
                    echo \"user_pref(\\\"$k\\\", $v);\" >> /tmp/moz/user.js; \
                  done; \
                  [ $GPU = 1 ] && for p in 'media.ffmpeg.vaapi.enabled|true' 'media.hardware-video-decoding.force-enabled|true' 'webgl.disabled|false'; \

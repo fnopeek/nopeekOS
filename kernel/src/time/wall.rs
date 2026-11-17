@@ -12,15 +12,21 @@ use super::zone;
 /// clock is a useful one, 1 January 2025.
 pub const CLOCK_SANE_FLOOR: u64 = 1_735_689_600;
 
-/// UTC seconds and the `time::uptime_ns` they were taken at.
+/// UTC nanoseconds and the `time::uptime_ns` they were taken at.
 static WALL: Mutex<Option<(u64, u64)>> = Mutex::new(None);
 
 /// True once NTP has set the clock in this boot.
 static SYNCED: AtomicBool = AtomicBool::new(false);
 
 /// Set the clock to UTC seconds `unix`.
+#[cfg(target_arch = "x86_64")]
 pub(super) fn set(unix: u64) {
-    *WALL.lock() = Some((unix, crate::time::uptime_ns()));
+    set_ns(unix.saturating_mul(1_000_000_000), crate::time::uptime_ns());
+}
+
+/// Set the clock to UTC nanoseconds `ns` as of `time::uptime_ns` `at`.
+pub(super) fn set_ns(ns: u64, at: u64) {
+    *WALL.lock() = Some((ns, at));
 }
 
 /// Current UTC seconds, or `None` before any source set the clock.
@@ -32,7 +38,7 @@ pub fn now() -> Option<u64> {
 pub fn now_ns() -> Option<u64> {
     let (base, at) = (*WALL.lock())?;
     let since = crate::time::uptime_ns().saturating_sub(at);
-    Some(base.saturating_mul(1_000_000_000).saturating_add(since))
+    Some(base.saturating_add(since))
 }
 
 /// [`now`], or 0 when the clock is unset.

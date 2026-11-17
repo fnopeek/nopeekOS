@@ -739,6 +739,17 @@ pub fn set_worker_poll_hz(hz: u32) {
     POLL_PERIOD[cid].store(period, Ordering::Relaxed);
 }
 
+/// Idle step of a short network wait (a DNS or NTP answer): a fiber
+/// sleeps 1 ms and its core runs the other fibers meanwhile; a native task
+/// halts as `worker_idle_hlt` does.
+pub fn reply_wait() {
+    if crate::smp::fiber::current_stack_lo().is_some() {
+        crate::smp::fiber::yield_sleep(1);
+    } else {
+        worker_idle_hlt();
+    }
+}
+
 /// Idle step of a worker-core wait loop that polls (the native network
 /// receive loops: `tcp_recv_poll`, `recv_blocking`): halt for one poll
 /// period — 10 ms, or what `set_worker_poll_hz` asked for — or until an

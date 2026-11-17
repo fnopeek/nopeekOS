@@ -35,8 +35,10 @@ pub fn native_protocol() -> Option<&'static str> {
     }
     #[cfg(target_arch = "aarch64")]
     {
+        // Offered only with `set microvm_gpu native` (see `reset`).
         crate::gpu::gpudev::native_device()?;
-        Some("v3d")
+        let mode = crate::config::get("microvm_gpu");
+        (mode.as_deref().map(str::trim) == Some("native")).then_some("v3d")
     }
 }
 
