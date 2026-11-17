@@ -314,6 +314,11 @@ pub fn open() -> Option<Ident> {
     Some(ident)
 }
 
+/// Whether V3D was opened: its page tables bound what it reaches.
+pub fn is_open() -> bool {
+    STATE.lock().is_some()
+}
+
 /// Runtime PM of V3D (`v3d_power_resume` / `v3d_power_suspend` with the
 /// genpd domains and the firmware clock around them). The module has
 /// masked V3D's interrupts and cleaned its caches before a suspend

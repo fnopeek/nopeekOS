@@ -32,8 +32,7 @@ pub mod virtio_console_pci;
 pub mod virtio_gpu_ctx;
 #[cfg(target_arch = "x86_64")]
 pub mod virtio_gpu_i915;
-#[cfg(target_arch = "x86_64")]
-pub mod virtio_gpu_amdgpu;
+pub mod virtio_gpu_module;
 pub mod virtio_gpu_pci;
 pub mod virtio_input_pci;
 pub mod virtio_input_keymap;

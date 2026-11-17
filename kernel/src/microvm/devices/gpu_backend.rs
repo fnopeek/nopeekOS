@@ -33,8 +33,11 @@ pub fn native_protocol() -> Option<&'static str> {
         let dev = crate::gpu::gpudev::native_device()?.pci()?;
         Some(if crate::drivers::pci::read16(dev, 0) == 0x1002 { "amdgpu" } else { "i915" })
     }
-    #[cfg(not(target_arch = "x86_64"))]
-    None
+    #[cfg(target_arch = "aarch64")]
+    {
+        crate::gpu::gpudev::native_device()?;
+        Some("v3d")
+    }
 }
 
 /// Reset the device on VM teardown/start (alongside `net_backend::reset`).
@@ -52,7 +55,7 @@ pub fn reset() {
         let backend: Option<(alloc::boxed::Box<dyn super::virtio_gpu_ctx::Backend>, &str)> =
             if native_protocol() == Some("amdgpu") {
                 crate::gpu::gpudev::native_capset()
-                    .and_then(|c| super::virtio_gpu_amdgpu::AmdgpuBackend::new(dev, c))
+                    .and_then(|c| super::virtio_gpu_module::ModuleBackend::new(&super::virtio_gpu_module::AMDGPU, c))
                     .map(|b| (alloc::boxed::Box::new(b) as _, "amdgpu"))
             } else {
                 Some((alloc::boxed::Box::new(super::virtio_gpu_i915::GpudevBackend::new(dev)), "i915"))
@@ -67,7 +70,23 @@ pub fn reset() {
             }
             None => crate::kprintln!("[gpu] no native contexts: the GPU module reported no amdgpu capset"),
         }
-    } else {
+    }
+    // The Pi's V3D: its capset comes from the display module.
+    #[cfg(target_arch = "aarch64")]
+    if crate::gpu::gpudev::native_device().is_some() {
+        match crate::gpu::gpudev::native_capset()
+            .and_then(|c| super::virtio_gpu_module::ModuleBackend::new(&super::virtio_gpu_module::V3D, c))
+        {
+            Some(b) => {
+                super::virtio_gpu_ctx::set_backend(Some(alloc::boxed::Box::new(b)));
+                if mode == Some("native") {
+                    crate::kprintln!("[gpu] native contexts offered: v3d through the display module");
+                }
+            }
+            None => crate::kprintln!("[gpu] no native contexts: the display module reported no v3d capset"),
+        }
+    }
+    if crate::gpu::gpudev::native_device().is_none() {
         if let Some(why) = crate::gpu::gpudev::native_refused() {
             crate::kprintln!("[gpu] no native contexts: {}", why);
         }
@@ -79,8 +98,11 @@ pub fn reset() {
         }
     }
     // Native contexts for this VM: a backend serves the host's GPU, and
-    // `set microvm_gpu off` does not keep the guest on the CPU.
-    GPU.lock().nativectx = super::virtio_gpu_ctx::backend_ready() && mode != Some("off");
+    // `set microvm_gpu off` does not keep the guest on the CPU. On the Pi
+    // only with `set microvm_gpu native`: the guest image's Mesa has to
+    // carry the v3d native context before the guest is offered one.
+    let wanted = if cfg!(target_arch = "aarch64") { mode == Some("native") } else { mode != Some("off") };
+    GPU.lock().nativectx = super::virtio_gpu_ctx::backend_ready() && wanted;
     RESUME_TSC.store(0, Ordering::Release);
     SUBMITTING.store(false, Ordering::Release);
     MSIX.reset(super::msix::wanted());

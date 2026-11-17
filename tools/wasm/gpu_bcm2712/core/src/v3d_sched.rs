@@ -66,6 +66,8 @@ struct Job {
     /// Overflow buffers the binner was given for this job's scene, freed
     /// with its render job (`unref_list`); the caller's handles.
     unref: Vec<u32>,
+    /// At most this long on its unit (us), progress or not.
+    budget: Option<u64>,
 }
 
 struct Active {
@@ -75,6 +77,8 @@ struct Active {
     /// What the timeout handler saw last (`timedout_ctca/ctra`,
     /// `timedout_batches`).
     progress: (u32, u32),
+    /// When its budget is spent (`u64::MAX`: none).
+    spent_us: u64,
 }
 
 /// What the caller has to do.
@@ -110,6 +114,9 @@ pub struct Sched {
     /// Per queue: jobs finished and time on the unit (`v3d_stats`).
     pub jobs: [u64; QUEUES],
     pub busy_us: [u64; QUEUES],
+    /// The budget of the jobs submitted from now on: a client's work runs
+    /// at most this long, however it progresses; then the GPU is reset.
+    pub budget: Option<u64>,
 }
 
 impl Default for Sched {
@@ -129,6 +136,7 @@ impl Sched {
             stopped: false,
             jobs: [0; QUEUES],
             busy_us: [0; QUEUES],
+            budget: None,
         }
     }
 
@@ -138,7 +146,8 @@ impl Sched {
         let fence = self.next;
         self.next += 1;
         self.open.push(fence);
-        self.pending[work.queue() as usize].push_back(Job { fence, work, deps: deps.to_vec(), unref: Vec::new() });
+        let budget = self.budget;
+        self.pending[work.queue() as usize].push_back(Job { fence, work, deps: deps.to_vec(), unref: Vec::new(), budget });
         fence
     }
 
@@ -179,7 +188,7 @@ impl Sched {
 
     /// The earliest timeout of a running job.
     pub fn next_deadline(&self) -> Option<u64> {
-        self.active.iter().flatten().map(|a| a.deadline_us).min()
+        self.active.iter().flatten().map(|a| a.deadline_us.min(a.spent_us)).min()
     }
 
     fn signal(&mut self, a: Active, ok: bool, now_us: u64, out: &mut Vec<Event>) {
@@ -226,13 +235,14 @@ impl Sched {
                     Work::CacheClean => {
                         // Synchronous: no fence to wait on.
                         let ok = v3d::clean_caches(hw);
-                        let a = Active { job, started_us: now_us, deadline_us: now_us, progress: (0, 0) };
+                        let a = Active { job, started_us: now_us, deadline_us: now_us, progress: (0, 0), spent_us: u64::MAX };
                         self.signal(a, ok, now_us, out);
                         started = true;
                         continue;
                     }
                 };
-                let a = Active { job, started_us: now_us, deadline_us: now_us + JOB_TIMEOUT_US, progress: (0, 0) };
+                let spent_us = job.budget.map_or(u64::MAX, |b| now_us + b);
+                let a = Active { job, started_us: now_us, deadline_us: now_us + JOB_TIMEOUT_US, progress: (0, 0), spent_us };
                 if runs {
                     self.active[i] = Some(a);
                 } else {
@@ -291,8 +301,8 @@ impl Sched {
 
     /// The timeout handlers (`v3d_cl_job_timedout`, `v3d_tfu_job_timedout`,
     /// `v3d_csd_job_timedout`): a job past its deadline that made progress
-    /// gets another timeout; one that did not stops every queue and asks
-    /// for a reset.
+    /// gets another timeout; one that did not, or that spent its budget,
+    /// stops every queue and asks for a reset.
     pub fn check_timeouts(&mut self, hw: &mut impl Hw, now_us: u64, out: &mut Vec<Event>) {
         if self.stopped {
             return;
@@ -300,14 +310,10 @@ impl Sched {
         for q in ALL {
             let i = q as usize;
             let Some(a) = self.active[i].as_mut() else { continue };
-            if now_us < a.deadline_us {
+            if now_us < a.deadline_us && now_us < a.spent_us {
                 continue;
             }
-            let progress = match q {
-                Queue::Bin | Queue::Render => Some(v3d::cl_progress(hw, i as u32)),
-                Queue::Csd => Some((v3d::csd_progress(hw), 0)),
-                Queue::Tfu | Queue::CacheClean => None,
-            };
+            let progress = if now_us >= a.spent_us { None } else { Self::progress(hw, q) };
             if let Some(p) = progress {
                 if p != a.progress {
                     a.progress = p;
@@ -319,6 +325,16 @@ impl Sched {
             self.stopped = true;
             out.push(Event::Reset { queue: q, err_stat: v3d::err_stat(hw) });
             return;
+        }
+    }
+
+    /// What a running job of queue `q` has done so far, for the timeout
+    /// handlers; None for the queues that have no such measure.
+    fn progress(hw: &mut impl Hw, q: Queue) -> Option<(u32, u32)> {
+        match q {
+            Queue::Bin | Queue::Render => Some(v3d::cl_progress(hw, q as u32)),
+            Queue::Csd => Some((v3d::csd_progress(hw), 0)),
+            Queue::Tfu | Queue::CacheClean => None,
         }
     }
 

@@ -21,9 +21,9 @@ use alloc::vec::Vec;
 use drm_core::linux::Line;
 use gpu_bcm2712_core::hw::{Hw, Spi};
 use gpu_bcm2712_core::shaders_gen::{self as sg, Program, U};
-use gpu_bcm2712_core::v3d::{self, CsdProgram};
+use gpu_bcm2712_core::v3d::{self, BinJob, CsdProgram, TfuJob};
 use gpu_bcm2712_core::v3d_draw::{self, BoAlloc, BoKind};
-use gpu_bcm2712_core::v3d_sched::{Event, Fence, Queue, Sched};
+use gpu_bcm2712_core::v3d_sched::{Event, Fence, Queue, Sched, Work};
 use gpu_scene::plan::{self, rect};
 
 const EINVAL: i32 = 22;
@@ -78,6 +78,16 @@ struct GlassLayer {
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
 const AUTOSUSPEND_US: u64 = 50_000;
+/// How long one job of a client may run on its unit, however it
+/// progresses (`docs/spec/V3D_NATIVE_CONTEXT.md`).
+const CLIENT_BUDGET_US: u64 = 100_000;
+
+/// A client's job (`drm_v3d_submit_cl`, `_tfu`, `_csd`).
+pub enum ClientJob {
+    Cl { bin: Option<BinJob>, render: (u32, u32), flush: bool },
+    Tfu(TfuJob),
+    Csd { cfg: [u32; 7], flush: bool },
+}
 /// Finished jobs whose time `take_job_us` can still collect.
 const JOB_US_KEPT: usize = 64;
 /// Uniform streams: one slot per dispatch that may be in flight.
@@ -90,22 +100,29 @@ pub struct Buf {
     dma: i32,
     pub va: u32,
     pub bytes: u32,
+    /// The V3D context it is mapped in.
+    ctx: i32,
 }
 
 impl Buf {
     fn new(pages: u32) -> Option<Buf> {
+        Buf::new_in(0, pages)
+    }
+
+    /// `pages` of the module's DMA memory mapped in V3D context `ctx`.
+    fn new_in(ctx: i32, pages: u32) -> Option<Buf> {
         let dma = npk_sys::dma_alloc(pages as i32);
         if dma < 0 {
             return None;
         }
         let phys = npk_sys::dma_phys_addr(dma) as u64;
         let list: Vec<u64> = (0..pages as u64).map(|i| phys + i * PAGE as u64).collect();
-        let va = npk_sys::v3d_map(&list);
+        let va = if ctx == 0 { npk_sys::v3d_map(&list) } else { npk_sys::v3d_ctx_map(ctx, &list) };
         if va <= 0 {
             npk_sys::dma_free(dma);
             return None;
         }
-        Some(Buf { dma, va: va as u32, bytes: pages * PAGE })
+        Some(Buf { dma, va: va as u32, bytes: pages * PAGE, ctx })
     }
 
     fn write(&self, off: u32, data: &[u8]) -> bool {
@@ -118,7 +135,11 @@ impl Buf {
 
     /// Unmapped for V3D, the pages given back.
     fn free(self) {
-        let _ = npk_sys::v3d_unmap(self.va as i64);
+        let _ = if self.ctx == 0 {
+            npk_sys::v3d_unmap(self.va as i64)
+        } else {
+            npk_sys::v3d_ctx_unmap(self.ctx, self.va as i64)
+        };
         npk_sys::dma_free(self.dma);
     }
 }
@@ -138,6 +159,11 @@ pub struct Composer {
     sched: Sched,
     /// The fence of the last submission, which the next one waits for.
     last: Fence,
+    /// The V3D context whose page table is loaded: 0, the module's, or a
+    /// client's (`use_ctx`).
+    ctx: i32,
+    /// GPU resets since the composer started.
+    resets: u64,
     /// Overflow buffers handed to the binner, by handle.
     overflow: Vec<(u32, Buf)>,
     next_overflow: u32,
@@ -315,6 +341,8 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         uslots: [0; UNIFORM_SLOTS as usize],
         sched: Sched::new(),
         last: 0,
+        ctx: 0,
+        resets: 0,
         overflow: Vec::new(),
         next_overflow: 1,
         powered: true,
@@ -413,6 +441,54 @@ impl Composer {
         }
     }
 
+    /// Context `ctx`'s page table for the next jobs: everything submitted
+    /// finished first, as the kernel loads a table only while V3D is idle.
+    pub fn use_ctx(&mut self, hw: &mut PiHw, ctx: i32) -> Result<(), i32> {
+        if self.ctx == ctx {
+            return Ok(());
+        }
+        self.drain(hw);
+        let r = npk_sys::v3d_switch(ctx);
+        if r != 0 {
+            Line::new().s("v3d: no switch to context ").dec(ctx as u64).s(" (").dec(r.unsigned_abs() as u64).s(")")
+                .say();
+            return Err(-EIO);
+        }
+        self.ctx = ctx;
+        Ok(())
+    }
+
+    /// A client's job in its own context, behind everything submitted,
+    /// with `CLIENT_BUDGET_US` on the unit. Its last fence.
+    pub fn submit_client(&mut self, hw: &mut PiHw, ctx: i32, job: ClientJob) -> Result<Fence, i32> {
+        self.use_ctx(hw, ctx)?;
+        self.power_up(hw)?;
+        let deps: Vec<Fence> = if self.last != 0 { alloc::vec![self.last] } else { Vec::new() };
+        self.sched.budget = Some(CLIENT_BUDGET_US);
+        let f = match job {
+            ClientJob::Cl { bin, render, flush } => self.sched.submit_cl(bin, render, flush, &deps),
+            ClientJob::Tfu(t) => self.sched.submit(Work::Tfu(t), &deps),
+            ClientJob::Csd { cfg, flush } => {
+                let c = self.sched.submit(Work::Csd(cfg), &deps);
+                if flush { self.sched.submit(Work::CacheClean, &[c]) } else { c }
+            }
+        };
+        self.sched.budget = None;
+        self.last = f;
+        self.pump(hw);
+        Ok(f)
+    }
+
+    /// Has fence `f` signalled; did it fail?
+    pub fn fence(&self, f: Fence) -> (bool, bool) {
+        (self.sched.signaled(f), self.sched.failed(f))
+    }
+
+    /// GPU resets since the composer started.
+    pub fn resets(&self) -> u64 {
+        self.resets
+    }
+
     /// When the module's loop must look again: the next job timeout or the
     /// autosuspend, in us from `now_us`.
     pub fn next_due(&self, now_us: u64) -> Option<u64> {
@@ -426,6 +502,7 @@ impl Composer {
     /// cache-clean job submitted. The clean job's fence.
     pub fn submit_dispatch(&mut self, hw: &mut PiHw, p: &'static Program, push: &[u32; 32], grid: [u32; 3])
         -> Result<Fence, i32> {
+        self.use_ctx(hw, 0)?;
         self.power_up(hw)?;
         // A uniform slot whose dispatch finished; the oldest one waited for
         // when all are in flight.
@@ -484,6 +561,7 @@ impl Composer {
     /// `submit_draws` with the tiles loaded from `load_from` (`Pass`).
     fn submit_pass(&mut self, hw: &mut PiHw, image: v3d_draw::Image, load: bool, load_from: Option<(u32, u32)>,
                    area: v3d_draw::Rect, draws: &[v3d_draw::Draw]) -> Result<Fence, i32> {
+        self.use_ctx(hw, 0)?;
         self.power_up(hw)?;
         let viewport = v3d_draw::Viewport { x: 0.0, y: 0.0, width: image.width as f32, height: image.height as f32,
                                             min_depth: 0.0, max_depth: 1.0 };
@@ -599,7 +677,7 @@ impl Composer {
     /// `v3d_overflow_mem_work`: 256 KiB for the binner, given to the
     /// running bin job's render job; dropped when no bin job runs.
     fn overflow_mem_work(&mut self, hw: &mut PiHw) {
-        let Some(b) = Buf::new(OVERFLOW_PAGES) else {
+        let Some(b) = Buf::new_in(self.ctx, OVERFLOW_PAGES) else {
             Line::new().s("v3d: Couldn't allocate binner overflow mem").say();
             return;
         };
@@ -623,6 +701,7 @@ impl Composer {
             Line::new().s("v3d: the kernel could not reset V3D").say();
         }
         v3d::irq_reset(hw);
+        self.resets += 1;
         let mut ev = Vec::new();
         self.sched.reset_done(queue, npk_sys::now_us() as u64, &mut ev);
         self.handle(hw, ev);

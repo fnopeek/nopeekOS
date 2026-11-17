@@ -33,6 +33,7 @@ extern crate alloc;
 
 mod display_audio;
 mod hw;
+mod native;
 mod scene;
 
 use drm_core::drm_client_modeset::drm_client_dev;
@@ -79,6 +80,8 @@ const CAP_FLIP: i32 = 128;
 const CAP_CURSOR: i32 = 8;
 const CAP_SCENE: i32 = 2;
 const CAP_LAYERS: i32 = 256;
+/// Guests' native contexts (`docs/spec/V3D_NATIVE_CONTEXT.md`).
+const CAP_NATIVE: i32 = 4;
 /// `OP_BO_ADD` / `OP_BO_REMOVE`: `a0` buffer; `OP_SCENE`: `a0` target,
 /// `a1` payload bytes.
 const OP_BO_ADD: u32 = 2;
@@ -96,6 +99,14 @@ const DRM_FORMAT_XRGB8888: u32 = 0x3432_5258;
 const DRM_FORMAT_ARGB8888: u32 = 0x3432_5241;
 /// `OP_SHUTDOWN`: the system goes down.
 const OP_SHUTDOWN: u32 = 15;
+/// Native contexts: `a0` client, then as gpudev's `OP_*` say.
+const OP_CLIENT: u32 = 5;
+const OP_CCMD: u32 = 7;
+const OP_BLOB: u32 = 8;
+const OP_BLOB_RELEASE: u32 = 9;
+const OP_ATTACH: u32 = 10;
+/// Largest ccmd a job carries.
+const CCMD_MAX: u32 = 64 << 10;
 /// `OP_CURSOR_IMAGE`: `a0` width, `a1` height, `a2`/`a3` hotspot, the
 /// payload premultiplied ARGB8888; `OP_CURSOR_MOVE`: `a0` x, `a1` y,
 /// `a2` shown.
@@ -206,6 +217,10 @@ pub extern "C" fn _start() {
     let scenes = if caps != 0 { Scenes::new(&mut hw) } else { None };
     if scenes.is_some() {
         caps |= CAP_SCENE;
+        // The same V3D serves guests, each in a context of its own.
+        if npk_sys::gpudev_capset(&native::capset(&mut hw)) == 0 {
+            caps |= CAP_NATIVE;
+        }
     }
     if npk_sys::gpudev_ready(caps) < 0 {
         Line::new().s("the kernel did not take the presenting, the compositor copies on the CPU").say();
@@ -292,6 +307,8 @@ struct Scenes {
     pending: alloc::vec::Vec<Pending>,
     /// Slow scenes logged.
     slow_logged: u32,
+    /// Guests' native contexts.
+    native: native::Native,
 }
 
 /// A scene on V3D, not yet completed.
@@ -357,7 +374,42 @@ impl Scenes {
         }
         c.switch_test(hw);
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
-        Some(Scenes { c, bos, pending: alloc::vec::Vec::new(), slow_logged: 0 })
+        Some(Scenes { c, bos, pending: alloc::vec::Vec::new(), slow_logged: 0, native: native::Native::default() })
+    }
+
+    /// A native-context job; its status, or None when it completes later.
+    fn native_job(&mut self, hw: &mut PiHw, seq: i32, op: u32, a: &[u32; 6]) -> Option<i32> {
+        let n = &mut self.native;
+        Some(match op {
+            OP_CLIENT if a[1] != 0 => n.open(a[0]),
+            OP_CLIENT => n.close(&mut self.c, hw, a[0]),
+            OP_CCMD => {
+                if a[1] > CCMD_MAX {
+                    return Some(-22);
+                }
+                let mut req = alloc::vec![0u8; a[1] as usize];
+                let mut at = 0usize;
+                while at < req.len() {
+                    let k = npk_sys::gpudev_job_data(seq, at as i32, &mut req[at..]);
+                    if k <= 0 {
+                        return Some(-22);
+                    }
+                    at += k as usize;
+                }
+                match n.ccmd(&mut self.c, hw, seq, a[0], &req) {
+                    native::Done::Reply(r) => if npk_sys::gpudev_reply(seq, &r) != 0 { -12 } else { 0 },
+                    native::Done::Later => return None,
+                }
+            }
+            OP_BLOB => match n.blob(a[0], a[1], a[2]) {
+                Ok(r) => if npk_sys::gpudev_reply(seq, &r) != 0 { -12 } else { 0 },
+                Err(e) => e,
+            },
+            OP_BLOB_RELEASE => n.release(&mut self.c, hw, a[0], a[1]),
+            OP_ATTACH if a[4] != 0 => n.attach(a[0], a[1], a[2], a[3]),
+            OP_ATTACH => n.release(&mut self.c, hw, a[0], a[1]),
+            _ => -22,
+        })
     }
 
     /// `OP_BO_ADD`: mapped for V3D, its address reported.
@@ -755,6 +807,9 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
             if let Some(us) = s.c.next_due(now) {
                 timeout_ms = timeout_ms.min(us.div_ceil(1000));
             }
+            if let Some(t) = s.native.next_due() {
+                timeout_ms = timeout_ms.min(t.saturating_sub(now).div_ceil(1000));
+            }
         }
 
         let woke = npk_sys::wait(WAIT_IRQ | WAIT_GPU_CMD, timeout_ms.max(1) as i32);
@@ -765,6 +820,7 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
         let fired = hw.fired(&mut seen);
         if let Some(s) = p.scenes.as_mut() {
             s.reap(hw, woke);
+            s.native.poll(&s.c);
             s.c.autosuspend(hw, npk_sys::now_us() as u64);
         }
         for pv in 0..vc4.crtc.len() {
@@ -833,6 +889,13 @@ fn serve(vc4: &mut Vc4, hw: &mut PiHw, kfb: &mut KernelFb, p: &mut Present) {
                     None => -1,
                 },
                 (OP_SHUTDOWN, _) => shutdown(vc4, hw, kfb, p),
+                (OP_CLIENT | OP_CCMD | OP_BLOB | OP_BLOB_RELEASE | OP_ATTACH, _) => match p.scenes.as_mut() {
+                    Some(s) => match s.native_job(hw, word(0) as i32, word(1), &a) {
+                        Some(st) => st,
+                        None => continue,
+                    },
+                    None => -1,
+                },
                 _ => -1,
             };
             npk_sys::gpudev_complete(word(0) as i32, status);

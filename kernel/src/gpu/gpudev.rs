@@ -1943,13 +1943,25 @@ pub fn scenes_offered() -> bool {
 }
 
 /// The card a module serves guest native contexts for: it reported
-/// `CAP_NATIVE` and the IOMMU confines the card to the pages granted to it.
+/// `CAP_NATIVE` and the card reaches only the pages granted to it: behind
+/// the IOMMU, or, for the Pi's V3D, through the page tables the kernel
+/// keeps (`pi5_v3d`), which take granted pages only.
 pub fn native_device() -> Option<DevId> {
     if !READY.load(Ordering::Acquire) || !NATIVE.load(Ordering::Acquire) {
         return None;
     }
     let owner = STATE.lock().owner?;
-    crate::drivers::iommu::protected(owner).then_some(owner)
+    confined(owner).then_some(owner)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn confined(dev: DevId) -> bool {
+    crate::drivers::iommu::protected(dev)
+}
+
+#[cfg(target_arch = "aarch64")]
+fn confined(_dev: DevId) -> bool {
+    crate::platform::pi5_v3d::is_open()
 }
 
 /// Why a module that serves native contexts is not used for them.
@@ -2111,7 +2123,6 @@ pub fn ring(dev: DevId, client: u32, ring: u32, submitted: u64, completed: u64) 
         }
     }
     RINGS.lock().insert((client, ring), (submitted, completed));
-    #[cfg(target_arch = "x86_64")]
     crate::microvm::devices::gpu_backend::fences_reported();
     0
 }

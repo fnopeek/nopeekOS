@@ -24,9 +24,11 @@ pub const CAPSET_DRM: u32 = 6;
 /// two, and the tail past the card's member is zero, which the struct
 /// defines as "not supported by the host".
 pub const CAPSET_DRM_SIZE: u32 = 1024;
-/// `VIRTGPU_DRM_CONTEXT_AMDGPU`, `VIRTGPU_DRM_CONTEXT_I915`.
+/// `VIRTGPU_DRM_CONTEXT_AMDGPU`, `VIRTGPU_DRM_CONTEXT_I915`, and V3D's
+/// (`docs/spec/V3D_NATIVE_CONTEXT.md`, not assigned upstream).
 pub const CONTEXT_AMDGPU: u32 = 2;
 pub const CONTEXT_I915: u32 = 3;
+pub const CONTEXT_V3D: u32 = 6;
 /// virtio `map_info` cache types (`VIRTIO_GPU_MAP_CACHE_*`).
 pub const MAP_CACHE_CACHED: u32 = 1;
 pub const MAP_CACHE_UNCACHED: u32 = 2;

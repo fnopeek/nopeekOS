@@ -1,40 +1,125 @@
-//! The amdgpu backend of native contexts: the
+//! The native-context backend whose ccmds the GPU driver module runs: the
 //! host side of virglrenderer `src/drm/amdgpu/amdgpu_renderer.c` with the
-//! GPU driver module in the place of the host's amdgpu. The ccmd handlers
-//! run in the module, which also allocates the GEM objects (with their VRAM
-//! and GTT domains, as `amdgpu_gem_create_ioctl` does). Its reply to a ccmd
-//! starts with `REPLY_HEAD`: the client's `async_error` and whether the
-//! handler failed (virglrenderer then drops the rest of the SUBMIT_3D),
-//! then the guest's response. This side writes the shmem header
-//! (`async_error`, the heaps as `update_heap_info_in_shmem` does) and keeps
-//! the fences per ring.
+//! module in the place of the host's amdgpu, and of the V3D protocol
+//! (`docs/spec/V3D_NATIVE_CONTEXT.md`) with the Pi's module. The module
+//! allocates the GEM objects. Its reply to a ccmd starts with
+//! `REPLY_HEAD`: the client's `async_error` and whether the handler failed
+//! (virglrenderer then drops the rest of the SUBMIT_3D), then the guest's
+//! response. This side writes the shmem header (`async_error`; for amdgpu
+//! the heaps, as `update_heap_info_in_shmem` does) and keeps the fences
+//! per ring. What differs between the protocols is a `Proto`.
 
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use super::virtio_gpu_ctx::{Backend, Timelines, CONTEXT_AMDGPU};
-use crate::drivers::pci::PciAddr;
+use super::virtio_gpu_ctx::{Backend, Timelines};
+#[cfg(target_arch = "x86_64")]
+use super::virtio_gpu_ctx::CONTEXT_AMDGPU;
+#[cfg(target_arch = "aarch64")]
+use super::virtio_gpu_ctx::CONTEXT_V3D;
 use crate::gpu::gpudev::{self, Answer};
 use crate::shade::buffers::ForeignPixels;
 
 const EINVAL: i32 = 22;
 const EIO: i32 = 5;
 
+/// What sets one card's protocol apart.
+pub struct Proto {
+    pub name: &'static str,
+    /// `context_type` of the capset.
+    context: u32,
+    /// ccmds are numbered 1 to this.
+    last_ccmd: u32,
+    /// `vdrm_shmem.rsp_mem_offset`: the size of the shmem header.
+    rsp_mem_offset: usize,
+    /// Where the header holds `async_error`.
+    async_error: usize,
+    /// The response of ccmd `cmd` whose driver call failed with `-errno`;
+    /// empty for a ccmd without one.
+    error_response: fn(cmd: u32, req: &[u8], errno: i32) -> Vec<u8>,
+    /// A request refused before the module sees it, and why.
+    refuse: fn(cmd: u32, req: &[u8]) -> Option<&'static str>,
+    /// The header carries amdgpu's heaps.
+    heaps: bool,
+}
+
+#[cfg(target_arch = "x86_64")]
+pub static AMDGPU: Proto = Proto {
+    name: "amdgpu",
+    context: CONTEXT_AMDGPU,
+    last_ccmd: CCMD_CS_QUERY_FENCE_STATUS,
+    rsp_mem_offset: SHMEM_SIZE,
+    async_error: SHMEM_ASYNC_ERROR,
+    error_response: amdgpu_error_response,
+    refuse: amdgpu_refuse,
+    heaps: true,
+};
+
+#[cfg(target_arch = "aarch64")]
+pub static V3D: Proto = Proto {
+    name: "v3d",
+    context: CONTEXT_V3D,
+    last_ccmd: V3D_CCMD_GET_PARAM,
+    rsp_mem_offset: V3D_SHMEM_SIZE,
+    async_error: SHMEM_ASYNC_ERROR,
+    error_response: v3d_error_response,
+    refuse: |_, _| None,
+    heaps: false,
+};
+
+/// `docs/spec/V3D_NATIVE_CONTEXT.md`: the last ccmd, the responses, and
+/// the shmem header (`vdrm_shmem`, `async_error`, a pad word).
+#[cfg(target_arch = "aarch64")]
+const V3D_CCMD_GET_BO_OFFSET: u32 = 3;
+#[cfg(target_arch = "aarch64")]
+const V3D_CCMD_WAIT_BO: u32 = 4;
+#[cfg(target_arch = "aarch64")]
+const V3D_CCMD_GET_PARAM: u32 = 8;
+#[cfg(target_arch = "aarch64")]
+const V3D_SHMEM_SIZE: usize = 16;
+
+#[cfg(target_arch = "aarch64")]
+fn v3d_error_response(cmd: u32, _req: &[u8], errno: i32) -> Vec<u8> {
+    let len = match cmd {
+        V3D_CCMD_GET_BO_OFFSET | V3D_CCMD_GET_PARAM => 16,
+        V3D_CCMD_WAIT_BO => 8,
+        _ => return Vec::new(),
+    };
+    response(len, errno)
+}
+
+fn response(len: usize, errno: i32) -> Vec<u8> {
+    let mut rsp = alloc::vec![0u8; len];
+    rsp[..4].copy_from_slice(&(len as u32).to_le_bytes());
+    rsp[4..8].copy_from_slice(&(-errno).to_le_bytes());
+    rsp
+}
+
 /// Mesa `amdgpu_virtio_proto.h` ccmd numbers.
 const CCMD_QUERY_INFO: u32 = 1;
+#[cfg(target_arch = "x86_64")]
 const CCMD_BO_VA_OP: u32 = 3;
+#[cfg(target_arch = "x86_64")]
 const CCMD_CS_SUBMIT: u32 = 4;
+#[cfg(target_arch = "x86_64")]
 const CCMD_SET_METADATA: u32 = 5;
+#[cfg(target_arch = "x86_64")]
 const CCMD_BO_QUERY_INFO: u32 = 6;
+#[cfg(target_arch = "x86_64")]
 const CCMD_CREATE_CTX: u32 = 7;
+#[cfg(target_arch = "x86_64")]
 const CCMD_RESERVE_VMID: u32 = 8;
+#[cfg(target_arch = "x86_64")]
 const CCMD_SET_PSTATE: u32 = 9;
+#[cfg(target_arch = "x86_64")]
 const CCMD_CS_QUERY_FENCE_STATUS: u32 = 10;
 
 /// `struct amdgpu_ccmd_bo_query_info_rsp` and the other fixed responses.
+#[cfg(target_arch = "x86_64")]
 const RSP_BO_QUERY_INFO: usize = 320;
+#[cfg(target_arch = "x86_64")]
 const RSP_WITH_WORD: usize = 16;
 const RSP_PLAIN: usize = 8;
 /// `struct amdgpu_ccmd_query_info_req`: `drm_amdgpu_info.return_size` and
@@ -43,6 +128,7 @@ const QUERY_RETURN_SIZE: usize = 24;
 const QUERY_ID: usize = 28;
 const QUERY_REQ: usize = 48;
 /// Largest `return_size` a query may ask for (the response must fit a reply).
+#[cfg(target_arch = "x86_64")]
 const MAX_QUERY_RETURN: u32 = (gpudev::MAX_REPLY - RSP_PLAIN) as u32;
 
 /// `struct amdvgpu_shmem`: `vdrm_shmem` (seqno, rsp_mem_offset),
@@ -52,6 +138,7 @@ const SHMEM_ASYNC_ERROR: usize = 8;
 const SHMEM_GTT: usize = 16;
 const SHMEM_VRAM: usize = 40;
 const SHMEM_VIS_VRAM: usize = 64;
+#[cfg(target_arch = "x86_64")]
 const SHMEM_SIZE: usize = 88;
 
 /// `AMDGPU_INFO_*` the heaps come from (`amdgpu_query_heap_info`).
@@ -76,7 +163,8 @@ struct Client {
     closed: bool,
 }
 
-pub struct AmdgpuBackend {
+pub struct ModuleBackend {
+    proto: &'static Proto,
     capset: Vec<u8>,
     /// Resources the module handed over, by the serial of their pages:
     /// the client and the resource id (`amdgpu_object.base.res_id`).
@@ -88,12 +176,13 @@ pub struct AmdgpuBackend {
     failed_lines: u32,
 }
 
-impl AmdgpuBackend {
-    /// For the card at `dev`, with the capset its module reported.
-    pub fn new(_dev: PciAddr, capset: Vec<u8>) -> Option<Self> {
+impl ModuleBackend {
+    /// With the capset the module reported, when it is `proto`'s.
+    pub fn new(proto: &'static Proto, capset: Vec<u8>) -> Option<Self> {
         let ctx_type = u32::from_le_bytes(capset.get(16..20)?.try_into().ok()?);
-        (ctx_type == CONTEXT_AMDGPU).then_some(AmdgpuBackend {
-            capset, blobs: BTreeMap::new(), clients: BTreeMap::new(), imports: Default::default(), failed_lines: 0,
+        (ctx_type == proto.context).then_some(ModuleBackend {
+            proto, capset, blobs: BTreeMap::new(), clients: BTreeMap::new(), imports: Default::default(),
+            failed_lines: 0,
         })
     }
 
@@ -102,7 +191,7 @@ impl AmdgpuBackend {
         const MAX_LINES: u32 = 16;
         if self.failed_lines < MAX_LINES {
             self.failed_lines += 1;
-            crate::kprintln!("[gpu] native context (amdgpu): ccmd {} failed ({}): {}", cmd, e, why);
+            crate::kprintln!("[gpu] native context ({}): ccmd {} failed ({}): {}", self.proto.name, cmd, e, why);
         }
         e
     }
@@ -144,24 +233,29 @@ impl AmdgpuBackend {
         out
     }
 
-    /// The response of ccmd `cmd` whose driver call failed with `-errno`,
-    /// in the layout of its `amdgpu_ccmd_*_rsp` (`ret` after the length).
-    fn error_response(cmd: u32, req: &[u8], errno: i32) -> Vec<u8> {
-        let len = match cmd {
-            CCMD_QUERY_INFO => RSP_PLAIN + (d32(req, QUERY_RETURN_SIZE).min(MAX_QUERY_RETURN) as usize),
-            CCMD_BO_QUERY_INFO => RSP_BO_QUERY_INFO,
-            CCMD_CREATE_CTX | CCMD_SET_PSTATE | CCMD_CS_QUERY_FENCE_STATUS => RSP_WITH_WORD,
-            CCMD_BO_VA_OP | CCMD_CS_SUBMIT | CCMD_SET_METADATA | CCMD_RESERVE_VMID => RSP_PLAIN,
-            _ => return Vec::new(),
-        };
-        let mut rsp = alloc::vec![0u8; len];
-        rsp[..4].copy_from_slice(&(len as u32).to_le_bytes());
-        rsp[4..8].copy_from_slice(&(-errno).to_le_bytes());
-        rsp
-    }
 }
 
-impl Backend for AmdgpuBackend {
+/// The response of amdgpu ccmd `cmd` whose driver call failed with
+/// `-errno`, in the layout of its `amdgpu_ccmd_*_rsp` (`ret` after the
+/// length).
+#[cfg(target_arch = "x86_64")]
+fn amdgpu_error_response(cmd: u32, req: &[u8], errno: i32) -> Vec<u8> {
+    let len = match cmd {
+        CCMD_QUERY_INFO => RSP_PLAIN + (d32(req, QUERY_RETURN_SIZE).min(MAX_QUERY_RETURN) as usize),
+        CCMD_BO_QUERY_INFO => RSP_BO_QUERY_INFO,
+        CCMD_CREATE_CTX | CCMD_SET_PSTATE | CCMD_CS_QUERY_FENCE_STATUS => RSP_WITH_WORD,
+        CCMD_BO_VA_OP | CCMD_CS_SUBMIT | CCMD_SET_METADATA | CCMD_RESERVE_VMID => RSP_PLAIN,
+        _ => return Vec::new(),
+    };
+    response(len, errno)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn amdgpu_refuse(cmd: u32, req: &[u8]) -> Option<&'static str> {
+    (cmd == CCMD_QUERY_INFO && d32(req, QUERY_RETURN_SIZE) > MAX_QUERY_RETURN).then_some("query larger than a reply")
+}
+
+impl Backend for ModuleBackend {
     fn capset(&self, out: &mut [u8]) {
         let n = self.capset.len().min(out.len());
         out[..n].copy_from_slice(&self.capset[..n]);
@@ -190,12 +284,12 @@ impl Backend for AmdgpuBackend {
     }
 
     fn rsp_mem_offset(&self) -> usize {
-        SHMEM_SIZE
+        self.proto.rsp_mem_offset
     }
 
     fn shmem_update(&mut self, ctx: u32, heap: bool) -> Vec<(usize, u32)> {
-        let mut out = alloc::vec![(SHMEM_ASYNC_ERROR, self.clients.get(&ctx).map_or(0, |c| c.async_error))];
-        if heap {
+        let mut out = alloc::vec![(self.proto.async_error, self.clients.get(&ctx).map_or(0, |c| c.async_error))];
+        if heap && self.proto.heaps {
             out.extend(self.heap_words(ctx));
         }
         out
@@ -206,17 +300,17 @@ impl Backend for AmdgpuBackend {
             return Err(-EINVAL);
         }
         let cmd = d32(req, 0);
-        if !(CCMD_QUERY_INFO..=CCMD_CS_QUERY_FENCE_STATUS).contains(&cmd) {
+        if !(1..=self.proto.last_ccmd).contains(&cmd) {
             return Err(self.ccmd_failed(cmd, "unknown command", -EINVAL));
         }
-        if cmd == CCMD_QUERY_INFO && d32(req, QUERY_RETURN_SIZE) > MAX_QUERY_RETURN {
-            return Err(self.ccmd_failed(cmd, "query larger than a reply", -EINVAL));
+        if let Some(why) = (self.proto.refuse)(cmd, req) {
+            return Err(self.ccmd_failed(cmd, why, -EINVAL));
         }
         let reply = match gpudev::ccmd(ctx, req, deadline) {
             Answer::Reply(r) => r,
             Answer::Malformed => return Err(self.ccmd_failed(cmd, "malformed", -EINVAL)),
             Answer::Failed => {
-                *rsp = Self::error_response(cmd, req, EIO);
+                *rsp = (self.proto.error_response)(cmd, req, EIO);
                 return Ok(());
             }
         };
@@ -289,7 +383,7 @@ impl Backend for AmdgpuBackend {
     }
 }
 
-impl Drop for AmdgpuBackend {
+impl Drop for ModuleBackend {
     fn drop(&mut self) {
         let ids: Vec<u32> = self.clients.keys().copied().collect();
         for id in ids {

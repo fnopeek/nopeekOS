@@ -1416,28 +1416,22 @@ host_imports! {
     // npk_gpudev_complete(seq, status) -> 0 / -1
     ctx fn npk_gpudev_complete(seq: i32, status: i32) -> i32;
     // npk_gpudev_reply(seq, ptr, len) -> 0 / -1; reply of an OP_CCMD job, <= 64 KB
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_reply(seq: i32, ptr: i32, len: i32) -> i32;
     // npk_gpudev_tt_alloc(client, pages) -> GTT pages id / -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_tt_alloc(client: i32, pages: i32) -> i32;
     // npk_gpudev_tt_buffer(tt) -> buffer id for npk_gpudev_bo_pages / -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_tt_buffer(tt: i32) -> i32;
     // npk_gpudev_tt_read(tt, offset, out_ptr, len) -> bytes / -1
     #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_tt_read(tt: i32, offset: i64, out_ptr: i32, len: i32) -> i32;
     // npk_gpudev_tt_free(tt) -> 0 / -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_tt_free(tt: i32) -> i32;
     // npk_gpudev_capset(ptr, len) -> 0 / -1; the card's DRM capset, <= 1 KB
-    #[cfg(target_arch = "x86_64")]
     mem fn npk_gpudev_capset(ptr: i32, len: i32) -> i32;
     // npk_gpudev_vram(base, size) -> 0 / -1; the CPU's window onto all VRAM
     #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_vram(base: i64, size: i64) -> i32;
     // npk_gpudev_ring(client, ring, submitted, completed) -> 0 / -1
-    #[cfg(target_arch = "x86_64")]
     ctx fn npk_gpudev_ring(client: i32, ring: i32, submitted: i64, completed: i64) -> i32;
     // npk_gpudev_released(id) -> 0 / -1; a GEM object kept past its detach
     ctx fn npk_gpudev_released(id: i32) -> i32;

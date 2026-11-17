@@ -212,6 +212,29 @@ mod sched {
     }
 
     #[test]
+    fn a_budgeted_job_resets_when_spent_however_it_progresses() {
+        let (mut s, mut r, mut ev) = (Sched::new(), Rec::default(), Vec::new());
+        s.budget = Some(100_000);
+        let a = s.submit(Work::Csd(csd(1)), &[]);
+        s.budget = None;
+        let host = s.submit(Work::Tfu(TfuJob::default()), &[]);
+        s.pump(&mut r, 0, &mut ev);
+        assert_eq!(s.next_deadline(), Some(100_000));
+        r.vals.insert((2, 0x968), 5);
+        s.check_timeouts(&mut r, 99_999, &mut ev);
+        assert!(ev.is_empty());
+        // Spent: progress no longer buys time.
+        r.vals.insert((2, 0x968), 6);
+        s.check_timeouts(&mut r, 100_000, &mut ev);
+        assert!(matches!(ev[..], [Event::Reset { queue: Queue::Csd, .. }]));
+        ev.clear();
+        s.reset_done(Queue::Csd, 100_000, &mut ev);
+        assert_eq!(done(&ev), vec![(a, false)]);
+        // A job without a budget keeps the 500 ms with progress.
+        assert!(!s.signaled(host));
+    }
+
+    #[test]
     fn after_a_reset_the_innocent_jobs_run_again_from_the_start() {
         let (mut s, mut r, mut ev) = (Sched::new(), Rec::default(), Vec::new());
         let t = s.submit(Work::Tfu(TfuJob::default()), &[]);

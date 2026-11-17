@@ -6107,7 +6107,6 @@ pub(crate) fn npk_gpudev_complete(ctx: &mut HostState, seq: i32, status: i32) ->
     }
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_reply(seq, ptr, len) -> 0 | -1`: the reply of `OP_CCMD` job
 /// `seq`, at most `gpudev::MAX_REPLY` bytes, before `npk_gpudev_complete`.
 pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, ptr: i32, len: i32) -> i32 {
@@ -6119,7 +6118,6 @@ pub(crate) fn npk_gpudev_reply(mem: &mut [u8], ctx: &mut HostState, seq: i32, pt
     crate::gpu::gpudev::reply(dev, seq as u32, data)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_tt_alloc(client, pages) -> tt | -1`: GTT pages for a guest
 /// client's object.
 pub(crate) fn npk_gpudev_tt_alloc(ctx: &mut HostState, client: i32, pages: i32) -> i32 {
@@ -6130,7 +6128,6 @@ pub(crate) fn npk_gpudev_tt_alloc(ctx: &mut HostState, client: i32, pages: i32) 
     crate::gpu::gpudev::tt_alloc(dev, client as u32, pages as u32)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_tt_buffer(tt) -> id | -1`: the buffer GTT pages `tt` are
 /// read under with `npk_gpudev_bo_pages`.
 pub(crate) fn npk_gpudev_tt_buffer(ctx: &mut HostState, tt: i32) -> i32 {
@@ -6153,7 +6150,6 @@ pub(crate) fn npk_gpudev_tt_read(mem: &mut [u8], ctx: &mut HostState, tt: i32, o
     crate::gpu::gpudev::tt_read(dev, tt as u32, offset as u64, out)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_tt_free(tt) -> 0 | -1`.
 pub(crate) fn npk_gpudev_tt_free(ctx: &mut HostState, tt: i32) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };
@@ -6163,7 +6159,6 @@ pub(crate) fn npk_gpudev_tt_free(ctx: &mut HostState, tt: i32) -> i32 {
     crate::gpu::gpudev::tt_free(dev, tt as u32)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_capset(ptr, len) -> 0 | -1`: the card's DRM capset, for
 /// native contexts, before `npk_gpudev_ready`.
 pub(crate) fn npk_gpudev_capset(mem: &mut [u8], ctx: &mut HostState, ptr: i32, len: i32) -> i32 {
@@ -6210,7 +6205,6 @@ pub(crate) fn npk_gpudev_vram(ctx: &mut HostState, base: i64, size: i64) -> i32 
     crate::gpu::gpudev::set_vram_window(dev, base as u64, size as u64)
 }
 
-#[cfg(target_arch = "x86_64")]
 /// `npk_gpudev_ring(client, ring, submitted, completed) -> 0 | -1`.
 pub(crate) fn npk_gpudev_ring(ctx: &mut HostState, client: i32, ring: i32, submitted: i64, completed: i64) -> i32 {
     let Some(dev) = gpudev_device(ctx) else { return -1 };
