@@ -9,7 +9,7 @@
 //! and rate converter and a sum-mix, equally usable by virtio-snd or a
 //! USB-audio driver.
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use spin::Mutex;
 
 /// Sample encodings, as numbered in the ABI (`npk_audio_format`).
@@ -99,6 +99,8 @@ struct Slot {
     pos: u64,
     prev: [i32; SOURCE_CHANNELS_MAX as usize],
     cur: [i32; SOURCE_CHANNELS_MAX as usize],
+    /// A frame was read since the ring last ran dry (`dry_counts`).
+    fed: bool,
     /// The ring; empty while the slot is closed, so a closed slot holds no
     /// memory.
     buf: alloc::vec::Vec<u8>,
@@ -107,7 +109,7 @@ struct Slot {
 impl Slot {
     const fn new() -> Self {
         Self { active: false, auto_close: false, head: 0, len: 0, owner: None, fmt: DEFAULT_FORMAT,
-               pos: 2 * ONE, prev: [0; 2], cur: [0; 2], buf: alloc::vec::Vec::new() }
+               pos: 2 * ONE, prev: [0; 2], cur: [0; 2], fed: false, buf: alloc::vec::Vec::new() }
     }
 
     /// Start empty in `fmt` with a ring of at least `min_bytes`.
@@ -119,6 +121,7 @@ impl Slot {
         self.fmt = fmt;
         self.head = 0;
         self.len = 0;
+        self.fed = false;
         self.rewind();
     }
 
@@ -151,6 +154,7 @@ impl Slot {
         }
         self.head = (self.head + fb) % cap;
         self.len -= fb;
+        self.fed = true;
         let w = self.fmt.encoding.bytes();
         let mut f = [0i32; SOURCE_CHANNELS_MAX as usize];
         for (c, s) in f.iter_mut().enumerate().take(self.fmt.channels as usize) {
@@ -432,7 +436,13 @@ pub fn poll_mix_as(owner: crate::devices::Owner, out: &mut [u8]) -> usize {
             if !s.active { continue; }
             let step = ((s.fmt.rate as u64) << 32) / dev.rate as u64;
             let Some(x) = s.next_frame(step) else {
-                if s.auto_close { s.stop(); }
+                if s.auto_close {
+                    s.stop();
+                } else if s.fed {
+                    s.fed = false;
+                    DRY_TIMES.fetch_add(1, Ordering::Relaxed);
+                    DRY_FRAMES.fetch_add((frames - f) as u64, Ordering::Relaxed);
+                }
                 continue;
             };
             if chans == 1 {
@@ -450,6 +460,18 @@ pub fn poll_mix_as(owner: crate::devices::Owner, out: &mut [u8]) -> usize {
     }
     shrink(&mut m.slots);
     frames * fb
+}
+
+/// A playing stream ran out of data while a device took its frames: the
+/// times since boot, and the frames the device got silence for in those
+/// takes. A stream that stops ends with one.
+static DRY_TIMES: AtomicU64 = AtomicU64::new(0);
+static DRY_FRAMES: AtomicU64 = AtomicU64::new(0);
+
+/// `(times, frames)` of [`DRY_TIMES`] and [`DRY_FRAMES`].
+#[cfg(target_arch = "aarch64")]
+pub fn dry_counts() -> (u64, u64) {
+    (DRY_TIMES.load(Ordering::Relaxed), DRY_FRAMES.load(Ordering::Relaxed))
 }
 
 /// Whether any stream is open: a driver that can stop its device lets it

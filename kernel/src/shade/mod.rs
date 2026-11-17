@@ -460,6 +460,9 @@ static FORCE_REDRAW_PENDING: AtomicBool = AtomicBool::new(false);
 /// scaled along, the pointer's bounds, the wallpaper drawn for the new
 /// size, the apps' scenes, then the whole screen.
 pub fn screen_resized() {
+    if HELD_SINCE.load(Ordering::Acquire) != 0 {
+        HELD_RESIZED.store(true, Ordering::Release);
+    }
     let Some((w, h)) = framebuffer::with_fb(|fb| {
         let info = fb.info();
         (info.width, info.height)
@@ -956,6 +959,51 @@ fn render_focus_glow() {
             finish_and_blit(fb, shadow, &info, &regions, old, had_old);
         }
     });
+}
+
+/// Counter reading when the desktop was held back (`hold_until_display`),
+/// 0 once it shows.
+static HELD_SINCE: AtomicU64 = AtomicU64::new(0);
+/// The screen changed size while held, and `screen_resized` drew the
+/// wallpaper for it.
+static HELD_RESIZED: AtomicBool = AtomicBool::new(false);
+/// How long the desktop waits for a display module that does not come.
+const HOLD_MAX_MS: u64 = 10_000;
+
+/// Build the desktop without showing it, the screen black, until a display
+/// module is ready (it may change the screen's size and colours first) or
+/// `HOLD_MAX_MS` passed. True when held: the caller skips the wallpaper
+/// and the first frame, they come when the desktop shows.
+#[cfg(target_arch = "aarch64")]
+pub fn hold_until_display() -> bool {
+    if crate::gpu::gpudev::is_ready() {
+        return false;
+    }
+    framebuffer::clear();
+    framebuffer::hold(true);
+    HELD_RESIZED.store(false, Ordering::Release);
+    HELD_SINCE.store(crate::time::counter().max(1), Ordering::Release);
+    true
+}
+
+/// Whether the desktop is held back; on Core 0, shows it once the display
+/// module is ready or the wait is over.
+fn still_held() -> bool {
+    let since = HELD_SINCE.load(Ordering::Acquire);
+    if since == 0 {
+        return false;
+    }
+    let waited = crate::time::counter() - since;
+    if !crate::gpu::gpudev::is_ready() && waited < HOLD_MAX_MS * (crate::time::counter_hz() / 1000) {
+        return true;
+    }
+    HELD_SINCE.store(0, Ordering::Release);
+    framebuffer::hold(false);
+    if !HELD_RESIZED.swap(false, Ordering::AcqRel) {
+        crate::intent::apply_startup_wallpaper();
+    }
+    force_redraw();
+    false
 }
 
 /// Check if shade compositor is active (lock-free, safe from any context).
@@ -1457,6 +1505,9 @@ pub fn poll_render() {
 
     if crate::gpu::gpudev::apply_pending_framebuffer() {
         screen_resized();
+    }
+    if still_held() {
+        return;
     }
 
     let mut revealed = false;

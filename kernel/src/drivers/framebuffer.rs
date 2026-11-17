@@ -635,9 +635,17 @@ fn present(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) -> bool {
 }
 
 
+/// The desktop's frames stay off the screen (`shade::hold_until_display`).
+static HELD: AtomicBool = AtomicBool::new(false);
+
+/// Keep `blit_rect` off the screen (true) or let it through again.
+pub fn hold(on: bool) {
+    HELD.store(on, Ordering::Release);
+}
+
 /// Blit a rectangular region from front buffer to MMIO framebuffer.
 pub fn blit_rect(console: &FbConsole, x: u32, y: u32, w: u32, h: u32) {
-    if console.info.bpp != 32 { return; }
+    if console.info.bpp != 32 || HELD.load(Ordering::Acquire) { return; }
     if present(console, x, y, w, h) { return; }
     scanout(console, x, y, w, h);
 }

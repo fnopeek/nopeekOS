@@ -56,14 +56,9 @@ const ITEM2_PUSH: usize = gpu_scene::scene::DRAW_PUSH_WORDS;
 /// A glass layer built (`GlassLayer`), and kinds 10 and 11 reading one.
 const KIND_GLASS_LAYER: usize = 12;
 const KIND_CHROME_INSIDE_LAYER: usize = 13;
-const KIND_WINDOW_INSIDE_LAYER: usize = 14;
 /// A fill and a content item off their corner rows (`inside_rows`).
 const KIND_FILL_INSIDE: usize = 15;
 const KIND_CONTENT_INSIDE: usize = 16;
-/// Slow scenes whose largest pass is taken apart by program (`profile`).
-const PROFILES: u32 = 2;
-/// Passes at least this many pixels are kept for `profile`.
-const PROFILED_PIXELS: u32 = 1 << 21;
 /// Glass layers kept: a window's glass fill differs with its focus.
 const GLASS_LAYERS: usize = 3;
 
@@ -83,18 +78,6 @@ struct GlassLayer {
 const CODE_ALIGN: u32 = 256;
 /// `pm_runtime_set_autosuspend_delay(dev, 50)` in v3d_platform_drm_probe.
 const AUTOSUSPEND_US: u64 = 50_000;
-/// The performance counters a scene is measured with (`PERF_COUNTERS_71`
-/// names; at most 32, as one perfmon holds).
-pub const PERF_COUNTERS: [&str; 32] = [
-    "cycle-count", "compute-active-cycles", "QPU-active", "QPU-stalls", "QPU-wait-bubble",
-    "QPU-ic-miss-bubble", "QPU-stalls-TMU", "QPU-stalls-uniforms", "QPU-stalls-SFU", "QPU-stalls-other",
-    "QPU-total-instr-cache-hit", "QPU-total-instr-cache-miss", "QPU-total-uniform-cache-hit",
-    "QPU-total-uniform-cache-miss", "TMU-active-cycles", "TMU-stalled-cycles", "TMU-total-text-quads-access",
-    "L2T-total-cache-hit", "L2T-total-cache-miss", "L2T-TMU-read-hits", "L2T-TMU-read-miss", "L2T-stalls-mem",
-    "L2T-writeback", "core-memory-reads", "core-memory-writes", "L2T-memory-reads", "L2T-memory-writes",
-    "AXI-read-trans", "AXI-write-trans", "AXI-read-wait-cycles", "AXI-write-wait-cycles",
-    "AXI-max-outstanding-reads",
-];
 /// Finished jobs whose time `take_job_us` can still collect.
 const JOB_US_KEPT: usize = 64;
 /// Uniform streams: one slot per dispatch that may be in flight.
@@ -155,8 +138,6 @@ pub struct Composer {
     sched: Sched,
     /// The fence of the last submission, which the next one waits for.
     last: Fence,
-    /// Dispatches by fence, for the trace.
-    names: Vec<(Fence, &'static str, [u32; 3])>,
     /// Overflow buffers handed to the binner, by handle.
     overflow: Vec<(u32, Buf)>,
     next_overflow: u32,
@@ -167,10 +148,6 @@ pub struct Composer {
     mmu_logged: bool,
     /// Time spent powering V3D up since `take_power_us` (us).
     power_us: u64,
-    /// Count `PERF_COUNTERS` over the next submission's jobs (`v3d_perfmon`
-    /// on the job), and whether they are counting.
-    pub perf_armed: bool,
-    perf_active: bool,
     /// Finished jobs and their time from start to the fence seen, until
     /// `take_job_us` collects them; the newest `JOB_US_KEPT`.
     job_us: Vec<(Fence, u64)>,
@@ -184,13 +161,6 @@ pub struct Composer {
     spill: Option<Buf>,
     /// Dispatches since the composer started.
     pub dispatches: u64,
-    /// While set, each dispatch's program, grid and time (submit to done,
-    /// caches cleaned) are kept here.
-    pub trace: Option<Vec<(&'static str, [u32; 3], u64)>>,
-    /// Slow passes still to take apart by program (`profile`), and the
-    /// last large pass, to do it with.
-    pub profiles_left: u32,
-    last_pass: Option<(v3d_draw::Image, v3d_draw::Rect, Vec<v3d_draw::Draw>)>,
 }
 
 /// The draw programs into one buffer, each at `CODE_ALIGN`, and the
@@ -345,15 +315,12 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         uslots: [0; UNIFORM_SLOTS as usize],
         sched: Sched::new(),
         last: 0,
-        names: Vec::new(),
         overflow: Vec::new(),
         next_overflow: 1,
         powered: true,
         idle_since: npk_sys::now_us() as u64,
         mmu_logged: false,
         power_us: 0,
-        perf_armed: false,
-        perf_active: false,
         job_us: Vec::new(),
         scene: Buf::new(SCENE_PAGES)?,
         draw_code,
@@ -362,22 +329,8 @@ pub fn composer_init(hw: &mut PiHw) -> Option<Composer> {
         glass: Vec::new(),
         spill,
         dispatches: 0,
-        trace: None,
-        profiles_left: PROFILES,
-        last_pass: None,
     };
-    Line::new().s("v3d: ").dec(qpus as u64).s(" QPUs, rev ").dec(rev as u64).s(", ")
-        .dec(total as u64).s(" bytes of programs at ").hex(c.code.va).say();
-    for p in used() {
-        Line::new().s("v3d:   ").s(p.name).s(" ").dec(p.qpu.len() as u64).s(" instructions, ")
-            .dec(p.threads as u64).s(" threads, ").dec(p.uniforms.len() as u64).s(" uniforms, spills ")
-            .dec(p.spill_size as u64).s(" bytes a thread").say();
-    }
-    Line::new().s("v3d: draw programs at ").hex(c.draw_code.va).s(", one pipeline per item kind").say();
-    for g in sg::DRAW_PIPELINES {
-        Line::new().s("v3d:   draw kind ").dec(g.kind as u64).s(": fragment ").dec(g.fs.qpu.len() as u64)
-            .s(" instructions, ").dec(g.fs.prog.base.threads as u64).s(" threads").say();
-    }
+    Line::new().s("v3d: ").dec(qpus as u64).s(" QPUs, rev ").dec(rev as u64).say();
     Some(c)
 }
 
@@ -474,10 +427,6 @@ impl Composer {
     pub fn submit_dispatch(&mut self, hw: &mut PiHw, p: &'static Program, push: &[u32; 32], grid: [u32; 3])
         -> Result<Fence, i32> {
         self.power_up(hw)?;
-        if self.perf_armed && !self.perf_active {
-            self.perf_start(hw);
-        }
-        self.perf_armed = false;
         // A uniform slot whose dispatch finished; the oldest one waited for
         // when all are in flight.
         let slot = match self.uslots.iter().position(|&f| f == 0 || self.sched.signaled(f)) {
@@ -520,21 +469,8 @@ impl Composer {
         self.uslots[slot] = f;
         self.last = f;
         self.dispatches += 1;
-        if self.trace.is_some() {
-            self.names.push((f - 1, p.name, grid));
-        }
         self.pump(hw);
         Ok(f)
-    }
-
-    /// `v3d_perfmon_start` with `PERF_COUNTERS`, for the submission it
-    /// was armed for.
-    fn perf_start(&mut self, hw: &mut PiHw) {
-        let ids: Vec<u8> = PERF_COUNTERS.iter()
-            .map(|n| v3d::PERF_COUNTERS_71.iter().position(|m| m == n).expect("a V3D 7.1 counter") as u8)
-            .collect();
-        v3d::perfmon_start(hw, &ids);
-        self.perf_active = true;
     }
 
     /// One render pass into `image` over `area`, recorded as v3dv records
@@ -549,10 +485,6 @@ impl Composer {
     fn submit_pass(&mut self, hw: &mut PiHw, image: v3d_draw::Image, load: bool, load_from: Option<(u32, u32)>,
                    area: v3d_draw::Rect, draws: &[v3d_draw::Draw]) -> Result<Fence, i32> {
         self.power_up(hw)?;
-        if self.perf_armed && !self.perf_active {
-            self.perf_start(hw);
-        }
-        self.perf_armed = false;
         let viewport = v3d_draw::Viewport { x: 0.0, y: 0.0, width: image.width as f32, height: image.height as f32,
                                             min_depth: 0.0, max_depth: 1.0 };
         let pipelines = self.pipelines;
@@ -597,13 +529,6 @@ impl Composer {
         self.bos.held.push((f, bufs));
         self.last = f;
         self.dispatches += 1;
-        if self.trace.is_some() {
-            // The bin job, then the render job; a cache clean after it is
-            // the submission's last fence.
-            let render = if job.submit.flush_cache { f - 1 } else { f };
-            self.names.push((render - 1, "bin", [draws.len() as u32, area.width, area.height]));
-            self.names.push((render, "render", [draws.len() as u32, area.width, area.height]));
-        }
         self.pump(hw);
         Ok(f)
     }
@@ -651,12 +576,6 @@ impl Composer {
                             self.overflow.swap_remove(i).1.free();
                         }
                     }
-                    if let Some(t) = self.trace.as_mut() {
-                        if let Some(&(_, name, grid)) = self.names.iter().find(|n| n.0 == fence) {
-                            t.push((name, grid, us));
-                        }
-                    }
-                    self.names.retain(|n| n.0 != fence);
                 }
                 Event::OutOfMemory => self.overflow_mem_work(hw),
                 Event::MmuFault { write_violation, pte_invalid, cap_exceeded } => {
@@ -737,17 +656,6 @@ impl Composer {
         }
     }
 
-    /// The counters since the submission they were armed for, which stop.
-    /// None when none counted (V3D was not powered by it).
-    pub fn perf_take(&mut self, hw: &mut PiHw) -> Option<[u64; 32]> {
-        if !core::mem::take(&mut self.perf_active) || !self.powered {
-            return None;
-        }
-        let mut v = [0u64; 32];
-        v3d::perfmon_stop(hw, &mut v, true);
-        Some(v)
-    }
-
     /// The power-up time since the last call (us).
     pub fn take_power_us(&mut self) -> u64 {
         core::mem::take(&mut self.power_us)
@@ -764,206 +672,6 @@ impl Composer {
     /// Has fence `f` signalled, and did its job fail?
     pub fn fence_state(&self, f: Fence) -> (bool, bool) {
         (self.sched.signaled(f), self.sched.failed(f))
-    }
-
-    /// What a pass costs, once at start, into a buffer of the module's
-    /// (3840x2160, or the largest smaller one DMA memory gives): the pass with and without loading its tiles, then per item
-    /// kind (fill, background colour, chrome with and without its content,
-    /// glow) one draw over the whole image on top of an opaque fill, and
-    /// eight translucent fills stacked and side by side. Logged with the
-    /// QPUs' counters, for where a scene's time goes.
-    pub fn draw_bench(&mut self, hw: &mut PiHw) {
-        let sizes = [(3840u32, 2160u32), (3840, 1080), (1920, 1080), (1280, 720)];
-        let Some((dst, width, height)) = sizes.iter().find_map(|&(w, h)| Buf::new((w * h * 4).div_ceil(PAGE)).map(|b| (b, w, h)))
-        else {
-            Line::new().s("v3d: bench skipped, no buffer").say();
-            return;
-        };
-        let draw = |kind: u32, words: &[u32]| {
-            let mut push = [0u32; v3d_draw::PUSH_WORDS];
-            push[..4].copy_from_slice(&[0, 0, width, height]);
-            push[4] = kind;
-            push[5..9].copy_from_slice(&[0, 0, width, height]);
-            push[9..9 + words.len()].copy_from_slice(words);
-            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT] = width;
-            push[gpu_scene::scene::DRAW_PUSH_VIEWPORT + 1] = height;
-            at_origin(&mut push, (0, 0), (width, height));
-            v3d_draw::Draw { pipeline: kind as usize - 1, push, vertex_count: 4 }
-        };
-        // Item::Fill: color, alpha, radius.
-        let opaque = draw(8, &[0x0020_3040, 255, 0]);
-        let half = draw(8, &[0x00c0_8040, 128, 0]);
-        // Item::Chrome: border_a, border_b, bg, rounding, border, border and
-        // bg opacity, paint_content.
-        let chrome = |content: u32| draw(4, &[0x0080_80ff, 0x00ff_8080, 0x0010_1018, 24, 2, 255, 200, content]);
-        // Item::Glow over a window in the middle: radius, color, band, alpha.
-        let mut glow = draw(2, &[24, 0x0040_80ff, 48, 160]);
-        glow.push[5..9].copy_from_slice(&[200, 200, width - 400, height - 400]);
-        // Eight translucent fills side by side: the pixels of one, the
-        // draws of eight. Against eight stacked ones it tells a cost per
-        // pixel a draw shades from one per draw a pixel waits for.
-        let strips: Vec<v3d_draw::Draw> = (0..8u32).map(|i| {
-            let mut d = half;
-            let (x0, x1) = (width * i / 8, width * (i + 1) / 8);
-            d.push[..4].copy_from_slice(&[x0, 0, x1, height]);
-            d.push[5..9].copy_from_slice(&[x0, 0, x1 - x0, height]);
-            d
-        }).collect();
-        // A window's inside as a scene has it: the straight rows of a chrome
-        // with a glass source, and a text layer over it, both reading this
-        // buffer as the pass before left it (glass; text whose coverage is
-        // its top byte: none after a fill, which writes 24 bits, all after
-        // the background colour, 0xFF181820, which the covering run draws
-        // last for its second, counted run).
-        let with_src = |mut d: v3d_draw::Draw, flags: u32| {
-            d.push[20] = flags;
-            d.push[24..27].copy_from_slice(&[dst.va, 0, width]);
-            d
-        };
-        let glass_inside = with_src({
-            let mut d = chrome(1);
-            d.pipeline = KIND_CHROME_INSIDE - 1;
-            d
-        }, 4);
-        let text = {
-            let mut d = draw(7, &[]);
-            d.push[9..14].copy_from_slice(&[dst.va, 0, width, height, width]);
-            d
-        };
-        // Both in one pass, as kind 11 draws a window's inside.
-        let window_inside = {
-            let mut d = glass_inside;
-            d.pipeline = KIND_WINDOW_INSIDE - 1;
-            d.push[ITEM2_PUSH..ITEM2_PUSH + 16].copy_from_slice(&text.push[4..20]);
-            d
-        };
-        // The same two read from a glass layer (kinds 13 and 14), this
-        // buffer standing in for it.
-        let layer_inside = {
-            let mut d = glass_inside;
-            d.pipeline = KIND_CHROME_INSIDE_LAYER - 1;
-            d
-        };
-        let window_inside_layer = {
-            let mut d = window_inside;
-            d.pipeline = KIND_WINDOW_INSIDE_LAYER - 1;
-            d
-        };
-        // The opaque fill by the program of a fill's inside (kind 15).
-        let opaque_inside = {
-            let mut d = opaque;
-            d.pipeline = KIND_FILL_INSIDE - 1;
-            d
-        };
-        let runs: [(&str, bool, Vec<v3d_draw::Draw>); 17] = [
-            ("fill by its inside's program", false, alloc::vec![opaque_inside]),
-            ("fill + chrome inside from a glass layer", false, alloc::vec![opaque, layer_inside]),
-            ("fill + both in one pass from a glass layer", false, alloc::vec![opaque, window_inside_layer]),
-            ("fill + chrome inside over glass", false, alloc::vec![opaque, glass_inside]),
-            ("fill + chrome inside over glass + empty text", false, alloc::vec![opaque, glass_inside, text]),
-            ("fill + both in one pass", false, alloc::vec![opaque, window_inside]),
-            ("fill + empty text", false, alloc::vec![opaque, text]),
-            ("background colour + covering text + background colour", false,
-             alloc::vec![draw(1, &[]), text, draw(1, &[])]),
-            ("fill + 8 translucent fills side by side", false, core::iter::once(opaque).chain(strips).collect()),
-            ("fill, tiles loaded", true, alloc::vec![opaque]),
-            ("fill", false, alloc::vec![opaque]),
-            ("background colour", false, alloc::vec![draw(1, &[])]),
-            ("fill + 8 translucent fills", false, alloc::vec![opaque; 1].into_iter()
-                .chain(core::iter::repeat_n(half, 8)).collect()),
-            ("fill + chrome with content", false, alloc::vec![opaque, chrome(1)]),
-            ("fill + chrome without content", false, alloc::vec![opaque, chrome(0)]),
-            ("fill + glow", false, alloc::vec![opaque, glow]),
-            ("fill + 8 chromes with content", false, alloc::vec![opaque; 1].into_iter()
-                .chain(core::iter::repeat_n(chrome(1), 8)).collect()),
-        ];
-        let image = v3d_draw::Image { va: dst.va, stride: width * 4, width: width, height: height };
-        let area = v3d_draw::Rect { x: 0, y: 0, width: width, height: height };
-        for (name, load, draws) in runs.iter() {
-            // The second run counts: the first may pay for power and caches.
-            let mut us = 0;
-            let mut perf = None;
-            for _ in 0..2 {
-                let t0 = npk_sys::now_us() as u64;
-                self.perf_armed = true;
-                let r = self.submit_draws(hw, image, *load, area, draws).and_then(|f| self.wait_fence(hw, f));
-                perf = self.perf_take(hw);
-                if let Err(e) = r {
-                    Line::new().s("v3d: bench ").s(name).s(" failed (").dec(e.unsigned_abs() as u64).s(")").say();
-                    self.drain(hw);
-                    dst.free();
-                    return;
-                }
-                us = npk_sys::now_us() as u64 - t0;
-            }
-            let mut l = Line::new();
-            l.s("v3d: bench ").dec(width as u64).s("x").dec(height as u64).s(" ").s(name).s(": ").dec(us).s(" us");
-            // Whether the QPUs compute or wait: their active, stalled and
-            // bubble cycles against the core's.
-            if let Some(v) = perf {
-                for i in [0usize, 2, 3, 4, 15, 29] {
-                    l.s(", ").s(PERF_COUNTERS[i]).s(" ").dec(v[i]);
-                }
-            }
-            l.say();
-        }
-        self.drain(hw);
-        dst.free();
-    }
-
-    /// The last large pass again, once per program with that program's
-    /// draws alone and last with all of them, each timed and counted as
-    /// `draw_bench` does: which items a slow scene spends its time on. Into
-    /// the scene's own target, before the scene is reported done: its
-    /// first item, the background, writes every pixel of the pass, so the
-    /// last run leaves the target as the scene did. Its sources are those
-    /// the scene read, which stay until the next scene.
-    pub fn profile(&mut self, hw: &mut PiHw) {
-        self.profiles_left = self.profiles_left.saturating_sub(1);
-        let Some((image, area, draws)) = self.last_pass.take() else {
-            Line::new().s("profile: the slow scene kept no pass").say();
-            return;
-        };
-        let mut pipelines: Vec<usize> = draws.iter().map(|d| d.pipeline).collect();
-        pipelines.sort_unstable();
-        pipelines.dedup();
-        let mut runs: Vec<(Option<usize>, Vec<v3d_draw::Draw>)> = Vec::new();
-        for &p in &pipelines {
-            runs.push((Some(p), draws.iter().filter(|d| d.pipeline == p).copied().collect()));
-        }
-        runs.push((None, draws.clone()));
-        for (p, ds) in &runs {
-            let mut us = 0;
-            let mut perf = None;
-            for _ in 0..2 {
-                let t0 = npk_sys::now_us() as u64;
-                self.perf_armed = true;
-                let r = self.submit_draws(hw, image, true, area, ds).and_then(|f| self.wait_fence(hw, f));
-                perf = self.perf_take(hw);
-                if let Err(e) = r {
-                    Line::new().s("profile failed (").dec(e.unsigned_abs() as u64).s(")").say();
-                    self.drain(hw);
-                    return;
-                }
-                us = npk_sys::now_us() as u64 - t0;
-            }
-            let px: u64 = ds.iter().map(|d| (d.push[2] - d.push[0]) as u64 * (d.push[3] - d.push[1]) as u64).sum();
-            let mut l = Line::new();
-            l.s("profile ").dec(area.width as u64).s("x").dec(area.height as u64).s(" ");
-            match p {
-                None => l.s("all ").dec(ds.len() as u64).s(" draws"),
-                Some(p) => l.s("kind ").dec(pipeline_kind(*p) as u64).s(", ").dec(ds.len() as u64).s(" draws over ")
-                    .dec(px).s(" px"),
-            };
-            l.s(": ").dec(us).s(" us");
-            if let Some(v) = perf {
-                for i in [2usize, 3, 4, 29] {
-                    l.s(", ").s(PERF_COUNTERS[i]).s(" ").dec(v[i]);
-                }
-            }
-            l.say();
-        }
-        self.drain(hw);
     }
 
     /// The draw path proved: one render pass into a 64x48 buffer of the
@@ -992,7 +700,6 @@ impl Composer {
         let image = v3d_draw::Image { va: dst.va, stride: W * 4, width: W, height: H };
         let area = v3d_draw::Rect { x: 0, y: 0, width: W, height: H };
         let r = (|| -> Result<bool, i32> {
-            let t0 = npk_sys::now_us() as u64;
             let faulted = self.mmu_logged;
             let f = self.submit_draws(hw, image, true, area, &draws)?;
             self.wait_fence(hw, f)?;
@@ -1003,7 +710,6 @@ impl Composer {
                 Line::new().s("v3d: draw self-test faulted in V3D's MMU").say();
                 return Ok(false);
             }
-            let us = npk_sys::now_us() as u64 - t0;
             // render::blend at 128 (Item::Fill: 128 * 256 / 255).
             let blend = |fg: u32, bg: u32, a: u32| {
                 let ch = |s: u32| ((((fg >> s) & 255) * a + ((bg >> s) & 255) * (256 - a)) >> 8) << s;
@@ -1026,7 +732,6 @@ impl Composer {
                     }
                 }
             }
-            Line::new().s("v3d: two draws over 64x48 in ").dec(us).s(" us").say();
             Ok(true)
         })();
         let _ = npk_sys::v3d_unmap(dst.va as i64);
@@ -1055,10 +760,8 @@ impl Composer {
                 ("pitch_px", &W.to_le_bytes()),
                 ("seed", &SEED.to_le_bytes()),
             ])?;
-            let t0 = npk_sys::now_us() as u64;
             let f = self.submit_dispatch(hw, &sg::FILL_PATTERN, &push, [W.div_ceil(sg::WIDTH), H, 1])?;
             self.wait_fence(hw, f)?;
-            let us = npk_sys::now_us() as u64 - t0;
             let mut row = [0u8; (W * 4) as usize];
             for y in 0..H {
                 if !dst.read(y * W * 4, &mut row) {
@@ -1075,7 +778,6 @@ impl Composer {
                     }
                 }
             }
-            Line::new().s("v3d: fill_pattern 64x64 in ").dec(us).s(" us").say();
             Ok(true)
         })();
         let _ = npk_sys::v3d_unmap(dst.va as i64);
@@ -1380,9 +1082,6 @@ impl plan::draw_sink for Sink<'_> {
         }
         let image = v3d_draw::Image { va: t.va as u32, stride: t.pitch, width: tw, height: th };
         let area = v3d_draw::Rect { x: at.x, y: at.y, width: at.w, height: at.h };
-        if self.c.profiles_left > 0 && area.width * area.height >= PROFILED_PIXELS {
-            self.c.last_pass = Some((image, area, draws.clone()));
-        }
         let f = self.c.submit_pass(self.hw, image, !fresh, load_from, area, &draws)?;
         for l in layer.into_iter().flatten() {
             self.c.glass[l].used = f;
@@ -1421,12 +1120,6 @@ fn window_text(ck: &gpu_scene::scene::checked, i: usize) -> Option<(usize, rect)
         }
     }
     best
-}
-
-/// The draw.frag kind pipeline `p` runs (`upload_draw_programs`).
-fn pipeline_kind(p: usize) -> usize {
-    let b = p % SCREEN_PIPELINES;
-    (if b < DRAW_KINDS { b + 1 } else { WIDE_KINDS[b - DRAW_KINDS] + 32 }) + if p >= SCREEN_PIPELINES { 64 } else { 0 }
 }
 
 /// Push words `ORIGIN_PUSH..`: where the target lies on the screen, and

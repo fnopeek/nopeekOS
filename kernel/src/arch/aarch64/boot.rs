@@ -372,7 +372,9 @@ pub fn desktop_intent() {
 /// What `kmain` does after login for the desktop: the console steps
 /// aside, the pointer settings, the UI font and icons, shade on the
 /// firmware's framebuffer, the `autostart` list (deck, the display
-/// module, which moves the desktop to the monitor's mode), the wallpaper.
+/// module, which moves the desktop to the monitor's mode). The Pi has no
+/// display without its module, so the desktop shows, with its wallpaper,
+/// once the module is ready (`shade::hold_until_display`).
 fn start_desktop() {
     if !crate::framebuffer::is_available() {
         return;
@@ -387,9 +389,12 @@ fn start_desktop() {
     crate::gui::text::init();
     crate::gui::icons::init();
     crate::shade::init();
+    let held = crate::shade::hold_until_display();
     crate::shade::start_autostart();
-    crate::intent::apply_startup_wallpaper();
-    crate::shade::render_frame();
+    if !held {
+        crate::intent::apply_startup_wallpaper();
+        crate::shade::render_frame();
+    }
 }
 
 static SHELL_ARGS: spin::Mutex<Option<(&'static spin::Mutex<crate::capability::Vault>, crate::capability::CapId)>> =

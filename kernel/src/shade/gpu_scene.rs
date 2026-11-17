@@ -2,12 +2,12 @@
 //!
 //! When the GPU module offers scenes, a frame's scene list is encoded with
 //! its sources named by gpudev buffer handles and composed by the module's
-//! programs. Before that happens for real, one whole frame is composed both
-//! ways — the CPU into the target, the GPU into a copy of it — and compared
-//! bit for bit; only an identical result switches the compositor over. A
-//! scene the module rejects or does not finish in time is composed on the
-//! CPU, and a run of them switches back to the CPU for good (until
-//! `gpu verify`).
+//! programs, from the first frame on. `gpu verify` composes the next whole
+//! frame both ways (the CPU into the target, the GPU into a copy of it)
+//! and compares them bit for bit; only an identical result keeps the GPU
+//! composing. A scene the module rejects or does not finish in time is
+//! composed on the CPU, and a run of them switches back to the CPU for good
+//! (until `gpu verify`).
 
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, AtomicU8, Ordering};
@@ -42,7 +42,7 @@ const PARTIAL_CHECKS: u32 = 16;
 const MODE_UNTESTED: u8 = 0;
 const MODE_ON: u8 = 1;
 const MODE_OFF: u8 = 2;
-static MODE: AtomicU8 = AtomicU8::new(MODE_UNTESTED);
+static MODE: AtomicU8 = AtomicU8::new(MODE_ON);
 static FAILURES_IN_ROW: AtomicU32 = AtomicU32::new(0);
 /// Partial scenes still to verify (`PARTIAL_CHECKS`).
 static PARTIAL_LEFT: AtomicU32 = AtomicU32::new(0);
@@ -802,7 +802,7 @@ pub(crate) fn layer_differs(frame: &Scene, layer: Rect, diffs: usize, first: Opt
     MODE.store(MODE_OFF, Ordering::Release);
 }
 
-/// Scenes may go to the GPU: verified, or not yet tried.
+/// Scenes may go to the GPU: not switched to the CPU.
 pub fn may_compose_on_gpu() -> bool {
     MODE.load(Ordering::Acquire) != MODE_OFF
 }
@@ -839,7 +839,7 @@ pub fn stats() -> Stats {
     Stats {
         mode: match MODE.load(Ordering::Acquire) {
             _ if !gpudev::scenes_offered() => "CPU (no module offers scenes)",
-            MODE_ON => "GPU (verified)",
+            MODE_ON => "GPU",
             MODE_UNTESTED => "CPU until the next whole frame is verified",
             _ => "CPU",
         },

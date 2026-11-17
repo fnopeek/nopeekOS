@@ -29,6 +29,9 @@ const REQUEST_MS: u64 = 1000;
 const IDLE_STOP_MS: u64 = 2000;
 /// How often the ports are looked at while nothing plays.
 const POLL_MS: u64 = 200;
+/// How often a playing stream says how it plays: the first window always,
+/// later ones when a refill was late or the mix ran dry in them.
+const REPORT_MS: u64 = 10_000;
 
 static WAKER: AtomicU32 = AtomicU32::new(u32::MAX);
 /// The port entered in the register, `NONE` for none.
@@ -76,6 +79,16 @@ struct Stream {
     written: u64,
     enc: Encoder,
     mix: alloc::vec::Vec<u8>,
+    /// Refills that came after the controller had reached a period not
+    /// written since its last turn, and the periods it played again.
+    late: u64,
+    replayed: u64,
+    /// Counter at the DMA start, at the last report, and what `late` and
+    /// `audio::dry_counts` were then.
+    started: u64,
+    reported: u64,
+    late_then: u64,
+    dry_then: (u64, u64),
 }
 
 impl Stream {
@@ -104,11 +117,39 @@ impl Stream {
         let done = super::pi5_hdmi_dma::periods();
         if self.written < done + 1 {
             // The controller caught up: it plays whatever the slots hold.
+            self.late += 1;
+            self.replayed += done + 1 - self.written;
             self.written = done + 1;
         }
         while self.written < done + PERIODS as u64 {
             self.fill_one();
         }
+        self.report(done);
+    }
+
+    /// Every `REPORT_MS`: the rate the controller plays at since the start,
+    /// from its periods against the counter, and what went wrong since the
+    /// last report.
+    fn report(&mut self, done: u64) {
+        let now = crate::time::counter();
+        if now - self.reported < ms(REPORT_MS) {
+            return;
+        }
+        let first = self.reported == self.started;
+        let dry = audio::dry_counts();
+        let (dry_times, dry_frames) = (dry.0 - self.dry_then.0, dry.1 - self.dry_then.1);
+        let late = self.late - self.late_then;
+        if first || late != 0 || dry_times != 0 {
+            let hz = crate::time::counter_hz();
+            let mrate = (done as u128 * PERIOD_FRAMES as u128 * hz as u128 * 1000 / (now - self.started).max(1) as u128) as u64;
+            kprintln!("[npk] hdmi audio: plays {}.{:03} Hz over {} s; in the last {} s {} late refill(s) ({} period(s) played again in all), \
+                the mix ran dry {} time(s) ({} frames of silence)",
+                mrate / 1000, mrate % 1000, (now - self.started) / hz, (now - self.reported) / hz, late, self.replayed,
+                dry_times, dry_frames);
+        }
+        self.reported = now;
+        self.late_then = self.late;
+        self.dry_then = dry;
     }
 }
 
@@ -121,6 +162,12 @@ fn start(port: usize) -> Option<Stream> {
         written: 0,
         enc: Encoder::new(status),
         mix: alloc::vec![0u8; PERIOD_BYTES],
+        late: 0,
+        replayed: 0,
+        started: 0,
+        reported: 0,
+        late_then: 0,
+        dry_then: (0, 0),
     };
     for _ in 0..PERIODS - 1 {
         s.fill_one();
@@ -137,6 +184,9 @@ fn start(port: usize) -> Option<Stream> {
         return None;
     }
     super::pi5_hdmi_dma::start();
+    s.started = crate::time::counter();
+    s.reported = s.started;
+    s.dry_then = audio::dry_counts();
     let _ = fiber::wait(0, crate::time::counter() + ms(100));
     if let Some((mai, sched, cs)) = super::pi5_hdmi_dma::mai_state() {
         // SCALER6_VERSION: 0x54 on D0 silicon, whose tree moves the DREQs.

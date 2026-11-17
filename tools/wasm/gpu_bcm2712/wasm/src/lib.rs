@@ -288,13 +288,10 @@ struct SceneBo {
 struct Scenes {
     c: scene::Composer,
     bos: alloc::vec::Vec<SceneBo>,
-    /// Scenes whose cost was logged.
-    logged: u32,
     /// Queued scenes.
     pending: alloc::vec::Vec<Pending>,
-    /// Slow scenes logged, and those with their counters.
+    /// Slow scenes logged.
     slow_logged: u32,
-    perf_logged: u32,
 }
 
 /// A scene on V3D, not yet completed.
@@ -306,7 +303,6 @@ struct Pending {
     /// When it was taken (us).
     t0: u64,
     dispatches: u32,
-    traced: bool,
     /// What powering V3D up for it cost (us).
     power_us: u64,
 }
@@ -314,17 +310,10 @@ struct Pending {
 /// What woke the loop that saw a scene finished: `npk_wait`'s bits, or
 /// `WOKE_DRAIN` for a wait on the fence itself.
 const WOKE_DRAIN: i32 = -1;
-/// A scene this slow (us) says where its time went.
+/// A scene this slow (us) says what it cost.
 const SCENE_SLOW_US: u64 = 50_000;
 /// Slow scenes that say so.
-const SLOW_LOGGED: u32 = 64;
-/// Scenes logged with their performance counters.
-const PERF_LOGGED: u32 = 16;
-
-/// Scenes after the start whose cost goes to the log.
-const SCENES_LOGGED: u32 = 8;
-/// Of those, the scenes logged dispatch by dispatch.
-const SCENES_TRACED: u32 = 2;
+const SLOW_LOGGED: u32 = 8;
 
 /// Buffer `id`'s pages, in order (`npk_gpudev_bo_pages`).
 fn bo_page_list(id: u32, pages: u32) -> Option<alloc::vec::Vec<u64>> {
@@ -366,9 +355,8 @@ impl Scenes {
             c.free(hw);
             return None;
         }
-        c.draw_bench(hw);
         let bos = alloc::vec![map_bo(1)?, map_bo(2)?];
-        Some(Scenes { c, bos, logged: 0, pending: alloc::vec::Vec::new(), slow_logged: 0, perf_logged: 0 })
+        Some(Scenes { c, bos, pending: alloc::vec::Vec::new(), slow_logged: 0 })
     }
 
     /// `OP_BO_ADD`: mapped for V3D, its address reported.
@@ -399,22 +387,15 @@ impl Scenes {
     /// it), or its status when it was refused.
     fn run(&mut self, hw: &mut PiHw, seq: i32, a: &[u32; 6]) -> Option<i32> {
         // One scene on V3D at a time (the next waits for the last fence):
-        // the one before is completed first, so the trace and the counters
-        // are this scene's alone.
+        // the one before is completed first, so its time is its own.
         self.c.drain(hw);
         self.reap(hw, WOKE_DRAIN);
         let bufs = SceneBufs(&self.bos);
         let t0 = npk_sys::now_us() as u64;
-        let traced = self.logged < SCENES_TRACED;
-        self.c.trace = Some(alloc::vec::Vec::new());
-        self.c.perf_armed = true;
         match self.c.run_scene(hw, &bufs, seq as u32, a[0], a[1]) {
             Ok((n, f)) => {
                 let power_us = self.c.take_power_us();
-                self.pending.push(Pending { seq, fence: f, t0, dispatches: n, traced, power_us });
-                if traced {
-                    self.logged += 1;
-                }
+                self.pending.push(Pending { seq, fence: f, t0, dispatches: n, power_us });
                 None
             }
             Err(e) => {
@@ -431,15 +412,14 @@ impl Scenes {
     }
 
     /// V3D's interrupts and timeouts served; every queued scene whose last
-    /// fence signalled completed. The first scenes say what they cost: the
-    /// measure of the V3D path, dispatch by dispatch for the first ones; a
-    /// slow one says what woke the loop that saw it done (`woke`).
+    /// fence signalled completed. The first slow ones say what they cost
+    /// and what woke the loop that saw them done (`woke`).
     fn reap(&mut self, hw: &mut PiHw, woke: i32) {
         self.c.service(hw);
         let mut i = 0;
         while i < self.pending.len() {
             let p = self.pending[i];
-            let (seq, traced) = (p.seq, p.traced);
+            let seq = p.seq;
             let (done, failed) = self.c.fence_state(p.fence);
             if !done {
                 i += 1;
@@ -448,53 +428,18 @@ impl Scenes {
             self.pending.remove(i);
             let total = (npk_sys::now_us() as u64).saturating_sub(p.t0);
             let gpu = self.c.take_job_us(p.fence);
-            let slow = total >= SCENE_SLOW_US && self.slow_logged < SLOW_LOGGED;
-            if slow {
+            if total >= SCENE_SLOW_US && self.slow_logged < SLOW_LOGGED {
                 self.slow_logged += 1;
-            }
-            let trace = self.c.trace.take().unwrap_or_default();
-            let perf = self.c.perf_take(hw);
-            if traced || self.logged < SCENES_LOGGED || slow {
                 let by = match woke {
                     WOKE_DRAIN => "a wait on it",
                     0 => "the loop's timeout",
                     w if w & WAIT_IRQ != 0 => "an interrupt",
                     _ => "a command",
                 };
-                Line::new().s("scene: ").dec(p.dispatches as u64).s(" submissions in ").dec(total).s(" us")
+                Line::new().s("slow scene: ").dec(p.dispatches as u64).s(" submissions in ").dec(total).s(" us")
                     .s(if failed { ", failed" } else { "" })
                     .s(" (power-up ").dec(p.power_us).s(" us, jobs ").dec(gpu).s(" us, seen after ").s(by).s(")")
                     .say();
-            }
-            if traced || slow {
-                for (name, g, us) in trace {
-                    let mut l = Line::new();
-                    l.s("scene:   ").s(name).s(" ");
-                    if name == "bin" || name == "render" {
-                        // Draws, and the render area.
-                        l.dec(g[0] as u64).s(" draws over ").dec(g[1] as u64).s("x").dec(g[2] as u64);
-                    } else {
-                        l.dec(g[0] as u64).s("x").dec(g[1] as u64).s(" groups");
-                    }
-                    l.s(", ").dec(us).s(" us").say();
-                }
-                if let Some(v) = perf.filter(|_| self.perf_logged < PERF_LOGGED) {
-                    self.perf_logged += 1;
-                    for (names, vals) in scene::PERF_COUNTERS.chunks(6).zip(v.chunks(6)) {
-                        let mut l = Line::new();
-                        l.s("scene:   ");
-                        for (n, v) in names.iter().zip(vals) {
-                            l.s(n).s("=").dec(*v).s(" ");
-                        }
-                        l.say();
-                    }
-                }
-            }
-            if !traced && self.logged < SCENES_LOGGED {
-                self.logged += 1;
-            }
-            if slow && !failed && self.c.profiles_left > 0 {
-                self.c.profile(hw);
             }
             npk_sys::gpudev_complete(seq, if failed { -5 } else { 0 });
         }

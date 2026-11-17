@@ -1698,6 +1698,11 @@ pub fn wait_layers(seq: u32) -> i32 {
     wait_seq(seq, deadline())
 }
 
+/// Whether a display module presents: it called `ready` with copies.
+pub fn is_ready() -> bool {
+    READY.load(Ordering::Acquire)
+}
+
 /// Whether the display scans the front shadow itself (`CAP_FLIP`).
 pub fn flips() -> bool {
     READY.load(Ordering::Acquire) && FLIP.load(Ordering::Acquire)

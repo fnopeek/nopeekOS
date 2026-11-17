@@ -53,7 +53,7 @@ use crate::shade::scene::{self, Item, Rect, Scene, Sources};
 const MAX_GROUPS: usize = 16;
 /// Rectangles a buffer keeps as what it lacks before they merge into one.
 const MAX_LACKS: usize = 16;
-/// Layer scenes painted both ways and compared before the GPU's alone count.
+/// Layer scenes painted both ways and compared after `gpu verify`.
 const CHECKS: u32 = 24;
 /// Compared layer scenes in a row that differ before the GPU stops: a
 /// source the CPU read can change before the GPU reads it, a wrong
@@ -180,7 +180,7 @@ static STRIPS_SAID: AtomicBool = AtomicBool::new(false);
 /// them is queued by then.
 static FORGET: AtomicBool = AtomicBool::new(false);
 /// Layer scenes still to compare (`CHECKS`).
-static CHECKS_LEFT: AtomicU32 = AtomicU32::new(CHECKS);
+static CHECKS_LEFT: AtomicU32 = AtomicU32::new(0);
 /// Compared layer scenes in a row that differed.
 static DIFFS: AtomicU32 = AtomicU32::new(0);
 
