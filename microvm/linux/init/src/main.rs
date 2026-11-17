@@ -152,7 +152,9 @@ fn launch_wayland(kmsg_fd: i64) {
     // already-present devices (event0, card0); `settle` waits for
     // /run/udev/data to be populated before npkwm enumerates. Degrades
     // with a WARN if udev is absent — npkwm still starts, just
-    // input/hotplug-blind.
+    // input/hotplug-blind. `WLR_LIBINPUT_NO_DEVICES`: an input device that
+    // appears only after the settle (a guest still probing) arrives through
+    // the monitor instead of keeping npkwm from starting.
     // The browser's allocator (scudo) keeps freed memory instead of handing
     // it back with madvise/munmap every few seconds: each hand-back is a TLB
     // shootdown on every vCPU the process ran on, and under an upload they
@@ -248,7 +250,7 @@ fn launch_wayland(kmsg_fd: i64) {
                  VA=iHD; grep -qE 'npkgpu=amdgpu( |$)' /proc/cmdline && VA=radeonsi; \
                  HW=$GPU; grep -qE 'npkgpu=v3d( |$)' /proc/cmdline && { HW=0; VA=; }; \
                  export XDG_RUNTIME_DIR=/tmp/xrt XDG_SEAT=seat0 \
-                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm \
+                 WLR_RENDERER=pixman WLR_BACKENDS=libinput,drm WLR_LIBINPUT_NO_DEVICES=1 \
                  LIBSEAT_BACKEND=seatd \
                  XDG_CONFIG_HOME=/tmp/app HOME=/tmp/app \
                  MOZ_ENABLE_WAYLAND=1 XDG_SESSION_TYPE=wayland; \
@@ -257,7 +259,8 @@ fn launch_wayland(kmsg_fd: i64) {
                  if [ $GPU = 1 ] && [ -x /usr/libexec/npk/npkwm-gles2 ]; then WM=/usr/libexec/npk/npkwm-gles2; unset WLR_RENDERER; fi; \
                  seatd -g wl > /tmp/seatd.log 2>&1 & \
                  i=0; while [ ! -S /run/seatd.sock ] && [ $i -lt 200 ]; do sleep 0.005; i=$((i+1)); done; \
-                 echo \"<0>[wl] ${WM##*/} start (seatd after ${i}x5ms)\" > /dev/kmsg; \
+                 N=$(ls /dev/input/event* 2>/dev/null | wc -l); \
+                 echo \"<0>[wl] ${WM##*/} start (seatd after ${i}x5ms, $N input devices)\" > /dev/kmsg; \
                  WMENV=$(tr ' ' '\\n' < /proc/cmdline | sed -n 's/^npkwmenv=//p' | tr '\\n' ' '); \
                  [ -n \"$WMENV\" ] && echo \"<0>[wl] npkwm env $WMENV\" > /dev/kmsg; \
                  su -s /bin/sh wl -c \"$WMENV XDG_RUNTIME_DIR=/tmp/wlrt NPK_WINDOWS=$W exec $WM\" > /tmp/npkwm.log 2>&1 & \
