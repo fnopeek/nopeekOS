@@ -819,8 +819,8 @@ pub fn guest_vcpus() -> u8 {
 
 /// `set microvm_vcpus N`: the guest's vCPUs, one per worker core at most
 /// (Core 0 is never one). More than fit beside a reserved net worker core
-/// gives up that reservation: the worker then shares a vCPU's core
-/// (`reserve_offload_core`). 0 when unset. Snapshotted while no VM exists,
+/// gives up that reservation (`reserve_offload_core`); with every worker
+/// core a vCPU's, the net worker runs on Core 0. 0 when unset. Snapshotted while no VM exists,
 /// as `guest_vcpus` must not change under a running guest.
 static ASKED_VCPUS: AtomicU32 = AtomicU32::new(0);
 
@@ -2093,7 +2093,14 @@ fn vcpu_fiber_task(_arg: u64) {
     // There is one data path for both vendors.
     // `place_worker` never puts it on a vCPU's core; with the reservation on it
     // marks a free core so the SIPI'd APs skip it.
-    let worker_core = place_worker(reserve_offload_core());
+    // Every worker core asked for as a vCPU's: the worker goes to Core 0,
+    // which holds none, so no vCPU is taken out of the guest by its wakes.
+    let worker_core = if asked_vcpus() >= crate::smp::per_core::core_count().saturating_sub(1) {
+        WORKER_CORES.fetch_or(1, Ordering::AcqRel);
+        0
+    } else {
+        place_worker(reserve_offload_core())
+    };
     crate::kprintln!(
         "[microvm] net worker core {} (vCPUs={}, reserve={})",
         worker_core, guest_vcpus(), reserve_offload_core()
