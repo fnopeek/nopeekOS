@@ -219,6 +219,7 @@ fn launch_wayland(kmsg_fd: i64) {
     // Gecko startup profiler and, after it exits, sends the gzipped profile
     // to that address (`nc -l` on the receiving side).
     let arg2 = b"exec >/dev/kmsg 2>&1; \
+                 echo '<0>[init] shell up' > /dev/kmsg; \
                  NPT=$(sed -n 's/.*nopeektime=\\([0-9][0-9]*\\).*/\\1/p' /proc/cmdline); \
                  [ -n \"$NPT\" ] && date -s @\"$NPT\" >/dev/null 2>&1; \
                  echo 1 > /proc/sys/kernel/print-fatal-signals 2>/dev/null; \
@@ -240,9 +241,13 @@ fn launch_wayland(kmsg_fd: i64) {
                  mount -t tmpfs -o mode=0755,nosuid,nodev,noexec tmpfs /run 2>/dev/null; \
                  mkdir -p /dev/shm 2>/dev/null; mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /dev/shm 2>/dev/null; \
                  mkdir -p /run/udev; \
+                 echo '<0>[init] tmpfs and users ready' > /dev/kmsg; \
                  /usr/lib/systemd/systemd-udevd --daemon 2>/dev/null; \
+                 echo '<0>[init] udevd started' > /dev/kmsg; \
                  udevadm trigger --type=devices --action=add --subsystem-match=drm --subsystem-match=input --subsystem-match=sound 2>/dev/null; \
+                 echo '<0>[init] udev triggered' > /dev/kmsg; \
                  udevadm settle --timeout=10 2>/dev/null; \
+                 echo '<0>[init] udev settled' > /dev/kmsg; \
                  W=; for p in /sys/class/virtio-ports/*; do [ \"$(cat $p/name 2>/dev/null)\" = npk.windows ] && W=/dev/${p##*/}; done; \
                  [ -n \"$W\" ] && chown 1001 \"$W\" && chmod 0600 \"$W\"; \
                  for p in /sys/class/virtio-ports/*; do case \"$(cat $p/name 2>/dev/null)\" in npk.camera|npk.capture) \

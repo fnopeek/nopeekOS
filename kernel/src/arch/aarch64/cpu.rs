@@ -55,6 +55,7 @@ pub fn without_interrupts<R>(f: impl FnOnce() -> R) -> R {
 
 /// Stop this core for good: everything masked, wait, never resume.
 pub fn halt_forever() -> ! {
+    crate::drivers::pl011::flush_halting();
     loop {
         // SAFETY: masks all exceptions, then waits; nothing resumes this core.
         unsafe { core::arch::asm!("msr DAIFSet, #0xf", "wfi", options(nomem, nostack)) };

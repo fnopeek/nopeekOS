@@ -193,6 +193,10 @@ fn interrupts(fdt: &Fdt) {
     // SAFETY: vectors, GIC and timer handler are in place.
     unsafe { core::arch::asm!("msr DAIFClr, #2", options(nomem, nostack)) };
     kprintln!("[npk] GIC: {} lines; timer on INTID {} ({} Hz)", super::gic::irqs(), irq, super::timer::HZ);
+    match crate::drivers::pl011::start_irq(fdt) {
+        Some(irq) => kprintln!("[npk] console: PL011 transmits from a buffer on INTID {}", irq),
+        None => kprintln!("[npk] console: PL011 interrupt not in the device tree, writes wait for the line"),
+    }
 }
 
 /// The hardware RNG seeds the CSPRNG.

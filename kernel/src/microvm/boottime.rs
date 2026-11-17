@@ -105,13 +105,39 @@ const GUEST_MARKS: &[(&str, &str)] = &[
     ("[microvm-init] PID-1 up", "pid1: up"),
     ("switched to squashfs bundle root", "pid1: sqfs root"),
     ("starting Wayland session", "pid1: session script"),
-    ("[moz-disk] /dev/vda present", "session: udev settled"),
+    ("[init] shell up", "session: shell up"),
+    ("[init] tmpfs and users ready", "session: tmpfs and users ready"),
+    ("[init] udevd started", "session: udevd started"),
+    ("[init] udev triggered", "session: udev triggered"),
+    ("[init] udev settled", "session: udev settled"),
+    (" start (seatd after", "session: compositor start"),
+    ("[moz-disk] /dev/vda present", "session: profile disk next"),
     ("[9p] npkhome mounted", "session: mounts done"),
-    ("[wl] npkwm start", "session: compositor start"),
     ("[wl] npkwm up", "session: compositor up"),
     (APP_EXEC_LINE, "session: app exec"),
     ("browser exited", "session: browser exited"),
 ];
+
+/// Disk work since the launch, appended to each guest milestone: what
+/// virtio-blk served and how much of that waited for chunks from npkFS.
+struct DiskSoFar;
+
+impl core::fmt::Display for DiskSoFar {
+    fn fmt(&self, f: &mut core::fmt::Formatter) -> core::fmt::Result {
+        use crate::microvm::devices::blk_image as bi;
+        let [_, _, b, c, _, _] = io_counters();
+        let [_, _, b0, c0, _, _] = *DISK_T0.lock();
+        let hz = counter_hz().max(1);
+        let l = bi::GUEST_LOADS.load(Ordering::Relaxed) - DISK_LOADS0.load(Ordering::Relaxed);
+        let lc = bi::GUEST_LOAD_CYCLES.load(Ordering::Relaxed) - DISK_LOAD_CYCLES0.load(Ordering::Relaxed);
+        write!(f, " | disk {} MB served in {} ms, {} chunks read for the guest in {} ms",
+            (b - b0) >> 20, (c - c0) * 1000 / hz, l, lc * 1000 / hz)
+    }
+}
+
+static DISK_T0: Mutex<[u64; IO_COUNTERS]> = Mutex::new([0; IO_COUNTERS]);
+static DISK_LOADS0: AtomicU64 = AtomicU64::new(0);
+static DISK_LOAD_CYCLES0: AtomicU64 = AtomicU64::new(0);
 
 /// Presented frames that get a milestone line.
 const FLUSH_MARKS: &[u32] = &[1, 10, 50, 200];
@@ -137,6 +163,10 @@ pub fn start() {
     GUEST_SEEN.store(0, Ordering::Relaxed);
     WIN_STATE.store(WIN_IDLE, Ordering::Relaxed);
     *APP_SNAP.lock() = None;
+    *DISK_T0.lock() = io_counters();
+    DISK_LOADS0.store(crate::microvm::devices::blk_image::GUEST_LOADS.load(Ordering::Relaxed), Ordering::Relaxed);
+    DISK_LOAD_CYCLES0.store(
+        crate::microvm::devices::blk_image::GUEST_LOAD_CYCLES.load(Ordering::Relaxed), Ordering::Relaxed);
     T0.store(counter(), Ordering::Relaxed);
     ACTIVE.store(true, Ordering::Release);
     kprintln!("[boottime] +0 ms launch");
@@ -172,7 +202,7 @@ pub fn guest_line(s: &str) {
         let bit = 1u32 << i;
         if seen & bit == 0 && s.contains(needle) {
             GUEST_SEEN.fetch_or(bit, Ordering::Relaxed);
-            kprintln!("[boottime] +{} ms {}", ms, label);
+            kprintln!("[boottime] +{} ms {}{}", ms, label, DiskSoFar);
             // The AP bring-up window ends where the session gets going.
             if *label == "session: compositor start" {
                 kprintln!("[ripsample] window: AP opened .. compositor start");

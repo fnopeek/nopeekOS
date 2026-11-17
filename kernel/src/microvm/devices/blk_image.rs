@@ -21,9 +21,19 @@ use alloc::boxed::Box;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use spin::Mutex;
+
+/// Chunks the guest's own request had to read from npkFS (the prefetch
+/// had not reached them), and the counter cycles it waited for them.
+pub static GUEST_LOADS: AtomicU64 = AtomicU64::new(0);
+pub static GUEST_LOAD_CYCLES: AtomicU64 = AtomicU64::new(0);
+
+/// Prefetch of the current launch: start counter, chunks and bytes read.
+static PREFETCH_T0: AtomicU64 = AtomicU64::new(0);
+static PREFETCH_CHUNKS: AtomicU64 = AtomicU64::new(0);
+static PREFETCH_BYTES: AtomicU64 = AtomicU64::new(0);
 
 /// Where a chunk's bytes are. Only the device turns a chunk into `Zero` or
 /// back; the prefetch worker only loads a `Stored` one.
@@ -80,7 +90,11 @@ impl Chunks {
                 if self.failed.load(Ordering::Acquire) {
                     return None;
                 }
-                *slot = Slot::Loaded(self.fetch(i)?);
+                let t0 = crate::time::counter();
+                let c = self.fetch(i);
+                GUEST_LOADS.fetch_add(1, Ordering::Relaxed);
+                GUEST_LOAD_CYCLES.fetch_add(crate::time::counter().wrapping_sub(t0), Ordering::Relaxed);
+                *slot = Slot::Loaded(c?);
                 self.loaded.fetch_add(1, Ordering::Relaxed);
             }
             Slot::Zero => *slot = Slot::Loaded(zeroed(self.chunk_len(i))?),
@@ -106,6 +120,8 @@ impl Chunks {
             return;
         }
         let Some(c) = self.fetch(i) else { return };
+        PREFETCH_CHUNKS.fetch_add(1, Ordering::Relaxed);
+        PREFETCH_BYTES.fetch_add(c.len() as u64, Ordering::Relaxed);
         let mut slot = self.slots[i].lock();
         // The device may have zeroed it meanwhile.
         if matches!(*slot, Slot::Stored) {
@@ -484,6 +500,9 @@ fn queue_prefetch(chunks: &Arc<Chunks>, order: Vec<usize>) {
     QUEUE.lock().push_back((chunks.clone(), order.into()));
     if RUNNING.compare_exchange(0, WORKERS, Ordering::AcqRel, Ordering::Acquire).is_ok() {
         STOP.store(false, Ordering::Release);
+        PREFETCH_T0.store(crate::time::counter(), Ordering::Relaxed);
+        PREFETCH_CHUNKS.store(0, Ordering::Relaxed);
+        PREFETCH_BYTES.store(0, Ordering::Relaxed);
         let cores = crate::microvm::cpu::place_helpers(WORKERS);
         // One worker per core; fewer cores than workers means fewer workers.
         RUNNING.store(cores.len(), Ordering::Release);
@@ -514,14 +533,28 @@ fn worker_entry(_: u64) {
         drain();
         // The last worker out picks up a job queued while it was finishing:
         // that job saw workers running and spawned none.
-        if RUNNING.fetch_sub(1, Ordering::AcqRel) != 1
-            || STOP.load(Ordering::Acquire)
-            || QUEUE.lock().is_empty()
-            || RUNNING.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err()
-        {
+        let last = RUNNING.fetch_sub(1, Ordering::AcqRel) == 1;
+        if !last || STOP.load(Ordering::Acquire) {
+            return;
+        }
+        if QUEUE.lock().is_empty() {
+            report_prefetch();
+            return;
+        }
+        if RUNNING.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return;
         }
     }
+}
+
+/// How long the prefetch of this launch took and how much it read.
+fn report_prefetch() {
+    let hz = crate::time::counter_hz().max(1);
+    let us = crate::time::counter().wrapping_sub(PREFETCH_T0.load(Ordering::Relaxed)) * 1000 / (hz / 1000).max(1);
+    let bytes = PREFETCH_BYTES.load(Ordering::Relaxed);
+    crate::kprintln!("[virtio-blk] prefetch done: {} chunks, {} MB in {} ms ({} MB/s)",
+        PREFETCH_CHUNKS.load(Ordering::Relaxed), bytes >> 20, us / 1000,
+        if us > 0 { bytes / us } else { 0 });
 }
 
 fn drain() {

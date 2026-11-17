@@ -75,10 +75,12 @@ pub fn call(f: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 /// `psci_sys_reset` for a cold reboot (`reboot_mode` REBOOT_COLD, so
 /// SYSTEM_RESET, not SYSTEM_RESET2). Returns only if the firmware refused.
 pub fn system_reset() {
+    crate::drivers::pl011::flush();
     call(PSCI_0_2_FN_SYSTEM_RESET, 0, 0, 0);
 }
 
 /// `psci_sys_poweroff`. Returns only if the firmware refused.
 pub fn system_off() {
+    crate::drivers::pl011::flush();
     call(PSCI_0_2_FN_SYSTEM_OFF, 0, 0, 0);
 }
