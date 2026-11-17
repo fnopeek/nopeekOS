@@ -4,7 +4,7 @@ sha384=ea161e6c2ff18d10259ea414a64e4c6e1d87cf677025278485f84be95d206d349b0c18cbd
 url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-159.0-arch20261029-7/microvm-firefox.sqfs
 
 [microvm-aarch64:firefox-sqfs]
-size=611291136
-sha384=f91108c5a878b94a04a5b564aac47f994ec5f4c95558282638b969403f19e4e33357a823ceddf1581a304073ab94dd61
+size=611758080
+sha384=69d42c6d1df15bc7619941a83f0e2d9e0527525e194f0df0526296bab17fac4cd5f9d3e0423b4ebd69aa4d4dc5f11ccc
 url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-160.0-alarm20261115-aarch64-v3d/microvm-firefox-aarch64.sqfs
 

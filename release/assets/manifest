@@ -1,4 +1,4 @@
-issued=1794920439
+issued=1794922412
 
 [font:ibm-plex-mono]
 size=173052
@@ -501,8 +501,8 @@ size=1370
 sha384=c7533ebdf648f56e94b37ccd188c5712c337189ffc2ae1c42bd1a936e83ad2971a6eb24a231c324982a179d440c5c019
 
 [microvm:initramfs]
-size=391833
-sha384=cf90355b0bec0dee27393d69d4fb17d96a4e7bdae666f1542e60ce93a1a43e363f97d334f2392b4198656501986f0b71
+size=391844
+sha384=03f3b24a3cf63dbd67961ca41df9cec3b46fb0b2f556ea94343f67e7122552750f70054b335bf600311fee28252bc9f6
 
 [python:stdlib]
 size=10992310
@@ -517,8 +517,8 @@ size=11024392
 sha384=ec4bfe3e4cb258ccc5e269fbe33c4c51d9d2bc297dc63d68a8597f16d0270935bbbe052c5b5d8bbe2923f7e9a19d039f
 
 [microvm-aarch64:initramfs]
-size=330281
-sha384=ab26f89dc7a747413ec39faeb9a0981e5cfe15c3b04bef36572169eb1ea7e9f8ff6f40cd6391555b4d23aa1141d72982
+size=330303
+sha384=41a6587a0076ea8c9f72eeda6ea5ef25adbbfcc1578c98ac1b56aaaf32d9f830edf97474f731a4b0c83e6ffc8df82028
 
 [wallpaper:amber-ash-waves.png]
 size=9200314
@@ -546,8 +546,8 @@ sha384=ea161e6c2ff18d10259ea414a64e4c6e1d87cf677025278485f84be95d206d349b0c18cbd
 url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-159.0-arch20261029-7/microvm-firefox.sqfs
 
 [microvm-aarch64:firefox-sqfs]
-size=611291136
-sha384=f91108c5a878b94a04a5b564aac47f994ec5f4c95558282638b969403f19e4e33357a823ceddf1581a304073ab94dd61
+size=611758080
+sha384=69d42c6d1df15bc7619941a83f0e2d9e0527525e194f0df0526296bab17fac4cd5f9d3e0423b4ebd69aa4d4dc5f11ccc
 url=https://github.com/fnopeek/nopeekOS/releases/download/guest/firefox-160.0-alarm20261115-aarch64-v3d/microvm-firefox-aarch64.sqfs
 
 
