@@ -89,6 +89,34 @@ fn print_arm_clock() {
         mhz(rate), mhz(measured), mhz(min), mhz(max));
 }
 
+/// `get_throttled`'s bits (vcgencmd): the low half is the state now, the
+/// high half what happened since boot.
+const THROTTLE_BITS: [(u32, &str); 4] = [
+    (1 << 0, "undervoltage"),
+    (1 << 1, "ARM frequency capped"),
+    (1 << 2, "throttled"),
+    (1 << 3, "soft temperature limit"),
+];
+
+/// The CPU and V3D clocks as measured now and the throttle state. Linux's
+/// `raspberrypi-hwmon` sends 0xffff and so clears the since-boot bits; 0
+/// keeps them, so one look after a load says whether it was throttled.
+pub fn print_live_clocks() {
+    let arm = clock_measured(fw::RPI_FIRMWARE_ARM_CLK_ID);
+    let v3d = clock_measured(fw::RPI_FIRMWARE_V3D_CLK_ID);
+    let thr = property::<1>(fw::RPI_FIRMWARE_GET_THROTTLED, [0]).map(|[v]| v);
+    let mhz = |v: Option<u32>| v.map_or(alloc::string::String::from("-"), |v| alloc::format!("{}", v / 1_000_000));
+    let names = |v: u32| {
+        let n: alloc::vec::Vec<&str> = THROTTLE_BITS.iter().filter(|(b, _)| v & b != 0).map(|(_, n)| *n).collect();
+        if n.is_empty() { alloc::string::String::from("none") } else { n.join(", ") }
+    };
+    kprintln!("[npk] clocks measured: ARM {} MHz, V3D {} MHz", mhz(arm), mhz(v3d));
+    match thr {
+        Some(v) => kprintln!("[npk] throttle {:#07x}: now {}; since boot {}", v, names(v & 0xf), names(v >> 16)),
+        None => kprintln!("[npk] throttle: no answer to GET_THROTTLED"),
+    }
+}
+
 /// `rpi_firmware_print_firmware_revision` and `_hash`.
 fn print_revision() {
     let Some([date]) = property::<1>(fw::RPI_FIRMWARE_GET_FIRMWARE_REVISION, [0]) else {

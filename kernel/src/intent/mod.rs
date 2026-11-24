@@ -2837,6 +2837,7 @@ fn dispatch_intent(input: &str, vault: &'static Mutex<Vault>, session: CapId) {
                     }
                     None => kprintln!("[npk] fan: not running"),
                 }
+                crate::platform::rpi_fw::print_live_clocks();
             }
         }
         #[cfg(target_arch = "aarch64")]
