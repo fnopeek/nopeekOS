@@ -4270,7 +4270,6 @@ pub(crate) fn npk_display_audio_done(ctx: &mut HostState) -> i32 {
 /// allocated run, so a read never crosses into free space.
 const BENCH_WINDOW_BLOCKS: u64 = 2048;
 
-#[cfg(target_arch = "x86_64")]
 /// `testdisk`'s layered measurements, as u64 values into `out`:
 ///
 /// - 0: device sequential read in calls of `a` blocks over `b` blocks of
@@ -4282,7 +4281,7 @@ const BENCH_WINDOW_BLOCKS: u64 = 2048;
 /// - 4: read the largest stored objects up to `a` bytes, cold → objects,
 ///   bytes, ticks
 /// - 5: TSC Hz, the object read and write stage counters
-///   (`npkfs::bench`), blocks per NVMe command, the path-layer write and
+///   (`npkfs::bench`), blocks per device command, the path-layer write and
 ///   commit stage counters
 ///
 /// Needs WRITE, as the other benchmarks: a device write takes free blocks
@@ -4311,7 +4310,7 @@ pub(crate) fn npk_disk_bench(mem: &mut [u8], ctx: &mut HostState, kind: i32, a: 
             v.push(crate::time::counter_hz());
             bench::GET.snapshot(&mut v);
             bench::PUT.snapshot(&mut v);
-            v.push(crate::nvme::max_blocks_per_cmd() as u64);
+            v.push(crate::blkdev::max_blocks_per_cmd() as u64);
             bench::WRITE.snapshot(&mut v);
             bench::COMMIT.snapshot(&mut v);
             bench::LOOKUP.snapshot(&mut v);

@@ -288,6 +288,16 @@ pub fn write_block_fua(block: u64, buf: &[u8; BLOCK_SIZE]) -> Result<(), BlkErro
     }
 }
 
+/// Most 4 KiB blocks the system disk moves in one device command.
+pub fn max_blocks_per_cmd() -> u32 {
+    match backend() {
+        #[cfg(target_arch = "x86_64")]
+        Backend::Nvme => nvme::max_blocks_per_cmd(),
+        Backend::Sd(_) => (crate::drivers::sdhci::MAX_REQ / BLOCK_SIZE) as u32,
+        _ => 0,
+    }
+}
+
 /// Sector `lba` of the whole disk, before any partition: the partition
 /// table and the ESP.
 pub fn read_disk_sector(lba: u64, buf: &mut [u8; SECTOR_SIZE]) -> Result<(), BlkError> {
