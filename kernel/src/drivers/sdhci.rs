@@ -441,7 +441,6 @@ pub fn udelay(us: u64) {
 
 /// `mmc_delay` / `usleep_range`: yields the core when it can.
 pub fn mdelay(ms: u64) {
-    #[cfg(target_arch = "x86_64")]
     if crate::smp::fiber::yield_sleep(ms) { return; }
     crate::time::delay_ms(ms);
 }
@@ -1570,10 +1569,7 @@ impl Host {
                 cmd_err = Some(Error::NoMedium);
                 break;
             }
-            #[cfg(target_arch = "x86_64")]
             crate::smp::fiber::spin_or_yield();
-            #[cfg(not(target_arch = "x86_64"))]
-            core::hint::spin_loop();
         }
         self.flags &= !SDHCI_REQ_USE_DMA;
         if let Some(e) = cmd_err {
