@@ -596,8 +596,7 @@ fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
             },
         };
 
-        let local_hash = crate::npkfs::fetch(&npkfs_path).ok()
-            .map(|(data, _)| crate::tls::sha256::sha384(&data));
+        let local_hash = local_sha384(&npkfs_path);
 
         if local_hash.as_ref() == Some(&entry.sha384) {
             current += 1;
@@ -609,6 +608,25 @@ fn plan_assets() -> (Vec<AssetJob>, usize, Vec<String>) {
     }
 
     (jobs, current, withdrawn)
+}
+
+/// SHA-384 of the stored copy at `path`, or None without one. A chunked
+/// object is hashed a chunk at a time: a guest bundle does not fit the heap
+/// whole, and an unreadable copy would be downloaded again on every update.
+fn local_sha384(path: &str) -> Option<[u8; 48]> {
+    match crate::npkfs::chunk_list(path).ok()? {
+        Some((total, hashes)) => {
+            let mut h = crate::tls::sha256::Sha384::new();
+            let mut len = 0u64;
+            for c in &hashes {
+                let data = crate::npkfs::read_chunk(c).ok()?;
+                len += data.len() as u64;
+                h.update(&data);
+            }
+            (len == total).then(|| h.finalize())
+        }
+        None => crate::npkfs::fetch(path).ok().map(|(data, _)| crate::tls::sha256::sha384(&data)),
+    }
 }
 
 /// Download, verify and store one planned asset. Prints its own result line;
